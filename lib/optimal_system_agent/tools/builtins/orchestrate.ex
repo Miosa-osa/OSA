@@ -46,6 +46,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.Orchestrate do
           "description" =>
             "Execution strategy: parallel (all at once), pipeline (sequential with dependency passing), auto (let the orchestrator decide), or pact (structured 4-phase Planning→Action→Coordination→Testing workflow for complex tasks requiring reconciliation)",
           "enum" => ["parallel", "pipeline", "auto", "pact"]
+        },
+        "priority" => %{
+          "type" => "string",
+          "description" =>
+            "Speed/cost priority biasing model tier + provider order for every spawned agent: immediate (fastest/highest tier), standard (default), loose (cheapest/most latency-tolerant).",
+          "enum" => ["immediate", "standard", "loose"]
         }
       },
       "required" => ["task"]
@@ -67,10 +73,22 @@ defmodule OptimalSystemAgent.Tools.Builtins.Orchestrate do
     # again reset the counter and the fork-bomb ceiling was never reached.
     depth = params["__delegation_depth__"] || 0
 
-    Logger.info("[Orchestrate] strategy=#{strategy} depth=#{depth} task=#{String.slice(task, 0, 100)}")
+    # Speed/cost priority (immediate|standard|loose). Threaded into every spawned
+    # config so DelegationRouter biases model tier + provider order the same way
+    # the `delegate` path already does — swarm agents previously never got the
+    # cost benefit because this path never passed priority through. Defaults to
+    # :standard when the caller omits it.
+    priority = params["priority"] || "standard"
+
+    Logger.info(
+      "[Orchestrate] strategy=#{strategy} priority=#{priority} depth=#{depth} task=#{String.slice(task, 0, 100)}"
+    )
 
     try do
-      case OptimalSystemAgent.Swarm.Patterns.dispatch(strategy, session_id, task, depth: depth) do
+      case OptimalSystemAgent.Swarm.Patterns.dispatch(strategy, session_id, task,
+             depth: depth,
+             priority: priority
+           ) do
         {:ok, result} -> {:ok, result}
         {:error, reason} -> {:error, "Orchestration failed: #{inspect(reason)}"}
       end

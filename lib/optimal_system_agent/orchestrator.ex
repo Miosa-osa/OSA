@@ -1023,7 +1023,8 @@ defmodule OptimalSystemAgent.Orchestrator do
                 display_name: display_name,
                 role: role,
                 result: String.slice(response, 0, 500),
-                duration_ms: duration_ms
+                duration_ms: duration_ms,
+                task_completed: true
               })
 
               Phoenix.PubSub.broadcast(
@@ -1040,6 +1041,10 @@ defmodule OptimalSystemAgent.Orchestrator do
                    elapsed_ms: elapsed_ms,
                    usage: usage,
                    cost_usd: cost_usd,
+                   # Whether the run genuinely SUCCEEDED (result was {:ok, _}),
+                   # so $/completed-task can be computed over real completions
+                   # rather than counting failed/timed-out/cancelled runs as done.
+                   task_completed: true,
                    output_file: output_file
                  }}
               )
@@ -1072,7 +1077,8 @@ defmodule OptimalSystemAgent.Orchestrator do
                 display_name: display_name,
                 role: role,
                 error: inspect(reason),
-                duration_ms: duration_ms
+                duration_ms: duration_ms,
+                task_completed: false
               })
 
               Phoenix.PubSub.broadcast(
@@ -1089,6 +1095,9 @@ defmodule OptimalSystemAgent.Orchestrator do
                    elapsed_ms: elapsed_ms,
                    usage: usage,
                    cost_usd: cost_usd,
+                   # This run did NOT complete ({:error, _} — error/timeout/cancel),
+                   # so it must not be counted toward $/completed-task.
+                   task_completed: false,
                    output_file: output_file
                  }}
               )
@@ -2046,6 +2055,34 @@ defmodule OptimalSystemAgent.Orchestrator do
           print != last_print ->
             watch_for_stall(parent_id, subagent_id, display_name, role, print, progressing())
 
+          now_ms() - stall.last_change_at >= stall_report_gap_ms(phase, stall.reports) and
+              not stall.nudged ->
+            # FIRST stall for this agent: bounded, non-destructive recovery.
+            #
+            # Before escalating to the parent (which costs it a turn) or giving
+            # up on the run, try ONE nudge — the same idle-wake a parent uses to
+            # resume a child (`Loop.poke/1`). If the child is genuinely idle the
+            # poke becomes a synthetic turn that prods it to continue; if it is
+            # mid-turn the cast waits in the mailbox and no-ops at the next drain
+            # boundary, so a healthy-but-slow teammate is never disrupted. It is
+            # never a kill and never a restart.
+            #
+            # We reset only the report clock (not `since`, so a later stall event
+            # still reports the true elapsed time) and mark `nudged: true` so the
+            # nudge is sent AT MOST ONCE. One more threshold window is granted for
+            # the child to react; if it stalls again we fall through to the
+            # observe-only behavior below.
+            since = stall.since || stall.last_change_at
+
+            nudge_stalled(parent_id, subagent_id, display_name, role, phase)
+
+            watch_for_stall(parent_id, subagent_id, display_name, role, print, %{
+              last_change_at: now_ms(),
+              since: since,
+              reports: stall.reports,
+              nudged: true
+            })
+
           now_ms() - stall.last_change_at >= stall_report_gap_ms(phase, stall.reports) ->
             since = stall.since || stall.last_change_at
 
@@ -2069,7 +2106,8 @@ defmodule OptimalSystemAgent.Orchestrator do
             watch_for_stall(parent_id, subagent_id, display_name, role, print, %{
               last_change_at: now_ms(),
               since: since,
-              reports: stall.reports + 1
+              reports: stall.reports + 1,
+              nudged: true
             })
 
           true ->
@@ -2091,7 +2129,47 @@ defmodule OptimalSystemAgent.Orchestrator do
 
   # Fresh watcher state: work just landed (or is yet to land), so nothing is
   # stalled and any earlier stall's backoff is forgotten.
-  defp progressing, do: %{last_change_at: now_ms(), since: nil, reports: 0}
+  defp progressing, do: %{last_change_at: now_ms(), since: nil, reports: 0, nudged: false}
+
+  # Bounded, non-destructive stall recovery: poke the child once to prod it to
+  # continue. `Loop.poke/1` is the parent's normal idle-wake — safe mid-turn (it
+  # no-ops at the next drain boundary) and never a kill/restart. Best-effort:
+  # a dead or unknown session poke is a no-op. Emits a light observability event
+  # so the nudge is visible without spending a parent turn the way a stall report
+  # does.
+  defp nudge_stalled(parent_id, subagent_id, display_name, role, phase) do
+    Logger.info(
+      "[Orchestrator] Background subagent #{subagent_id} idle in :#{phase} — sending one " <>
+        "non-destructive nudge (Loop.poke) before escalating"
+    )
+
+    Loop.poke(subagent_id)
+
+    payload = %{
+      event: :background_agent_nudged,
+      session_id: parent_id,
+      agent_id: subagent_id,
+      display_name: display_name,
+      role: role,
+      phase: phase
+    }
+
+    Bus.emit(:system_event, payload)
+
+    # Same dual-emit as the stalled/completed/failed events, so TUI and SSE
+    # consumers see the nudge on the session topic they already listen to.
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{parent_id}",
+      {:osa_event, Map.put(payload, :type, :background_agent_nudged)}
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
 
   defp progress_fingerprint(run) do
     {Map.get(run, :tool_count, 0), Map.get(run, :tokens_used, 0),

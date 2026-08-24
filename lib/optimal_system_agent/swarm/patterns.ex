@@ -35,13 +35,14 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
     runner = Keyword.get(opts, :runner, &Orchestrator.run_subagent/1)
     timeout = Keyword.get(opts, :timeout, 600_000)
     depth = Keyword.get(opts, :depth, 0)
+    priority = Keyword.get(opts, :priority, :standard)
 
     results =
       OptimalSystemAgent.TaskSupervisor
       |> Task.Supervisor.async_stream_nolink(
         configs,
         fn config ->
-          runner.(with_lineage(config, parent_id, depth))
+          runner.(with_lineage(config, parent_id, depth, priority))
         end,
         # `length(configs)` was no cap at all: a 40-agent swarm started 40
         # concurrent subagent Loops, each with its own provider connection,
@@ -85,6 +86,7 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
   def pipeline(parent_id, configs, opts \\ []) do
     Logger.info("[Swarm.Patterns] pipeline — #{length(configs)} agents")
     depth = Keyword.get(opts, :depth, 0)
+    priority = Keyword.get(opts, :priority, :standard)
 
     {results, _} =
       Enum.map_reduce(configs, nil, fn config, prev_output ->
@@ -95,7 +97,7 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
             config.task
           end
 
-        config = config |> with_lineage(parent_id, depth) |> Map.put(:task, task)
+        config = config |> with_lineage(parent_id, depth, priority) |> Map.put(:task, task)
         result = Orchestrator.run_subagent(config)
 
         output =
@@ -121,6 +123,7 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
   def debate(parent_id, configs, opts \\ []) do
     Logger.info("[Swarm.Patterns] debate — #{length(configs)} agents")
     depth = Keyword.get(opts, :depth, 0)
+    priority = Keyword.get(opts, :priority, :standard)
 
     if length(configs) < 2 do
       Logger.warning("[Swarm.Patterns] debate requires ≥2 agents, falling back to parallel")
@@ -134,7 +137,7 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
         |> Task.Supervisor.async_stream_nolink(
           proposers,
           fn config ->
-            Orchestrator.run_subagent(with_lineage(config, parent_id, depth))
+            Orchestrator.run_subagent(with_lineage(config, parent_id, depth, priority))
           end,
           # Same cap as `parallel/3` — an uncapped fan-out here is the identical
           # defect, just reached through a different pattern.
@@ -163,7 +166,7 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
 
       evaluator_config =
         evaluator_config
-        |> with_lineage(parent_id, depth)
+        |> with_lineage(parent_id, depth, priority)
         |> Map.put(:task, evaluator_task)
 
       evaluator_result = Orchestrator.run_subagent(evaluator_config)
@@ -184,15 +187,16 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
   def review_loop(parent_id, configs, opts \\ []) do
     max_iterations = Keyword.get(opts, :max_iterations, 3)
     depth = Keyword.get(opts, :depth, 0)
+    priority = Keyword.get(opts, :priority, :standard)
     Logger.info("[Swarm.Patterns] review_loop max_iterations=#{max_iterations}")
 
     case configs do
       [worker_config, reviewer_config | _] ->
-        run_review_loop(parent_id, worker_config, reviewer_config, max_iterations, depth)
+        run_review_loop(parent_id, worker_config, reviewer_config, max_iterations, depth, priority)
 
       [single | _] ->
         Logger.warning("[Swarm.Patterns] review_loop needs ≥2 agents, running single")
-        result = Orchestrator.run_subagent(with_lineage(single, parent_id, depth))
+        result = Orchestrator.run_subagent(with_lineage(single, parent_id, depth, priority))
         {:ok, [result]}
 
       [] ->
@@ -200,7 +204,7 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
     end
   end
 
-  defp run_review_loop(_parent_id, _worker_cfg, _reviewer_cfg, max_iter, _depth)
+  defp run_review_loop(_parent_id, _worker_cfg, _reviewer_cfg, max_iter, _depth, _priority)
        when max_iter < 1 do
     Logger.warning(
       "[Swarm.Patterns] review_loop max_iterations=#{max_iter} < 1, returning empty result"
@@ -209,7 +213,7 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
     {:ok, [{:ok, "[no iterations]"}]}
   end
 
-  defp run_review_loop(parent_id, worker_cfg, reviewer_cfg, max_iter, depth) do
+  defp run_review_loop(parent_id, worker_cfg, reviewer_cfg, max_iter, depth, priority) do
     {final_output, _iterations, approved} =
       Enum.reduce_while(1..max_iter, {nil, 0, false}, fn iteration,
                                                          {prev_output, _iter, _approved} ->
@@ -223,7 +227,7 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
 
         worker_result =
           worker_cfg
-          |> with_lineage(parent_id, depth)
+          |> with_lineage(parent_id, depth, priority)
           |> Map.put(:task, worker_task)
           |> Orchestrator.run_subagent()
 
@@ -239,7 +243,7 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
 
         reviewer_result =
           reviewer_cfg
-          |> with_lineage(parent_id, depth)
+          |> with_lineage(parent_id, depth, priority)
           |> Map.put(:task, reviewer_task)
           |> Orchestrator.run_subagent()
 
@@ -276,10 +280,11 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
   # the depth, every orchestrate-spawned child started at depth 1 and the
   # fork-bomb ceiling in `ToolFilter.apply_delegation_depth_guard` was never
   # reached on this path.
-  defp with_lineage(config, parent_id, depth) do
+  defp with_lineage(config, parent_id, depth, priority \\ :standard) do
     config
     |> Map.put(:parent_session_id, parent_id)
     |> Map.put(:delegation_depth, depth)
+    |> Map.put(:priority, priority)
   end
 
   # ---------------------------------------------------------------------------
@@ -478,7 +483,8 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
           task: task,
           parent_session_id: parent_id,
           role: "agent",
-          tier: :specialist
+          tier: :specialist,
+          priority: Keyword.get(opts, :priority, :standard)
         })
 
       {:ok, [result]}

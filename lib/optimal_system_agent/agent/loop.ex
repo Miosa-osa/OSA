@@ -333,6 +333,31 @@ defmodule OptimalSystemAgent.Agent.Loop do
     ArgumentError -> []
   end
 
+  @doc """
+  Best-effort `{cost_per_task_usd, completed_tasks}` from the most active live
+  session, for the session-agnostic `/health` billing snapshot. OSA is normally
+  a single interactive session, so this reports that session's figure; when
+  several are live it picks the one with the most completed tasks. Returns
+  `{0.0, 0}` when nothing is live (the TUI then hides the $/task chip). Never
+  raises.
+  """
+  @spec latest_live_cost_per_task() :: {float(), non_neg_integer()}
+  def latest_live_cost_per_task do
+    :ets.tab2list(@live_table)
+    |> Enum.map(fn {_sid, snap} -> Map.get(snap, :spend, %{}) end)
+    |> Enum.reject(&(&1 == %{}))
+    |> case do
+      [] ->
+        {0.0, 0}
+
+      spends ->
+        best = Enum.max_by(spends, &Map.get(&1, :completed_tasks, 0))
+        {Map.get(best, :cost_per_task_usd, 0.0) * 1.0, Map.get(best, :completed_tasks, 0)}
+    end
+  rescue
+    _ -> {0.0, 0}
+  end
+
   defp monotonic_seconds_since(then_ms) do
     div(System.monotonic_time(:millisecond) - then_ms, 1000)
   end
