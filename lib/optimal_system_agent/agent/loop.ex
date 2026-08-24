@@ -2338,6 +2338,18 @@ defmodule OptimalSystemAgent.Agent.Loop do
     }
   end
 
+  # One-line, on-screen rendering of a crashed turn: the exception's type and
+  # message, collapsed to a single line and truncated so it fits the pane. This
+  # is what the user sees when ReactLoop raises, so it must name the cause
+  # (e.g. an image-encoding error on a provider) rather than hide it.
+  @crash_detail_limit 500
+  defp crash_detail(e) do
+    "#{inspect(e.__struct__)}: #{Exception.message(e)}"
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
+    |> String.slice(0, @crash_detail_limit)
+  end
+
   defp run_and_reply(state) do
     Logger.info("[loop] Entering ReactLoop for session #{state.session_id}")
 
@@ -2376,8 +2388,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
             "[loop] CRASH in ReactLoop: #{Exception.message(e)}\n#{Exception.format_stacktrace(__STACKTRACE__)}"
           )
 
+          # Surface the real cause instead of "check the logs". A user in the TUI
+          # has no access to the server logs, so a bare "an error occurred" left
+          # them (and us) blind - the exception type + message is the single most
+          # useful piece of signal and belongs on screen. Truncated so a giant
+          # message can't flood the pane.
           TerminalSource.halt(
-            "I hit an error processing that request. Check the logs for details.",
+            "I hit an error processing that request: #{crash_detail(e)}",
             Accounting.adopt_partial(state),
             :error
           )
