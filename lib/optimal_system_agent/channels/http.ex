@@ -1002,8 +1002,23 @@ defmodule OptimalSystemAgent.Channels.HTTP do
       # token usage rather than dollars.
       usd_pricing: active_usd_pricing?(provider, model),
       currency: "USD",
-      subscription: nil
+      subscription: nil,
+      # $/completed-task for the active session (best-effort; {0.0, 0} when no
+      # session is live → the TUI hides the chip). Session-level, surfaced here
+      # so the status bar can show cost efficiency next to daily spend.
+      cost_per_task_usd: cost_per_task_field(),
+      completed_tasks: completed_tasks_field()
     }
+  end
+
+  defp cost_per_task_field do
+    {cpt, _tasks} = OptimalSystemAgent.Agent.Loop.latest_live_cost_per_task()
+    cpt
+  end
+
+  defp completed_tasks_field do
+    {_cpt, tasks} = OptimalSystemAgent.Agent.Loop.latest_live_cost_per_task()
+    tasks
   end
 
   # True when the active provider has explicit non-zero per-token USD rates, or

@@ -134,6 +134,15 @@ defmodule OptimalSystemAgent.Protocol.TUISchema do
             default: true,
             doc:
               "Whether this provider's spend is denominated in USD. When false, the\nstatus line must never show a `$` figure — show token usage instead."
+          ),
+          f("cost_per_task_usd", :f64,
+            default: true,
+            doc:
+              "Cost per completed task (session spend amortised over turns) for the\nactive session. 0.0 when no task has completed; the status bar shows a\n`$/task` chip only when completed_tasks > 0 and usd_pricing is true."
+          ),
+          f("completed_tasks", :u64,
+            default: true,
+            doc: "Completed tasks (turns) for the active session, the denominator of cost_per_task_usd."
           )
         ]
       },
