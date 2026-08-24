@@ -233,7 +233,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       # Per-call override for the subagent JOIN timeout (D1). Applies to both
       # the single-task and fan-out paths; nil lets Orchestrator fall back to
       # `:subagent_join_timeout_ms` / `@default_subagent_timeout_ms`.
-      timeout_ms: parse_timeout_ms(Map.get(args, "timeout_ms"))
+      timeout_ms: parse_timeout_ms(Map.get(args, "timeout_ms")),
+      # Per-subagent USD spend ceiling. nil = off (unchanged default). When set,
+      # the child Loop aborts its own run once it crosses the cap, so a wide
+      # fan-out cannot burn unbounded spend. Each child is capped independently.
+      max_budget_usd:
+        parse_budget_usd(Map.get(args, "max_budget_usd") || Map.get(args, "maxBudgetUsd"))
     }
 
     DelegationRouter.resolve(child_task, config)
@@ -781,6 +786,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
 
   defp resolve_parent_id(_args, %UseContext{session_id: sid}) when is_binary(sid), do: sid
   defp resolve_parent_id(args, _ctx), do: Map.get(args, "__session_id__", "unknown")
+
+  # Parse a per-subagent USD budget. Accepts a positive number or numeric
+  # string; anything else (including 0 / negative) is "no cap".
+  defp parse_budget_usd(n) when is_number(n) and n > 0, do: n * 1.0
+
+  defp parse_budget_usd(s) when is_binary(s) do
+    case Float.parse(s) do
+      {f, _} when f > 0 -> f
+      _ -> nil
+    end
+  end
+
+  defp parse_budget_usd(_), do: nil
 
   defp parse_timeout_ms(nil), do: nil
   defp parse_timeout_ms(ms) when is_integer(ms) and ms > 0, do: ms
