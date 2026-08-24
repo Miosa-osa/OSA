@@ -180,11 +180,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
         hook_note =
           edited_paths
           |> Enum.map(fn ep ->
-            FileEditHandler.file_changed_note(%{
-              path: ep,
-              tool: "multi_file_edit",
-              operation: :edit
-            })
+            note =
+              FileEditHandler.file_changed_note(%{
+                path: ep,
+                tool: "multi_file_edit",
+                operation: :edit
+              })
+
+            # A :file_changed formatter hook may have rewritten this path;
+            # re-capture its baseline from the final on-disk bytes so a
+            # follow-up edit isn't falsely flagged stale.
+            FileEditHandler.refresh_write_baseline(session, ep)
+            note
           end)
           |> Enum.join("")
 
