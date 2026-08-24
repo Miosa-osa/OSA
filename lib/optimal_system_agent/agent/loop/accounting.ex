@@ -816,9 +816,18 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
   @spec snapshot(map()) :: map()
   def snapshot(state) do
     tree = safe_tree_spend(state)
+    cost = get(state, :session_cost_usd, 0.0)
+    # A completed task ≈ one user turn (each user message drives one turn to a
+    # terminal answer). $/completed-task is the number Vetta-style comparisons
+    # turn on, and it is the honest efficiency figure for long-running work:
+    # total spend amortised over tasks actually finished. turn_count is 0 before
+    # the first turn completes, so guard the divide.
+    tasks = max(get(state, :turn_count, 0), 1)
 
     %{
-      cost_usd: round6(get(state, :session_cost_usd, 0.0)),
+      cost_usd: round6(cost),
+      cost_per_task_usd: round6(cost / tasks),
+      completed_tasks: get(state, :turn_count, 0),
       tree_cost_usd: tree.usd,
       tree_cost_complete: tree.complete,
       input_tokens: get(state, :session_input_tokens, 0),
