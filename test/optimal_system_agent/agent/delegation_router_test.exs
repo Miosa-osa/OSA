@@ -196,4 +196,45 @@ defmodule OptimalSystemAgent.Agent.DelegationRouterTest do
       refute routed.model_reason =~ "priority:"
     end
   end
+
+  describe "cost-aware routing (#10): loose prefers the cheapest observed model" do
+    alias OptimalSystemAgent.Agent.CostObservations
+
+    setup do
+      CostObservations.reset()
+      on_exit(&CostObservations.reset/0)
+      :ok
+    end
+
+    test "among two capable loose candidates, the cheaper observed one wins" do
+      CostObservations.record(:paid_a, "paid_a-specialist-model", 1.0)
+      CostObservations.record(:paid_b, "paid_b-specialist-model", 0.2)
+
+      routed =
+        DelegationRouter.resolve("do it", %{provider: :paid_a, tier: :specialist, priority: "loose"},
+          candidates: [:paid_a, :paid_b],
+          configured?: fn _ -> true end,
+          model_for: fn tier, provider -> "#{provider}-#{tier}-model" end,
+          tool_call: fn _, _ -> true end,
+          context_window: fn _ -> 200_000 end,
+          vision_capable: fn _, _ -> true end
+        )
+
+      assert routed.provider == :paid_b, "cheaper observed model should be chosen for loose"
+    end
+
+    test "with no observations, order is unchanged (first compatible)" do
+      routed =
+        DelegationRouter.resolve("do it", %{provider: :paid_a, tier: :specialist, priority: "loose"},
+          candidates: [:paid_a, :paid_b],
+          configured?: fn _ -> true end,
+          model_for: fn tier, provider -> "#{provider}-#{tier}-model" end,
+          tool_call: fn _, _ -> true end,
+          context_window: fn _ -> 200_000 end,
+          vision_capable: fn _, _ -> true end
+        )
+
+      assert routed.provider == :paid_a
+    end
+  end
 end

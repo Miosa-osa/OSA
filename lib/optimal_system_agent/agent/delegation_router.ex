@@ -8,6 +8,7 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
   Unknown capability data is treated as unknown rather than unsupported.
   """
 
+  alias OptimalSystemAgent.Agent.CostObservations
   alias OptimalSystemAgent.Agent.Tier
   alias OptimalSystemAgent.Providers.{FallbackChain, ImageBudget, ModelLimits, Registry}
 
@@ -74,14 +75,29 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
     vision_capable = Keyword.get(opts, :vision_capable, &ImageBudget.vision_capable?/2)
 
     find = fn reqs ->
-      Enum.find_value(candidates, fn provider ->
-        model = model_for.(tier, provider)
+      compatible =
+        candidates
+        |> Enum.map(fn provider -> {provider, model_for.(tier, provider)} end)
+        |> Enum.filter(fn {provider, model} ->
+          configured?.(provider) and
+            compatible?(reqs, provider, model, tool_call, context_window, vision_capable)
+        end)
 
-        if configured?.(provider) and
-             compatible?(reqs, provider, model, tool_call, context_window, vision_capable) do
-          {provider, model}
-        end
-      end)
+      case {priority, compatible} do
+        {_, []} ->
+          nil
+
+        # Cost-aware routing (#10): for non-urgent work, among the compatible
+        # candidates prefer the cheapest one we've actually OBSERVED — but never
+        # route away from a free/local provider (it's $0). No-data candidates
+        # keep their existing order, so with no history this is identical to
+        # today's first-compatible pick.
+        {:loose, list} ->
+          cheapest_observed(list)
+
+        {_, [first | _]} ->
+          first
+      end
     end
 
     # Walk the relaxation ladder: full requirements first, then progressively
@@ -191,6 +207,21 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
   # Loose work prefers free/local providers (zero cost, prompt stays on the
   # machine); if none is configured/capable the relaxation walk still reaches
   # the paid candidates. Other priorities keep the caller's order (primary first).
+  # Among compatible candidates, pick the one with the lowest OBSERVED cost,
+  # keeping all free/local providers ahead of paid ones (free is $0) and
+  # preserving original order for candidates with no observation yet. With no
+  # history at all this returns the first candidate — identical to the plain
+  # first-compatible pick.
+  defp cheapest_observed(candidates) do
+    candidates
+    |> Enum.with_index()
+    |> Enum.min_by(fn {{provider, model}, idx} ->
+      free_rank = if FallbackChain.free?(provider), do: 0, else: 1
+      {free_rank, CostObservations.avg_cost(provider, model) || :infinity, idx}
+    end)
+    |> elem(0)
+  end
+
   defp order_for_priority(candidates, :loose) do
     {free, paid} = Enum.split_with(candidates, &FallbackChain.free?/1)
     free ++ paid
