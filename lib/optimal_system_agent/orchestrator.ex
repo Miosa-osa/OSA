@@ -227,6 +227,19 @@ defmodule OptimalSystemAgent.Orchestrator do
   def run_subagent(%{routing_error: reason}), do: {:error, {:no_capable_model, reason}}
 
   def run_subagent(config) do
+    # Cheaper agent wake (#3): if this id belongs to a subagent that finished
+    # recently and is still resident in memory (lingering, see `maybe_linger/5`),
+    # reuse the live Loop directly — no terminate, no transcript replay. This is
+    # only ever reachable when `:subagent_linger_ms` > 0; with the default 0 no
+    # linger record is ever created, so `resume_lingering_if_resident/1` always
+    # returns `:no` and behavior is byte-for-byte identical to before.
+    case resume_lingering_if_resident(config) do
+      {:reused, result} -> result
+      :no -> run_fresh_subagent(config)
+    end
+  end
+
+  defp run_fresh_subagent(config) do
     task = Map.fetch!(config, :task)
     parent_id = Map.fetch!(config, :parent_session_id)
     role = Map.get(config, :role, "agent")
@@ -533,11 +546,22 @@ defmodule OptimalSystemAgent.Orchestrator do
           :exit, _ -> :ok
         end
 
-        # Cleanup
+        # Cleanup. Normally the child Loop is terminated now and its worktree
+        # torn down. When linger is enabled and the run SUCCEEDED, ownership of
+        # both is handed to a linger process that keeps the pid resident for a
+        # TTL so a quick resume can reuse it without replay. With linger disabled
+        # (the default) `maybe_linger/5` always returns `:terminate_now`, so this
+        # is exactly the original terminate-then-finish_worktree path.
         stop_event_forwarder(forwarder)
-        safely_terminate(pid)
 
-        finish_worktree(worktree_info, subagent_id, config, result)
+        case maybe_linger(pid, subagent_id, worktree_info, config, result) do
+          :lingering ->
+            :ok
+
+          :terminate_now ->
+            safely_terminate(pid)
+            finish_worktree(worktree_info, subagent_id, config, result)
+        end
 
         result
 
@@ -649,6 +673,196 @@ defmodule OptimalSystemAgent.Orchestrator do
         :subagent_join_timeout_ms,
         @default_subagent_timeout_ms
       )
+  end
+
+  # ── Cheaper agent wake (#3): keep a finished subagent RESIDENT briefly ──
+  #
+  # A terminated subagent Loop is expensive to bring back: `resume_subagent/2`
+  # restarts a fresh Loop and REPLAYS the whole durable transcript as input
+  # tokens. A never-terminated idle Loop, by contrast, costs nothing to wake —
+  # its context is already in memory.
+  #
+  # So on a SUCCESSFUL completion, when `:subagent_linger_ms` > 0, we do NOT
+  # terminate the child immediately. A linger process takes ownership of the
+  # pid + its worktree and:
+  #
+  #   * terminates + tears down after the TTL if no resume arrives, OR
+  #   * hands the pid straight back to a resume that reaches it first (the fast
+  #     path in `resume_lingering/2`), which reuses it with no replay, OR
+  #   * cleans up if the Loop dies on its own in the meantime.
+  #
+  # DEFAULT is 0 — no linger process is ever spawned and every completion takes
+  # the original terminate-immediately path. The resident-reuse path is dead
+  # code until an operator opts in.
+  @default_subagent_linger_ms 0
+
+  @doc false
+  def subagent_linger_ms do
+    Application.get_env(
+      :optimal_system_agent,
+      :subagent_linger_ms,
+      @default_subagent_linger_ms
+    )
+  end
+
+  # Registry key the linger owner process registers itself under. A tuple key
+  # can never collide with the plain-string session ids the Loops register with,
+  # and its stored value is the resident Loop pid.
+  defp linger_key(agent_id), do: {:linger, agent_id}
+
+  # Decide the fate of a just-finished child. `:lingering` means a linger owner
+  # now owns teardown of BOTH the pid and the worktree; `:terminate_now` means
+  # the caller must terminate + finish_worktree itself (the original behavior).
+  defp maybe_linger(pid, subagent_id, worktree_info, config, result) do
+    ttl = subagent_linger_ms()
+
+    if ttl > 0 and match?({:ok, _}, result) and is_pid(pid) and Process.alive?(pid) do
+      start_linger(pid, subagent_id, worktree_info, config, result, ttl)
+      :lingering
+    else
+      :terminate_now
+    end
+  rescue
+    # A linger is a pure optimization; if anything about arming it fails, fall
+    # back to terminating now so a pid is never accidentally leaked.
+    _ -> :terminate_now
+  end
+
+  defp start_linger(pid, subagent_id, worktree_info, config, result, ttl) do
+    spawn(fn ->
+      Registry.register(OptimalSystemAgent.SessionRegistry, linger_key(subagent_id), pid)
+      ref = Process.monitor(pid)
+
+      receive do
+        {:cancel_linger, caller} ->
+          # A resume claimed this resident pid. Hand back the worktree it must
+          # keep running under; DO NOT terminate — the resume owns it now.
+          Process.demonitor(ref, [:flush])
+          send(caller, {:linger_cancelled, worktree_info})
+
+        {:DOWN, ^ref, :process, _, _} ->
+          # The Loop died on its own before the TTL. Only the worktree is left
+          # to clean up.
+          finish_worktree(worktree_info, subagent_id, config, result)
+      after
+        ttl ->
+          Logger.info(
+            "[Orchestrator] Linger TTL (#{ttl}ms) elapsed for #{subagent_id} with no resume — terminating"
+          )
+
+          safely_terminate(pid)
+          finish_worktree(worktree_info, subagent_id, config, result)
+      end
+    end)
+
+    :ok
+  end
+
+  # True only for an id whose linger owner is registered AND whose resident Loop
+  # pid is still alive.
+  defp lingering?(agent_id) do
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, linger_key(agent_id)) do
+      [{_linger_pid, loop_pid}] -> is_pid(loop_pid) and Process.alive?(loop_pid)
+      _ -> false
+    end
+  end
+
+  # Cancel the linger for `agent_id`, taking ownership of its resident pid.
+  # Returns `{:ok, worktree_info}` on success (the linger owner will not
+  # terminate the pid), or `:error` if the linger already fired / is gone.
+  defp cancel_linger(agent_id) do
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, linger_key(agent_id)) do
+      [{linger_pid, _loop_pid}] ->
+        send(linger_pid, {:cancel_linger, self()})
+
+        receive do
+          {:linger_cancelled, worktree_info} -> {:ok, worktree_info}
+        after
+          5_000 -> :error
+        end
+
+      _ ->
+        :error
+    end
+  end
+
+  # Fast-resume entry point. Reachable only via `run_subagent/1`'s dispatcher,
+  # which only routes here when `lingering?/1` is true. Reuses the resident Loop
+  # with NO terminate + NO transcript replay — the new `message` is delivered to
+  # the live Loop exactly as `execute_and_collect/6` delivers a first turn.
+  defp resume_lingering_if_resident(config) do
+    agent_id = Map.get(config, :agent_id) || Map.get(config, :subagent_id)
+
+    if is_binary(agent_id) and lingering?(agent_id) do
+      {:reused, resume_lingering(agent_id, config)}
+    else
+      :no
+    end
+  end
+
+  defp resume_lingering(agent_id, config) do
+    case cancel_linger(agent_id) do
+      {:ok, worktree_info} ->
+        parent_id = Map.fetch!(config, :parent_session_id)
+        role = Map.get(config, :role, "agent")
+        task = Map.fetch!(config, :task)
+        display_name = config[:name] || role
+        batch_id = Map.get(config, :batch_id)
+        tier = Map.get(config, :tier, :specialist)
+        max_iter = Map.get(config, :max_iterations) || Tier.max_iterations(tier)
+
+        Logger.info(
+          "[Orchestrator] Fast-resume: reusing resident subagent #{agent_id} in memory (no replay)"
+        )
+
+        RunStore.start_run(%{
+          agent_id: agent_id,
+          parent_session_id: parent_id,
+          role: role,
+          task: task,
+          resumed_from: Map.get(config, :resumed_from)
+        })
+
+        ensure_execution_control(agent_id, config, %{
+          parent_session_id: parent_id,
+          task: task,
+          role: role
+        })
+
+        forwarder = start_event_forwarder(agent_id, parent_id, role)
+
+        result =
+          execute_and_collect(agent_id, task, parent_id, role, max_iter, worktree_info,
+            display_name: display_name,
+            batch_id: batch_id,
+            resumed_from: agent_id,
+            timeout_ms: Map.get(config, :timeout_ms)
+          )
+
+        stop_event_forwarder(forwarder)
+
+        pid =
+          case Registry.lookup(OptimalSystemAgent.SessionRegistry, agent_id) do
+            [{p, _}] -> p
+            _ -> nil
+          end
+
+        case maybe_linger(pid, agent_id, worktree_info, config, result) do
+          :lingering ->
+            :ok
+
+          :terminate_now ->
+            if is_pid(pid), do: safely_terminate(pid)
+            finish_worktree(worktree_info, agent_id, config, result)
+        end
+
+        result
+
+      :error ->
+        # The linger fired between `lingering?/1` and here (TTL race). The pid is
+        # gone, so fall back to the original terminate-and-replay spawn.
+        run_fresh_subagent(config)
+    end
   end
 
   # ── Worktree end-of-life ──────────────────────────────────────────────
