@@ -189,5 +189,4 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGlob.Handler do
   defp allowed?(expanded_path) do
     OptimalSystemAgent.Agent.Safety.PathPolicy.within_read_roots?(expanded_path)
   end
-
 end

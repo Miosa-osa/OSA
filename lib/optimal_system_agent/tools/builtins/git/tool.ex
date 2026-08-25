@@ -144,15 +144,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.Git.Tool do
 
           {:deny, reason} ->
             {:error, reason}
-
-          {:ask, prompt} ->
-            # Same interactive round-trip as the structured path
-            # (LegacyAdapter → PermissionBroker); a decline is a non-fatal,
-            # model-readable refusal, never an internal error string.
-            case OptimalSystemAgent.Permissions.AskFlow.request(name(), valid, ctx, prompt) do
-              :allow -> Handler.execute(valid, ctx)
-              {:error, reason} -> {:error, reason}
-            end
         end
 
       {:error, msg, _code} ->

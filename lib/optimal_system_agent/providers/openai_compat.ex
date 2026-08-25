@@ -245,9 +245,6 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
           0 -> {:error, "SSE recovery: stream completed without a result"}
         end
 
-      {:ok, result} when is_map(result) ->
-        {:ok, result}
-
       {:error, reason} ->
         {:error, "SSE recovery failed: #{inspect(reason)}"}
 
@@ -892,6 +889,10 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   defp content_part(%{"text" => t} = b) when is_binary(t),
     do: carry_cache_control(%{"type" => "text", "text" => t}, b)
 
+  # Anything else structured (a stray tool_use block) carries nothing this API
+  # can render.
+  defp content_part(_), do: nil
+
   # `cache_control` is an Anthropic field, but OpenRouter forwards it verbatim
   # on an OpenAI-shaped content part when the upstream model is Anthropic —
   # which is the only case `Registry.anthropic_prompt_cache?/2` lets reach here.
@@ -915,10 +916,6 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   end
 
   defp carry_cache_control(target, _source), do: target
-
-  # Anything else structured (a stray tool_use block) carries nothing this API
-  # can render.
-  defp content_part(_), do: nil
 
   @image_unusable_source "[An image was attached here but its source could not be read, so the image was not sent. Do not describe or reason about it; ask the user to re-share it if it matters.]"
 
@@ -1738,6 +1735,8 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     }
   end
 
+  defp parse_usage(_), do: %{}
+
   # The SSE path's equivalent of `parse_usage/1`.
   #
   # Both streaming branches used to build `%{input_tokens: .., output_tokens: ..}`
@@ -1789,8 +1788,6 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   defp cache_written(%{"cache_creation_input_tokens" => n}) when is_integer(n), do: n
   defp cache_written(%{"cache_write_tokens" => n}) when is_integer(n), do: n
   defp cache_written(_), do: 0
-
-  defp parse_usage(_), do: %{}
 
   # `message` is only usable as a message when it IS one. Some gateways answer
   # with `{"error": {"message": {"detail": ...}}}` or a list of validation

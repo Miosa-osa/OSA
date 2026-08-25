@@ -170,7 +170,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Tool do
   # Computer use touches the live OS UI — it is inherently open-world.
   def open_world?(_input, _ctx), do: true
 
-  @impl true
   # On interrupt: cancel the pending action. Blocking would stall the agent
   # loop while a human has seized the keyboard/mouse.
 

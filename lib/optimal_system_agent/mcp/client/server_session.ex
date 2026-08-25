@@ -447,61 +447,6 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
     end
   end
 
-  # The server answered with a revision OSA cannot speak. Continuing would mean
-  # exchanging messages under a schema neither side agreed on, so drop the
-  # connection instead — the lifecycle spec says the client SHOULD disconnect.
-  defp reject_handshake({:unsupported_protocol_version, version}, state) do
-    Logger.warning(
-      "[MCP:#{state.server.name}] server negotiated unsupported MCP revision " <>
-        "#{inspect(version)} (OSA speaks #{Enum.join(Messages.supported_versions(), ", ")}); " <>
-        "disconnecting"
-    )
-
-    schedule_reconnect(%{state | status: :failed, init_id: nil})
-  end
-
-  defp complete_handshake(version, state) do
-    if version != Messages.protocol_version() do
-      Logger.debug(
-        "[MCP:#{state.server.name}] negotiated down to MCP #{version} " <>
-          "(announced #{Messages.protocol_version()})"
-      )
-    end
-
-    # Tell the HTTP transport which revision won, so the `MCP-Protocol-Version`
-    # header on every subsequent request carries the NEGOTIATED value rather
-    # than the one we opened with. Only the HTTP transport has headers, so the
-    # message is not broadcast at transports that would have no use for it.
-    if state.transport_mod == Http and is_pid(state.transport) do
-      send(state.transport, {:mcp_protocol_version, version})
-    end
-
-    state = %{state | protocol_version: version}
-
-    # initialize succeeded → send `initialized`, then request the first tool
-    # page. Don't reset the backoff yet: the connection must survive the
-    # stability window first (see `:mark_stable`), so a server that handshakes
-    # then dies instantly still escalates its reconnect delay.
-    _ = send_msg(state, Messages.initialized())
-    list = Messages.list_tools(nil, nil)
-
-    state =
-      %{
-        state
-        | status: :ready,
-          init_id: nil,
-          tools_acc: [],
-          list_cursors: MapSet.new(),
-          list_pages: 0
-      }
-      |> arm_stability_timer()
-
-    case send_msg(state, list) do
-      :ok -> %{state | list_id: list["id"]}
-      {:error, _reason} -> state
-    end
-  end
-
   defp handle_response(id, result, %{list_id: id} = state) do
     page_tools = Messages.parse_tool_list(result)
     acc = state.tools_acc ++ page_tools
@@ -559,6 +504,61 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
         cancel_timer(timer)
         GenServer.reply(from, {:ok, result})
         %{state | pending: pending}
+    end
+  end
+
+  # The server answered with a revision OSA cannot speak. Continuing would mean
+  # exchanging messages under a schema neither side agreed on, so drop the
+  # connection instead — the lifecycle spec says the client SHOULD disconnect.
+  defp reject_handshake({:unsupported_protocol_version, version}, state) do
+    Logger.warning(
+      "[MCP:#{state.server.name}] server negotiated unsupported MCP revision " <>
+        "#{inspect(version)} (OSA speaks #{Enum.join(Messages.supported_versions(), ", ")}); " <>
+        "disconnecting"
+    )
+
+    schedule_reconnect(%{state | status: :failed, init_id: nil})
+  end
+
+  defp complete_handshake(version, state) do
+    if version != Messages.protocol_version() do
+      Logger.debug(
+        "[MCP:#{state.server.name}] negotiated down to MCP #{version} " <>
+          "(announced #{Messages.protocol_version()})"
+      )
+    end
+
+    # Tell the HTTP transport which revision won, so the `MCP-Protocol-Version`
+    # header on every subsequent request carries the NEGOTIATED value rather
+    # than the one we opened with. Only the HTTP transport has headers, so the
+    # message is not broadcast at transports that would have no use for it.
+    if state.transport_mod == Http and is_pid(state.transport) do
+      send(state.transport, {:mcp_protocol_version, version})
+    end
+
+    state = %{state | protocol_version: version}
+
+    # initialize succeeded → send `initialized`, then request the first tool
+    # page. Don't reset the backoff yet: the connection must survive the
+    # stability window first (see `:mark_stable`), so a server that handshakes
+    # then dies instantly still escalates its reconnect delay.
+    _ = send_msg(state, Messages.initialized())
+    list = Messages.list_tools(nil, nil)
+
+    state =
+      %{
+        state
+        | status: :ready,
+          init_id: nil,
+          tools_acc: [],
+          list_cursors: MapSet.new(),
+          list_pages: 0
+      }
+      |> arm_stability_timer()
+
+    case send_msg(state, list) do
+      :ok -> %{state | list_id: list["id"]}
+      {:error, _reason} -> state
     end
   end
 

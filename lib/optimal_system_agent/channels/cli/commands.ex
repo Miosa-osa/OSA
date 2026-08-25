@@ -770,9 +770,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
                 IO.puts("  #{@dim}Transcript kept.#{@reset}")
 
               {:error, :not_enough_checkpoints} ->
-                IO.puts(
-                  "  #{@yellow}error: not enough file checkpoints to revert #{n}#{@reset}"
-                )
+                IO.puts("  #{@yellow}error: not enough file checkpoints to revert #{n}#{@reset}")
 
               {:error, reason} ->
                 IO.puts("  #{@yellow}error: #{inspect(reason)}#{@reset}")

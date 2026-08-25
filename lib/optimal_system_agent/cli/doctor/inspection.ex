@@ -534,6 +534,11 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
     ".grok/GROK.md"
   ]
 
+  # How deep to look for AGENTS.md / CLAUDE.md / GROK.md. They are a
+  # project-root convention; a handful of levels covers every real layout and
+  # keeps the walk bounded regardless of checkout size.
+  @agent_doc_max_depth 4
+
   # ProjectInstructions is lazy — it only fires for directories the agent has
   # actually touched — so a static report cannot say "this WILL load". It says
   # what exists and what would gate it, which is the honest version.
@@ -1081,13 +1086,6 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
     _ -> false
   end
 
-  @vendored ~w(node_modules .git _build deps vendor target dist build .elixir_ls .venv)
-
-  # How deep to look for AGENTS.md / CLAUDE.md / GROK.md. They are a
-  # project-root convention; a handful of levels covers every real layout and
-  # keeps the walk bounded regardless of checkout size.
-  @agent_doc_max_depth 4
-
   @agent_doc_names ~w(AGENTS.md CLAUDE.md GROK.md)
 
   # Directories never worth descending into. Pruned BEFORE recursing, which is
@@ -1126,11 +1124,6 @@ defmodule OptimalSystemAgent.CLI.Doctor.Inspection do
       _ ->
         []
     end
-  end
-
-  defp vendored?(path) do
-    parts = Path.split(path)
-    Enum.any?(@vendored, &(&1 in parts))
   end
 
   defp touched_paths do

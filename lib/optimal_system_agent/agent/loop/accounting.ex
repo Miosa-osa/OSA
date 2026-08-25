@@ -1067,7 +1067,7 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
 
   # --- Private ---
 
-  defp emit_cost_update(state, norm, turn_cost, extra \\ %{}) do
+  defp emit_cost_update(state, norm, turn_cost, extra) do
     payload =
       %{
         event: :cost_update,

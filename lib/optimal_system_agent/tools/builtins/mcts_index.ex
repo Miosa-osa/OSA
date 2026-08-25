@@ -69,43 +69,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.MCTSIndex do
   end
 
   @impl true
-  def execute(%{"goal" => goal} = args) do
-    root_dir = Map.get(args, "root_dir", File.cwd!())
-    max_iterations = args |> Map.get("max_iterations", 50) |> min(200)
-    max_results = args |> Map.get("max_results", 20) |> min(50)
-
-    opts = [
-      max_iterations: max_iterations,
-      max_results: max_results
-    ]
-
-    case OptimalSystemAgent.MCTS.Indexer.run(goal, root_dir, opts) do
-      {:ok, %{files: files, summary: summary}} ->
-        lines = [summary, "", "## Relevant Files (ranked by MCTS score)", ""]
-
-        file_lines =
-          files
-          |> Enum.with_index(1)
-          |> Enum.map(fn {%{path: path, relevance: rel, summary: sum}, i} ->
-            preview =
-              if sum do
-                cleaned =
-                  sum
-                  |> String.replace(~r/^symbols:\d+ kw_hits:\d+ \| /, "")
-                  |> String.slice(0, 120)
-
-                "\n   → #{cleaned}"
-              else
-                ""
-              end
-
-            "#{i}. `#{path}` (relevance: #{rel})#{preview}"
-          end)
-
-        {:ok, (lines ++ file_lines) |> Enum.join("\n")}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+  def execute(%{"goal" => _goal}) do
+    # OptimalSystemAgent.MCTS.Indexer backend is not present in this build.
+    {:error, "MCTS.Indexer backend not present in this build"}
   end
 end

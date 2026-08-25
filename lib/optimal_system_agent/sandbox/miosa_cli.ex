@@ -115,8 +115,7 @@ defmodule OptimalSystemAgent.Sandbox.MiosaCli do
   def create(opts \\ []) do
     cond do
       cli_path() == nil ->
-        {:error,
-         "miosa CLI not found on PATH. Install it, or switch to another sandbox backend."}
+        {:error, "miosa CLI not found on PATH. Install it, or switch to another sandbox backend."}
 
       not credential_present?() ->
         {:error, "miosa CLI is not authenticated. Run `miosa login`."}
@@ -465,7 +464,10 @@ defmodule OptimalSystemAgent.Sandbox.MiosaCli do
   end
 
   defp cli_config_key? do
-    path = Path.expand(Application.get_env(:optimal_system_agent, :miosa_cli_config) || "~/.miosa/config.json")
+    path =
+      Path.expand(
+        Application.get_env(:optimal_system_agent, :miosa_cli_config) || "~/.miosa/config.json"
+      )
 
     with {:ok, raw} <- File.read(path),
          {:ok, %{"api_key" => key}} <- Jason.decode(raw),

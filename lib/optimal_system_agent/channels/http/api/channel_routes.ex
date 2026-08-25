@@ -67,9 +67,6 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ChannelRoutes do
         case Telegram.handle_update(conn.body_params) do
           :ok ->
             send_resp(conn, 200, "")
-
-          {:error, :not_started} ->
-            json_error(conn, 503, "channel_unavailable", "Telegram adapter not started")
         end
 
       {:error, :no_secret} ->

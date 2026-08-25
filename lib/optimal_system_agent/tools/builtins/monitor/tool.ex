@@ -102,8 +102,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.Monitor.Tool do
   def open_world?(_input, _ctx), do: false
 
   @impl true
-
-  @impl true
   def max_result_size_chars, do: 5_000
 
   # ── Flat-layout compatibility ─────────────────────────────────────────
