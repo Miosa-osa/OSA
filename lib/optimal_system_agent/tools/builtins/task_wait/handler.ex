@@ -26,15 +26,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
   alias OptimalSystemAgent.Tools.UseContext
 
   @terminal_statuses [:completed, :failed, :cancelled]
-  # Real subagents routinely run far longer than the old 10-minute default, so
-  # that default spuriously "timed out" on perfectly healthy agents and drove
-  # the coordinator into re-issuing task_wait over and over (a wasteful poll
-  # loop that also reads as broken). 30 minutes matches the stream idle backstop
-  # and covers the large majority of jobs in a single call; a caller with a
-  # known-longer horizon still passes an explicit `timeout_ms`, and the timeout
-  # branch below no longer treats a still-running agent as a dead end.
-  @default_timeout_ms 1_800_000
   @poll_interval_ms 500
+
+  # Default wait bound = the shared agent-LIFETIME backstop, which is measured in
+  # DAYS (see Orchestrator.@default_subagent_timeout_ms / :subagent_join_timeout_ms).
+  # Long-running agents run for days, so a minute-scale default spuriously "timed
+  # out" on healthy agents and drove the coordinator into a re-poll loop. Reading
+  # the same knob means task_wait, the delegate join, and the swarm patterns all
+  # agree on one days-scale number with no stray cap. A caller that wants a
+  # deliberately short bound still passes an explicit `timeout_ms`, and the
+  # timeout branch treats a still-running agent as healthy (not a dead end).
+  defp default_timeout_ms,
+    do: OptimalSystemAgent.Orchestrator.subagent_join_timeout_ms(%{})
 
   # ── Stage 1: Input validation ──────────────────────────────────────────
 
@@ -82,7 +85,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
   def execute(%{"agent_ids" => agent_ids} = input, ctx) do
     caller_id = session_id(ctx)
     require_all = Map.get(input, "require_all", true) != false
-    timeout_ms = parse_timeout_ms(Map.get(input, "timeout_ms")) || @default_timeout_ms
+    timeout_ms = parse_timeout_ms(Map.get(input, "timeout_ms")) || default_timeout_ms()
     deadline = System.monotonic_time(:millisecond) + timeout_ms
 
     Depth.enter(caller_id)

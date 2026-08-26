@@ -32,7 +32,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Prompt do
 
     Give the agentIds to wait on (from earlier delegate/background launches). By default waits
     for ALL of them (`require_all: true`); set it to `false` to return as soon as ANY one
-    finishes. An optional `timeout_ms` bounds the wait (default 30 minutes) — on timeout, any
+    finishes. An optional `timeout_ms` bounds the wait (defaults to the agent-lifetime backstop,
+    measured in DAYS, since agents run that long) — on timeout, any
     still-running agents are HEALTHY (not failed): their results arrive automatically when they
     finish, so do NOT call this again on them, just continue with other work.
 

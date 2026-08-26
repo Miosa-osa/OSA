@@ -38,11 +38,15 @@ defmodule OptimalSystemAgent.Orchestrator do
   # agent building 67 pages and running 157 tests hit it and was reported as
   # `:timeout` with its finished results thrown away.
   #
-  # An agent expected to work unattended for a shift needs a backstop measured
-  # in shifts. Still finite so a truly wedged child cannot be held forever, and
-  # still overridable per call (`timeout_ms:` / `await_timeout:`) or globally via
-  # `:subagent_await_timeout_ms` for a deliberately bounded job.
-  @default_subagent_timeout_ms 12 * 60 * 60 * 1000
+  # Long-running agents run for DAYS, not a shift. This backstop is deliberately
+  # measured in days so a healthy multi-day agent is never killed or abandoned
+  # (the whole point of unattended background work). Still finite — 3 days — so a
+  # truly wedged child cannot be held literally forever, and still overridable
+  # per call (`timeout_ms:` / `await_timeout:`) or globally via
+  # `:subagent_join_timeout_ms` / `:subagent_await_timeout_ms`. This is the ONE
+  # agent-lifetime knob; the swarm patterns and task_wait read it too, so there
+  # is no stray minute-scale cap anywhere that could kill a day-long agent.
+  @default_subagent_timeout_ms 3 * 24 * 60 * 60 * 1000
 
   @doc false
   def runner_key(agent_id), do: "subagent-runner:" <> agent_id
