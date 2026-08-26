@@ -806,6 +806,15 @@ impl App {
 
         let items = std::mem::take(&mut self.message_queue);
         let count = items.len();
+        // Echo each steered message into the transcript so the user SEES what
+        // they sent land mid-turn. Without this, send-now showed only a
+        // transient toast and the message vanished from view - reported as "I
+        // don't see the prompt, I don't think it worked". Optimistic, like any
+        // chat: on failure the SendNowFailed path re-queues it, and the toast
+        // says it will run when the turn ends, so the echo is never a lie.
+        for text in &items {
+            self.chat.add_user_message(text);
+        }
         self.input.set_queued_items(Vec::new());
         self.activity.set_queued(0);
         self.recompute_layout();

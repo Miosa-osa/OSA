@@ -91,6 +91,17 @@ defmodule OptimalSystemAgent.Agent.Loop.Steer do
   texts. A steer is surfaced as a `system` directive (consistent with every
   other mid-turn injection in `ReactLoop`, which avoids provider role-alternation
   issues) but is clearly labelled as coming from the user.
+
+  ## Why the framing is imperative
+
+  The earlier wording ("adapt your current work to incorporate this now, without
+  discarding progress already made") was too soft: a model with momentum on a
+  plan read "without discarding progress" as licence to FINISH the whole plan
+  first and only acknowledge the steer at the very end - reported as "it told me
+  at the end, it didn't take what I said into consideration as it was working".
+  The framing now names and forbids that exact failure so the model treats the
+  steer as an interrupt to act on BEFORE its next action, not a closing note.
+  "User steer" is preserved as a stable, testable marker.
   """
   @spec to_messages([String.t()]) :: [map()]
   def to_messages(texts) when is_list(texts) do
@@ -98,8 +109,13 @@ defmodule OptimalSystemAgent.Agent.Loop.Steer do
       %{
         role: "system",
         content:
-          "[User steer — a mid-turn directive from the user. Adapt your current work to " <>
-            "incorporate this now, without discarding progress already made]: " <> text
+          "[URGENT User steer - a mid-turn course correction the user sent WHILE you are " <>
+            "working. Treat it as the user interrupting you right now. Before your very next " <>
+            "action, act on it: change your current plan to satisfy it, carrying forward the " <>
+            "progress you have already made. Do NOT finish your existing plan first and only " <>
+            "mention this at the end - that is the exact failure this directive exists to " <>
+            "prevent. If it changes what you should be doing, change course immediately.]: " <>
+            text
       }
     end)
   end
