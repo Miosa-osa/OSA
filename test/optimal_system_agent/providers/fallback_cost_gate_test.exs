@@ -62,6 +62,7 @@ defmodule OptimalSystemAgent.Providers.FallbackCostGateTest do
   describe "explicit opt-in" do
     test "config :fallback_allow_paid lets the built-in chain bill" do
       Application.put_env(:optimal_system_agent, :fallback_allow_paid, true)
+      on_exit(fn -> Application.delete_env(:optimal_system_agent, :fallback_allow_paid) end)
       candidates = @builtin -- [:ollama]
       assert FallbackChain.cost_gated_chain(candidates, :ollama) == candidates
     end
@@ -70,6 +71,7 @@ defmodule OptimalSystemAgent.Providers.FallbackCostGateTest do
   describe "a chain the user actually configured" do
     test "is honoured as written" do
       Application.put_env(:optimal_system_agent, :fallback_chain, [:ollama, :anthropic])
+      on_exit(fn -> Application.delete_env(:optimal_system_agent, :fallback_chain) end)
       assert FallbackChain.cost_gated_chain([:anthropic], :ollama) == [:anthropic]
     end
   end
