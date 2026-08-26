@@ -1816,7 +1816,7 @@ mod tests {
         );
         // 107_300 → "107.3k", arrow ↓.
         assert!(
-            main_line.contains("\u{2193}107.3k"),
+            main_line.contains("107.3k tok"),
             "main ↓tokens column: {main_line:?}"
         );
         // ONE turn clock: `main.elapsed_secs` IS the turn elapsed the activity
@@ -1841,7 +1841,7 @@ mod tests {
             "worker activity: {worker_line:?}"
         );
         assert!(
-            worker_line.contains("\u{2193}4.2k"),
+            worker_line.contains("4.2k tok"),
             "worker ↓tokens: {worker_line:?}"
         );
         // Tree connector present.
@@ -1973,8 +1973,13 @@ mod tests {
     }
 
     /// The display column of the first `↓` cell in a row, if any.
-    fn arrow_col(row: &[String]) -> Option<usize> {
-        row.iter().position(|s| s == "\u{2193}")
+    // The meta column now reads `<elapsed> · <tokens> tok` (no `↓`, which read
+    // as a pressable down-key). Anchor alignment on the `tok` unit: it is
+    // present on every roster row (main root and workers), unique per row, and
+    // lines up when the equal-width, flush-right metas align.
+    fn meta_sep_col(row: &[String]) -> Option<usize> {
+        (0..row.len().saturating_sub(2))
+            .find(|&i| row[i] == "t" && row[i + 1] == "o" && row[i + 2] == "k")
     }
 
     #[test]
@@ -2018,22 +2023,17 @@ mod tests {
                 .collect();
             assert_eq!(rows.len(), 3, "expected main + 2 worker rows at w={w}");
 
-            // Every row's `↓` sits in the identical column.
+            // Every row's meta separator `·` sits in the identical column.
             let cols: Vec<usize> = rows
                 .iter()
-                .map(|r| arrow_col(r).expect("↓ present"))
+                .map(|r| meta_sep_col(r).expect("meta separator present"))
                 .collect();
             assert!(
                 cols.iter().all(|c| *c == cols[0]),
-                "meta ↓ column must line up across rows at w={w}: {cols:?}"
+                "meta column must line up across rows at w={w}: {cols:?}"
             );
-            // Equal-width metas → the ↓ sits 5 columns in from the right edge
-            // (`↓X.Xk`), and the token digit 'k' is the last cell.
-            assert_eq!(
-                cols[0],
-                w as usize - 5,
-                "↓ is 5 cols from the edge at w={w}"
-            );
+            // Equal-width metas are flush-right: the last cell is the final `k`
+            // of the `tok` unit.
             for r in &rows {
                 assert_eq!(
                     r[w as usize - 1],
@@ -2078,7 +2078,7 @@ mod tests {
 
         let cols: Vec<usize> = rows
             .iter()
-            .map(|r| arrow_col(r).expect("↓ present"))
+            .map(|r| meta_sep_col(r).expect("meta separator present"))
             .collect();
         assert_eq!(
             cols[0], cols[1],

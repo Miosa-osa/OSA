@@ -1132,8 +1132,8 @@ fn fmt_tokens(n: u32) -> String {
     }
 }
 
-/// The CC roster row's right-hand meta column: `<elapsed> · ↓<tokens>`, e.g.
-/// `10m 25s · ↓107.3k`. Reuses the shared compact elapsed formatter and the
+/// The CC roster row's right-hand meta column: `<elapsed> · <tokens> tok`, e.g.
+/// `10m 25s · 107.3k tok`. Reuses the shared compact elapsed formatter and the
 /// k/M token scaler so every roster surface renders identically.
 fn fmt_cc_meta(elapsed_secs: u64, tokens: u32) -> String {
     format!(
@@ -1143,11 +1143,16 @@ fn fmt_cc_meta(elapsed_secs: u64, tokens: u32) -> String {
     )
 }
 
-/// The meta column WITHOUT a duration: `↓<tokens>`. Used by the inline `main`
-/// root row, whose elapsed would be a second rendering of the turn clock the
-/// activity line already owns.
+/// The meta column WITHOUT a duration: `<tokens> tok`. Used by the inline
+/// `main` root row, whose elapsed would be a second rendering of the turn clock
+/// the activity line already owns.
+///
+/// Labelled `tok`, NOT prefixed with `↓`. This panel also uses `↓` as a real
+/// key hint (`↓ to manage`), so a `↓`-prefixed token count read as a pressable
+/// button that did nothing — reported as "a 0 with a down-arrow next to the
+/// timer that never does anything". A unit label can't be mistaken for a key.
 fn fmt_cc_tokens(tokens: u32) -> String {
-    format!("\u{2193}{}", fmt_tokens(tokens))
+    format!("{} tok", fmt_tokens(tokens))
 }
 
 /// Format a byte size compactly: 312 → "312", 2100 → "2.1k", 1_500_000 → "1.5M".

@@ -1526,7 +1526,7 @@ mod panel_invariants {
             "the empty `main` row is back:\n{screen}"
         );
         assert!(
-            screen.contains("\u{2193}2.8k"),
+            screen.contains("2.8k tok"),
             "the folded session tokens were lost, not folded:\n{screen}"
         );
         // The routing key never reaches the screen, on any surface.
