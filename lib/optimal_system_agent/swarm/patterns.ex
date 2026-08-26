@@ -27,13 +27,16 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
 
     * `:runner`  — 1-arity fun invoked per config. Defaults to
       `Orchestrator.run_subagent/1`.
-    * `:timeout` — per-agent timeout in ms. Defaults to 10 minutes.
+    * `:timeout` — per-agent timeout in ms. Defaults to the shared agent-lifetime
+      backstop (`Orchestrator.subagent_join_timeout_ms/1`, measured in DAYS), so
+      a healthy long-running agent is never killed mid-run. The old minute-scale
+      defaults killed day-long agents; there is no minute-scale cap here now.
   """
   def parallel(parent_id, configs, opts \\ []) do
     Logger.info("[Swarm.Patterns] parallel — #{length(configs)} agents")
 
     runner = Keyword.get(opts, :runner, &Orchestrator.run_subagent/1)
-    timeout = Keyword.get(opts, :timeout, 600_000)
+    timeout = Keyword.get(opts, :timeout, Orchestrator.subagent_join_timeout_ms(%{}))
     depth = Keyword.get(opts, :depth, 0)
     priority = Keyword.get(opts, :priority, :standard)
 
@@ -142,7 +145,7 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
           # Same cap as `parallel/3` — an uncapped fan-out here is the identical
           # defect, just reached through a different pattern.
           max_concurrency: min(length(proposers), Orchestrator.delegate_concurrency_cap()),
-          timeout: 600_000,
+          timeout: Orchestrator.subagent_join_timeout_ms(%{}),
           on_timeout: :kill_task
         )
         |> Enum.map(fn

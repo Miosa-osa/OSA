@@ -37,11 +37,15 @@ defmodule OptimalSystemAgent.Orchestrator do
   # agent building 67 pages and running 157 tests hit it and was reported as
   # `:timeout` with its finished results thrown away.
   #
-  # An agent expected to work unattended for a shift needs a backstop measured
-  # in shifts. Still finite so a truly wedged child cannot be held forever, and
-  # still overridable per call (`timeout_ms:` / `await_timeout:`) or globally via
-  # `:subagent_await_timeout_ms` for a deliberately bounded job.
-  @default_subagent_timeout_ms 12 * 60 * 60 * 1000
+  # Long-running agents run for DAYS, not a shift. This backstop is deliberately
+  # measured in days so a healthy multi-day agent is never killed or abandoned
+  # (the whole point of unattended background work). Still finite — 3 days — so a
+  # truly wedged child cannot be held literally forever, and still overridable
+  # per call (`timeout_ms:` / `await_timeout:`) or globally via
+  # `:subagent_join_timeout_ms` / `:subagent_await_timeout_ms`. This is the ONE
+  # agent-lifetime knob; the swarm patterns and task_wait read it too, so there
+  # is no stray minute-scale cap anywhere that could kill a day-long agent.
+  @default_subagent_timeout_ms 3 * 24 * 60 * 60 * 1000
 
   @doc false
   def runner_key(agent_id), do: "subagent-runner:" <> agent_id
@@ -2169,17 +2173,31 @@ defmodule OptimalSystemAgent.Orchestrator do
   #               provider that stopped responding mid-run; a much shorter
   #               threshold is appropriate.
   #
-  # It only OBSERVES: it emits `:background_agent_stalled` and stops. It never
-  # kills the child — a long-running-but-alive teammate must not be reaped by a
-  # heuristic, and the existing join timeout remains the only hard stop.
-  # It exits as soon as the run reaches a terminal status or its row disappears.
+  # Mostly OBSERVES: on the first stall it sends ONE non-destructive nudge, then
+  # emits `:background_agent_stalled` and keeps watching. It does NOT reap a
+  # long-running-but-alive teammate on the minute-scale thresholds — a healthy
+  # agent that is slow or in a long provider call must never be killed.
+  #
+  # The ONE exception is a definitely-dead hang: an agent that has made NO
+  # progress for `@stall_hard_stop_ms` (default 2h) AFTER a nudge is not slow,
+  # it is wedged — every legitimate long operation resolves well inside that
+  # window (MCP calls time out at 60s, shell commands background, a stalled
+  # provider call fails over its retries in ~90min), and a healthy multi-day
+  # agent makes SOME progress far sooner. Rather than leave it for the operator
+  # to notice and `task_stop` by hand, the watcher auto-stops it and reports it
+  # cancelled. This is well under the 3-day lifetime backstop (which bounds a
+  # *working* agent) and only ever fires on a genuine no-progress hang.
   @stall_poll_interval_ms 30_000
   @stall_threshold_starting_ms 5 * 60 * 1000
   @stall_threshold_working_ms 15 * 60 * 1000
+  @stall_hard_stop_ms 2 * 60 * 60 * 1000
 
   defp stall_poll_interval_ms,
     do:
       Application.get_env(:optimal_system_agent, :stall_poll_interval_ms, @stall_poll_interval_ms)
+
+  defp stall_hard_stop_ms,
+    do: Application.get_env(:optimal_system_agent, :stall_hard_stop_ms, @stall_hard_stop_ms)
 
   defp stall_threshold_ms(:starting),
     do:
@@ -2294,6 +2312,26 @@ defmodule OptimalSystemAgent.Orchestrator do
               nudged: true
             })
 
+          stall.nudged and
+              now_ms() - (stall.since || stall.last_change_at) >= stall_hard_stop_ms() ->
+            # Definitely-dead hang: no progress for the hard threshold (default
+            # 2h) even AFTER a nudge. Auto-stop it and report it cancelled so the
+            # operator/coordinator doesn't have to notice and `task_stop` it by
+            # hand. Safe against the days requirement: a healthy long/slow agent
+            # makes SOME progress well inside 2h, and every legitimate long call
+            # resolves sooner (MCP 60s, shell backgrounds, provider retries
+            # ~90min). Stop watching once stopped.
+            auto_stop_stalled(
+              parent_id,
+              subagent_id,
+              display_name,
+              role,
+              phase,
+              now_ms() - (stall.since || stall.last_change_at)
+            )
+
+            :ok
+
           now_ms() - stall.last_change_at >= stall_report_gap_ms(phase, stall.reports) ->
             since = stall.since || stall.last_change_at
 
@@ -2373,6 +2411,74 @@ defmodule OptimalSystemAgent.Orchestrator do
       OptimalSystemAgent.PubSub,
       "osa:session:#{parent_id}",
       {:osa_event, Map.put(payload, :type, :background_agent_nudged)}
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  # Auto-stop a subagent that is a confirmed dead hang (no progress for the hard
+  # threshold, after a nudge). Cancels the Loop and records the run as cancelled
+  # with an honest summary — the SAME path `task_stop` takes — then emits a
+  # `:background_agent_auto_stopped` event so the coordinator learns it is done
+  # (and why) without having to poll or stop it by hand. Best-effort.
+  defp auto_stop_stalled(parent_id, subagent_id, display_name, role, phase, stalled_ms) do
+    minutes = div(stalled_ms, 60_000)
+
+    Logger.warning(
+      "[Orchestrator] Background subagent #{subagent_id} made NO progress for #{minutes}m in " <>
+        ":#{phase} even after a nudge — auto-stopping it as an unrecoverable hang"
+    )
+
+    Loop.cancel(subagent_id)
+
+    summary =
+      "Auto-stopped after #{minutes}m with no progress in :#{phase} (unrecoverable hang — " <>
+        "a hung tool or a stalled provider call that never resumed)."
+
+    case RunStore.get(subagent_id) do
+      nil ->
+        :ok
+
+      run ->
+        RunStore.complete(subagent_id, %{
+          agent_id: subagent_id,
+          parent_session_id: run.parent_session_id,
+          role: run.role,
+          status: :cancelled,
+          summary: summary,
+          files_changed: [],
+          commands_run: [],
+          tool_count: Map.get(run, :tool_count, 0),
+          tokens_used: Map.get(run, :tokens_used, 0),
+          duration_ms: nil,
+          errors: ["stall_hard_stop"],
+          next_actions: [],
+          transcript_path: Map.get(run, :transcript_path),
+          worktree: nil
+        })
+    end
+
+    payload = %{
+      event: :background_agent_auto_stopped,
+      session_id: parent_id,
+      agent_id: subagent_id,
+      display_name: display_name,
+      role: role,
+      phase: phase,
+      stalled_ms: stalled_ms,
+      summary: summary
+    }
+
+    Bus.emit(:system_event, payload)
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{parent_id}",
+      {:osa_event, Map.put(payload, :type, :background_agent_auto_stopped)}
     )
 
     :ok

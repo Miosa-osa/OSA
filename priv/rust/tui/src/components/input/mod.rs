@@ -56,12 +56,12 @@ use super::{AppAction, Component, ComponentAction};
 /// interrupt keeps its own key and its own surface — the spinner's "esc to
 /// interrupt" — so no row advertises two meanings for one press.
 pub const QUEUED_HINT_FULL: &str =
-    "  \u{2014} sends when this turn ends \u{00b7} alt+enter to send it into this turn now";
+    "  \u{2014} sends when this turn ends \u{00b7} enter again (or alt+enter) sends it into this turn now";
 
 /// Mid-width form. Same key, fewer words — never a different key, and never a
 /// key mentioned without saying what it does.
 pub const QUEUED_HINT_MID: &str =
-    "  \u{2014} sends when this turn ends \u{00b7} alt+enter sends it now";
+    "  \u{2014} sends when this turn ends \u{00b7} enter again sends it now";
 
 /// The narrow-terminal fallback: the trigger, with no key named.
 ///
@@ -5026,8 +5026,8 @@ mod queued_affordance {
     fn the_named_key_is_the_one_that_delivers() {
         let row = queued_row_text(vec!["check the god files"], 140);
         assert!(
-            row.contains("alt+enter"),
-            "the row must name the send-now key: {row:?}"
+            row.contains("enter again"),
+            "the row must name the portable send-now gesture: {row:?}"
         );
         assert!(
             !row.contains("esc"),
@@ -5040,12 +5040,15 @@ mod queued_affordance {
     /// abbreviated to a different chord would be the original defect again,
     /// just narrower.
     #[test]
-    fn every_tier_that_names_a_key_names_alt_enter() {
+    fn every_tier_that_names_a_key_names_the_portable_gesture() {
         for width in [40usize, 55, 60, 70, 80, 100, 120, 200] {
             let row = queued_row_text(vec!["check the god files"], width as u16);
+            // Any tier that names a key must name the PORTABLE wired gesture
+            // ("enter again"), which works on every terminal. The full tier may
+            // ALSO mention alt+enter, but the universal one must always be present.
             if row.contains("alt") || row.contains("enter") || row.contains("esc") {
                 assert!(
-                    row.contains("alt+enter"),
+                    row.contains("enter again"),
                     "at width {width} the row names a key that is not the wired \
                      one: {row:?}"
                 );

@@ -34,6 +34,7 @@ defmodule OptimalSystemAgent.Agent.Orchestrator.BoundedStallRecoveryTest do
       Application.delete_env(:optimal_system_agent, :stall_poll_interval_ms)
       Application.delete_env(:optimal_system_agent, :stall_threshold_starting_ms)
       Application.delete_env(:optimal_system_agent, :stall_threshold_working_ms)
+      Application.delete_env(:optimal_system_agent, :stall_hard_stop_ms)
 
       if prev_provider,
         do: Application.put_env(:optimal_system_agent, :default_provider, prev_provider),
@@ -84,6 +85,64 @@ defmodule OptimalSystemAgent.Agent.Orchestrator.BoundedStallRecoveryTest do
       refute_receive {:osa_event, %{type: :background_agent_nudged, agent_id: ^id}}, 300
 
       # Terminal row => the watcher exits on its next poll. Never killed here.
+      RunStore.complete(id, %{agent_id: id, status: :completed, summary: "done"})
+    end
+  end
+
+  describe "hard auto-stop of an unrecoverable hang" do
+    test "an agent with no progress past the hard threshold is auto-stopped and cancelled",
+         %{parent: parent} do
+      # Tight timings: nudge fires, then the hard-stop threshold trips a couple
+      # polls later. A real hang is 2h; here it is milliseconds.
+      Application.put_env(:optimal_system_agent, :stall_poll_interval_ms, 30)
+      Application.put_env(:optimal_system_agent, :stall_threshold_starting_ms, 40)
+      Application.put_env(:optimal_system_agent, :stall_hard_stop_ms, 50)
+
+      id = "stallhard-run-" <> Integer.to_string(System.unique_integer([:positive]))
+
+      RunStore.start_run(%{
+        agent_id: id,
+        parent_session_id: parent,
+        role: "tester",
+        task: "hang forever"
+      })
+
+      :ok = Orchestrator.start_stall_watcher(parent, id, "hanger", "tester")
+
+      # It nudges first (bounded recovery), then — still no progress past the
+      # hard threshold — auto-stops the dead hang instead of watching forever.
+      assert_receive {:osa_event, %{type: :background_agent_nudged, agent_id: ^id}}, 5_000
+
+      assert_receive {:osa_event, %{type: :background_agent_auto_stopped, agent_id: ^id} = ev},
+                     5_000,
+                     "a hang with no progress past the hard threshold must auto-stop"
+
+      assert ev.summary =~ "Auto-stopped"
+
+      # The run is recorded cancelled (same terminal state task_stop produces),
+      # so the coordinator sees it done without a manual task_stop.
+      assert %{status: :cancelled} = RunStore.get(id)
+    end
+
+    test "a healthy agent that keeps progressing is NEVER auto-stopped", %{parent: parent} do
+      Application.put_env(:optimal_system_agent, :stall_poll_interval_ms, 30)
+      Application.put_env(:optimal_system_agent, :stall_threshold_starting_ms, 40)
+      Application.put_env(:optimal_system_agent, :stall_hard_stop_ms, 50)
+
+      id = "stallhealthy-run-" <> Integer.to_string(System.unique_integer([:positive]))
+      RunStore.start_run(%{agent_id: id, parent_session_id: parent, role: "tester", task: "work"})
+      :ok = Orchestrator.start_stall_watcher(parent, id, "worker", "tester")
+
+      # Keep changing the fingerprint (real progress) across the window the
+      # hard-stop would otherwise fire in.
+      for n <- 1..6 do
+        RunStore.progress(id, "did #{n}", n)
+        Process.sleep(40)
+      end
+
+      refute_receive {:osa_event, %{type: :background_agent_auto_stopped, agent_id: ^id}}, 100
+      assert %{status: :running} = RunStore.get(id)
+
       RunStore.complete(id, %{agent_id: id, status: :completed, summary: "done"})
     end
   end

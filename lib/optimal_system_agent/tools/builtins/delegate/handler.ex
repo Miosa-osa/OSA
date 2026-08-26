@@ -189,6 +189,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       # so anything a worker drops here is readable by the coordinator and its
       # siblings.
       task: inject_scratchpad(child_task, parent_id),
+      # Clean roster/label preview from the ORIGINAL task, before the shared-
+      # scratchpad preamble is injected — otherwise the agents panel shows
+      # "[shared scratchpad] You are part of a coordinated team..." (the preamble)
+      # as the row's description instead of the actual work.
+      description: child_task |> to_string() |> String.trim() |> String.slice(0, 80),
       parent_session_id: parent_id,
       role: role || "agent",
       # Non-fatal signal: caller named a specific role/subagent_type but no such
