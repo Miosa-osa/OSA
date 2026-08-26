@@ -71,9 +71,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Tool do
         "timeout_ms" => %{
           "type" => "integer",
           "description" =>
-            "Maximum time to block in milliseconds (default 600000 / 10 minutes). Agents " <>
-              "still running when the timeout elapses are reported as such, not treated " <>
-              "as errors."
+            "Maximum time to block in milliseconds (default 1800000 / 30 minutes). Agents " <>
+              "still running when the timeout elapses are HEALTHY, not failed — their results " <>
+              "are delivered to you automatically when they finish, so do NOT call task_wait " <>
+              "again on them; continue with other work. Only pass a larger value if you have " <>
+              "a specific reason to block longer."
         }
       }
     }
