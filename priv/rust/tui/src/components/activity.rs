@@ -326,6 +326,7 @@ fn tool_display(name: &str) -> (&'static str, &'static str) {
         // Task tools
         "task_write" | "TaskWrite" | "TaskCreate" => (">", "planning"),
         "task_read" | "TaskRead" | "TaskList" => (">", "checking"),
+        "task_wait" | "TaskWait" => (">", "waiting on tasks"),
         "ask_user" => ("?", "asking"),
 
         // Diagnostics

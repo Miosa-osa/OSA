@@ -523,7 +523,24 @@ impl App {
                 // `delegate` calls close each other's row.
                 self.activity
                     .tool_start_with_id(&name, &args, tool_call_id.as_deref());
-                self.activity.set_phase(ProcessingPhase::ToolCall);
+                // A `task_wait` is a tool whose entire job is to block until other
+                // agents finish — it can sit here for minutes with nothing else on
+                // screen. Render it as an explicit WAIT rather than a generic
+                // ToolCall: the Waiting phase names the blocker on the status row
+                // ("Waiting on tasks…") AND re-enables the silence notice, which is
+                // deliberately suppressed during a ToolCall on the theory that "a
+                // running tool is work, not a stall" — untrue for a join, whose
+                // whole point is to do nothing but wait. Without this the row
+                // animates a meaningless verb and the one honest "nothing is
+                // happening" signal is muted exactly when it is needed most.
+                if is_blocking_join_tool(&name) {
+                    self.activity.set_phase(ProcessingPhase::Waiting);
+                    self.activity.set_waiting_reason(Some(
+                        crate::components::activity::WaitingReason::Tasks,
+                    ));
+                } else {
+                    self.activity.set_phase(ProcessingPhase::ToolCall);
+                }
                 // A shell call with run_in_background counts as a live background
                 // terminal until its `background_command_completed` event lands.
                 // A shell call WITHOUT it is a foreground command that Ctrl+B can
@@ -3626,6 +3643,13 @@ fn is_shell_tool(name: &str) -> bool {
     )
 }
 
+/// A blocking join-barrier tool: it spends its whole run waiting on OTHER
+/// agents, so the status row should read it as a WAIT (named blocker + silence
+/// notice) instead of a generic in-flight ToolCall.
+fn is_blocking_join_tool(name: &str) -> bool {
+    matches!(name.to_ascii_lowercase().as_str(), "task_wait")
+}
+
 /// True when a shell tool call's JSON args request background execution
 /// (`run_in_background: true`). Mirrors the detection in `tools/bash.rs`.
 fn is_run_in_background(args: &str) -> bool {
@@ -3817,6 +3841,19 @@ pub(crate) fn builtin_command_entries() -> Vec<crate::client::types::CommandEntr
 mod handle_backend_tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// A `task_wait` is a blocking join: the status row must treat it as a WAIT
+    /// (named blocker + re-enabled silence notice), not a generic ToolCall.
+    #[test]
+    fn task_wait_is_a_blocking_join_tool() {
+        assert!(is_blocking_join_tool("task_wait"));
+        assert!(is_blocking_join_tool("TASK_WAIT"));
+        // Not every tool blocks on other agents — only the join barrier does.
+        assert!(!is_blocking_join_tool("task_output"));
+        assert!(!is_blocking_join_tool("task_resume"));
+        assert!(!is_blocking_join_tool("delegate"));
+        assert!(!is_blocking_join_tool("bash"));
+    }
 
     /// `> planning  complete 171c8358` — the feed showed a bare opaque id. The
     /// backend hint cannot do better (it only has the raw arguments), so the TUI

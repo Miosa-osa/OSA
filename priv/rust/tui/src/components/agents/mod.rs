@@ -710,7 +710,15 @@ impl Agents {
 
     /// How long a still-"Running" agent may go silent before the panel admits it
     /// no longer knows the agent's state.
-    const STALE_SECS: u64 = 90;
+    ///
+    /// Agents here run for hours-to-days and report progress in bursts, so a
+    /// short window flipped a perfectly healthy worker into the "Quiet" tier
+    /// between updates — churn that reads as "the fleet is dying" during exactly
+    /// the long multi-agent waits this panel exists to reassure through. 90s was
+    /// tuned for minute-scale runs; 3 minutes matches how these agents actually
+    /// pace their signals. Silence is still not death — any later signal restores
+    /// the row to Running, and only a terminal event ends it.
+    const STALE_SECS: u64 = 180;
     /// How long a finished (Completed/Failed) row lingers before it's removed so
     /// the panel doesn't accumulate old rows.
     const RETAIN_SECS: u64 = 20;
