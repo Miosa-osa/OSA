@@ -64,6 +64,41 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntelTest do
       {:error, reason} = run("note_create", ctx, %{})
       assert String.contains?(reason, "key")
     end
+
+    test "accepts note fields flattened to the top level (not nested)", %{ctx: ctx} do
+      # Models frequently flatten after the schema rejects a bad `note` shape;
+      # accepting the top-level form is what stops the create→error→retry loop.
+      {:ok, body} =
+        run("note_create", ctx, %{
+          "key" => "top-level-vuln",
+          "category" => "vulnerability",
+          "target" => "https://app/embed",
+          "weaknesses" => ["XSS"],
+          "content" => "@html sink"
+        })
+
+      assert String.contains?(body, "key: top-level-vuln")
+      assert String.contains?(body, "category: vulnerability")
+    end
+
+    test "a wrong-category note points the model at the right category", %{ctx: ctx} do
+      # An XSS recorded as `finding` (host/service enumeration) can't satisfy
+      # that category — the error must steer toward `vulnerability`.
+      {:error, reason} =
+        run("note_create", ctx, %{
+          "key" => "xss-as-finding",
+          "note" => %{"category" => "finding", "target" => "https://app", "content" => "XSS"}
+        })
+
+      assert String.contains?(reason, "vulnerability")
+      assert String.contains?(reason, "Category cheat-sheet")
+    end
+
+    test "a missing-key error is self-correcting (names key + categories)", %{ctx: ctx} do
+      {:error, reason} = run("note_create", ctx, %{"note" => %{"category" => "info"}})
+      assert String.contains?(reason, "key")
+      assert String.contains?(reason, "vulnerability")
+    end
   end
 
   describe "note_get" do
@@ -451,6 +486,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntelTest do
     test "requires content", %{ctx: ctx} do
       assert {:error, reason} = run("whitebox_scan", ctx, %{"whitebox" => %{"entry" => "x.ex"}})
       assert reason =~ "content is required"
+    end
+
+    test "accepts content/entry at the top level (not nested under whitebox)", %{ctx: ctx} do
+      # A bare {action, entry, content} call must scan, not dead-end on nesting.
+      result = run("whitebox_scan", ctx, %{"entry" => "x.ex", "content" => "def f(x), do: x"})
+
+      case result do
+        {:ok, body} -> assert is_binary(body)
+        {:error, reason} -> refute reason =~ "content is required"
+      end
     end
   end
 
