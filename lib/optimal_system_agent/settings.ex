@@ -219,13 +219,6 @@ defmodule OptimalSystemAgent.Settings do
     _ -> :ok
   end
 
-  defp drop_session(session_id, key) do
-    :ets.delete(:osa_settings, {:session, session_id, to_string(key)})
-    :ok
-  rescue
-    _ -> :ok
-  end
-
   defp global_key_spellings(key) when is_atom(key), do: [key, Atom.to_string(key)]
 
   defp global_key_spellings(key) when is_binary(key) do
@@ -238,6 +231,13 @@ defmodule OptimalSystemAgent.Settings do
     [String.to_existing_atom(key)]
   rescue
     ArgumentError -> []
+  end
+
+  defp drop_session(session_id, key) do
+    :ets.delete(:osa_settings, {:session, session_id, to_string(key)})
+    :ok
+  rescue
+    _ -> :ok
   end
 
   @doc """

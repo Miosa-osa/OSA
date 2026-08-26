@@ -39,7 +39,6 @@ defmodule OptimalSystemAgent.Tools.RefreshWriteBaselineTest do
            "precondition: the post-format file is stale versus the pre-format baseline"
 
     assert :ok = Handler.refresh_write_baseline(session, path)
-
     assert FileState.check_read(session, path) == :ok,
            "after refresh, the next edit must not be falsely flagged stale"
   end

@@ -18,8 +18,6 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.PlatformEventsRoutes do
 
   alias OptimalSystemAgent.Platform.EventBus
 
-  @compile {:no_warn_undefined, [OptimalSystemAgent.Platform.EventBus]}
-
   plug(:match)
   plug(:dispatch)
 

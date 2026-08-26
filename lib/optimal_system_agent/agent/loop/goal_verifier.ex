@@ -249,10 +249,10 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
     session_id = Map.get(state, :session_id)
     runs = Map.get(state, :goal_verifier_runs, 0)
 
-    # GoalVerifier's OWN per-turn cap (:goal_verifier_max_runs, default 3) —
-    # deliberately NOT GoalTracker's lifetime cap. They are separate knobs and
-    # conflating them silently disabled this one.
     session_id != nil and
+      # GoalVerifier's OWN per-turn cap (:goal_verifier_max_runs, default 3) —
+      # deliberately NOT GoalTracker's lifetime cap. They are separate knobs and
+      # conflating them silently disabled this one.
       runs < max_runs() and
       not stalled?(state) and
       has_accumulated_work?(session_id)

@@ -177,6 +177,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CommandCenterRoutes do
           conn
           |> put_resp_content_type("application/json")
           |> send_resp(201, body)
+
+        {:error, reason} ->
+          json_error(conn, 500, "provision_failed", inspect(reason))
       end
     else
       _ -> json_error(conn, 400, "invalid_request", "Missing required field: os_id")
@@ -193,6 +196,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CommandCenterRoutes do
         conn
         |> put_resp_content_type("application/json")
         |> send_resp(200, body)
+
+      {:error, :not_found} ->
+        json_error(conn, 404, "not_found", "Sandbox '#{id}' not found")
+
+      {:error, reason} ->
+        json_error(conn, 500, "deprovision_failed", inspect(reason))
     end
   end
 

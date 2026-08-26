@@ -265,8 +265,7 @@ defmodule OptimalSystemAgent.Sandbox.MIOSA do
   #   * `exit_code` was discarded and stdout/stderr concatenated, so a FAILED
   #     command was reported to the model as `{:ok, output}`. The agent could
   #     not tell a passing build from a failing one.
-  defp exec_in_session(session, command, timeout),
-    do: exec_in_session(session, command, timeout, [])
+  defp exec_in_session(session, command, timeout), do: exec_in_session(session, command, timeout, [])
 
   defp exec_in_session(%{id: id, key: key}, command, timeout, opts) do
     Logger.info("[Sandbox.MIOSA] exec: #{String.slice(command, 0, 80)}")

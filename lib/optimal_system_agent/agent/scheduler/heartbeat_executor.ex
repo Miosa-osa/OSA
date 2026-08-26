@@ -128,6 +128,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler.HeartbeatExecutor do
     end
   end
 
+  defp execute_reply({:ok, _}, run), do: {:ok, run}
   defp execute_reply({:error, reason}, _run), do: {:error, reason}
   defp execute_reply(other, run), do: {other, run}
 

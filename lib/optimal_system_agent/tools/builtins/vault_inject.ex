@@ -33,8 +33,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.VaultInject do
   end
 
   @impl true
-  def execute(%{"query" => _query}) do
-    # OptimalSystemAgent.Vault backend is not present in this build.
-    {:error, "Vault backend not present in this build"}
+  def execute(%{"query" => query} = args) do
+    max_items = Map.get(args, "max_items", 10)
+    result = OptimalSystemAgent.Vault.Inject.query(query, max_items: max_items)
+
+    if result == "" do
+      {:ok, "No matching vault memories found."}
+    else
+      {:ok, result}
+    end
   end
 end

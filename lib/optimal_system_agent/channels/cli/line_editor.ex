@@ -471,13 +471,7 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
 
   `row` and `col` are 0-based and relative to the first row of the prompt.
   """
-  @spec index_at(
-          String.t(),
-          non_neg_integer(),
-          pos_integer(),
-          non_neg_integer(),
-          non_neg_integer()
-        ) ::
+  @spec index_at(String.t(), non_neg_integer(), pos_integer(), non_neg_integer(), non_neg_integer()) ::
           non_neg_integer()
   def index_at(text, prompt_width, terminal_cols, row, col)
       when is_binary(text) and is_integer(prompt_width) and is_integer(terminal_cols) and
@@ -743,7 +737,7 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditor do
           redraw(state)
           state
 
-        multiple when multiple != [] ->
+        multiple when length(multiple) > 0 ->
           tty_write(state.tty, "\r\n")
 
           for cmd <- multiple do

@@ -13,11 +13,7 @@ defmodule OptimalSystemAgent.Swarm.PatternsDepthTest do
 
   test "parallel stamps the caller's depth onto every config" do
     parent = self()
-
-    runner = fn config ->
-      send(parent, {:cfg, config})
-      {:ok, "done"}
-    end
+    runner = fn config -> send(parent, {:cfg, config}); {:ok, "done"} end
 
     configs = [%{task: "a", role: "a"}, %{task: "b", role: "b"}]
     {:ok, _} = Patterns.parallel("p1", configs, runner: runner, depth: 2, timeout: 5_000)
@@ -34,11 +30,7 @@ defmodule OptimalSystemAgent.Swarm.PatternsDepthTest do
 
   test "depth defaults to 0 when the caller does not pass one" do
     parent = self()
-
-    runner = fn config ->
-      send(parent, {:cfg, config})
-      {:ok, "done"}
-    end
+    runner = fn config -> send(parent, {:cfg, config}); {:ok, "done"} end
 
     {:ok, _} = Patterns.parallel("p2", [%{task: "x", role: "x"}], runner: runner, timeout: 5_000)
 

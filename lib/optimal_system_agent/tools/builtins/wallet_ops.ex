@@ -5,8 +5,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.WalletOps do
 
   alias OptimalSystemAgent.Integrations.Wallet
 
-  @compile {:no_warn_undefined, OptimalSystemAgent.Integrations.Wallet}
-
   @impl true
   def available? do
     Application.get_env(:optimal_system_agent, :wallet_enabled, false) == true

@@ -1,6 +1,4 @@
 defmodule OptimalSystemAgent.Shell.TerminalOutputSaver do
-  @max_saved_files 10
-
   @moduledoc """
   Save full terminal output to a file when it exceeds token/context limits.
 
@@ -34,6 +32,7 @@ defmodule OptimalSystemAgent.Shell.TerminalOutputSaver do
   require Logger
 
   @max_output_chars 8_000
+  @max_saved_files 10
   @output_base_dir "/tmp/terminal_full_output"
 
   @type save_result :: {:saved, String.t(), String.t()} | :not_needed

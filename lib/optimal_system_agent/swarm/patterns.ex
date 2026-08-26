@@ -195,14 +195,7 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
 
     case configs do
       [worker_config, reviewer_config | _] ->
-        run_review_loop(
-          parent_id,
-          worker_config,
-          reviewer_config,
-          max_iterations,
-          depth,
-          priority
-        )
+        run_review_loop(parent_id, worker_config, reviewer_config, max_iterations, depth, priority)
 
       [single | _] ->
         Logger.warning("[Swarm.Patterns] review_loop needs ≥2 agents, running single")
@@ -290,7 +283,7 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
   # the depth, every orchestrate-spawned child started at depth 1 and the
   # fork-bomb ceiling in `ToolFilter.apply_delegation_depth_guard` was never
   # reached on this path.
-  defp with_lineage(config, parent_id, depth, priority) do
+  defp with_lineage(config, parent_id, depth, priority \\ :standard) do
     config
     |> Map.put(:parent_session_id, parent_id)
     |> Map.put(:delegation_depth, depth)
@@ -323,12 +316,7 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
     # showed up as loose agents with no "started / synthesizing / completed"
     # frame. Best-effort; never affects execution.
     team_id = "swarm:#{parent_id}:#{normalized_unique(task)}"
-
-    emit_task_event(parent_id, %{
-      event: "orchestrator_task_started",
-      task_id: team_id,
-      strategy: to_string(norm)
-    })
+    emit_task_event(parent_id, %{event: "orchestrator_task_started", task_id: team_id, strategy: to_string(norm)})
 
     result =
       case norm do

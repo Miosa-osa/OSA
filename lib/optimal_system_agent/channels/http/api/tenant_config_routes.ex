@@ -21,8 +21,6 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.TenantConfigRoutes do
 
   alias OptimalSystemAgent.Tenant.Config
 
-  @compile {:no_warn_undefined, [OptimalSystemAgent.Tenant.Config]}
-
   plug(:match)
   plug(:dispatch)
 

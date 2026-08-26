@@ -1429,379 +1429,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     end
   end
 
-  # Tool calls — execute in parallel and loop
-  defp handle_result({:ok, %{content: content, tool_calls: tool_calls} = resp}, state, _context)
-       when is_list(tool_calls) do
-    # Doom-loop resample snapshot: the loop state BEFORE this turn's assistant
-    # response (and its tool results) is appended. If a doom-loop is detected
-    # below, `Resample` rewinds to this snapshot to DISCARD the offending
-    # response and re-roll the turn, up to a bounded budget, before falling back
-    # to the existing halt behavior.
-    resample_snapshot = state
-
-    # DUPLICATE-ID REPAIR — must happen HERE, before `assistant_msg` is built and
-    # before either id-keyed map below (`all_results_map` at the merge, and
-    # `ToolOrchestrator.dispatch/3`'s own order-restoring map). Two tool calls
-    # sharing an id collapse in both maps, losing one result and orphaning a
-    # `tool_use` block, which a strict provider rejects on the NEXT request.
-    # Single canonical repair, applied once, upstream of everything.
-    tool_calls = ToolOrchestrator.uniquify_ids(tool_calls)
-
-    # Forward progress: a tool call resets the reasoning-only spin streak (the
-    # reasoning-only doom-loop backstop counts only wasted, tool-less, empty
-    # generations — see the no-tool-call clause above) AND clears the
-    # just-compacted flag (the model continued on its own, so no post-compaction
-    # continuation is needed). Map.put mirrors the detectors' own state access.
-    state =
-      %{state | iteration: state.iteration + 1}
-      |> Map.put(:reasoning_only_streak, 0)
-      |> Map.put(:just_compacted, false)
-
-    content =
-      if Scratchpad.inject?(state) do
-        Scratchpad.process_response(content, state.session_id)
-      else
-        content
-      end
-
-    assistant_msg = %{role: "assistant", content: content, tool_calls: tool_calls}
-
-    assistant_msg =
-      case Map.get(resp, :thinking_blocks) do
-        blocks when is_list(blocks) and blocks != [] ->
-          Map.put(assistant_msg, :thinking_blocks, blocks)
-
-        _ ->
-          assistant_msg
-      end
-
-    state = %{state | messages: state.messages ++ [assistant_msg]}
-
-    # Check if any tools were already started via streaming execution
-    streaming_ctx = Process.get(:osa_streaming_tool_ctx)
-
-    streaming_started_ids =
-      if streaming_ctx, do: MapSet.new(streaming_ctx.order), else: MapSet.new()
-
-    # Split: tools already started streaming vs tools that need fresh execution
-    {already_streaming, need_execution} =
-      Enum.split_with(tool_calls, fn tc -> tc.id in streaming_started_ids end)
-
-    # Phase 2: per-input parallel/serial split via ToolOrchestrator. The
-    # orchestrator routes through LegacyAdapter so structured tools are
-    # checked per-input via `concurrency_safe?/2` while flat tools fall
-    # back to the module-level `concurrent?/0`.
-    fresh_results =
-      ToolOrchestrator.dispatch(need_execution, state,
-        max_concurrency: 10,
-        # Raised from a hardcoded 60s to 300s (config `:tool_timeout_ms`) so a
-        # long build/test/install batched into the parallel path isn't killed
-        # before shell_execute's own 300s default gets to run.
-        # No default ceiling. A five-minute cap killed multi-agent dispatches
-        # mid-flight: the wrapper reported a tool timeout and ended the turn
-        # while the agents it launched carried on in the background, so the
-        # turn lost its own work and nothing else stopped. Tools that need a
-        # bound carry their own (shell per-command, provider receive timeouts,
-        # bounded_compaction). Set :tool_timeout_ms to reimpose one.
-        timeout_ms: Application.get_env(:optimal_system_agent, :tool_timeout_ms, :infinity)
-      )
-
-    # Collect streaming tool results (these may already be done). Pair by
-    # tool_call_id — NOT by position: collect_results returns results in stream
-    # (parse-completion) order, which can differ from the model's final
-    # tool_calls order. A positional zip would stamp one tool_call's result with
-    # another tool_call's id (one id gets two results, another gets none).
-    streaming_results =
-      if streaming_ctx && StreamingToolExecutor.has_in_flight?(streaming_ctx) do
-        collected = StreamingToolExecutor.collect_results(streaming_ctx)
-
-        results_by_id =
-          Map.new(collected, fn result ->
-            # `result` is {tool_msg, str} or the fatal {tool_msg, str, {:fatal, _}}
-            tool_msg = elem(result, 0)
-            {tool_msg[:tool_call_id] || tool_msg["tool_call_id"], result}
-          end)
-
-        Enum.map(already_streaming, fn tc ->
-          result =
-            Map.get(
-              results_by_id,
-              tc.id,
-              {%{role: "tool", tool_call_id: tc.id, content: "Error: Tool not executed"},
-               "Error: Tool not executed"}
-            )
-
-          {tc, result}
-        end)
-      else
-        []
-      end
-
-    # Merge results in original tool_call order
-    all_results_map =
-      Map.new(streaming_results ++ fresh_results, fn {tc, result} -> {tc.id, {tc, result}} end)
-
-    results =
-      Enum.map(tool_calls, fn tc ->
-        Map.get(
-          all_results_map,
-          tc.id,
-          {tc,
-           {%{role: "tool", tool_call_id: tc.id, content: "Error: Tool not executed"},
-            "Error: Tool not executed"}}
-        )
-      end)
-
-    # Clean up streaming context
-    Process.delete(:osa_streaming_tool_ctx)
-
-    # NON-FATAL TOOL ERROR contract (Codex parity). Every ordinary tool failure
-    # — a raise, a crash, a timeout, a denial, an {:error, _} — has already been
-    # synthesized into a readable tool result by ToolExecutor, so the turn just
-    # continues below. Only an explicit FATAL result carries the third tuple
-    # element; strip it here, keep its tool message (so the assistant's
-    # tool_calls are never orphaned in history), and end the turn.
-    {results, fatal_message} = ToolError.normalize_results(results)
-
-    tool_messages = Enum.map(results, fn {_tc, {tool_msg, _result_str}} -> tool_msg end)
-    state = %{state | messages: state.messages ++ tool_messages}
-
-    if is_binary(fatal_message) do
-      handle_fatal_tool_error(fatal_message, state)
-    else
-      continue_after_tools(results, tool_calls, state, resample_snapshot)
-    end
-  end
-
-  # WS5 — hard interrupt: LLMClient killed the in-flight stream. Kill any tool
-  # tasks the streaming executor had started (their tool_use blocks were never
-  # persisted, so discarding keeps history valid), persist the partial text and
-  # the interrupt marker, and end the turn.
-  defp handle_result({:cancelled, %{content: partial}}, state, _context) do
-    Logger.info("[loop] Hard interrupt at iteration #{state.iteration} — aborting turn")
-
-    case Process.get(:osa_streaming_tool_ctx) do
-      nil -> :ok
-      ctx -> StreamingToolExecutor.discard(ctx)
-    end
-
-    Process.delete(:osa_streaming_tool_ctx)
-
-    # Subtree-wide clear — the exact inverse of `Loop.cancel/1`. See the
-    # matching call in `run/1`.
-    Loop.clear_cancel(state.session_id)
-
-    Bus.emit(:system_event, %{
-      event: :agent_cancelled,
-      session_id: state.session_id,
-      iteration: state.iteration
-    })
-
-    finalize_interrupt(state, partial)
-  end
-
-  # Turn-level retry budget for a stream idle timeout. Small on purpose: each
-  # attempt costs a full generation, and the committed tool results mean the
-  # retry resumes rather than restarts.
-  @max_idle_timeout_retries 2
-
-  # LLM error — compact and retry or surface error
-  defp handle_result({:error, reason}, state, _context) do
-    alias OptimalSystemAgent.Agent.Loop.ContextCollapse
-
-    reason_str = if is_binary(reason), do: reason, else: inspect(reason)
-
-    # DURABILITY (defect: executed tool work discarded on the error path).
-    # Tools stream-execute EAGERLY, so by the time the LLM call fails their side
-    # effects have already happened. Commit their results to message history
-    # BEFORE erroring or retrying — Codex's turn retry RESUMES from history
-    # rather than replaying, and that is only possible if the outputs are in
-    # history first. Without this a retry re-runs `git push` / re-writes files.
-    # A no-op when no tool ever streamed (the common case, incl. overflow).
-    {state, executed_tools} = commit_streamed_tool_results(state, reason)
-
-    if context_overflow?(reason_str) and state.overflow_retries < 3 do
-      retry_num = state.overflow_retries + 1
-
-      Logger.warning(
-        "Context overflow — attempting recovery (retry #{retry_num}/3, iteration #{state.iteration})"
-      )
-
-      # Try context collapse first (cheap — just withhold large tool results)
-      collapsed_messages =
-        case ContextCollapse.collapse(state.messages, retry_num) do
-          {:ok, collapsed} ->
-            collapsed
-
-          {:error, _} ->
-            # Collapse failed — fall back to full compaction
-            Logger.info("[loop] Context collapse insufficient, running full compaction")
-
-            # `force: true` — the provider has ALREADY returned a
-            # context-length error, so this is the real overflow signal the
-            # compactor's `:unknown`-window deferral policy waits for. Compact
-            # even when the window cannot be resolved; the threaded window
-            # still sizes the target when it CAN be.
-            OptimalSystemAgent.Agent.ContextEngine.Router.maybe_compact(
-              state.messages,
-              Map.get(state, :last_input_tokens, 0),
-              state.session_id,
-              context_window: OptimalSystemAgent.Agent.Loop.ContextWindow.resolve(state),
-              force: true
-            )
-        end
-
-      # Media-strip replay (opencode compaction.ts replay parity): a media-driven
-      # overflow won't shrink from tool-result collapse alone, so rewrite any
-      # image/video/audio/file blocks in the history to "[Attached <type>]" text
-      # placeholders before retrying. Idempotent (placeholders are plain text) and
-      # a no-op when there is no media.
-      state =
-        %{
-          state
-          | messages: strip_media_from_messages(collapsed_messages),
-            overflow_retries: retry_num
-        }
-        |> Map.put(:just_compacted, true)
-        |> Map.put(:just_compacted_overflow, true)
-
-      run(state)
-    else
-      if context_overflow?(reason_str) do
-        Logger.error("Context overflow after 3 recovery attempts (iteration #{state.iteration})")
-
-        Observability.emit(
-          :system_event,
-          %{event: :error, kind: :context_overflow, iteration: state.iteration},
-          state,
-          source: "agent.react_loop"
-        )
-
-        TerminalSource.halt(
-          "I've exceeded the context window. Try breaking your request into smaller parts.",
-          state,
-          :error
-        )
-      else
-        idle_attempt = Map.get(state, :idle_timeout_retries, 0) + 1
-
-        if idle_timeout?(reason) and idle_attempt <= @max_idle_timeout_retries do
-          # RETRYABLE (Codex parity), not terminal. The provider connection went
-          # silent; killing the stream task also destroyed the in-task
-          # Resilience retries, so the retry decision is re-made here — where the
-          # already-executed tool results have just been committed to history, so
-          # the retry RESUMES from that history and never re-runs a tool.
-          Logger.warning(
-            "[loop] Stream idle timeout — retrying turn " <>
-              "(#{idle_attempt}/#{@max_idle_timeout_retries}, iteration #{state.iteration}" <>
-              if(executed_tools == [],
-                do: ")",
-                else: ", resuming after #{length(executed_tools)} already-executed tool(s))"
-              )
-          )
-
-          Observability.emit(
-            :system_event,
-            %{
-              event: :error,
-              kind: :llm_idle_timeout,
-              category: :timeout,
-              retryable: true,
-              attempt: idle_attempt,
-              max_attempts: @max_idle_timeout_retries,
-              resumed_tools: executed_tools,
-              iteration: state.iteration
-            },
-            state,
-            source: "agent.react_loop"
-          )
-
-          state
-          |> Map.put(:idle_timeout_retries, idle_attempt)
-          |> Map.put(:iteration, state.iteration + 1)
-          |> run()
-        else
-          Logger.error("LLM call failed: #{reason_str}")
-
-          category = OptimalSystemAgent.Providers.ErrorCatalog.classify(reason)
-
-          # `kind` is ATTRIBUTION, and it was a lie for a whole class of
-          # failures. Not every reason that reaches here is the provider's: an
-          # encoding fault (a tool result carrying non-UTF-8 bytes, which
-          # `Jason` refuses before any HTTP call), a body OSA assembled wrong,
-          # a crash inside a provider module — all arrive as
-          # `{:error, "Provider error: …"}` and all used to be stamped
-          # `:llm_error`.
-          #
-          # Downstream that is not cosmetic. The benchmark driver keys on this
-          # to set `status: "provider_error"`, so every OSA defect in this
-          # class inflated the measured MODEL failure rate and hid itself in
-          # the process — in exactly the numbers the current work is being
-          # judged by.
-          owner = OptimalSystemAgent.Providers.ErrorCatalog.fault_owner(reason)
-          kind = if owner == :osa, do: :harness_error, else: :llm_error
-
-          Observability.emit(
-            :system_event,
-            %{
-              event: :error,
-              kind: kind,
-              category: category,
-              # Additive, and the field a consumer should actually read: `kind`
-              # keeps its old values for old consumers, `owner` answers the
-              # only question attribution cares about.
-              owner: owner,
-              reason: reason_str,
-              iteration: state.iteration
-            },
-            state,
-            source: "agent.react_loop"
-          )
-
-          message =
-            OptimalSystemAgent.Providers.ErrorCatalog.user_message(reason) <>
-              executed_tools_note(executed_tools)
-
-          # Record that this turn ended in a PROVIDER failure, not an answer.
-          #
-          # Without this the turn is indistinguishable from a successful one:
-          # the reply is a human-readable error string, `process_message`
-          # returns `{:ok, message}`, and the `done` frame is clean. Measured
-          # directly during benchmarking — a turn with 11 retries, the fallback
-          # chain exhausted and ZERO tokens exchanged still reported
-          # `status: ok` with `saw_done: true`.
-          #
-          # That is right for a human reading the TUI, who wants to see the
-          # error text. It is wrong for anything programmatic: two benchmark
-          # harnesses independently scored these as the MODEL failing to
-          # produce output, and one nearly published a fake result because the
-          # instances that died were the ones the baseline had solved.
-          #
-          # Carried on state and surfaced as an additive field on the
-          # agent_response event, so existing consumers are unaffected and new
-          # ones can tell an outage from an answer.
-          #
-          # `owner` rides along for the same reason it is on the system_event:
-          # the driver currently maps ANY `turn_error` to
-          # `status: "provider_error"`, which is wrong when the fault is ours.
-          # Additive, so a driver that ignores it behaves exactly as before.
-          state =
-            Map.put(state, :turn_error, %{
-              category: category,
-              owner: owner,
-              reason: reason_str
-            })
-
-          # The turn ended in a provider OUTAGE, not an answer. `turn_error`
-          # above already says so in a field, but it is dropped by the Rust
-          # client (never declared in the SSE struct); the source mark is the
-          # carrier that actually reaches a renderer.
-          TerminalSource.halt(message, state, :error)
-        end
-      end
-    end
-  end
-
   # Terminal finish for a no-tool-call turn: run stop hooks (which may override
   # the response or force continuation), else return the content as the final
   # answer. Extracted so both the clean `true ->` path and the GoalVerifier
@@ -2135,6 +1762,150 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       "If the task isn't complete, try breaking it into smaller steps or giving more specific instructions."
   end
 
+  # Tool calls — execute in parallel and loop
+  defp handle_result({:ok, %{content: content, tool_calls: tool_calls} = resp}, state, _context)
+       when is_list(tool_calls) do
+    # Doom-loop resample snapshot: the loop state BEFORE this turn's assistant
+    # response (and its tool results) is appended. If a doom-loop is detected
+    # below, `Resample` rewinds to this snapshot to DISCARD the offending
+    # response and re-roll the turn, up to a bounded budget, before falling back
+    # to the existing halt behavior.
+    resample_snapshot = state
+
+    # DUPLICATE-ID REPAIR — must happen HERE, before `assistant_msg` is built and
+    # before either id-keyed map below (`all_results_map` at the merge, and
+    # `ToolOrchestrator.dispatch/3`'s own order-restoring map). Two tool calls
+    # sharing an id collapse in both maps, losing one result and orphaning a
+    # `tool_use` block, which a strict provider rejects on the NEXT request.
+    # Single canonical repair, applied once, upstream of everything.
+    tool_calls = ToolOrchestrator.uniquify_ids(tool_calls)
+
+    # Forward progress: a tool call resets the reasoning-only spin streak (the
+    # reasoning-only doom-loop backstop counts only wasted, tool-less, empty
+    # generations — see the no-tool-call clause above) AND clears the
+    # just-compacted flag (the model continued on its own, so no post-compaction
+    # continuation is needed). Map.put mirrors the detectors' own state access.
+    state =
+      %{state | iteration: state.iteration + 1}
+      |> Map.put(:reasoning_only_streak, 0)
+      |> Map.put(:just_compacted, false)
+
+    content =
+      if Scratchpad.inject?(state) do
+        Scratchpad.process_response(content, state.session_id)
+      else
+        content
+      end
+
+    assistant_msg = %{role: "assistant", content: content, tool_calls: tool_calls}
+
+    assistant_msg =
+      case Map.get(resp, :thinking_blocks) do
+        blocks when is_list(blocks) and blocks != [] ->
+          Map.put(assistant_msg, :thinking_blocks, blocks)
+
+        _ ->
+          assistant_msg
+      end
+
+    state = %{state | messages: state.messages ++ [assistant_msg]}
+
+    # Check if any tools were already started via streaming execution
+    streaming_ctx = Process.get(:osa_streaming_tool_ctx)
+
+    streaming_started_ids =
+      if streaming_ctx, do: MapSet.new(streaming_ctx.order), else: MapSet.new()
+
+    # Split: tools already started streaming vs tools that need fresh execution
+    {already_streaming, need_execution} =
+      Enum.split_with(tool_calls, fn tc -> tc.id in streaming_started_ids end)
+
+    # Phase 2: per-input parallel/serial split via ToolOrchestrator. The
+    # orchestrator routes through LegacyAdapter so structured tools are
+    # checked per-input via `concurrency_safe?/2` while flat tools fall
+    # back to the module-level `concurrent?/0`.
+    fresh_results =
+      ToolOrchestrator.dispatch(need_execution, state,
+        max_concurrency: 10,
+        # Raised from a hardcoded 60s to 300s (config `:tool_timeout_ms`) so a
+        # long build/test/install batched into the parallel path isn't killed
+        # before shell_execute's own 300s default gets to run.
+        # No default ceiling. A five-minute cap killed multi-agent dispatches
+        # mid-flight: the wrapper reported a tool timeout and ended the turn
+        # while the agents it launched carried on in the background, so the
+        # turn lost its own work and nothing else stopped. Tools that need a
+        # bound carry their own (shell per-command, provider receive timeouts,
+        # bounded_compaction). Set :tool_timeout_ms to reimpose one.
+        timeout_ms: Application.get_env(:optimal_system_agent, :tool_timeout_ms, :infinity)
+      )
+
+    # Collect streaming tool results (these may already be done). Pair by
+    # tool_call_id — NOT by position: collect_results returns results in stream
+    # (parse-completion) order, which can differ from the model's final
+    # tool_calls order. A positional zip would stamp one tool_call's result with
+    # another tool_call's id (one id gets two results, another gets none).
+    streaming_results =
+      if streaming_ctx && StreamingToolExecutor.has_in_flight?(streaming_ctx) do
+        collected = StreamingToolExecutor.collect_results(streaming_ctx)
+
+        results_by_id =
+          Map.new(collected, fn result ->
+            # `result` is {tool_msg, str} or the fatal {tool_msg, str, {:fatal, _}}
+            tool_msg = elem(result, 0)
+            {tool_msg[:tool_call_id] || tool_msg["tool_call_id"], result}
+          end)
+
+        Enum.map(already_streaming, fn tc ->
+          result =
+            Map.get(
+              results_by_id,
+              tc.id,
+              {%{role: "tool", tool_call_id: tc.id, content: "Error: Tool not executed"},
+               "Error: Tool not executed"}
+            )
+
+          {tc, result}
+        end)
+      else
+        []
+      end
+
+    # Merge results in original tool_call order
+    all_results_map =
+      Map.new(streaming_results ++ fresh_results, fn {tc, result} -> {tc.id, {tc, result}} end)
+
+    results =
+      Enum.map(tool_calls, fn tc ->
+        Map.get(
+          all_results_map,
+          tc.id,
+          {tc,
+           {%{role: "tool", tool_call_id: tc.id, content: "Error: Tool not executed"},
+            "Error: Tool not executed"}}
+        )
+      end)
+
+    # Clean up streaming context
+    Process.delete(:osa_streaming_tool_ctx)
+
+    # NON-FATAL TOOL ERROR contract (Codex parity). Every ordinary tool failure
+    # — a raise, a crash, a timeout, a denial, an {:error, _} — has already been
+    # synthesized into a readable tool result by ToolExecutor, so the turn just
+    # continues below. Only an explicit FATAL result carries the third tuple
+    # element; strip it here, keep its tool message (so the assistant's
+    # tool_calls are never orphaned in history), and end the turn.
+    {results, fatal_message} = ToolError.normalize_results(results)
+
+    tool_messages = Enum.map(results, fn {_tc, {tool_msg, _result_str}} -> tool_msg end)
+    state = %{state | messages: state.messages ++ tool_messages}
+
+    if is_binary(fatal_message) do
+      handle_fatal_tool_error(fatal_message, state)
+    else
+      continue_after_tools(results, tool_calls, state, resample_snapshot)
+    end
+  end
+
   # FATAL class — the one tool outcome that still aborts the turn.
   defp handle_fatal_tool_error(message, state) do
     Logger.error(
@@ -2272,6 +2043,235 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
             state = GoalVerifier.maybe_gate(state)
             run(state)
           end
+      end
+    end
+  end
+
+  # WS5 — hard interrupt: LLMClient killed the in-flight stream. Kill any tool
+  # tasks the streaming executor had started (their tool_use blocks were never
+  # persisted, so discarding keeps history valid), persist the partial text and
+  # the interrupt marker, and end the turn.
+  defp handle_result({:cancelled, %{content: partial}}, state, _context) do
+    Logger.info("[loop] Hard interrupt at iteration #{state.iteration} — aborting turn")
+
+    case Process.get(:osa_streaming_tool_ctx) do
+      nil -> :ok
+      ctx -> StreamingToolExecutor.discard(ctx)
+    end
+
+    Process.delete(:osa_streaming_tool_ctx)
+
+    # Subtree-wide clear — the exact inverse of `Loop.cancel/1`. See the
+    # matching call in `run/1`.
+    Loop.clear_cancel(state.session_id)
+
+    Bus.emit(:system_event, %{
+      event: :agent_cancelled,
+      session_id: state.session_id,
+      iteration: state.iteration
+    })
+
+    finalize_interrupt(state, partial)
+  end
+
+  # Turn-level retry budget for a stream idle timeout. Small on purpose: each
+  # attempt costs a full generation, and the committed tool results mean the
+  # retry resumes rather than restarts.
+  @max_idle_timeout_retries 2
+
+  # LLM error — compact and retry or surface error
+  defp handle_result({:error, reason}, state, _context) do
+    alias OptimalSystemAgent.Agent.Loop.ContextCollapse
+
+    reason_str = if is_binary(reason), do: reason, else: inspect(reason)
+
+    # DURABILITY (defect: executed tool work discarded on the error path).
+    # Tools stream-execute EAGERLY, so by the time the LLM call fails their side
+    # effects have already happened. Commit their results to message history
+    # BEFORE erroring or retrying — Codex's turn retry RESUMES from history
+    # rather than replaying, and that is only possible if the outputs are in
+    # history first. Without this a retry re-runs `git push` / re-writes files.
+    # A no-op when no tool ever streamed (the common case, incl. overflow).
+    {state, executed_tools} = commit_streamed_tool_results(state, reason)
+
+    if context_overflow?(reason_str) and state.overflow_retries < 3 do
+      retry_num = state.overflow_retries + 1
+
+      Logger.warning(
+        "Context overflow — attempting recovery (retry #{retry_num}/3, iteration #{state.iteration})"
+      )
+
+      # Try context collapse first (cheap — just withhold large tool results)
+      collapsed_messages =
+        case ContextCollapse.collapse(state.messages, retry_num) do
+          {:ok, collapsed} ->
+            collapsed
+
+          {:error, _} ->
+            # Collapse failed — fall back to full compaction
+            Logger.info("[loop] Context collapse insufficient, running full compaction")
+
+            # `force: true` — the provider has ALREADY returned a
+            # context-length error, so this is the real overflow signal the
+            # compactor's `:unknown`-window deferral policy waits for. Compact
+            # even when the window cannot be resolved; the threaded window
+            # still sizes the target when it CAN be.
+            OptimalSystemAgent.Agent.ContextEngine.Router.maybe_compact(
+              state.messages,
+              Map.get(state, :last_input_tokens, 0),
+              state.session_id,
+              context_window: OptimalSystemAgent.Agent.Loop.ContextWindow.resolve(state),
+              force: true
+            )
+        end
+
+      # Media-strip replay (opencode compaction.ts replay parity): a media-driven
+      # overflow won't shrink from tool-result collapse alone, so rewrite any
+      # image/video/audio/file blocks in the history to "[Attached <type>]" text
+      # placeholders before retrying. Idempotent (placeholders are plain text) and
+      # a no-op when there is no media.
+      state =
+        %{
+          state
+          | messages: strip_media_from_messages(collapsed_messages),
+            overflow_retries: retry_num
+        }
+        |> Map.put(:just_compacted, true)
+        |> Map.put(:just_compacted_overflow, true)
+
+      run(state)
+    else
+      if context_overflow?(reason_str) do
+        Logger.error("Context overflow after 3 recovery attempts (iteration #{state.iteration})")
+
+        Observability.emit(
+          :system_event,
+          %{event: :error, kind: :context_overflow, iteration: state.iteration},
+          state,
+          source: "agent.react_loop"
+        )
+
+        TerminalSource.halt(
+          "I've exceeded the context window. Try breaking your request into smaller parts.",
+          state,
+          :error
+        )
+      else
+        idle_attempt = Map.get(state, :idle_timeout_retries, 0) + 1
+
+        if idle_timeout?(reason) and idle_attempt <= @max_idle_timeout_retries do
+          # RETRYABLE (Codex parity), not terminal. The provider connection went
+          # silent; killing the stream task also destroyed the in-task
+          # Resilience retries, so the retry decision is re-made here — where the
+          # already-executed tool results have just been committed to history, so
+          # the retry RESUMES from that history and never re-runs a tool.
+          Logger.warning(
+            "[loop] Stream idle timeout — retrying turn " <>
+              "(#{idle_attempt}/#{@max_idle_timeout_retries}, iteration #{state.iteration}" <>
+              if(executed_tools == [],
+                do: ")",
+                else: ", resuming after #{length(executed_tools)} already-executed tool(s))"
+              )
+          )
+
+          Observability.emit(
+            :system_event,
+            %{
+              event: :error,
+              kind: :llm_idle_timeout,
+              category: :timeout,
+              retryable: true,
+              attempt: idle_attempt,
+              max_attempts: @max_idle_timeout_retries,
+              resumed_tools: executed_tools,
+              iteration: state.iteration
+            },
+            state,
+            source: "agent.react_loop"
+          )
+
+          state
+          |> Map.put(:idle_timeout_retries, idle_attempt)
+          |> Map.put(:iteration, state.iteration + 1)
+          |> run()
+        else
+          Logger.error("LLM call failed: #{reason_str}")
+
+          category = OptimalSystemAgent.Providers.ErrorCatalog.classify(reason)
+
+          # `kind` is ATTRIBUTION, and it was a lie for a whole class of
+          # failures. Not every reason that reaches here is the provider's: an
+          # encoding fault (a tool result carrying non-UTF-8 bytes, which
+          # `Jason` refuses before any HTTP call), a body OSA assembled wrong,
+          # a crash inside a provider module — all arrive as
+          # `{:error, "Provider error: …"}` and all used to be stamped
+          # `:llm_error`.
+          #
+          # Downstream that is not cosmetic. The benchmark driver keys on this
+          # to set `status: "provider_error"`, so every OSA defect in this
+          # class inflated the measured MODEL failure rate and hid itself in
+          # the process — in exactly the numbers the current work is being
+          # judged by.
+          owner = OptimalSystemAgent.Providers.ErrorCatalog.fault_owner(reason)
+          kind = if owner == :osa, do: :harness_error, else: :llm_error
+
+          Observability.emit(
+            :system_event,
+            %{
+              event: :error,
+              kind: kind,
+              category: category,
+              # Additive, and the field a consumer should actually read: `kind`
+              # keeps its old values for old consumers, `owner` answers the
+              # only question attribution cares about.
+              owner: owner,
+              reason: reason_str,
+              iteration: state.iteration
+            },
+            state,
+            source: "agent.react_loop"
+          )
+
+          message =
+            OptimalSystemAgent.Providers.ErrorCatalog.user_message(reason) <>
+              executed_tools_note(executed_tools)
+
+          # Record that this turn ended in a PROVIDER failure, not an answer.
+          #
+          # Without this the turn is indistinguishable from a successful one:
+          # the reply is a human-readable error string, `process_message`
+          # returns `{:ok, message}`, and the `done` frame is clean. Measured
+          # directly during benchmarking — a turn with 11 retries, the fallback
+          # chain exhausted and ZERO tokens exchanged still reported
+          # `status: ok` with `saw_done: true`.
+          #
+          # That is right for a human reading the TUI, who wants to see the
+          # error text. It is wrong for anything programmatic: two benchmark
+          # harnesses independently scored these as the MODEL failing to
+          # produce output, and one nearly published a fake result because the
+          # instances that died were the ones the baseline had solved.
+          #
+          # Carried on state and surfaced as an additive field on the
+          # agent_response event, so existing consumers are unaffected and new
+          # ones can tell an outage from an answer.
+          #
+          # `owner` rides along for the same reason it is on the system_event:
+          # the driver currently maps ANY `turn_error` to
+          # `status: "provider_error"`, which is wrong when the fault is ours.
+          # Additive, so a driver that ignores it behaves exactly as before.
+          state =
+            Map.put(state, :turn_error, %{
+              category: category,
+              owner: owner,
+              reason: reason_str
+            })
+
+          # The turn ended in a provider OUTAGE, not an answer. `turn_error`
+          # above already says so in a field, but it is dropped by the Rust
+          # client (never declared in the SSE struct); the source mark is the
+          # carrier that actually reaches a renderer.
+          TerminalSource.halt(message, state, :error)
+        end
       end
     end
   end

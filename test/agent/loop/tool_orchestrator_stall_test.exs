@@ -102,16 +102,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestratorStallTest do
     tc = %{id: "call_1", name: "slow_probe", arguments: "{}"}
 
     # Exercise the same poll/report path the real dispatch uses.
-    :erlang.apply(ToolOrchestrator, :collect_tasks, [
-      [{tc, task}],
-      [],
-      "sess-stall",
-      :infinity,
-      %{
-        started: System.monotonic_time(:millisecond),
-        last_report: System.monotonic_time(:millisecond)
-      }
-    ])
+    :erlang.apply(ToolOrchestrator, :collect_tasks, [[{tc, task}], [], "sess-stall", :infinity, %{
+      started: System.monotonic_time(:millisecond),
+      last_report: System.monotonic_time(:millisecond)
+    }])
   rescue
     UndefinedFunctionError ->
       # collect_tasks/5 is private; fall back to asserting via the public

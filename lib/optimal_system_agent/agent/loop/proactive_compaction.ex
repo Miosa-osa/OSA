@@ -627,7 +627,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
 
   # Retry the summarization LLM call up to `retries_left` additional times
   # (CC compact does 2 streaming retries before giving up).
-  defp summarize_with_retries(messages, retries_left, instructions) do
+  defp summarize_with_retries(messages, retries_left, instructions \\ nil) do
     case summarize(messages, instructions) do
       {:ok, summary} ->
         # Skip quality gating in offline/stub mode (no real LLM to retry with).

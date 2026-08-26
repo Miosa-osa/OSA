@@ -18,7 +18,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ProtocolRoutes do
   require Logger
 
   alias MiosaSignal.CloudEvent
+  alias OptimalSystemAgent.Protocol.OSCP
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Fleet.Registry, as: Fleet
   alias OptimalSystemAgent.Agent.Tasks
 
   plug(:match)
@@ -96,7 +98,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ProtocolRoutes do
   defp handle_oscp(conn) do
     json_body = Jason.encode!(conn.body_params)
 
-    case CloudEvent.decode(json_body) do
+    case OSCP.decode(json_body) do
       {:ok, event} ->
         route_oscp_event(event)
 
@@ -139,9 +141,15 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ProtocolRoutes do
 
   # ── OSCP Event Routing ──────────────────────────────────────────────
 
-  defp route_oscp_event(%CloudEvent{type: "oscp.heartbeat"}) do
-    # Fleet.Registry backend not present in this build; heartbeat is dropped.
-    {:error, "Fleet.Registry backend not present in this build"}
+  defp route_oscp_event(%CloudEvent{type: "oscp.heartbeat"} = event) do
+    agent_id = event.data["agent_id"] || event.data[:agent_id] || "unknown"
+    metrics = Map.drop(event.data, ["agent_id", :agent_id])
+
+    try do
+      Fleet.heartbeat(agent_id, metrics)
+    catch
+      :exit, _ -> Logger.warning("[API] Fleet unavailable for heartbeat from #{agent_id}")
+    end
   end
 
   defp route_oscp_event(%CloudEvent{type: "oscp.instruction"} = event) do
@@ -175,7 +183,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ProtocolRoutes do
   end
 
   defp route_oscp_event(%CloudEvent{type: "oscp.signal"} = event) do
-    Bus.emit(:system_event, CloudEvent.to_bus_event(event))
+    Bus.emit(:system_event, OSCP.to_bus_event(event))
   end
 
   defp route_oscp_event(%CloudEvent{} = event) do

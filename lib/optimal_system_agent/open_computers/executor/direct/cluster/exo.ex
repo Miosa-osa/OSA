@@ -198,7 +198,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Cluster.Exo do
     end
   end
 
-  defp run_cmd(cmd, args, opts) do
+  defp run_cmd(cmd, args, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 60_000)
     cwd = Keyword.get(opts, :cwd, nil)
     env = Keyword.get(opts, :env, [])

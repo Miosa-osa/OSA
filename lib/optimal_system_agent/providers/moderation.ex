@@ -142,7 +142,7 @@ defmodule OptimalSystemAgent.Providers.Moderation do
       {:ok, {{_version, 200, _}, _resp_headers, resp_body}} ->
         parse_moderation_response(resp_body, truncated, opts)
 
-      {:ok, {{_version, status, _}, _resp_headers, _resp_body}} ->
+      {:ok, {{_version, status, _}, _resp_headers, resp_body}} ->
         Logger.warning("[Moderation] API returned status #{status}")
         empty_result()
 
@@ -204,7 +204,7 @@ defmodule OptimalSystemAgent.Providers.Moderation do
     end
   end
 
-  defp do_find_target([_msg | _rest], collected, count, combined) when count >= 3 do
+  defp do_find_target([msg | rest], collected, count, combined) when count >= 3 do
     if String.length(String.trim(combined)) >= @min_message_length do
       create_combined_message(Enum.reverse(collected))
     else

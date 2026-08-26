@@ -1113,6 +1113,48 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     end
   end
 
+  # Fold a chronologically-ordered, indexed warm-zone slice into pair-safe
+  # units: an assistant message with non-empty `:tool_calls` plus every
+  # immediately-following `role: "tool"` result becomes one unit; every other
+  # message is its own singleton unit. Mirrors `CompactionSafety.tool_result?/1`
+  # so both live behind the same tool-pair definition.
+  #
+  # Public (not `defp`) + `@doc false` so the pair-grouping invariant itself
+  # (finding #7 / K2) is directly unit-testable without spinning up the full
+  # progressive-compression pipeline.
+  @doc false
+  @spec build_pair_safe_units([{{map(), number()}, non_neg_integer()}]) :: [map()]
+  def build_pair_safe_units(indexed_warm) do
+    do_build_units(indexed_warm, [])
+  end
+
+  defp do_build_units([], acc), do: Enum.reverse(acc)
+
+  defp do_build_units([{{msg, imp}, idx} = head | rest], acc) do
+    if has_tool_calls?(msg) do
+      {pair_items, remaining} =
+        Enum.split_while(rest, fn {{m, _imp}, _idx} -> CompactionSafety.tool_result?(m) end)
+
+      items = [{{msg, imp}, idx} | pair_items]
+      unit = %{items: items, importance: min_importance(items), order: idx}
+      do_build_units(remaining, [unit | acc])
+    else
+      unit = %{items: [head], importance: imp, order: idx}
+      do_build_units(rest, [unit | acc])
+    end
+  end
+
+  defp min_importance(items) do
+    items |> Enum.map(fn {{_msg, imp}, _idx} -> imp end) |> Enum.min()
+  end
+
+  defp has_tool_calls?(msg) do
+    case Map.get(msg, :tool_calls) do
+      calls when is_list(calls) -> calls != []
+      _ -> false
+    end
+  end
+
   # Step 4: Compress cold zone to key facts
   defp apply_step(:compress_cold, annotated, system_msgs, _target, _cw) do
     total = length(annotated)
@@ -1213,48 +1255,6 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
       updated_system = system_msgs ++ [topic_notice]
       {pinned ++ tail, updated_system, :emergency_truncate}
-    end
-  end
-
-  # Fold a chronologically-ordered, indexed warm-zone slice into pair-safe
-  # units: an assistant message with non-empty `:tool_calls` plus every
-  # immediately-following `role: "tool"` result becomes one unit; every other
-  # message is its own singleton unit. Mirrors `CompactionSafety.tool_result?/1`
-  # so both live behind the same tool-pair definition.
-  #
-  # Public (not `defp`) + `@doc false` so the pair-grouping invariant itself
-  # (finding #7 / K2) is directly unit-testable without spinning up the full
-  # progressive-compression pipeline.
-  @doc false
-  @spec build_pair_safe_units([{{map(), number()}, non_neg_integer()}]) :: [map()]
-  def build_pair_safe_units(indexed_warm) do
-    do_build_units(indexed_warm, [])
-  end
-
-  defp do_build_units([], acc), do: Enum.reverse(acc)
-
-  defp do_build_units([{{msg, imp}, idx} = head | rest], acc) do
-    if has_tool_calls?(msg) do
-      {pair_items, remaining} =
-        Enum.split_while(rest, fn {{m, _imp}, _idx} -> CompactionSafety.tool_result?(m) end)
-
-      items = [{{msg, imp}, idx} | pair_items]
-      unit = %{items: items, importance: min_importance(items), order: idx}
-      do_build_units(remaining, [unit | acc])
-    else
-      unit = %{items: [head], importance: imp, order: idx}
-      do_build_units(rest, [unit | acc])
-    end
-  end
-
-  defp min_importance(items) do
-    items |> Enum.map(fn {{_msg, imp}, _idx} -> imp end) |> Enum.min()
-  end
-
-  defp has_tool_calls?(msg) do
-    case Map.get(msg, :tool_calls) do
-      calls when is_list(calls) -> calls != []
-      _ -> false
     end
   end
 

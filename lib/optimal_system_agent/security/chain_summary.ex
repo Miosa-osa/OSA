@@ -38,7 +38,7 @@ defmodule OptimalSystemAgent.Security.ChainSummary do
 
   require Logger
 
-  alias OptimalSystemAgent.Security.ShadowGraph
+  alias OptimalSystemAgent.Security.{StructuredNotes, ShadowGraph}
 
   @type summary :: %{
           session_id: String.t(),

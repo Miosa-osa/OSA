@@ -30,6 +30,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SkillEvolutionRoutes do
           })
 
         conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+
+      {:error, reason} ->
+        json_error(conn, 500, "evolution_unavailable", inspect(reason))
     end
   end
 

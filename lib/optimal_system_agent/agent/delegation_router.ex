@@ -68,7 +68,6 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
       opts
       |> Keyword.get(:candidates, candidate_providers(primary))
       |> order_for_priority(priority)
-
     configured? = Keyword.get(opts, :configured?, &Registry.provider_configured?/1)
     model_for = Keyword.get(opts, :model_for, &Tier.model_for/2)
     tool_call = Keyword.get(opts, :tool_call, &ModelLimits.tool_call/2)
@@ -257,7 +256,6 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
   # reimagine) do not force a vision requirement onto a plain code task.
   defp mentions_vision?(text),
     do: Enum.any?(@vision_phrases, &Regex.match?(~r/\b#{&1}\b/u, text))
-
   defp maybe_add(list, item, true), do: list ++ [item]
   defp maybe_add(list, _item, false), do: list
 end

@@ -32,16 +32,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.VaultContext do
     }
   end
 
-  # `OptimalSystemAgent.Vault` does not exist in this build (there is no vault
-  # backend yet — see the `@allowlist` comment in
-  # `test/optimal_system_agent/tools/registry_coverage_test.exs`). This tool
-  # is intentionally NOT wired into `Tools.Registry.load_builtin_tools/0`, so
-  # the model never sees or calls it today. Still, `execute/1` must never
-  # raise `UndefinedFunctionError` if it is ever invoked directly (a future
-  # registration mistake, a direct call from other code, …) — fail with a
-  # normal, honest tool error instead.
   @impl true
-  def execute(_args) do
-    {:error, "vault context is not available in this build"}
+  def execute(args) do
+    profile = args |> Map.get("profile", "default") |> String.to_existing_atom()
+    query = Map.get(args, "query")
+    opts = if query, do: [query: query], else: []
+
+    context = OptimalSystemAgent.Vault.context(profile, opts)
+
+    if context == "" do
+      {:ok, "No vault memories found for this context."}
+    else
+      {:ok, context}
+    end
   end
 end

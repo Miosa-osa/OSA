@@ -13,8 +13,6 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.PlatformAuthRoutes do
   alias OptimalSystemAgent.Platform.Auth, as: PlatformAuth
   alias OptimalSystemAgent.Channels.HTTP.Auth
 
-  @compile {:no_warn_undefined, [OptimalSystemAgent.Platform.Auth]}
-
   plug(:match)
 
   plug(Plug.Parsers,

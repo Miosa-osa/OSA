@@ -99,12 +99,8 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditorSelectionTest do
       lines = LE.decorate_lines("one\ntwo", 1, 6)
 
       assert length(lines) == 2
-
-      assert Enum.all?(lines, &String.contains?(&1, "\e[7m")),
-             "a line was not re-opened: #{inspect(lines)}"
-
-      assert Enum.all?(lines, &String.contains?(&1, "\e[27m")),
-             "a line was left open: #{inspect(lines)}"
+      assert Enum.all?(lines, &String.contains?(&1, "\e[7m")), "a line was not re-opened: #{inspect(lines)}"
+      assert Enum.all?(lines, &String.contains?(&1, "\e[27m")), "a line was left open: #{inspect(lines)}"
     end
 
     test "lines outside the selection are untouched" do

@@ -632,26 +632,18 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
     # defects were found one at a time; this one refuses the thirteenth
     # occurrence of the SHAPE.
     test "no NEW bare function_exported?/2,3 enters the tree" do
-      # A call counts as PAIRED when `Code.ensure_loaded` appears on the same
-      # line or the line directly above — `mix format` splits
-      # `Code.ensure_loaded?(M) and function_exported?(M, :f, a)` across two
-      # lines once it passes the line limit, and that split must not read as
-      # a new bare call.
-      count =
-        Path.wildcard("lib/**/*.ex")
-        |> Enum.map(fn file ->
-          lines = file |> File.read!() |> String.split("\n")
+      {out, 0} =
+        System.cmd(
+          "sh",
+          [
+            "-c",
+            ~s(grep -rn "function_exported?" lib --include='*.ex' | grep -vc "Code.ensure_loaded")
+          ],
+          cd: File.cwd!(),
+          stderr_to_stdout: true
+        )
 
-          lines
-          |> Enum.with_index()
-          |> Enum.count(fn {line, index} ->
-            String.contains?(line, "function_exported?") and
-              not String.contains?(line, "Code.ensure_loaded") and
-              not (index > 0 and
-                     String.contains?(Enum.at(lines, index - 1), "Code.ensure_loaded"))
-          end)
-        end)
-        |> Enum.sum()
+      count = out |> String.trim() |> String.to_integer()
 
       assert count <= @bare_fx_ratchet, """
       #{count} bare `function_exported?` calls, up from the reviewed baseline of #{@bare_fx_ratchet}.

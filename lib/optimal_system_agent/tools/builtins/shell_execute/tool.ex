@@ -108,6 +108,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool do
   def open_world?(_input, _ctx), do: true
 
   @impl true
+  # Long-running shells should be cancelable, not blocking.
+
+  @impl true
   def max_result_size_chars, do: 30_000
 
   # ── Flat-layout compatibility ──────────────────────────────────────────────────

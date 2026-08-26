@@ -26,7 +26,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.REPL.Handler do
 
   @spec check_permissions(map(), UseContext.t()) ::
           {:allow, map()} | {:deny, String.t()} | {:ask, String.t()}
-  def check_permissions(%{"language" => lang} = _input, _ctx)
+  def check_permissions(%{"language" => lang} = input, _ctx)
       when lang not in ["python", "elixir", "node"] do
     {:deny,
      "Access denied: unsupported language #{inspect(lang)}. Allowed: #{Enum.join(Constants.supported_languages(), ", ")}"}

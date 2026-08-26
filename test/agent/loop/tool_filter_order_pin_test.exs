@@ -63,7 +63,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolFilterOrderPinTest do
       again = ToolFilter.filter(shuffled, state(session)) |> names()
 
       assert again == pinned
-
       refute again == names(shuffled),
              "the second call followed the shuffled input instead of the pinned order"
     end

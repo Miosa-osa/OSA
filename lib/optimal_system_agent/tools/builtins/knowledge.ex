@@ -75,6 +75,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Knowledge do
        when is_binary(s) and is_binary(p) and is_binary(o) do
     case MiosaKnowledge.assert(store(), {s, p, o}) do
       :ok -> {:ok, "Asserted: (#{s}, #{p}, #{o})"}
+      {:error, reason} -> {:error, "Assert failed: #{inspect(reason)}"}
     end
   end
 
@@ -84,6 +85,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Knowledge do
        when is_binary(s) and is_binary(p) and is_binary(o) do
     case MiosaKnowledge.retract(store(), {s, p, o}) do
       :ok -> {:ok, "Retracted: (#{s}, #{p}, #{o})"}
+      {:error, reason} -> {:error, "Retract failed: #{inspect(reason)}"}
     end
   end
 
@@ -107,6 +109,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.Knowledge do
           |> Enum.join("\n")
 
         {:ok, "Found #{length(results)} triples:\n#{formatted}"}
+
+      {:error, reason} ->
+        {:error, "Query failed: #{inspect(reason)}"}
     end
   end
 
@@ -119,11 +124,30 @@ defmodule OptimalSystemAgent.Tools.Builtins.Knowledge do
   defp do_count do
     case MiosaKnowledge.count(store()) do
       {:ok, n} -> {:ok, "Knowledge graph contains #{n} triples."}
+      {:error, reason} -> {:error, "Count failed: #{inspect(reason)}"}
     end
   end
 
   defp do_sparql(%{"sparql_query" => query}) when is_binary(query) do
     case MiosaKnowledge.sparql(store(), query) do
+      {:ok, results} when is_list(results) ->
+        formatted =
+          results
+          |> Enum.map(fn bindings ->
+            bindings
+            |> Enum.map(fn {k, v} -> "  #{k} = #{v}" end)
+            |> Enum.join(", ")
+          end)
+          |> Enum.join("\n")
+
+        {:ok, "SPARQL results (#{length(results)} rows):\n#{formatted}"}
+
+      {:ok, :inserted, count} ->
+        {:ok, "Inserted #{count} triples."}
+
+      {:ok, :deleted, count} ->
+        {:ok, "Deleted #{count} triples."}
+
       {:error, reason} ->
         {:error, "SPARQL error: #{inspect(reason)}"}
     end
@@ -138,7 +162,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Knowledge do
       case :sys.get_state(store_ref) do
         %{backend: backend, backend_state: backend_state} ->
           case MiosaKnowledge.Reasoner.materialize(backend, backend_state) do
-            {:ok, rounds} ->
+            {:ok, _new_state, rounds} ->
               {:ok, "Reasoning complete. #{rounds} rounds of inference applied."}
           end
 

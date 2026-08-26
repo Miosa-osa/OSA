@@ -362,6 +362,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Parser do
     |> Enum.map(fn {raw, _v} -> raw end)
   end
 
+  defp path_arg_candidates([], _head), do: []
+
   defp prefix_tokens(words, head) do
     if head in @cwd_commands, do: [], else: arity_prefix(Enum.map(words, &unq/1))
   end

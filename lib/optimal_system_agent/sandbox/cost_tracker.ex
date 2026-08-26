@@ -108,7 +108,7 @@ defmodule OptimalSystemAgent.Sandbox.CostTracker do
   end
 
   @impl true
-  def handle_call({:switch_provider, session_id, _from, to}, _from_pid, state) do
+  def handle_call({:switch_provider, session_id, from, to}, _from, state) do
     case :ets.lookup(@table, session_id) do
       [{^session_id, data}] ->
         updated = Map.put_new(data, to, %{runtime_ms: 0, cost_usd: 0.0, segments: []})

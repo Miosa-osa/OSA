@@ -87,6 +87,8 @@ defmodule OptimalSystemAgent.Agent.Context do
   defp response_reserve(max_tok),
     do: min(@response_reserve, max(div(max_tok, @response_reserve_frac), 512))
 
+  defp max_tokens, do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
+
   # ---------------------------------------------------------------------------
   # Public API
   # ---------------------------------------------------------------------------
@@ -302,7 +304,8 @@ defmodule OptimalSystemAgent.Agent.Context do
       system_prompt_budget: max_tok - reserve - conversation_tokens,
       system_prompt_actual: static_tokens + dynamic_tokens + tool_tokens,
       total_tokens: total_tokens,
-      utilization_pct: if(max_tok > 0, do: Float.round(occupied / max_tok * 100, 1), else: 0.0),
+      utilization_pct:
+        if(max_tok > 0, do: Float.round(occupied / max_tok * 100, 1), else: 0.0),
       headroom: max_tok - total_tokens,
       blocks: block_details
     }

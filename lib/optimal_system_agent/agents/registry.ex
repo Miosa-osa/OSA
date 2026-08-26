@@ -186,7 +186,7 @@ defmodule OptimalSystemAgent.Agents.Registry do
     Path.expand("~/.osa/agents")
   end
 
-  defp load_from_directory(dir, source) do
+  defp load_from_directory(dir, source \\ :unknown) do
     if File.dir?(dir) do
       # Support both flat files (priv/agents/architect.md) and
       # subdirectories (~/. osa/agents/my-agent/AGENT.md)

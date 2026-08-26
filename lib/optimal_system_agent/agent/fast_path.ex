@@ -234,8 +234,6 @@ defmodule OptimalSystemAgent.Agent.FastPath do
     end)
   end
 
-  def classify_intents(_message), do: []
-
   # 4 characters is the shortest keyword for which a prefix match is safe here.
   # Below it the keywords are acronyms (`pr`, `ui`, `git`) whose prefixes are
   # common word openings — matching those is what made `print` score `:git`.
@@ -246,6 +244,8 @@ defmodule OptimalSystemAgent.Agent.FastPath do
       (String.length(keyword) >= @min_prefix_keyword and
          Enum.any?(words, &String.starts_with?(&1, keyword)))
   end
+
+  def classify_intents(_message), do: []
 
   defp prefetch(state) do
     cwd = working_dir(state)

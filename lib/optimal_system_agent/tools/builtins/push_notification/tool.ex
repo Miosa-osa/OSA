@@ -80,6 +80,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.PushNotification.Tool do
   def open_world?(_input, _ctx), do: true
 
   @impl true
+
+  @impl true
   def max_result_size_chars, do: 1_000
 
   # ── Safety ────────────────────────────────────────────────────────────

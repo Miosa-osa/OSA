@@ -307,6 +307,14 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
   def model(id) when is_binary(id), do: Map.get(@by_id, id)
   def model(_), do: nil
 
+  @doc """
+  Look up a model by id, tolerating a dated snapshot suffix.
+
+  Haiku 4.5 is the one current model whose canonical Claude API ID carries a
+  date (`claude-haiku-4-5-20251001`); the bare `claude-haiku-4-5` alias is
+  equally valid and is what OSA offers. Both resolve here. Longest id wins so a
+  short id can never shadow a longer, more specific one.
+  """
   # Bare aliases the Claude Code CLI accepts for `--model`, mapped to the
   # catalogue id each names.
   #
@@ -336,14 +344,6 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
   @spec cli_aliases() :: %{String.t() => String.t()}
   def cli_aliases, do: @cli_aliases
 
-  @doc """
-  Look up a model by id, tolerating a dated snapshot suffix.
-
-  Haiku 4.5 is the one current model whose canonical Claude API ID carries a
-  date (`claude-haiku-4-5-20251001`); the bare `claude-haiku-4-5` alias is
-  equally valid and is what OSA offers. Both resolve here. Longest id wins so a
-  short id can never shadow a longer, more specific one.
-  """
   @spec resolve(String.t() | nil) :: model() | nil
   def resolve(id) when is_binary(id) do
     case model(id) do
@@ -364,14 +364,14 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
     end
   end
 
-  def resolve(_), do: nil
-
   defp alias_match(down) do
     case Map.fetch(@cli_aliases, down) do
       {:ok, canonical} -> model(canonical)
       :error -> nil
     end
   end
+
+  def resolve(_), do: nil
 
   @doc "The default model for a fresh install."
   @spec default_model() :: String.t()

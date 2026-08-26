@@ -13,6 +13,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.EnterWorktree.Handler do
 
   require Logger
 
+  alias OptimalSystemAgent.Agent.Worktree
   alias OptimalSystemAgent.Tools.Builtins.EnterWorktree.Constants
   alias OptimalSystemAgent.Tools.UseContext
 

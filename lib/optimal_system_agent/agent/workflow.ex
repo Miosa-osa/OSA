@@ -237,6 +237,50 @@ defmodule OptimalSystemAgent.Agent.Workflow do
     end
   end
 
+  defp do_advance(state, workflow_id, workflow, result) do
+    # Complete current step with result
+    workflow = complete_current_step(workflow, result)
+
+    # Advance to the next step
+    next_index = workflow.current_step + 1
+
+    workflow =
+      if next_index >= length(workflow.steps) do
+        # All steps done
+        %{workflow | status: :completed, updated_at: now_iso()}
+      else
+        workflow = %{workflow | current_step: next_index, updated_at: now_iso()}
+        mark_current_step_in_progress(workflow)
+      end
+
+    state = put_workflow(state, workflow)
+    persist_workflow(state.dir, workflow)
+
+    Logger.info(
+      "Workflow #{workflow_id}: advanced to step #{workflow.current_step + 1}/#{length(workflow.steps)} (status: #{workflow.status})"
+    )
+
+    {:reply, {:ok, serialize_workflow(workflow)}, state}
+  end
+
+  # Optimistic-concurrency guard shared by advance / complete_step / skip_step.
+  # `expected_step` is the 0-based index the caller believes is current; a
+  # duplicated call (tool retry, redelivered event, two callers) carries a stale
+  # index and is refused instead of silently consuming a step nobody ran.
+  defp check_expected_step(workflow, opts) do
+    case Keyword.get(opts, :expected_step) do
+      nil ->
+        :ok
+
+      expected ->
+        if expected == workflow.current_step do
+          :ok
+        else
+          {:error, {:step_conflict, expected, workflow.current_step}}
+        end
+    end
+  end
+
   @impl true
   def handle_call({:complete_step, workflow_id, result, opts}, _from, state) do
     case Map.get(state.workflows, workflow_id) do
@@ -422,50 +466,6 @@ defmodule OptimalSystemAgent.Agent.Workflow do
       end
 
     {:reply, result, state}
-  end
-
-  defp do_advance(state, workflow_id, workflow, result) do
-    # Complete current step with result
-    workflow = complete_current_step(workflow, result)
-
-    # Advance to the next step
-    next_index = workflow.current_step + 1
-
-    workflow =
-      if next_index >= length(workflow.steps) do
-        # All steps done
-        %{workflow | status: :completed, updated_at: now_iso()}
-      else
-        workflow = %{workflow | current_step: next_index, updated_at: now_iso()}
-        mark_current_step_in_progress(workflow)
-      end
-
-    state = put_workflow(state, workflow)
-    persist_workflow(state.dir, workflow)
-
-    Logger.info(
-      "Workflow #{workflow_id}: advanced to step #{workflow.current_step + 1}/#{length(workflow.steps)} (status: #{workflow.status})"
-    )
-
-    {:reply, {:ok, serialize_workflow(workflow)}, state}
-  end
-
-  # Optimistic-concurrency guard shared by advance / complete_step / skip_step.
-  # `expected_step` is the 0-based index the caller believes is current; a
-  # duplicated call (tool retry, redelivered event, two callers) carries a stale
-  # index and is refused instead of silently consuming a step nobody ran.
-  defp check_expected_step(workflow, opts) do
-    case Keyword.get(opts, :expected_step) do
-      nil ->
-        :ok
-
-      expected ->
-        if expected == workflow.current_step do
-          :ok
-        else
-          {:error, {:step_conflict, expected, workflow.current_step}}
-        end
-    end
   end
 
   # ── LLM Task Decomposition ──────────────────────────────────────────

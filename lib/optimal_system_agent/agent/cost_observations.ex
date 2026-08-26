@@ -137,13 +137,7 @@ defmodule OptimalSystemAgent.Agent.CostObservations do
     case :ets.whereis(@table) do
       :undefined ->
         try do
-          :ets.new(@table, [
-            :named_table,
-            :public,
-            :set,
-            read_concurrency: true,
-            write_concurrency: true
-          ])
+          :ets.new(@table, [:named_table, :public, :set, read_concurrency: true, write_concurrency: true])
         rescue
           ArgumentError -> :ok
         end

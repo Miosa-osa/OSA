@@ -157,7 +157,7 @@ defmodule OptimalSystemAgent.Channels.WhatsApp do
   defp process_incoming(msg, bridge_url) do
     chat_id = msg["chatId"]
     text = msg["body"] || ""
-    _sender_name = msg["senderName"] || "unknown"
+    sender_name = msg["senderName"] || "unknown"
     session_id = "whatsapp:#{chat_id}"
 
     ensure_session(session_id)

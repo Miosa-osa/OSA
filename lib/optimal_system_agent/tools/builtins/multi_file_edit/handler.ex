@@ -291,7 +291,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
                    "disproportionate — re-read the file and copy old_string verbatim"}
 
               {:error, {:replace_all_approximate, _}} ->
-                {:error, dp, "old_string matched only approximately — copy it verbatim and retry"}
+                {:error, dp,
+                 "old_string matched only approximately — copy it verbatim and retry"}
 
               {:error, :not_found} ->
                 # Genuinely absent even after fuzzy matching, so the idempotency
@@ -315,6 +316,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
   # POSIX {mtime, size} for DriftGuard. A stat failure degrades to {0, 0},
   # which DriftGuard treats as a non-matching identity and defers on — never a
   # false rejection. Mirrors `FileEdit.Handler.stat_or_zero/1`.
+  defp stat_or_zero(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, %File.Stat{mtime: mtime, size: size}} -> {mtime, size}
+      _ -> {0, 0}
+    end
+  end
+
+  # POSIX {mtime, size} for DriftGuard, identical to `FileEdit.Handler`'s. A
+  # stat failure degrades to {0, 0}, which DriftGuard treats as a non-matching
+  # identity and simply defers on — never a false rejection.
   defp stat_or_zero(path) do
     case File.stat(path, time: :posix) do
       {:ok, %File.Stat{mtime: mtime, size: size}} -> {mtime, size}

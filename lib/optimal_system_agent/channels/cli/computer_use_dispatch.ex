@@ -74,7 +74,7 @@ defmodule OptimalSystemAgent.Channels.CLI.ComputerUseDispatch do
   end
 
   # Single unified LLM call — classifies AND extracts params for all tools.
-  defp classify_and_dispatch(input, screen_context) do
+  defp classify_and_dispatch(input, screen_context \\ "") do
     url = cu_api_url()
     key = cu_api_key()
     model = cu_model()

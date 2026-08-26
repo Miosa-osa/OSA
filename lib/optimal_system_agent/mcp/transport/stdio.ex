@@ -56,17 +56,7 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
   # a beat after spawn; a short probe lets that settle before we cache the group.
   @pgid_probe_ms 200
 
-  defstruct [
-    :port,
-    :owner,
-    :ref,
-    :name,
-    buffer: "",
-    exe: nil,
-    reap: false,
-    pgid: nil,
-    mem_warned: false
-  ]
+  defstruct [:port, :owner, :ref, :name, buffer: "", exe: nil, reap: false, pgid: nil, mem_warned: false]
 
   # ── Transport API ─────────────────────────────────────────────────────
 
@@ -139,6 +129,8 @@ defmodule OptimalSystemAgent.MCP.Transport.Stdio do
       {:reply, :ok, state}
     rescue
       e -> {:reply, {:error, Exception.message(e)}, state}
+    catch
+      :error, reason -> {:reply, {:error, reason}, state}
     end
   end
 

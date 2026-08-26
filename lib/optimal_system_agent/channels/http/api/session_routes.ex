@@ -1078,10 +1078,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
                   model: info.model,
                   context_window: info.context_window
                 }
-                |> put_present(
-                  "old_provider",
-                  info[:old_provider] && to_string(info.old_provider)
-                )
+                |> put_present("old_provider", info[:old_provider] && to_string(info.old_provider))
                 |> put_present("old_model", info[:old_model])
                 |> put_present("old_context_window", info[:old_context_window])
                 |> put_present("tokens_before", info[:tokens_before])
@@ -1191,7 +1188,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
           steps: steps,
           restored_n: result.restored_n,
           checkpoint_id: result.commit,
-          message: "Reverted #{steps} file step(s) to step #{result.restored_n}. Transcript kept."
+          message:
+            "Reverted #{steps} file step(s) to step #{result.restored_n}. Transcript kept."
         })
 
       {:error, _} ->
@@ -1652,13 +1650,11 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
   defp put_present(map, key, value), do: Map.put(map, key, value)
 
   defp parse_positive_int(n) when is_integer(n) and n >= 1, do: n
-
   defp parse_positive_int(n) when is_binary(n) do
     case Integer.parse(n) do
       {i, ""} when i >= 1 -> i
       _ -> 1
     end
   end
-
   defp parse_positive_int(_), do: 1
 end

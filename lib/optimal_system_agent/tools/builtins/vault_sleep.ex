@@ -1,8 +1,6 @@
 defmodule OptimalSystemAgent.Tools.Builtins.VaultSleep do
   @behaviour MiosaTools.Behaviour
 
-  @compile {:no_warn_undefined, OptimalSystemAgent.Vault}
-
   @impl true
   def available?, do: true
 

@@ -38,6 +38,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.KnowledgeRoutes do
         conn
         |> put_resp_content_type("application/json")
         |> send_resp(200, body)
+
+      {:error, reason} ->
+        Logger.error("[Knowledge] query failed: #{inspect(reason)}")
+        json_error(conn, 500, "query_failed", inspect(reason))
     end
   end
 
@@ -57,6 +61,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.KnowledgeRoutes do
           conn
           |> put_resp_content_type("application/json")
           |> send_resp(201, body)
+
+        {:error, reason} ->
+          Logger.error("[Knowledge] assert failed: #{inspect(reason)}")
+          json_error(conn, 500, "assert_failed", inspect(reason))
       end
     else
       _ ->
@@ -85,6 +93,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.KnowledgeRoutes do
           conn
           |> put_resp_content_type("application/json")
           |> send_resp(200, body)
+
+        {:error, reason} ->
+          Logger.error("[Knowledge] retract failed: #{inspect(reason)}")
+          json_error(conn, 500, "retract_failed", inspect(reason))
       end
     else
       _ ->
@@ -105,6 +117,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.KnowledgeRoutes do
     with %{"query" => sparql_query} <- conn.body_params,
          true <- is_binary(sparql_query) and sparql_query != "" do
       case MiosaKnowledge.sparql(store(), sparql_query) do
+        {:ok, results} ->
+          body = Jason.encode!(%{results: results, count: length(results)})
+
+          conn
+          |> put_resp_content_type("application/json")
+          |> send_resp(200, body)
+
         {:error, reason} ->
           Logger.error("[Knowledge] SPARQL failed: #{inspect(reason)}")
           json_error(conn, 400, "sparql_failed", inspect(reason))
@@ -132,6 +151,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.KnowledgeRoutes do
         conn
         |> put_resp_content_type("application/json")
         |> send_resp(200, body)
+
+      {:error, reason} ->
+        Logger.error("[Knowledge] reasoner failed: #{inspect(reason)}")
+        json_error(conn, 500, "reason_failed", inspect(reason))
     end
   end
 
@@ -164,6 +187,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.KnowledgeRoutes do
         conn
         |> put_resp_content_type("application/json")
         |> send_resp(200, body)
+
+      {:error, reason} ->
+        Logger.error("[Knowledge] count failed: #{inspect(reason)}")
+        json_error(conn, 500, "count_failed", inspect(reason))
     end
   end
 

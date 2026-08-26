@@ -88,6 +88,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.TeamCreate.Tool do
   # Spawns external subagent processes — open world.
   def open_world?(_input, _ctx), do: true
 
+  @impl true
+
   # ── Flat-layout compatibility ─────────────────────────────────────────
   @impl true
   # Safety: :subagent signals the permission layer this tool spawns subagents.

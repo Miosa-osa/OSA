@@ -10,13 +10,6 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.PlatformRoutes do
   alias OptimalSystemAgent.Platform.OsInstances
   alias OptimalSystemAgent.Platform.Grants
 
-  @compile {:no_warn_undefined,
-            [
-              OptimalSystemAgent.Platform.Tenants,
-              OptimalSystemAgent.Platform.OsInstances,
-              OptimalSystemAgent.Platform.Grants
-            ]}
-
   plug(:match)
   plug(:dispatch)
 

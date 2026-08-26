@@ -381,9 +381,7 @@ defmodule OptimalSystemAgent.Providers.Batch do
     e -> {:error, Exception.message(e)}
   end
 
-  defp put_body(opts, %{multipart: mp}) when is_map(mp),
-    do: Keyword.put(opts, :form_multipart, mp)
-
+  defp put_body(opts, %{multipart: mp}) when is_map(mp), do: Keyword.put(opts, :form_multipart, mp)
   defp put_body(opts, %{json: json}) when is_map(json), do: Keyword.put(opts, :json, json)
   defp put_body(opts, _), do: opts
 end

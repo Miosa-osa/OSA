@@ -13,6 +13,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.SemanticSearch do
   # Every schema in the default set is re-sent on EVERY request. Measured
   # across 15 SWE-bench Pro transcripts, this tool was called zero times while
   # costing its schema on all 863 turns.
+  @impl true
   def should_defer?, do: true
 
   @impl true

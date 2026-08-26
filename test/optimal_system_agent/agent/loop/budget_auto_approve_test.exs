@@ -18,16 +18,11 @@ defmodule OptimalSystemAgent.Agent.Loop.BudgetAutoApproveTest do
   setup do
     prior_policy = Application.get_env(:optimal_system_agent, :budget_auto_approve, false)
     prior_flag = Application.get_env(:optimal_system_agent, :settings_flag_path)
-
-    prior_interactive =
-      Application.get_env(:optimal_system_agent, :interactive_permissions, false)
-
+    prior_interactive = Application.get_env(:optimal_system_agent, :interactive_permissions, false)
     # The test env sets :non_interactive_permission_bypass true (auto-allow all
     # unattended). Turn it OFF here so the budget policy / fail-closed actually
     # decide, which is the whole point of these tests.
-    prior_bypass =
-      Application.get_env(:optimal_system_agent, :non_interactive_permission_bypass, false)
-
+    prior_bypass = Application.get_env(:optimal_system_agent, :non_interactive_permission_bypass, false)
     Application.put_env(:optimal_system_agent, :non_interactive_permission_bypass, false)
 
     # Force an ASK rule on shell_execute so it needs approval, and mark the
@@ -58,57 +53,30 @@ defmodule OptimalSystemAgent.Agent.Loop.BudgetAutoApproveTest do
     do:
       struct(
         Loop,
-        [
-          session_id: "bap-#{System.unique_integer([:positive])}",
-          channel: :internal,
-          permission_mode: :ask
-        ] ++
+        [session_id: "bap-#{System.unique_integer([:positive])}", channel: :internal, permission_mode: :ask] ++
           overrides
       )
 
   defp tool,
-    do: %{
-      id: "tc-#{System.unique_integer([:positive])}",
-      name: "shell_execute",
-      arguments: %{"command" => "echo hi"}
-    }
+    do: %{id: "tc-#{System.unique_integer([:positive])}", name: "shell_execute", arguments: %{"command" => "echo hi"}}
 
   test "within budget + policy on → allowed" do
     Application.put_env(:optimal_system_agent, :budget_auto_approve, true)
-
-    assert ToolExecutor.approve_tool_call(
-             tool(),
-             unattended(max_budget_usd: 1.0, session_cost_usd: 0.10)
-           ) == :allow
+    assert ToolExecutor.approve_tool_call(tool(), unattended(max_budget_usd: 1.0, session_cost_usd: 0.10)) == :allow
   end
 
   test "over budget + policy on → blocked (bounded by dollars)" do
     Application.put_env(:optimal_system_agent, :budget_auto_approve, true)
-
-    assert {:blocked, _} =
-             ToolExecutor.approve_tool_call(
-               tool(),
-               unattended(max_budget_usd: 1.0, session_cost_usd: 2.0)
-             )
+    assert {:blocked, _} = ToolExecutor.approve_tool_call(tool(), unattended(max_budget_usd: 1.0, session_cost_usd: 2.0))
   end
 
   test "policy OFF → fails closed even within budget (unchanged default)" do
     Application.put_env(:optimal_system_agent, :budget_auto_approve, false)
-
-    assert {:blocked, _} =
-             ToolExecutor.approve_tool_call(
-               tool(),
-               unattended(max_budget_usd: 1.0, session_cost_usd: 0.10)
-             )
+    assert {:blocked, _} = ToolExecutor.approve_tool_call(tool(), unattended(max_budget_usd: 1.0, session_cost_usd: 0.10))
   end
 
   test "no cap set → policy does not fire (blocked)" do
     Application.put_env(:optimal_system_agent, :budget_auto_approve, true)
-
-    assert {:blocked, _} =
-             ToolExecutor.approve_tool_call(
-               tool(),
-               unattended(max_budget_usd: nil, session_cost_usd: 0.10)
-             )
+    assert {:blocked, _} = ToolExecutor.approve_tool_call(tool(), unattended(max_budget_usd: nil, session_cost_usd: 0.10))
   end
 end

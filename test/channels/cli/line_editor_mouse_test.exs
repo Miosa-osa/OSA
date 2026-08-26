@@ -78,10 +78,7 @@ defmodule OptimalSystemAgent.Channels.CLI.LineEditorMouseTest do
 
       for index <- [0, 5, 17, 42] do
         layout = LineEditor.visual_layout(text, @prompt, @cols, index)
-
-        round_trip =
-          LineEditor.index_at(text, @prompt, @cols, layout.cursor_row, layout.cursor_col)
-
+        round_trip = LineEditor.index_at(text, @prompt, @cols, layout.cursor_row, layout.cursor_col)
         assert round_trip == index, "index #{index} did not round-trip (got #{round_trip})"
       end
     end

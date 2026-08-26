@@ -78,7 +78,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.PushNotification.Handler do
 
   @spec check_permissions(map(), UseContext.t()) ::
           {:allow, map()} | {:deny, String.t()}
-  def check_permissions(%{"urgency" => "critical"} = _input, %UseContext{permission_mode: :strict}) do
+  def check_permissions(%{"urgency" => "critical"} = input, %UseContext{permission_mode: :strict}) do
     {:deny, "Access denied: critical notifications require non-strict permission mode"}
   end
 

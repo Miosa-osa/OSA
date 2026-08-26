@@ -308,6 +308,10 @@ defmodule OptimalSystemAgent.Soul do
     end
   end
 
+  defp interpolate_and_cache do
+    cached_or_build(:full, :static_base, :static_token_count, :static_base_fp)
+  end
+
   # LITE variant — same template, but only the core-tool allowlist is inlined
   # (ToolsSection.build(:lite)). Cached in its own persistent_term slot.
   defp interpolate_and_cache(variant, base_key, count_key, fp_key, fp) do
@@ -679,6 +683,7 @@ defmodule OptimalSystemAgent.Soul do
 
   # ── Token Estimation ───────────────────────────────────────────────
 
+  defp estimate_tokens(nil), do: 0
   defp estimate_tokens(""), do: 0
 
   defp estimate_tokens(text) when is_binary(text) do

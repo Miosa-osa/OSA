@@ -43,6 +43,8 @@ defmodule OptimalSystemAgent.Security.ShadowGraph do
 
   alias OptimalSystemAgent.Security.StructuredNotes
 
+  @ip_pattern ~r/\b(?:\d{1,3}\.){3}\d{1,3}\b/
+
   @type node_id :: String.t()
   @type graph :: %{
           nodes: %{node_id() => map()},
