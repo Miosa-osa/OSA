@@ -70,7 +70,8 @@ defmodule OptimalSystemAgent.Agent.Orchestrator.BoundedStallRecoveryTest do
       :ok = Orchestrator.start_stall_watcher(parent, id, "hanger", "tester")
 
       # FIRST stall -> one nudge, before any stalled escalation.
-      assert_receive {:osa_event, %{type: :background_agent_nudged, agent_id: ^id, phase: :starting}},
+      assert_receive {:osa_event,
+                      %{type: :background_agent_nudged, agent_id: ^id, phase: :starting}},
                      5_000,
                      "the first stall must trigger one non-destructive nudge"
 

@@ -852,24 +852,25 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         emit_non_interactive(:allow, tool_call.name, sid, why)
         :allow
 
-      true -> nil
+      true ->
+        nil
     end
     |> case do
       :allow ->
         :allow
 
       nil ->
-      Logger.info(
-        "[permissions] auto-DENIED #{tool_call.name} — unattended session (#{why}), " <>
-          "permissions fail closed"
-      )
+        Logger.info(
+          "[permissions] auto-DENIED #{tool_call.name} — unattended session (#{why}), " <>
+            "permissions fail closed"
+        )
 
-      emit_non_interactive(:deny, tool_call.name, sid, why)
+        emit_non_interactive(:deny, tool_call.name, sid, why)
 
-      {:blocked,
-       "Blocked: #{tool_call.name} requires interactive approval, but nobody can answer on " <>
-         "this session (#{why}) — auto-rejected (permissions fail closed). Save an allow " <>
-         "rule for this tool, or run it from an interactive session."}
+        {:blocked,
+         "Blocked: #{tool_call.name} requires interactive approval, but nobody can answer on " <>
+           "this session (#{why}) — auto-rejected (permissions fail closed). Save an allow " <>
+           "rule for this tool, or run it from an interactive session."}
     end
   end
 

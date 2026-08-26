@@ -4,7 +4,9 @@ defmodule OptimalSystemAgent.Security.SandboxArtifactsTest do
   alias OptimalSystemAgent.Security.SandboxArtifacts
 
   setup do
-    base = Path.join(System.tmp_dir!(), "osa-sandbox-artifacts-#{System.unique_integer([:positive])}")
+    base =
+      Path.join(System.tmp_dir!(), "osa-sandbox-artifacts-#{System.unique_integer([:positive])}")
+
     root = Path.join(base, "sandbox")
     dest = Path.join(base, "dest")
     File.mkdir_p!(root)

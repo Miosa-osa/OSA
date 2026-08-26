@@ -16,6 +16,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.FleetDashboardRoutes do
 
   alias OptimalSystemAgent.Fleet.Dashboard
 
+  @compile {:no_warn_undefined, [OptimalSystemAgent.Fleet.Dashboard]}
+
   plug(:match)
   plug(:dispatch)
 

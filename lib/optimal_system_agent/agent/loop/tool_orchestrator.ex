@@ -519,7 +519,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
   @default_stall_report_ms 60_000
 
   defp stall_report_ms,
-    do: Application.get_env(:optimal_system_agent, :tool_stall_report_ms, @default_stall_report_ms)
+    do:
+      Application.get_env(:optimal_system_agent, :tool_stall_report_ms, @default_stall_report_ms)
 
   defp new_progress do
     now = System.monotonic_time(:millisecond)

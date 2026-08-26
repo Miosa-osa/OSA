@@ -267,6 +267,34 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Container do
     {:noreply, state}
   end
 
+  # Stats emission keyed by runtime_id → look up container_id in state
+  def handle_cast(
+        {:emit_stats_for_runtime_id, runtime_id, cpu, mem_mb, net_rx, net_tx, disk_read,
+         disk_write},
+        state
+      ) do
+    case Enum.find(state.containers, fn {_id, c} -> c.runtime_id == runtime_id end) do
+      nil ->
+        {:noreply, state}
+
+      {container_id, _c} ->
+        FrameRouter.send_frame(
+          {:container_stats,
+           %{
+             container_id: container_id,
+             cpu_percent: cpu,
+             mem_mb: mem_mb,
+             net_rx: net_rx,
+             net_tx: net_tx,
+             disk_read: disk_read,
+             disk_write: disk_write
+           }}
+        )
+
+        {:noreply, state}
+    end
+  end
+
   # Stats tick: emit stats for all running containers
   @impl true
   def handle_info(:stats_tick, state) do
@@ -422,7 +450,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Container do
     base ++ port_args ++ env_args ++ volume_args ++ image_and_cmd
   end
 
-  defp check_port_conflicts(runtime, []), do: :ok
+  defp check_port_conflicts(_runtime, []), do: :ok
 
   defp check_port_conflicts(runtime, ports) do
     # Get all currently bound host ports
@@ -582,7 +610,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Container do
   end
 
   defp start_log_stream(runtime, runtime_id, container_id) do
-    parent = self()
+    _parent = self()
 
     spawn_link(fn ->
       stream_logs(runtime, runtime_id, container_id)
@@ -692,34 +720,6 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Container do
 
       _ ->
         :ok
-    end
-  end
-
-  # Stats emission keyed by runtime_id → look up container_id in state
-  def handle_cast(
-        {:emit_stats_for_runtime_id, runtime_id, cpu, mem_mb, net_rx, net_tx, disk_read,
-         disk_write},
-        state
-      ) do
-    case Enum.find(state.containers, fn {_id, c} -> c.runtime_id == runtime_id end) do
-      nil ->
-        {:noreply, state}
-
-      {container_id, _c} ->
-        FrameRouter.send_frame(
-          {:container_stats,
-           %{
-             container_id: container_id,
-             cpu_percent: cpu,
-             mem_mb: mem_mb,
-             net_rx: net_rx,
-             net_tx: net_tx,
-             disk_read: disk_read,
-             disk_write: disk_write
-           }}
-        )
-
-        {:noreply, state}
     end
   end
 

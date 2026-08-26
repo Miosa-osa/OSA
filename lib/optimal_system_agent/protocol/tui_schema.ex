@@ -142,7 +142,8 @@ defmodule OptimalSystemAgent.Protocol.TUISchema do
           ),
           f("completed_tasks", :u64,
             default: true,
-            doc: "Completed tasks (turns) for the active session, the denominator of cost_per_task_usd."
+            doc:
+              "Completed tasks (turns) for the active session, the denominator of cost_per_task_usd."
           )
         ]
       },

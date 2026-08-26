@@ -65,16 +65,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.Browser do
     }
   end
 
-  @impl true
   # Deferred: absent from the default toolbox, discovered mid-turn via
   # `tool_search`. Reason: browser automation is a specialist surface, not a default coding tool.
   #
   # Every schema in the default set is re-sent on EVERY request. Measured
   # across 15 SWE-bench Pro transcripts, this tool was called zero times while
   # costing its schema on all 863 turns.
-  @impl true
   def should_defer?, do: true
 
+  @impl true
   def available? do
     # Always available — falls back to HTTP mode when Playwright is absent
     true
