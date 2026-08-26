@@ -14,10 +14,12 @@ defmodule OptimalSystemAgent.Utils.Mojibake do
   # Â (0xC2), Ã (0xC3), â (0xE2). A mojibake run is one of these followed by the
   # original char's continuation bytes, which decode to the 0x80..0xBF range.
   @marker_cps [0xC2, 0xC3, 0xE2]
-  # A single UTF-8 char is at most 4 bytes → at most 4 mojibake codepoints, so a
-  # trailing run longer than this is already several complete chars, not one
-  # in-flight one.
-  @max_moji_cps 4
+  # A single UTF-8 char is at most 4 bytes. A DOUBLY-mojibaked char (the form
+  # some providers emit — e.g. glm/z.ai renders an em-dash as `Ã¢Â\x80Â\x94`)
+  # re-encodes each of those bytes again, so one in-flight char can be up to 8
+  # mojibake codepoints. A trailing run longer than this is already several
+  # complete chars, not one in-flight one.
+  @max_moji_cps 8
 
   @doc """
   Stateful repair for a STREAM of deltas: `{text_to_emit, carry_for_next_delta}`.
@@ -51,22 +53,47 @@ defmodule OptimalSystemAgent.Utils.Mojibake do
   def flush(carry) when is_binary(carry), do: repair(carry)
 
   # Index where a possibly-incomplete trailing mojibake run begins, or nil when
-  # the text does not end mid-sequence. The run is the last marker codepoint
-  # when everything after it, to the end, is continuation-range and the whole
-  # run is no longer than a single char's worth of bytes.
+  # the text does not end mid-sequence.
+  #
+  # A mojibake char — single OR double-encoded — is a contiguous run of marker
+  # and continuation codepoints. The earlier version anchored on the LAST marker
+  # and held only from there; that splits a double-encoded char (whose markers
+  # sit at non-adjacent positions, e.g. `[C3 A2][C2 80][C2 94]`) into two halves
+  # that can never be rejoined across deltas, so each half emitted as broken
+  # mojibake. Instead: find the maximal trailing run of marker/continuation
+  # codepoints and hold from its FIRST marker (leading continuation bytes belong
+  # to an already-emitted char). `repair/1` can then re-decode the whole run as
+  # one unit once a non-mojibake codepoint (or stream end) proves it complete.
   defp incomplete_tail_start(cps) do
-    last_marker =
+    len = length(cps)
+
+    # Start of the maximal trailing run of marker-or-continuation codepoints
+    # (`len` when the text does not end in one).
+    run_start =
       cps
       |> Enum.with_index()
-      |> Enum.reduce(nil, fn {cp, idx}, acc -> if cp in @marker_cps, do: idx, else: acc end)
+      |> Enum.reverse()
+      |> Enum.reduce_while(len, fn {cp, idx}, _acc ->
+        if cp in @marker_cps or continuation?(cp), do: {:cont, idx}, else: {:halt, len}
+      end)
 
-    with i when is_integer(i) <- last_marker,
-         after_cps = Enum.drop(cps, i + 1),
-         true <- length(after_cps) < @max_moji_cps,
-         true <- Enum.all?(after_cps, &continuation?/1) do
-      i
+    if run_start == len do
+      nil
     else
-      _ -> nil
+      hold =
+        cps
+        |> Enum.drop(run_start)
+        |> Enum.with_index(run_start)
+        |> Enum.find_value(fn {cp, idx} -> if cp in @marker_cps, do: idx, else: nil end)
+
+      cond do
+        # No marker in the trailing run — only orphaned continuation bytes whose
+        # marker was already emitted; nothing to hold.
+        is_nil(hold) -> nil
+        # Too long to be a single in-flight char — treat as complete and repair now.
+        len - hold > @max_moji_cps -> nil
+        true -> hold
+      end
     end
   end
 

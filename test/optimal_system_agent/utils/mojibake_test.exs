@@ -83,5 +83,39 @@ defmodule OptimalSystemAgent.Utils.MojibakeTest do
       {e2, c2} = Mojibake.repair_stream(c1, " on")
       assert e1 <> e2 <> Mojibake.flush(c2) == "goâ on"
     end
+
+    test "a DOUBLE-encoded mojibake char (glm/z.ai em-dash) is repaired when streamed" do
+      # Some providers render an em-dash "—" as DOUBLE mojibake: "—" (E2 80 94)
+      # -> "â\x80\x94" -> "Ã¢Â\x80Â\x94". Its markers sit at non-adjacent
+      # positions, which the old last-marker carry split into un-rejoinable
+      # halves — the "Ã¢" the roster showed. The whole run must survive as a unit.
+      single = corrupt(<<0xE2, 0x80, 0x94>>)
+      double = corrupt(:unicode.characters_to_binary(single))
+      deltas = ["miosa-compute) ", double, " 6 PRs"]
+
+      {out, carry} =
+        Enum.reduce(deltas, {"", ""}, fn d, {acc, carry} ->
+          {emit, new_carry} = Mojibake.repair_stream(carry, d)
+          {acc <> emit, new_carry}
+        end)
+
+      assert out <> Mojibake.flush(carry) == "miosa-compute) — 6 PRs"
+    end
+
+    test "a double-encoded char split across deltas still rejoins" do
+      single = corrupt(<<0xE2, 0x80, 0x94>>)
+      double = corrupt(:unicode.characters_to_binary(single))
+      # Split at a codepoint boundary, as the decoded SSE stream would.
+      {first, rest} = String.split_at(double, 2)
+      deltas = ["a ", first, rest, " b"]
+
+      {out, carry} =
+        Enum.reduce(deltas, {"", ""}, fn d, {acc, carry} ->
+          {emit, new_carry} = Mojibake.repair_stream(carry, d)
+          {acc <> emit, new_carry}
+        end)
+
+      assert out <> Mojibake.flush(carry) == "a — b"
+    end
   end
 end
