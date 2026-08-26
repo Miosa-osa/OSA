@@ -2406,13 +2406,20 @@ def test_alt_enter_delivers_a_queued_message_into_the_live_turn(
 
 
 def test_the_queued_row_advertises_the_key_that_delivers(backend: StubBackend) -> None:
-    """The row names alt+enter, and names no key that ends the turn.
+    """The row names the key that DELIVERS, and names no key that ends the turn.
 
     Third check of one invariant that this file has now caught two violations
     of: the screen must not name a key whose behaviour differs from the words
     beside it. Here the wrong outcome would be especially quiet — the row could
     name Esc, which *does* eventually run the message, by destroying the turn
     first.
+
+    The delivering key is adaptive: only where the kitty keyboard protocol lets
+    the TUI tell Alt+Enter apart does the row advertise `alt+enter`; everywhere
+    else (this pty-stub included) it names the portable form, `enter again`.
+    Advertising alt+enter on a terminal that cannot see it would itself be the
+    "words differ from the key" defect this test guards against. What must hold
+    in BOTH forms: a benign delivering key is named, and Esc never is.
     """
     hold_turn()
     try:
@@ -2440,7 +2447,7 @@ def test_the_queued_row_advertises_the_key_that_delivers(backend: StubBackend) -
                     "the queued row lost its explanation entirely.\n"
                     f"--- rendered screen ---\n{s.dump()}"
                 )
-            if "alt+enter" not in row:
+            if "alt+enter" not in row and "enter again" not in row:
                 raise AssertionError(
                     f"the row does not name the key that delivers: {row!r}\n"
                     f"--- rendered screen ---\n{s.dump()}"
