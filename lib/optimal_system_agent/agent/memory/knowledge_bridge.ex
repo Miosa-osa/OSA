@@ -31,6 +31,8 @@ defmodule OptimalSystemAgent.Agent.Memory.KnowledgeBridge do
 
   alias OptimalSystemAgent.Agent.Learning
 
+  @compile {:no_warn_undefined, OptimalSystemAgent.Agent.Learning}
+
   @sync_interval_ms 60_000
   @store_name "osa_default"
 

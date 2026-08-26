@@ -78,7 +78,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.AskUser.Tool do
   @impl true
   def open_world?(_input, _ctx), do: false
 
-  @impl true
   # Block — the agent loop must wait for the user's answer.
 
   # ── Flat-layout compatibility ─────────────────────────────────────────

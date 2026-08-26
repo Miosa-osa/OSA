@@ -25,8 +25,6 @@ defmodule OptimalSystemAgent.Channels.EmailChannel do
   alias OptimalSystemAgent.Agent.Loop
   alias OptimalSystemAgent.Channels.Delivery
 
-  @default_poll_interval 15_000
-
   defstruct [
     :imap_host,
     :imap_port,

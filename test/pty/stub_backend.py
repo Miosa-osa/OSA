@@ -18,13 +18,19 @@ agent behaviour it wants the real backend, not more code here.
 from __future__ import annotations
 
 import json
+import pathlib
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# Version reported on /health. The TUI only displays it, so any well-formed
-# string does; keeping it obviously fake makes a stray screenshot unambiguous.
-STUB_VERSION = "0.0.0-pty-stub"
+# Version reported on /health. The TUI compares it against its own version
+# and paints a multi-row "Version mismatch" banner when they differ, which
+# steals screen rows from the bands under test. Report the working tree's
+# real version (repo-root VERSION file, same source mix.exs reads) so the
+# banner stays off, like the `billing`/`update` nulls below.
+STUB_VERSION = (
+    (pathlib.Path(__file__).resolve().parents[2] / "VERSION").read_text().strip()
+)
 
 _HEALTH = {
     "status": "ok",
@@ -281,6 +287,20 @@ def hold_health() -> None:
 
 def release_health() -> None:
     _HEALTH_GATE.set()
+
+
+# Deliberately never a real release number; used by the stale-daemon test to
+# force the TUI's "Version mismatch" banner on demand.
+STALE_VERSION = "0.0.0-pty-stub"
+
+
+def report_stale_version() -> None:
+    """Make `/health` report a fake version, so the TUI sees a stale daemon."""
+    _HEALTH["version"] = STALE_VERSION
+
+
+def report_real_version() -> None:
+    _HEALTH["version"] = STUB_VERSION
 
 
 def hold_turn() -> None:

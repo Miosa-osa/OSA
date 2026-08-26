@@ -21,6 +21,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.Diff do
   alias OptimalSystemAgent.Tools.BoundedCmd
 
   @impl true
+  def available?, do: true
+
+  @impl true
   def safety, do: :read_only
 
   @impl true

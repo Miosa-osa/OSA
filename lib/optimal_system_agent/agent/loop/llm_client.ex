@@ -73,7 +73,6 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
   def capped_retry_delay_ms(_), do: 0
 
-
   # Map the session's speed priority to an OpenAI processing tier. Only OpenAI
   # honours `service_tier`; openai_compat gates it to that provider, so setting
   # it for any provider is safe (ignored elsewhere). :loose → "flex" (~50%
@@ -95,7 +94,6 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   end
 
   defp service_tier_for(_), do: nil
-
 
   defp retry_after_cap_ms do
     case Application.get_env(:optimal_system_agent, :retry_after_cap_ms, @retry_after_cap_ms) do
@@ -329,7 +327,11 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
   Returns {:ok, result} | {:error, reason}.
   """
-  def llm_chat_stream(%{session_id: session_id, provider: provider, model: model} = state, messages, opts) do
+  def llm_chat_stream(
+        %{session_id: session_id, provider: provider, model: model} = state,
+        messages,
+        opts
+      ) do
     Logger.debug(
       "[llm] stream — #{length(messages)} messages (sanitized): #{inspect(sanitize_for_log(messages))} session=#{session_id}"
     )
@@ -385,7 +387,6 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         if text != "" do
           emit_text_delta(text, session_id, message_id, heartbeat)
         end
-
 
       {:done, result} ->
         :atomics.add(heartbeat, 1, 1)

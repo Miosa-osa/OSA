@@ -407,9 +407,9 @@ defmodule OptimalSystemAgent.Providers.Resilience do
   end
 
   defp act_on(
-         {:emit_to_session, _reason},
+         {:emit_to_session, _reason_a},
          result,
-         _reason,
+         _reason_b,
          _fun,
          _attempt,
          _max,
@@ -422,7 +422,17 @@ defmodule OptimalSystemAgent.Providers.Resilience do
     result
   end
 
-  defp act_on({:fatal, _reason}, result, _reason, _fun, _attempt, _max, _opts, _oc, _stripped?) do
+  defp act_on(
+         {:fatal, _reason_a},
+         result,
+         _reason_b,
+         _fun,
+         _attempt,
+         _max,
+         _opts,
+         _oc,
+         _stripped?
+       ) do
     result
   end
 
