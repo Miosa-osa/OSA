@@ -143,6 +143,11 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
   defp inject(parent_id, ev, outcome) do
     role = Map.get(ev, :role, "background")
     agent_id = Map.get(ev, :agent_id, "unknown")
+    # Prefer the clean handle the event already carries (the stall path already
+    # does this) over the raw `agent:session-<ts>-<hash>:name` id, so the
+    # completion line reads "@backend-plan-enrollments" not the session gibberish.
+    # (agent_id is still the routing id used for task_id below, just not shown.)
+    name = Map.get(ev, :display_name) || role
     dur = Map.get(ev, :duration_ms)
     dur_str = if is_integer(dur), do: " after #{dur}ms", else: ""
 
@@ -151,12 +156,12 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
         :completed ->
           result = ev |> Map.get(:result, "") |> to_string() |> String.slice(0, 1000)
 
-          "Background agent '#{role}' (#{agent_id}) completed#{dur_str}: #{result}"
+          "Background agent @#{name} completed#{dur_str}: #{result}"
 
         :failed ->
           error = ev |> Map.get(:error, "unknown error") |> to_string() |> String.slice(0, 1000)
 
-          "Background agent '#{role}' (#{agent_id}) failed#{dur_str}: #{error}"
+          "Background agent @#{name} failed#{dur_str}: #{error}"
       end
 
     # WS7 — structured usage rendered as a compact string so the model reads

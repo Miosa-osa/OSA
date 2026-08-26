@@ -380,7 +380,9 @@ impl Agents {
                 let mut agent_type = if !entry.role.is_empty() {
                     entry.role.clone()
                 } else {
-                    entry.name.clone()
+                    // Never show the raw `agent:session-<ts>-<hash>:name` routing
+                    // key in the roster — compact it to the clean trailing handle.
+                    super::short_agent_label(&entry.name)
                 };
                 if !entry.active_skills.is_empty() {
                     agent_type.push_str(&format!(" [{}]", entry.active_skills.join(",")));
@@ -699,7 +701,7 @@ impl Agents {
                 }
                 // "  ↳ @agent wrote findings.md (2.1k)" — all dim, tucked under
                 // the agent rows.
-                let who = short_agent(&note.agent);
+                let who = super::short_agent_label(&note.agent);
                 let line_text = format!(
                     "  \u{21b3} @{} {} {} ({})",
                     who,
@@ -1157,14 +1159,6 @@ fn fmt_bytes(n: u64) -> String {
     } else {
         n.to_string()
     }
-}
-
-/// Compact a writer's session id for the scratchpad line. Worker session ids
-/// look like `agent:<parent>:1`; showing the trailing `<parent>:1` keeps the
-/// line short while still distinguishing teammates. Non-worker ids pass through.
-fn short_agent(agent: &str) -> String {
-    let trimmed = agent.strip_prefix("agent:").unwrap_or(agent);
-    truncate_str(trimmed, 18)
 }
 
 /// Shorten model names by stripping the "claude-" prefix.

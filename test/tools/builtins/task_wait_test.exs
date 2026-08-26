@@ -143,6 +143,24 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWaitTest do
       assert text =~ "still running"
     end
 
+    test "on timeout, it says TIMED OUT, tells the coordinator NOT to re-wait, and uses clean names" do
+      RunStore.start_run(%{agent_id: "agent:session-123-abc:frontend-billing-fixes", parent_session_id: "p", role: "frontend"})
+
+      {:ok, text} =
+        Handler.execute(
+          %{"agent_ids" => ["agent:session-123-abc:frontend-billing-fixes"], "timeout_ms" => 200},
+          ctx("p")
+        )
+
+      # It is a timeout, framed as healthy-not-failed with explicit no-re-wait guidance.
+      assert text =~ "TIMED OUT"
+      assert text =~ "do NOT wait on them again"
+      assert text =~ "automatically"
+      # Clean handle, never the raw agent:session-<ts>-<hash> gibberish.
+      assert text =~ "frontend-billing-fixes"
+      refute text =~ "### agent:session-123-abc:frontend-billing-fixes"
+    end
+
     test "an unknown agent id does not block the join and is reported clearly" do
       {:ok, text} = Handler.execute(%{"agent_ids" => ["agent:p:ghost"]}, ctx("p"))
       assert text =~ "No run found"

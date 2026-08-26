@@ -26,7 +26,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
   alias OptimalSystemAgent.Tools.UseContext
 
   @terminal_statuses [:completed, :failed, :cancelled]
-  @default_timeout_ms 600_000
+  # Real subagents routinely run far longer than the old 10-minute default, so
+  # that default spuriously "timed out" on perfectly healthy agents and drove
+  # the coordinator into re-issuing task_wait over and over (a wasteful poll
+  # loop that also reads as broken). 30 minutes matches the stream idle backstop
+  # and covers the large majority of jobs in a single call; a caller with a
+  # known-longer horizon still passes an explicit `timeout_ms`, and the timeout
+  # branch below no longer treats a still-running agent as a dead end.
+  @default_timeout_ms 1_800_000
   @poll_interval_ms 500
 
   # ── Stage 1: Input validation ──────────────────────────────────────────
@@ -124,22 +131,42 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
 
   defp format_results(agent_ids, runs, require_all) do
     sections = Enum.map(agent_ids, &format_one(&1, Map.get(runs, &1)))
-
     mode = if require_all, do: "ALL", else: "ANY"
 
+    still_running =
+      agent_ids
+      |> Enum.filter(fn id -> match?(%{status: :running}, Map.get(runs, id)) end)
+
     header =
-      "Join-barrier wait finished (mode=#{mode}) for #{length(agent_ids)} agent(s):"
+      if still_running == [] do
+        "Join-barrier wait finished (mode=#{mode}) for #{length(agent_ids)} agent(s):"
+      else
+        # Timed out with work still in flight. This is NOT a failure and the
+        # coordinator must NOT re-issue task_wait — background completion is
+        # delivered automatically as a task-notification. Say so explicitly, or
+        # the model falls back into the 10-minute re-poll loop this fix removes.
+        "Join-barrier TIMED OUT with #{length(still_running)} of #{length(agent_ids)} " <>
+          "agent(s) still running: #{Enum.map_join(still_running, ", ", &short_name/1)}. " <>
+          "They are healthy, not failed — do NOT wait on them again. Their results will be " <>
+          "delivered to you automatically when they finish; continue with other work now."
+      end
 
     Enum.join([header | sections], "\n\n")
   end
 
+  # Clean, human handle for a subagent id: the trailing name segment of
+  # `agent:session-<ts>-<hash>:name`, never the raw session gibberish.
+  defp short_name(id) when is_binary(id), do: id |> String.split(":") |> List.last()
+  defp short_name(id), do: to_string(id)
+
   defp format_one(id, nil) do
-    "### #{id}\nNo run found for this agent id — nothing to join on."
+    "### #{short_name(id)}\nNo run found for this agent id — nothing to join on."
   end
 
   defp format_one(id, %{status: :running} = run) do
-    "### #{id} (#{run.role}) — still running (timed out waiting)\n" <>
-      "Latest progress: #{Enum.join(run.recent_actions, "; ")}"
+    "### #{short_name(id)} (#{run.role}) — still running\n" <>
+      "Latest progress: #{Enum.join(run.recent_actions, "; ")}\n" <>
+      "(Not finished yet — its completion will be delivered automatically; do not re-wait.)"
   end
 
   defp format_one(id, run) do
@@ -152,7 +179,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
     resumed_note =
       if Map.get(run, :resumed_from), do: " (resumed_from=#{run.resumed_from})", else: ""
 
-    "### #{id} (#{run.role})#{resumed_note} — #{run.status}\n#{summary}"
+    "### #{short_name(id)} (#{run.role})#{resumed_note} — #{run.status}\n#{summary}"
   end
 
   defp parse_timeout_ms(nil), do: nil
