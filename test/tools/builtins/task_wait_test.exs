@@ -166,6 +166,53 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWaitTest do
       assert text =~ "No run found"
     end
 
+    test "a bare short name resolves to its full child id and joins" do
+      RunStore.start_run(%{
+        agent_id: "agent:cx1:frontend-audit",
+        parent_session_id: "cx1",
+        role: "worker"
+      })
+
+      RunStore.complete("agent:cx1:frontend-audit", %{status: :completed, summary: "audit done"})
+
+      # Model re-issues the bare name (not the full agent:<parent>:<name> id it
+      # was handed) — it must still join, not dead-end.
+      {:ok, text} = Handler.execute(%{"agent_ids" => ["frontend-audit"]}, ctx("cx1"))
+
+      assert text =~ "audit done"
+      refute text =~ "No run found"
+    end
+
+    test "an id with stray array punctuation still resolves" do
+      RunStore.start_run(%{
+        agent_id: "agent:cx2:api-audit",
+        parent_session_id: "cx2",
+        role: "worker"
+      })
+
+      RunStore.complete("agent:cx2:api-audit", %{status: :completed, summary: "api ok"})
+
+      # Mis-parsed array element leaked a trailing `"]` — normalize and resolve.
+      {:ok, text} = Handler.execute(%{"agent_ids" => ["api-audit\"]"]}, ctx("cx2"))
+
+      assert text =~ "api ok"
+    end
+
+    test "an unknown id lists the caller's live agents so the model can self-correct" do
+      RunStore.start_run(%{
+        agent_id: "agent:cx3:live-one",
+        parent_session_id: "cx3",
+        role: "worker"
+      })
+
+      {:ok, text} =
+        Handler.execute(%{"agent_ids" => ["totally-bogus"], "timeout_ms" => 100}, ctx("cx3"))
+
+      assert text =~ "No run found for 'totally-bogus'"
+      assert text =~ "Live agents you can join on"
+      assert text =~ "live-one"
+    end
+
     test "deregisters the blocked-wait entry after completion (no leak)" do
       RunStore.start_run(%{agent_id: "agent:p:leak", parent_session_id: "p", role: "worker"})
       RunStore.complete("agent:p:leak", %{status: :completed, summary: "ok"})

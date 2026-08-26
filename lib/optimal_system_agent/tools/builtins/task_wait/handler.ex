@@ -88,11 +88,22 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
     timeout_ms = parse_timeout_ms(Map.get(input, "timeout_ms")) || default_timeout_ms()
     deadline = System.monotonic_time(:millisecond) + timeout_ms
 
+    # The launch notice hands the model the full `agent:<parent>:<name>` id, but
+    # in practice it often re-issues a bare `<name>` (or one with a stray `"]`
+    # from a mis-parsed array). A bare name never matches `RunStore.get/1`, so
+    # the join dead-ended as "No run found" and the coordinator looped on the
+    # same bad guess. Resolve each requested id against THIS caller's children —
+    # exact match first, else a unique short-name match — so a bare name joins
+    # on its real run. Unresolvable ids fall through unchanged and get the live
+    # id list appended (below) so the model can self-correct instead of looping.
+    children = RunStore.children_of(caller_id)
+    resolved_ids = Enum.map(agent_ids, &resolve_id(&1, children))
+
     Depth.enter(caller_id)
 
     try do
-      runs = poll(agent_ids, require_all, deadline)
-      {:ok, format_results(agent_ids, runs, require_all)}
+      runs = poll(resolved_ids, require_all, deadline)
+      {:ok, format_results(resolved_ids, runs, require_all, children)}
     after
       Depth.exit_wait(caller_id)
     end
@@ -132,8 +143,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
   defp terminal?(%{status: status}), do: status in @terminal_statuses
   defp terminal?(_), do: true
 
-  defp format_results(agent_ids, runs, require_all) do
-    sections = Enum.map(agent_ids, &format_one(&1, Map.get(runs, &1)))
+  defp format_results(agent_ids, runs, require_all, children) do
+    sections = Enum.map(agent_ids, &format_one(&1, Map.get(runs, &1), children))
     mode = if require_all, do: "ALL", else: "ANY"
 
     still_running =
@@ -162,17 +173,47 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
   defp short_name(id) when is_binary(id), do: id |> String.split(":") |> List.last()
   defp short_name(id), do: to_string(id)
 
-  defp format_one(id, nil) do
-    "### #{short_name(id)}\nNo run found for this agent id — nothing to join on."
+  # Resolve a requested id to the canonical RunStore id. Exact match wins;
+  # otherwise a UNIQUE short-name match against this caller's children resolves
+  # a bare `<name>` to its full `agent:<parent>:<name>`. A stray-char id (e.g.
+  # `name"]` from a mis-parsed array) is normalized before matching. Ambiguous
+  # or genuinely unknown ids return unchanged so `format_one/3` lists the real
+  # ids instead of silently joining the wrong agent.
+  defp resolve_id(requested, children) when is_binary(requested) do
+    cond do
+      requested in children ->
+        requested
+
+      true ->
+        want = normalize_name(short_name(requested))
+
+        case Enum.filter(children, fn c -> normalize_name(short_name(c)) == want end) do
+          [only] -> only
+          _ -> requested
+        end
+    end
   end
 
-  defp format_one(id, %{status: :running} = run) do
+  defp resolve_id(requested, _children), do: requested
+
+  # Strip surrounding whitespace and stray array/quote punctuation a model
+  # sometimes leaks into an id element (`"name"`, `name"]`, `[name`).
+  defp normalize_name(s) when is_binary(s),
+    do: String.replace(s, ~r/^[\s"'\[\]]+|[\s"'\[\]]+$/, "")
+
+  defp normalize_name(s), do: to_string(s)
+
+  defp format_one(id, nil, children) do
+    "### #{short_name(id)}\n" <> no_run_hint(id, children)
+  end
+
+  defp format_one(id, %{status: :running} = run, _children) do
     "### #{short_name(id)} (#{run.role}) — still running\n" <>
       "Latest progress: #{Enum.join(run.recent_actions, "; ")}\n" <>
       "(Not finished yet — its completion will be delivered automatically; do not re-wait.)"
   end
 
-  defp format_one(id, run) do
+  defp format_one(id, run, _children) do
     summary =
       case run.result do
         %{summary: s} when is_binary(s) and s != "" -> s
@@ -183,6 +224,27 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
       if Map.get(run, :resumed_from), do: " (resumed_from=#{run.resumed_from})", else: ""
 
     "### #{short_name(id)} (#{run.role})#{resumed_note} — #{run.status}\n#{summary}"
+  end
+
+  # Dead end → self-correcting hint. Instead of "nothing to join on", name the
+  # caller's actual live agents so the model re-issues with a real id (or just
+  # continues) rather than looping on the same bad guess.
+  defp no_run_hint(id, children) do
+    case children do
+      [] ->
+        "No run found for '#{short_name(id)}', and this session has no background agents " <>
+          "to join on. Continue — any completions are delivered automatically."
+
+      _ ->
+        list =
+          children
+          |> Enum.map(fn c -> "#{short_name(c)} (#{c})" end)
+          |> Enum.join(", ")
+
+        "No run found for '#{short_name(id)}'. Live agents you can join on: #{list}. " <>
+          "Re-issue task_wait with one of these ids, or just continue — background " <>
+          "completions are delivered automatically."
+    end
   end
 
   defp parse_timeout_ms(nil), do: nil
