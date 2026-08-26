@@ -2770,15 +2770,22 @@ impl Component for InputComponent {
                     // keeps "sends when this turn ends" — the half that fixed
                     // the "typing appeared to do nothing" report — instead of
                     // losing the whole row's explanation to a longer sentence.
-                    let hint = if fits(QUEUED_HINT_FULL) {
-                        Some(QUEUED_HINT_FULL)
-                    } else if fits(QUEUED_HINT_MID) {
-                        Some(QUEUED_HINT_MID)
-                    } else if fits(QUEUED_HINT_SHORT) {
-                        Some(QUEUED_HINT_SHORT)
+                    //
+                    // The FULL form is the only one that names `alt+enter`, and
+                    // alt+enter only reaches OSA on kitty-protocol terminals —
+                    // elsewhere (GNOME Terminal etc.) it is bound to fullscreen
+                    // or collapses to a bare Enter. So only OFFER the alt+enter
+                    // tier when the protocol is actually active; otherwise the
+                    // widest form is MID ("enter again sends it now"), the
+                    // portable gesture that works on every terminal. Advertising
+                    // a key that does nothing here is the exact defect this row
+                    // has been bitten by before.
+                    let candidates: &[&str] = if self.kbd_enhanced {
+                        &[QUEUED_HINT_FULL, QUEUED_HINT_MID, QUEUED_HINT_SHORT]
                     } else {
-                        None
+                        &[QUEUED_HINT_MID, QUEUED_HINT_SHORT]
                     };
+                    let hint = candidates.iter().copied().find(|h| fits(h));
                     if let Some(hint) = hint {
                         spans.push(Span::styled(hint.to_string(), theme.recede()));
                     }
@@ -5022,6 +5029,35 @@ mod queued_affordance {
     /// into the running turn over the mid-turn steer path, without ending it.
     /// The interrupt keeps its own key on its own surface (the spinner's "esc
     /// to interrupt"), so this row never advertises two meanings for one press.
+    #[test]
+    fn alt_enter_is_only_advertised_when_the_protocol_supports_it() {
+        // Non-kitty terminal (kbd_enhanced=false, the default): the row must
+        // NOT name alt+enter (it fullscreens / collapses there) — it names the
+        // portable "enter again" gesture instead.
+        let mut plain = InputComponent::new();
+        plain.set_queued_items(vec!["check the god files".into()]);
+        let row_plain = render_row(&plain, 140);
+        assert!(!row_plain.contains("alt+enter"), "plain terminal must not name alt+enter: {row_plain:?}");
+        assert!(row_plain.contains("enter again"), "plain terminal must name the portable gesture: {row_plain:?}");
+
+        // Kitty-protocol terminal: alt+enter DOES reach OSA, so the full form
+        // may name it (alongside the portable gesture).
+        let mut kitty = InputComponent::new();
+        kitty.set_kbd_enhanced(true);
+        kitty.set_queued_items(vec!["check the god files".into()]);
+        let row_kitty = render_row(&kitty, 140);
+        assert!(row_kitty.contains("alt+enter"), "kitty terminal should offer alt+enter: {row_kitty:?}");
+        assert!(row_kitty.contains("enter again"), "portable gesture stays named too: {row_kitty:?}");
+    }
+
+    fn render_row(input: &InputComponent, width: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, 10);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| input.draw(f, ratatui::layout::Rect::new(0, 0, width, 10))).expect("draw");
+        let buf = term.backend().buffer().clone();
+        (0..width).map(|x| buf[(x, 0)].symbol().to_string()).collect::<String>()
+    }
+
     #[test]
     fn the_named_key_is_the_one_that_delivers() {
         let row = queued_row_text(vec!["check the god files"], 140);

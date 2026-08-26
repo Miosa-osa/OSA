@@ -525,22 +525,72 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
 
   # ── Notes ──────────────────────────────────────────────────────────────
 
-  defp do_note_create(session_id, %{"key" => key, "note" => note_data}) do
-    with {:ok, _} <- NotesStore.ensure_started(session_id) do
-      data = normalize_note_data(note_data)
+  defp do_note_create(session_id, input) do
+    key = Map.get(input, "key")
+    note_data = extract_note_data(input)
 
-      case NotesStore.put(session_id, key, data) do
-        {:ok, note} ->
-          {:ok, format_note(note)}
+    cond do
+      not (is_binary(key) and key != "") ->
+        {:error,
+         note_create_usage(
+           "is missing 'key' (a short unique id for this note, e.g. \"xss-embed-page\")"
+         )}
 
-        {:error, reason} ->
-          {:error, reason}
-      end
+      map_size(note_data) == 0 ->
+        {:error,
+         note_create_usage(
+           "is missing the note body — pass a 'note' object (or the note fields at the top " <>
+             "level), and it must include 'category'"
+         )}
+
+      true ->
+        with {:ok, _} <- NotesStore.ensure_started(session_id) do
+          data = normalize_note_data(note_data)
+
+          case NotesStore.put(session_id, key, data) do
+            {:ok, note} -> {:ok, format_note(note)}
+            # A validation failure is the model's cue to fix the note, so append
+            # the category cheat-sheet — the single most common cause is picking
+            # the wrong category (an XSS is a `vulnerability`, not a `finding`).
+            {:error, reason} -> {:error, "#{reason}\n\n#{category_cheatsheet()}"}
+          end
+        end
     end
   end
 
-  defp do_note_create(_session_id, _input) do
-    {:error, "note_create requires 'key' and 'note' parameters"}
+  # The note fields, whether the model nested them under `note` (canonical) or
+  # flattened them to the top level (its frequent second guess after the schema
+  # rejects a bad shape). Accepting both is what stops the create→error→retry
+  # loop the tool used to trap models in.
+  @note_fields ~w(category content target source username password protocol port cve url
+                  evidence_path confidence status services endpoints technologies weaknesses
+                  affected_versions metadata)
+
+  defp extract_note_data(input) do
+    case Map.get(input, "note") do
+      note when is_map(note) and map_size(note) > 0 -> note
+      _ -> Map.take(input, @note_fields)
+    end
+  end
+
+  defp note_create_usage(problem) do
+    "note_create #{problem}.\n\n" <>
+      "Shape: {\"action\":\"note_create\",\"key\":\"<unique-id>\"," <>
+      "\"note\":{\"category\":\"<credential|vulnerability|finding|artifact|info>\", ...}}\n\n" <>
+      category_cheatsheet()
+  end
+
+  defp category_cheatsheet do
+    """
+    Category cheat-sheet — pick by WHAT you are recording:
+      - vulnerability  code/web vulns (XSS, SQLi, RCE, auth bypass, IDOR, SSRF): needs target + one of cve|weaknesses
+      - finding        host/service enumeration (open ports, running services): needs target + one of services|endpoints|technologies|port
+      - credential     creds: needs username + target + one of password|protocol
+      - artifact       a captured file/output: needs target
+      - info           freeform note: no required fields
+    Example (an XSS you found):
+      {"action":"note_create","key":"xss-embed-176","note":{"category":"vulnerability","target":"https://app/embed","weaknesses":["XSS"],"content":"@html sink at embed/+page.svelte:177","confidence":"high","status":"confirmed"}}\
+    """
   end
 
   defp do_note_get(session_id, %{"key" => key}) do
@@ -663,42 +713,60 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
   # ── TDA ─────────────────────────────────────────────────────────────────
 
   defp do_whitebox_scan(session_id, input) do
-    wb = Map.get(input, "whitebox", %{})
-    content = Map.get(wb, "content")
+    wb = case Map.get(input, "whitebox") do
+      m when is_map(m) -> m
+      _ -> %{}
+    end
 
-    classes =
-      case Map.get(wb, "vuln_classes") do
-        list when is_list(list) and list != [] ->
-          Enum.map(list, &safe_atom/1) |> Enum.filter(&(&1 in CallChainAnalyzer.vuln_classes()))
+    # Accept the entry file's source (and its siblings) either nested under
+    # `whitebox` — canonical — or at the top level. A model that calls
+    # whitebox_scan with a bare `content` should scan, not dead-end on nesting.
+    content = Map.get(wb, "content") || Map.get(input, "content")
 
-        _ ->
-          CallChainAnalyzer.vuln_classes()
-      end
+    if not (is_binary(content) and content != "") do
+      {:error,
+       "content is required for whitebox_scan: pass the entry file's source. " <>
+         "Shape: {\"action\":\"whitebox_scan\",\"whitebox\":{\"entry\":\"path/to/file\"," <>
+         "\"content\":\"<file source>\"}} (entry/content may also be passed at the top level)."}
+    else
+      classes =
+        case Map.get(wb, "vuln_classes") || Map.get(input, "vuln_classes") do
+          list when is_list(list) and list != [] ->
+            Enum.map(list, &safe_atom/1) |> Enum.filter(&(&1 in CallChainAnalyzer.vuln_classes()))
 
-    mode =
-      case Map.get(wb, "mode") || Map.get(input, "mode") do
-        "legacy" -> :legacy
-        :legacy -> :legacy
-        _ -> :per_class
-      end
+          _ ->
+            CallChainAnalyzer.vuln_classes()
+        end
 
-    root = Map.get(wb, "root") || Map.get(input, "root")
+      mode =
+        case Map.get(wb, "mode") || Map.get(input, "mode") do
+          "legacy" -> :legacy
+          :legacy -> :legacy
+          _ -> :per_class
+        end
 
-    reader =
-      if is_binary(root) and File.dir?(root) do
-        SymbolResolver.reader(root)
-      else
-        fn _ -> :not_found end
-      end
+      root = Map.get(wb, "root") || Map.get(input, "root")
 
-    opts = [
-      entry: Map.get(wb, "entry", "<entry>"),
-      content: content,
-      vuln_classes: classes,
-      mode: mode,
-      reader: reader
-    ]
+      reader =
+        if is_binary(root) and File.dir?(root) do
+          SymbolResolver.reader(root)
+        else
+          fn _ -> :not_found end
+        end
 
+      opts = [
+        entry: Map.get(wb, "entry") || Map.get(input, "entry") || "<entry>",
+        content: content,
+        vuln_classes: classes,
+        mode: mode,
+        reader: reader
+      ]
+
+      do_whitebox_analyze(session_id, opts)
+    end
+  end
+
+  defp do_whitebox_analyze(session_id, opts) do
     case CallChainAnalyzer.analyze(opts) do
       {:ok, []} ->
         {:ok,
