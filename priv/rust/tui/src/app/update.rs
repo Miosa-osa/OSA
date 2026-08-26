@@ -1212,6 +1212,15 @@ impl App {
     // `pub(super)` so the inline ask_user band's Ctrl+C path can decline the
     // question and then fall through to the normal interrupt handling.
     pub(super) fn handle_processing_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        // Was an interrupt armed BEFORE this key? Captured up front because the
+        // non-Esc reset below clears it. A bare Enter that is DISARMING an armed
+        // interrupt (a deliberate Esc-then-Enter, or a split Alt+Enter that
+        // arrived as Esc+Enter) must stay HARMLESS — it only disarms, it does
+        // NOT trigger send-now. Only a CLEAN bare Enter (nothing armed) is a
+        // real send-now gesture. This is what keeps the portable Enter path from
+        // colliding with the ambiguous split-chord case.
+        let interrupt_was_armed = self.activity.is_interrupt_armed();
+
         // NOTE: vim does NOT get Esc first-refusal while Processing — Esc must
         // interrupt the running turn ("esc to interrupt"). Non-Esc Normal-mode
         // motions still reach the composer via the `_` fall-through arm below
@@ -1358,6 +1367,21 @@ impl App {
             // mismatch as one that does not work where it is.
             (KeyCode::Enter, m)
                 if m.contains(KeyModifiers::ALT) && !self.message_queue.is_empty() =>
+            {
+                self.send_queued_now();
+                false
+            }
+            // Portable send-now (works on EVERY terminal, no kitty protocol):
+            // a CLEAN bare Enter on an empty composer, with messages queued,
+            // delivers them into the running turn — same action as Alt+Enter,
+            // for terminals where Alt+Enter collapses to a bare Enter. Gated on
+            // `!interrupt_was_armed` so a split Alt+Enter (Esc+Enter) or a
+            // deliberate Esc-then-Enter stays harmless (it only disarmed above);
+            // and on an EMPTY composer so typed text still queues as before.
+            (KeyCode::Enter, KeyModifiers::NONE)
+                if !interrupt_was_armed
+                    && self.input.is_empty()
+                    && !self.message_queue.is_empty() =>
             {
                 self.send_queued_now();
                 false

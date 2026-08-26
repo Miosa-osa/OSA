@@ -2453,15 +2453,7 @@ impl Component for InputComponent {
                         }
 
                         if self.content.trim().is_empty() {
-                            // Empty Enter is no longer swallowed: emit an empty
-                            // Submit so the app can treat it as a PORTABLE
-                            // send-now — press Enter on an empty composer while a
-                            // turn is running with messages queued and they fold
-                            // into the live turn. Works on EVERY terminal (no
-                            // modifier, no kitty protocol), unlike Alt+Enter.
-                            // With no queue / no active turn, `submit_input`
-                            // no-ops on empty exactly as before.
-                            return ComponentAction::Emit(AppAction::Submit(String::new()));
+                            return ComponentAction::Consumed;
                         }
                         let text = self.submit();
                         return ComponentAction::Emit(AppAction::Submit(text));

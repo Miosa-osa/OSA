@@ -608,16 +608,6 @@ impl App {
     pub fn submit_input(&mut self, text: &str) {
         let text = text.trim();
         if text.is_empty() {
-            // Portable send-now: pressing Enter on an EMPTY composer while a
-            // turn is running with messages queued flushes them into the live
-            // turn — the same action as Alt+Enter, but with no modifier and no
-            // kitty protocol, so it works on every terminal (Terminal.app,
-            // conhost, VS Code, tmux/SSH). With nothing queued or no active
-            // turn it stays a no-op, exactly as before.
-            if self.turn_is_active() && !self.message_queue.is_empty() {
-                self.send_queued_now();
-            }
-
             return;
         }
 
