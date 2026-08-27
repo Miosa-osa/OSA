@@ -71,6 +71,18 @@ defmodule OptimalSystemAgent.Agent.Loop.SteerTest do
       assert msg.content =~ "User steer"
       assert msg.content =~ "do X instead"
     end
+
+    test "to_messages/1 framing forbids deferring the steer to the end of the turn" do
+      # A model with momentum used to finish its whole plan and only acknowledge
+      # the steer at the end. The framing must name and forbid that failure so the
+      # steer is acted on mid-flight, not treated as a closing note.
+      [msg] = Steer.to_messages(["switch to the billing bug"])
+
+      content = String.downcase(msg.content)
+      assert content =~ "before your very next action"
+      assert content =~ "do not finish"
+      assert content =~ "change course"
+    end
   end
 
   describe "Loop mid-turn injection mechanism" do
