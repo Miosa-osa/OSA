@@ -813,7 +813,7 @@ impl App {
         // chat: on failure the SendNowFailed path re-queues it, and the toast
         // says it will run when the turn ends, so the echo is never a lie.
         for text in &items {
-            self.chat.add_user_message(text);
+            self.chat.add_midturn_user_message(text);
         }
         self.input.set_queued_items(Vec::new());
         self.activity.set_queued(0);

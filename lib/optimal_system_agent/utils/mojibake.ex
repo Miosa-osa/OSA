@@ -73,8 +73,11 @@ defmodule OptimalSystemAgent.Utils.Mojibake do
       cps
       |> Enum.with_index()
       |> Enum.reverse()
-      |> Enum.reduce_while(len, fn {cp, idx}, _acc ->
-        if cp in @marker_cps or continuation?(cp), do: {:cont, idx}, else: {:halt, len}
+      |> Enum.reduce_while(len, fn {cp, idx}, acc ->
+        # Halt with the ACCUMULATOR (the start of the trailing run seen so far),
+        # not `len` — returning `len` here discarded the run and made the hold-back
+        # dead whenever the mojibake was preceded by ordinary text ("hello â…").
+        if cp in @marker_cps or continuation?(cp), do: {:cont, idx}, else: {:halt, acc}
       end)
 
     if run_start == len do

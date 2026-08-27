@@ -615,17 +615,24 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # and guard-safe (no function calls in guards) because the value is
   # normalized before dispatch rather than during it.
   defp canonicalize_stop_reason({:ok, resp}, state, usage) when is_map(resp) do
-    # The truncation excuse is ONLY for a generation cut off mid-output — a
-    # model writing a long answer that hit the ceiling. An *empty* generation
-    # (no visible content, no tool call) that reports a ceiling stop reason
-    # produced nothing to cut off; treating it as truncated makes the
-    # reasoning-only guard suppress it (a truncation "is neither progress nor a
-    # spin"), so a model that returns empty+`length` every time — observed on
-    # the OpenRouter reasoning models, which burn the output budget on hidden
-    # reasoning and return no visible content — spins forever, never counted,
-    # never halted. An empty generation is a spin regardless of why it stopped,
-    # so it must NOT get the truncation pass.
-    if StopReason.truncated?(resp) and not empty_generation?(resp) do
+    # A ceiling stop reason (Anthropic "max_tokens" / OpenAI-compat "length" /
+    # Gemini "MAX_TOKENS" / …) routes into the BOUNDED recovery below (the
+    # handle_result max_tokens clauses): up to two budget-doubling retries, then
+    # a terminal INCOMPLETE / no-answer message.
+    #
+    # This now covers the EMPTY case too — a reasoning model (grok-4.6, the
+    # OpenRouter reasoners) that burns its whole output budget on hidden
+    # reasoning and returns no visible content. That case used to be excluded
+    # here so the reasoning-only doom-loop guard would count it — but in an
+    # ATTENDED session that guard's halt is suppressed, so an empty+`length`
+    # generation nudge-looped forever at the same starved budget (reported:
+    # "grok thinks for a bit then just stops"). Routing it through the bounded
+    # recovery raises the ceiling (the model may then have room to answer) and,
+    # failing that, terminates with an honest message — a halt that the
+    # suppression cannot defeat, and which the empty-aware branches in the
+    # max_tokens clauses tailor for "no answer produced". Content-ful truncation
+    # (a long answer cut off mid-output) is unchanged.
+    if StopReason.truncated?(resp) do
       raw = StopReason.raw(resp) || "unknown"
       output_tokens = Map.get(usage || %{}, :output_tokens, 0)
 
@@ -685,20 +692,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
   defp canonicalize_stop_reason(result, state, _usage), do: {result, state}
 
-  # A generation that produced no visible content AND no tool call. Such a
-  # generation cannot have been "cut off mid-answer" — there is no answer to cut
-  # — so it is never a legitimate output-ceiling truncation, and the
-  # reasoning-only doom-loop guard must be allowed to count it.
-  defp empty_generation?(resp) when is_map(resp) do
-    content = Map.get(resp, :content) || Map.get(resp, "content")
-    tool_calls = Map.get(resp, :tool_calls) || Map.get(resp, "tool_calls") || []
-
-    blank_content? = is_nil(content) or String.trim(to_string(content)) == ""
-    blank_content? and (tool_calls == [] or is_nil(tool_calls))
-  end
-
-  defp empty_generation?(_), do: false
-
   # Max tokens recovery — response was truncated, bump limit and retry.
   #
   # GUARD (finding-1 data-loss fix): only handle the no-tool-call truncation
@@ -734,19 +727,38 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       iteration: state.iteration
     })
 
-    # Inject the partial response so the model can continue from where it left off
+    # Inject the continuation directive. Two shapes: a partial answer gets
+    # replayed so the model resumes from it; an EMPTY generation (a reasoning
+    # model that spent the whole budget thinking and produced no content) has
+    # nothing to resume — replaying an empty assistant message would also break
+    # role-alternation on stricter providers — so it gets only a budget-raise
+    # directive telling it to answer within the larger ceiling and keep its
+    # internal reasoning brief.
+    injected =
+      if String.trim(to_string(content)) == "" do
+        [
+          %{
+            role: "system",
+            content:
+              "[Your previous attempt reached the output-token limit while reasoning and " <>
+                "produced no answer. The output budget has been raised to #{bumped}. Give your " <>
+                "answer now, and keep internal reasoning brief so it fits.]"
+          }
+        ]
+      else
+        [
+          %{role: "assistant", content: content},
+          %{
+            role: "system",
+            content:
+              "[Your previous response was truncated due to length. Continue from where you left off.]"
+          }
+        ]
+      end
+
     state = %{
       state
-      | messages:
-          state.messages ++
-            [
-              %{role: "assistant", content: content},
-              %{
-                role: "system",
-                content:
-                  "[Your previous response was truncated due to length. Continue from where you left off.]"
-              }
-            ],
+      | messages: state.messages ++ injected,
         overflow_retries: state.overflow_retries + 1,
         iteration: state.iteration + 1
     }
@@ -800,11 +812,21 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     })
 
     marked =
-      String.trim_trailing(content) <>
-        "\n\n[INCOMPLETE: this response was cut off at the output-token limit " <>
-        "(#{max_response_tokens()} tokens, provider stop reason `#{raw}`) after " <>
-        "#{state.overflow_retries} continuation attempt(s). It is a fragment, not a " <>
-        "finished answer, and any task it describes should be assumed unfinished.]"
+      if String.trim(content) == "" do
+        # Reasoning-exhausted: no partial answer to hand back. Say WHY there is
+        # nothing, and how to fix it, instead of the silent "..." + nudge-spin
+        # this case used to fall into.
+        "[INCOMPLETE: the model used its entire #{max_response_tokens()}-token output " <>
+          "budget on internal reasoning and produced no answer (provider stop reason " <>
+          "`#{raw}`) after #{state.overflow_retries} continuation attempt(s). Lower the " <>
+          "reasoning effort (e.g. turn thinking off) or raise the output-token cap, then retry.]"
+      else
+        String.trim_trailing(content) <>
+          "\n\n[INCOMPLETE: this response was cut off at the output-token limit " <>
+          "(#{max_response_tokens()} tokens, provider stop reason `#{raw}`) after " <>
+          "#{state.overflow_retries} continuation attempt(s). It is a fragment, not a " <>
+          "finished answer, and any task it describes should be assumed unfinished.]"
+      end
 
     finish_turn(marked, state)
   end

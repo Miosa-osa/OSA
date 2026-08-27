@@ -399,6 +399,17 @@ impl Chat {
         self.turn_output_mark = self.emitted;
     }
 
+    /// Echo a user message injected MID-TURN (a send-now steer) into the
+    /// transcript. Unlike [`add_user_message`], this does NOT open a new turn or
+    /// re-arm the per-turn output mark: the turn is already running, and
+    /// re-arming would make output the agent has already produced stop counting,
+    /// so a later empty `agent_response` would misclassify as a silent turn and
+    /// print a spurious "turn ended with no answer" notice.
+    pub fn add_midturn_user_message(&mut self, content: &str) {
+        self.last_user_text = Some(content.to_string());
+        self.push_scrollback_block(Message::new(MessageType::User, content.to_string(), None));
+    }
+
     pub fn add_agent_message(&mut self, content: &str, signal: Option<&Signal>) {
         self.last_agent_text = Some(content.to_string());
         let mut msg = Message::new(

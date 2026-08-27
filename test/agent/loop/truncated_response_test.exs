@@ -147,6 +147,27 @@ defmodule OptimalSystemAgent.Agent.Loop.TruncatedResponseTest do
 
       assert OptimalSystemAgent.Observability.truncation_count(state) > 0
     end
+
+    test "an EMPTY reasoning-exhausted generation ends with a clear no-answer message, not a spin" do
+      # grok-4.6 shape (reported "it thinks for a bit then just stops"): the
+      # model burns its whole output budget on hidden reasoning and returns
+      # empty content + a ceiling stop reason. It must NOT nudge-loop forever —
+      # it must attempt recovery with a larger budget and then terminate with an
+      # actionable message naming the cause.
+      {response, state, n} = run_with("", "length")
+
+      assert is_binary(response)
+      assert response =~ "INCOMPLETE"
+      assert response =~ "reasoning", "the message must name the reasoning-budget cause"
+      assert response =~ "length", "the message must name the provider's own stop reason"
+      refute String.trim(response) == "...", "the empty answer must not be masked as '...'"
+
+      # Bounded: it continued (bigger budget) but did not spin to the iteration cap.
+      assert n > 1 and n <= 4,
+             "an empty+length generation must be bounded; the loop made #{n} round-trips"
+
+      assert Map.get(state, :truncations, 0) > 0
+    end
   end
 
   # ── The control ───────────────────────────────────────────────────────────
