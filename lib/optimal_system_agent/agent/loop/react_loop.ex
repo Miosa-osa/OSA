@@ -1202,7 +1202,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       # nudge for concrete progress and loop; at it we stop with an honest handoff
       # rather than burning the budget in thought.
       visible_empty? ->
-        case DoomLoop.ReasoningOnly.check([], state) do
+        # Tell the guard this generation produced NO visible content, so it is
+        # not mistaken for a conversation and suppressed in an attended session
+        # (the "grok thinks then just stops" nudge-spin). The flag is one-shot —
+        # `check/2` clears it.
+        case DoomLoop.ReasoningOnly.check([], Map.put(state, :generation_empty, true)) do
           {:halt, msg, state} ->
             Bus.emit(:system_event, %{
               event: :reasoning_only_halt,
