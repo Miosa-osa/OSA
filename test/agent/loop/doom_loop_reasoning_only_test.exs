@@ -168,6 +168,45 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.ReasoningOnlyTest do
     end
   end
 
+  # ── An EMPTY generation is a spin even in a conversation / attended session ──
+  #
+  # LIVE REPORT: grok-4.6 with thinking on "thinks for a bit then just stops" —
+  # it returns NO visible content and no tool call. In an attended TUI the
+  # conversational/attended suppression above kept the halt from firing, so it
+  # nudge-looped forever. A conversation is the model TALKING; a generation with
+  # no content is not one, and `generation_empty` (set by the caller from its
+  # `visible_empty?`) says so.
+  describe "an empty generation bypasses conversational suppression" do
+    test "empty content in a conversation session still halts at the threshold" do
+      empty = fn s -> Map.put(s, :generation_empty, true) end
+
+      state = conversation_state()
+      {:ok, state} = DoomLoop.check([], [], empty.(state))
+      {:ok, state} = DoomLoop.check([], [], empty.(state))
+
+      assert {:halt, msg, _} = DoomLoop.check([], [], empty.(state))
+      assert msg =~ "reasoning-only"
+    end
+
+    test "generation_empty is one-shot — cleared after each check" do
+      state = Map.put(conversation_state(), :generation_empty, true)
+      {:ok, state} = DoomLoop.check([], [], state)
+      refute Map.get(state, :generation_empty, false)
+    end
+
+    test "a content-ful conversational turn (flag unset) is still NOT halted" do
+      # The regression guard: only an EMPTY generation bypasses suppression. A
+      # normal talking turn (caller leaves the flag unset) stays protected.
+      state = conversation_state()
+
+      Enum.reduce(1..6, state, fn _, acc ->
+        refute match?({:halt, _, _}, DoomLoop.check([], [], acc))
+        {:ok, next} = DoomLoop.check([], [], acc)
+        next
+      end)
+    end
+  end
+
   describe "provenance — guard text is never the model's answer" do
     alias OptimalSystemAgent.Agent.Loop.TerminalSource
 
