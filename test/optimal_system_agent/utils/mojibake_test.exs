@@ -102,6 +102,24 @@ defmodule OptimalSystemAgent.Utils.MojibakeTest do
       assert out <> Mojibake.flush(carry) == "miosa-compute) — 6 PRs"
     end
 
+    test "a split sequence PRECEDED by text in the same delta is still repaired" do
+      # Regression: the cross-delta hold-back must fire even when ordinary text
+      # sits in front of the trailing partial sequence within one delta. A bug in
+      # the tail scan (halting with `len` instead of the accumulator) made it
+      # hold ONLY when the whole delta was mojibake, so "price: â" leaked.
+      moji = corrupt(<<0xE2, 0x80, 0x94>>)
+      <<first::binary-size(2), rest::binary>> = moji
+      deltas = ["price: " <> first, rest, " done"]
+
+      {out, carry} =
+        Enum.reduce(deltas, {"", ""}, fn d, {acc, carry} ->
+          {emit, new_carry} = Mojibake.repair_stream(carry, d)
+          {acc <> emit, new_carry}
+        end)
+
+      assert out <> Mojibake.flush(carry) == "price: — done"
+    end
+
     test "a double-encoded char split across deltas still rejoins" do
       single = corrupt(<<0xE2, 0x80, 0x94>>)
       double = corrupt(:unicode.characters_to_binary(single))
