@@ -143,6 +143,29 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       requires_subscription: nil,
       note: "Z.ai flagship — long-horizon agentic + coding"
     },
+    # GLM-5.3-Flash — Ollama tag `glm-5.3-flash:cloud` (the bare `glm-5.3` is
+    # still a 404; only the Flash line shipped). The FIRST natively-multimodal
+    # GLM text tag: image + video inline, unlike every glm-N text model before
+    # it. 320B/18B MoE, 1M window, 131K output. ctx :static (from Ollama's
+    # library page + Z.ai spec, not a live /api/show probe).
+    %{
+      id: "glm-5.3-flash:cloud",
+      name: "GLM-5.3 Flash",
+      ctx: 1_048_576,
+      ctx_source: :static,
+      tools: true,
+      thinking: true,
+      vision: true,
+      audio: false,
+      # Z.ai list price: $0.15 in / $0.50 out per 1M, cross-checked on Ollama's
+      # model page and third-party trackers. A 50%-off launch promo
+      # ($0.075 / $0.25) runs through 2026-09-09; the LIST rate is recorded so
+      # spend is not under-counted once the promo lapses.
+      pricing: {0.15, 0.50},
+      recommended: true,
+      requires_subscription: nil,
+      note: "1M ctx, 320B/18B MoE - multimodal (image+video), flash-priced agentic"
+    },
     # `glm-4.7:cloud` carries no `context_length` in Ollama's /api/show
     # model_info, so the probe cannot resolve it and it was absent here too —
     # which made `ContextWindow.resolve/1` return `:unknown` for a tag this
