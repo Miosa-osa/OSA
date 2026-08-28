@@ -207,4 +207,38 @@ defmodule OptimalSystemAgent.Agent.Loop.TruncatedResponseTest do
       end
     end
   end
+
+  # ── A steer that lands mid-turn is acted on before the turn ends ────────────
+  describe "a mid-turn steer is not stranded by a text-only turn" do
+    alias OptimalSystemAgent.Agent.Loop.Steer
+
+    test "a steer queued DURING the final generation is drained at finish_turn, not left for next turn" do
+      # Reported: "I sent 'set the goal and lock it in' mid-response and it just
+      # ended asking me to choose." A text-only answer is a SINGLE iteration, so
+      # a steer that arrives after that iteration's start-of-loop drain has no
+      # later step boundary to be folded into. finish_turn must catch it and
+      # continue the turn rather than stranding the directive until next turn.
+      s = sid()
+      state = %{base_state() | session_id: s}
+
+      # Simulate the user steering WHILE the first generation streams — after the
+      # iteration-start drain has already run for this iteration.
+      Application.put_env(:optimal_system_agent, :mock_provider_after_call_once, fn ->
+        Steer.queue(s, "set the goal and lock it in")
+      end)
+
+      on_exit(fn -> Application.delete_env(:optimal_system_agent, :mock_provider_after_call_once) end)
+
+      Application.put_env(:optimal_system_agent, :mock_provider_final_text, "here is the plan")
+      Application.delete_env(:optimal_system_agent, :mock_provider_stop_reason)
+      MockProvider.reset_round_trips()
+
+      {_response, _state} = ReactLoop.run(state)
+
+      assert MockProvider.round_trips() > 1,
+             "the turn ended after one generation without acting on the pending steer"
+
+      assert Steer.count(s) == 0, "the steer was left stranded in the queue"
+    end
+  end
 end

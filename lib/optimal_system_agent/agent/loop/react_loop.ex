@@ -1481,7 +1481,26 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         {new_content, state}
 
       {:ok, state} ->
-        {content, state}
+        # A steer that arrived DURING this turn's FINAL generation has no later
+        # step boundary to be folded into — a text-only answer has a single
+        # iteration, and `inject_pending_steer` only runs at an iteration START.
+        # Ending here would strand the directive until the next turn (reported:
+        # "I sent 'set the goal and lock it in' mid-response and it just ended
+        # asking me to choose"). So if a steer is queued, commit the answer we
+        # just produced and CONTINUE the turn — the next iteration drains the
+        # steer and acts on it now. Destructive drain + max_iterations bound the
+        # loop; a turn with no pending steer ends exactly as before.
+        if OptimalSystemAgent.Agent.Loop.Steer.count(state.session_id) > 0 do
+          state = %{
+            state
+            | messages: state.messages ++ [%{role: "assistant", content: content}],
+              iteration: state.iteration + 1
+          }
+
+          run(state)
+        else
+          {content, state}
+        end
     end
   end
 
