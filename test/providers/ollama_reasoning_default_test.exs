@@ -59,6 +59,30 @@ defmodule OptimalSystemAgent.Providers.OllamaReasoningDefaultTest do
     end
   end
 
+  # The decision was always correct; the CLOUD STREAMING path never applied it.
+  # `maybe_add_think` was wired into chat/2 and the local path but not the cloud
+  # body, so glm-5.3-flash streamed with no `think` field and its always-on
+  # reasoning garbled the visible answer. These pin the body itself.
+  describe "the cloud streaming body applies the reasoning decision" do
+    @msgs [%{role: "user", content: "hi"}]
+
+    test "a reasoning cloud model's cloud body carries think: true" do
+      assert Ollama.build_cloud_body(@cloud, @msgs, [], [])["think"] == true
+    end
+
+    test "glm-5.3-flash gets think: true in its cloud body" do
+      assert Ollama.build_cloud_body("glm-5.3-flash:cloud", @msgs, [], [])["think"] == true
+    end
+
+    test "the size-qualified '-cloud' tag gets think: true too" do
+      assert Ollama.build_cloud_body(@cloud_sized, @msgs, [], [])["think"] == true
+    end
+
+    test "a non-reasoning model's cloud body has no think field" do
+      refute Map.has_key?(Ollama.build_cloud_body(@flat, @msgs, [], []), "think")
+    end
+  end
+
   describe "locally served reasoning models KEEP the stall guard" do
     test "a local reasoning model still defaults to think: false" do
       assert {false, :local_stall_guard} = Ollama.reasoning_decision(@local, [])
