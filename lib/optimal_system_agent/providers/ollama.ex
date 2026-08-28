@@ -283,28 +283,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       Logger.info("[Ollama] Cloud URL detected — streaming via curl port")
 
       tools = Keyword.get(opts, :tools, [])
-
-      body_map = %{
-        model: model,
-        messages: format_messages(messages),
-        stream: true,
-        keep_alive: keep_alive(),
-        options: build_options(opts, messages, model)
-      }
-
-      body_map =
-        case {tools, tools_decision(model, opts)} do
-          {[], _} ->
-            body_map
-
-          {_, {true, _source}} ->
-            Map.put(body_map, :tools, format_tools(tools))
-
-          {_, {false, source}} ->
-            report_tools_stripped(model, length(tools), source)
-            body_map
-        end
-
+      body_map = build_cloud_body(model, messages, opts, tools)
       body = Jason.encode!(body_map)
       api_key = Application.get_env(:optimal_system_agent, :ollama_api_key, "")
 
@@ -489,8 +468,22 @@ defmodule OptimalSystemAgent.Providers.Ollama do
             Logger.info("[Ollama] Cloud stream: got #{length(tool_calls)} tool calls mid-stream")
             cloud_stream_loop(port, callback, %{acc | tool_calls: acc.tool_calls ++ tool_calls})
 
+          {:ok, %{"message" => %{"thinking" => think_token}}}
+          when is_binary(think_token) and think_token != "" ->
+            # Native reasoning channel (`think: true`). Reasoning arrives on its
+            # OWN `thinking` field, separate from `content`, so route it straight
+            # to the thinking box and leave the visible answer untouched. Without
+            # this arm the chunk fell to the catch-all and the reasoning was
+            # dropped; the arm exists so a reasoning model shows its reasoning
+            # like the `ollama` CLI does.
+            callback.({:thinking_delta, think_token})
+            cloud_stream_loop(port, callback, acc)
+
           {:ok, %{"message" => %{"content" => token}}} when token != "" ->
             # Streaming token — split inline reasoning tags out before emitting.
+            # (Belt-and-suspenders: with `think: true` reasoning comes on the
+            # `thinking` field above, but a model that still inlines `<think>`
+            # tags is handled here too.)
             {visible, thinking, think_state} =
               ThinkStreamParser.feed(acc.think, token)
 
@@ -1072,6 +1065,43 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   (W4: "no thinking → clean no-op, never crash").
   """
   def apply_think(body, model, opts), do: maybe_add_think(body, model, opts)
+
+  @doc false
+  # The Ollama Cloud streaming request body. A SEAM (not inlined in
+  # do_chat_stream) so the reasoning + tool decisions can be asserted directly.
+  #
+  # `maybe_add_think/3` was applied in `chat/2` and the LOCAL streaming path but
+  # MISSING here, so every cloud reasoning model streamed with no `think` field:
+  # glm-5.2 tolerated it by inlining `<think>` tags the parser strips, but
+  # glm-5.3-flash's always-on reasoning jumbled into the visible answer as
+  # fragmented, repetitive garbage. Building the body through this function keeps
+  # the three request paths in agreement and lets a test pin that a cloud
+  # reasoning model gets `think: true`.
+  def build_cloud_body(model, messages, opts, tools) do
+    %{
+      model: model,
+      messages: format_messages(messages),
+      stream: true,
+      keep_alive: keep_alive(),
+      options: build_options(opts, messages, model)
+    }
+    |> apply_cloud_tools(model, opts, tools)
+    |> maybe_add_think(model, opts)
+  end
+
+  defp apply_cloud_tools(body_map, model, opts, tools) do
+    case {tools, tools_decision(model, opts)} do
+      {[], _} ->
+        body_map
+
+      {_, {true, _source}} ->
+        Map.put(body_map, :tools, format_tools(tools))
+
+      {_, {false, source}} ->
+        report_tools_stripped(model, length(tools), source)
+        body_map
+    end
+  end
 
   @doc """
   Test seam: apply the tool-schema decision to a request body, without a live
