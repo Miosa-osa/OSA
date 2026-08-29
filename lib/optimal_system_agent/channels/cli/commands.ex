@@ -10,6 +10,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   require Logger
 
   alias OptimalSystemAgent.Agent.{Compactor, ContextDiscovery, Loop, SessionPersistence, Tasks}
+  alias OptimalSystemAgent.Agent.PromptOverrides
   alias OptimalSystemAgent.Budget
   alias OptimalSystemAgent.Channels.CLI.{MessageQueue, Renderer, Session, TaskDisplay}
   alias OptimalSystemAgent.ContextRefs.Parser, as: ContextRefsParser
@@ -34,7 +35,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "clear" => {"Clear conversation and start fresh session", :cmd_clear},
     "new" => {"Start a new session (alias for /clear)", :cmd_clear},
     "compact" => {"Force context compaction", :cmd_compact},
-    "model" => {"Show or switch the current model", :cmd_model},
+    "model" => {"Show or switch the current model (list = local Ollama models)", :cmd_model},
+    "system" =>
+      {"Inject into or replace the system prompt for the current model (persists)", :cmd_system},
     "uncensored" =>
       {"Hop the current model to its unfiltered twin (off to return)", :cmd_uncensored},
     "status" => {"Show session status", :cmd_status},
@@ -278,6 +281,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     IO.puts("")
 
     case String.trim(args) do
+      arg when arg in ["list", "ls", "local"] ->
+        model_list_local(session_id)
+
       "" ->
         provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
         model = get_model_name(provider)
@@ -357,6 +363,255 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     _ ->
       IO.puts("  #{@yellow}error: uncensored switch failed#{@reset}\n")
       session_id
+  end
+
+  # `/model list` — what the local Ollama daemon can actually serve, so a tag
+  # pulled outside OSA (`ollama pull hf.co/…`) is one copy-paste from `/model`.
+  defp model_list_local(session_id) do
+    {_provider, current} = session_provider_model(session_id)
+
+    case OptimalSystemAgent.Providers.Ollama.list_models() do
+      {:ok, []} ->
+        IO.puts("  #{@dim}No local Ollama models. Pull one with `ollama pull <tag>`.#{@reset}")
+
+      {:ok, models} ->
+        IO.puts("  #{@bold}Local Ollama models#{@reset}")
+        IO.puts("")
+
+        models
+        |> Enum.sort_by(& &1.name)
+        |> Enum.each(fn m ->
+          marker = if m.name == current, do: "#{@green}●#{@reset}", else: "#{@dim}•#{@reset}"
+          IO.puts("  #{marker} #{m.name} #{@dim}#{format_gb(m.size)}#{@reset}")
+        end)
+
+        IO.puts("")
+        IO.puts("  #{@dim}Switch with /model <tag>#{@reset}")
+
+      {:error, reason} ->
+        IO.puts("  #{@yellow}Ollama not reachable: #{inspect(reason)}#{@reset}")
+    end
+  end
+
+  defp format_gb(0), do: ""
+  defp format_gb(bytes) when is_integer(bytes), do: "#{Float.round(bytes / 1.0e9, 1)} GB"
+  defp format_gb(_), do: ""
+
+  # ── /system — operator system prompt overrides ────────────────────────────
+  #
+  #   /system                   status for the current model
+  #   /system show              print the saved operator text
+  #   /system inject <text>     append <text> to OSA's built-in prompt
+  #   /system replace <text>    <text> becomes the WHOLE system prompt
+  #   /system inject @file.md   read the text from a file (same for replace)
+  #   /system off | on          disable / re-enable without deleting
+  #   /system clear             delete the override for this model
+  #   /system list              every saved override
+  #
+  # Add `--all` right after the verb to target every model ("*") instead of
+  # the current one. Saved in ~/.osa/system_prompts.json; applies next turn.
+  def cmd_system(args, session_id) do
+    IO.puts("")
+    {_provider, current} = session_provider_model(session_id)
+
+    {verb, rest} =
+      case String.split(String.trim(args), ~r/\s+/, parts: 2) do
+        [""] -> {"", ""}
+        [v] -> {String.downcase(v), ""}
+        [v, r] -> {String.downcase(v), r}
+      end
+
+    {target, rest} = system_target(rest, current)
+
+    case verb do
+      "" -> system_status(current)
+      "show" -> system_show(target)
+      "list" -> system_list()
+      v when v in ["inject", "add", "append"] -> system_set(target, :inject, rest)
+      v when v in ["replace", "wipe", "only", "set"] -> system_set(target, :replace, rest)
+      v when v in ["off", "disable"] -> system_enable(target, false)
+      v when v in ["on", "enable"] -> system_enable(target, true)
+      v when v in ["clear", "remove", "delete", "reset"] -> system_clear(target)
+      _ -> system_usage()
+    end
+
+    IO.puts("")
+    session_id
+  rescue
+    e ->
+      IO.puts("  #{@yellow}error: /system failed: #{Exception.message(e)}#{@reset}\n")
+      session_id
+  end
+
+  defp system_target(rest, current) do
+    case String.split(rest, ~r/\s+/, parts: 2) do
+      ["--all" | tail] -> {PromptOverrides.all_key(), Enum.join(tail, "")}
+      ["all" | tail] when tail != [] -> {PromptOverrides.all_key(), Enum.join(tail, "")}
+      _ -> {current, rest}
+    end
+  end
+
+  defp system_status(current) do
+    IO.puts("  #{@bold}System prompt#{@reset}  #{@dim}model:#{@reset} #{current}")
+
+    case PromptOverrides.effective(current) do
+      nil ->
+        own = PromptOverrides.get(current)
+
+        if own && !own.enabled do
+          IO.puts(
+            "  #{@dim}Override saved but OFF (#{own.mode}, #{String.length(own.text)} chars) — /system on#{@reset}"
+          )
+        else
+          IO.puts(
+            "  #{@dim}Built-in prompt only. /system inject <text> or /system replace <text>#{@reset}"
+          )
+        end
+
+      {key, entry} ->
+        scope = if key == PromptOverrides.all_key(), do: "all models", else: "this model"
+
+        verb =
+          if entry.mode == :replace,
+            do: "REPLACES built-in prompt",
+            else: "injected on top of built-in prompt"
+
+        IO.puts(
+          "  #{@green}ON#{@reset} #{verb} #{@dim}(#{scope}, #{String.length(entry.text)} chars)#{@reset}"
+        )
+
+        IO.puts("  #{@dim}/system show to print it · /system off · /system clear#{@reset}")
+    end
+  end
+
+  defp system_show(target) do
+    case PromptOverrides.get(target) do
+      nil ->
+        IO.puts("  #{@dim}Nothing saved for #{target}.#{@reset}")
+
+      entry ->
+        state = if entry.enabled, do: "#{@green}on#{@reset}", else: "#{@yellow}off#{@reset}"
+        IO.puts("  #{@bold}#{target}#{@reset}  #{@dim}#{entry.mode}#{@reset}  #{state}")
+        IO.puts("")
+        IO.puts(entry.text)
+    end
+  end
+
+  defp system_list do
+    overrides = PromptOverrides.list()
+
+    if map_size(overrides) == 0 do
+      IO.puts("  #{@dim}No system prompt overrides saved.#{@reset}")
+    else
+      IO.puts(
+        "  #{@bold}Saved system prompt overrides#{@reset}  #{@dim}#{PromptOverrides.path()}#{@reset}"
+      )
+
+      IO.puts("")
+
+      overrides
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.each(fn {model, e} ->
+        state = if e.enabled, do: "#{@green}on #{@reset}", else: "#{@yellow}off#{@reset}"
+
+        IO.puts(
+          "  #{state} #{@dim}#{String.pad_trailing(to_string(e.mode), 7)}#{@reset} #{model} #{@dim}(#{String.length(e.text)} chars)#{@reset}"
+        )
+      end)
+    end
+  end
+
+  defp system_set(_target, _mode, ""), do: system_usage()
+
+  defp system_set(target, mode, text) do
+    case system_read_text(text) do
+      {:ok, body} ->
+        case PromptOverrides.set(target, mode, body) do
+          :ok ->
+            what =
+              if mode == :replace,
+                do: "now REPLACES the built-in prompt",
+                else: "injected on top of the built-in prompt"
+
+            IO.puts(
+              "  #{@green}#{@reset} Saved for #{target} — #{what} #{@dim}(#{String.length(String.trim(body))} chars, takes effect next turn)#{@reset}"
+            )
+
+          {:error, reason} ->
+            IO.puts("  #{@yellow}error: could not save: #{inspect(reason)}#{@reset}")
+        end
+
+      {:error, reason} ->
+        IO.puts("  #{@yellow}error: #{reason}#{@reset}")
+    end
+  end
+
+  # `@path` reads the text from a file — pasting a 3k-char prompt into a REPL
+  # line is miserable; a file is not.
+  defp system_read_text("@" <> path) do
+    expanded = Path.expand(path)
+
+    case File.read(expanded) do
+      {:ok, body} when byte_size(body) > 0 -> {:ok, body}
+      {:ok, _} -> {:error, "#{expanded} is empty"}
+      {:error, reason} -> {:error, "cannot read #{expanded}: #{:file.format_error(reason)}"}
+    end
+  end
+
+  defp system_read_text(text), do: {:ok, text}
+
+  defp system_enable(target, enabled?) do
+    case PromptOverrides.enable(target, enabled?) do
+      :ok ->
+        IO.puts(
+          "  #{@green}#{@reset} Override for #{target} #{if enabled?, do: "ON", else: "OFF (text kept)"}"
+        )
+
+      {:error, :not_found} ->
+        IO.puts("  #{@dim}Nothing saved for #{target}.#{@reset}")
+
+      {:error, reason} ->
+        IO.puts("  #{@yellow}error: #{inspect(reason)}#{@reset}")
+    end
+  end
+
+  defp system_clear(target) do
+    case PromptOverrides.clear(target) do
+      :ok ->
+        IO.puts("  #{@green}#{@reset} Cleared override for #{target} — built-in prompt restored")
+
+      {:error, reason} ->
+        IO.puts("  #{@yellow}error: #{inspect(reason)}#{@reset}")
+    end
+  end
+
+  defp system_usage do
+    IO.puts("  #{@bold}/system#{@reset} — operator system prompt, saved per model")
+    IO.puts("")
+    IO.puts("  #{@cyan}/system#{@reset}                    status for the current model")
+    IO.puts("  #{@cyan}/system inject#{@reset} <text>     append <text> to the built-in prompt")
+
+    IO.puts(
+      "  #{@cyan}/system replace#{@reset} <text>    <text> becomes the entire system prompt"
+    )
+
+    IO.puts(
+      "  #{@cyan}/system inject#{@reset} @file.md   read the text from a file (also for replace)"
+    )
+
+    IO.puts("  #{@cyan}/system show#{@reset}               print the saved text")
+
+    IO.puts(
+      "  #{@cyan}/system off#{@reset} | #{@cyan}on#{@reset}           disable / re-enable, text kept"
+    )
+
+    IO.puts("  #{@cyan}/system clear#{@reset}              delete it for this model")
+    IO.puts("  #{@cyan}/system list#{@reset}               every saved override")
+    IO.puts("")
+
+    IO.puts(
+      "  #{@dim}Add --all after the verb to target every model. Saved in #{PromptOverrides.path()}#{@reset}"
+    )
   end
 
   defp uncensored_list do
@@ -770,9 +1025,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
                 IO.puts("  #{@dim}Transcript kept.#{@reset}")
 
               {:error, :not_enough_checkpoints} ->
-                IO.puts(
-                  "  #{@yellow}error: not enough file checkpoints to revert #{n}#{@reset}"
-                )
+                IO.puts("  #{@yellow}error: not enough file checkpoints to revert #{n}#{@reset}")
 
               {:error, reason} ->
                 IO.puts("  #{@yellow}error: #{inspect(reason)}#{@reset}")
