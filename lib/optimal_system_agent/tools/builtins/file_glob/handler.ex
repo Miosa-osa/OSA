@@ -109,19 +109,56 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGlob.Handler do
     max = Constants.max_results()
     filter_git? = not references_noise_dir?(pattern)
 
-    all =
-      base
-      |> Path.join(pattern)
-      # `match_dot: true` is the whole reason dotfiles are visible at all.
-      # Without it `Path.wildcard/2` refuses to match any component beginning
-      # with `.`, so `**/*` skipped `.github/`, `.env.example`, `.gitignore`
-      # and every dot-directory beneath them — not "returned them ranked low",
-      # but never returned them under any pattern the caller could write.
-      |> Path.wildcard(match_dot: true)
-      |> Enum.reject(&sensitive?/1)
-      |> Enum.reject(fn p -> filter_git? and in_noise_dir?(p) end)
-      |> Enum.sort()
+    case bounded_wildcard(pattern, base) do
+      :timeout ->
+        {:ok, walk_timed_out_message(base)}
 
+      {:ok, matched} ->
+        all =
+          matched
+          |> Enum.reject(&sensitive?/1)
+          |> Enum.reject(fn p -> filter_git? and in_noise_dir?(p) end)
+          |> Enum.sort()
+
+        format_glob_result(all, pattern, base, filter_git?, max)
+    end
+  end
+
+  # `Path.wildcard/2` walks the whole tree under `base` and FOLLOWS symlinks, so
+  # a `**`-rooted pattern over a repo root with a large symlinked `_build`/`deps`
+  # can run for minutes and freeze the turn (the operator then interrupts,
+  # killing all in-flight work). Run it under a hard deadline in a throwaway
+  # process so the tool call can never hang: past the deadline the walk is
+  # brutally killed and we return actionable guidance instead of nothing.
+  defp bounded_wildcard(pattern, base) do
+    task =
+      Task.async(fn ->
+        base
+        |> Path.join(pattern)
+        # `match_dot: true` is the whole reason dotfiles are visible at all.
+        # Without it `Path.wildcard/2` refuses to match any component beginning
+        # with `.`, so `**/*` skipped `.github/`, `.env.example`, `.gitignore`
+        # and every dot-directory beneath them — not "returned them ranked low",
+        # but never returned them under any pattern the caller could write.
+        |> Path.wildcard(match_dot: true)
+      end)
+
+    case Task.yield(task, Constants.walk_timeout_ms()) || Task.shutdown(task, :brutal_kill) do
+      {:ok, matched} -> {:ok, matched}
+      _ -> :timeout
+    end
+  end
+
+  defp walk_timed_out_message(base) do
+    secs = div(Constants.walk_timeout_ms(), 1000)
+
+    "Search under #{base} was stopped after #{secs}s to avoid freezing the turn. " <>
+      "This path holds a large or symlinked tree (usually _build, deps, .git or " <>
+      "node_modules). Narrow the search: set `path` to a specific subdirectory " <>
+      "(e.g. lib/ or test/), or make the pattern more specific."
+  end
+
+  defp format_glob_result(all, pattern, base, filter_git?, max) do
     total = length(all)
     shown = Enum.take(all, max)
 
