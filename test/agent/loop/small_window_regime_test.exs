@@ -118,24 +118,34 @@ defmodule OptimalSystemAgent.Agent.Loop.SmallWindowRegimeTest do
       assert variant == :native_tools
     end
 
-    test "genuinely small weights still get :lite" do
+    # :lite (13.2k) is bigger than :native_tools (8.95k); on a transport that
+    # ships tool schemas natively the small window gets the smaller base.
+    test "genuinely small weights on a native transport get :native_tools" do
       variant =
         Context.static_base_variant(
           :ollama,
           Context.small_window?(@small_model, :ollama)
         )
 
-      assert variant == :lite
+      assert variant == :native_tools
+      assert Soul.static_token_count(:native_tools) < Soul.static_token_count(:lite)
     end
 
-    test "Context.build/1 assembles the SMALLER prefix for the big-window model" do
+    test "genuinely small weights on a prompt-text transport keep :lite" do
+      assert Context.static_base_variant(:claude_cli, true) == :lite
+    end
+
+    test "Context.build/1 assembles the :native_tools prefix for both window sizes on :ollama" do
       big = build_system_content(@cloud_model)
       small = build_system_content(@small_model)
 
       assert String.starts_with?(big, Soul.static_base(:native_tools)),
              "the assembled system prompt must open with the :native_tools base"
 
-      assert String.starts_with?(small, Soul.static_base(:lite))
+      # The small window used to get :lite here — 4.2k tokens MORE than the
+      # native base it now shares with the big window.
+      assert String.starts_with?(small, Soul.static_base(:native_tools))
+      refute String.starts_with?(small, Soul.static_base(:lite))
 
       IO.puts(
         "\n[measured] Context.build system prompt bytes: " <>
