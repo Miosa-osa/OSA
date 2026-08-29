@@ -103,7 +103,7 @@ defmodule OptimalSystemAgent.LocalModels do
           quant: quant,
           capabilities: (entry && entry.capabilities) || [],
           fit: Fit.assess(spec, hw, ctx),
-          measured_tps: get_in(bench, [m.name, "decode_tps"]),
+          measured_tps: measured_for(m, bench, installed),
           entry: entry
         }
       end)
@@ -405,7 +405,14 @@ defmodule OptimalSystemAgent.LocalModels do
       entry = Catalog.find(ref) ->
         {_, quant} = Catalog.split_tag(ref)
         quant = if Catalog.hf_tag?(ref) or String.contains?(ref, "/"), do: quant, else: nil
-        {:catalog, entry, quant}
+
+        # A catalog id whose model is already pulled (at any quant) IS that
+        # installed tag — `/models info <id>` after `/models install <id>`
+        # must describe what is on disk, and `/models use <id>` must work.
+        case Enum.find(entry.quants, &MapSet.member?(installed, Catalog.tag(entry, &1))) do
+          nil -> {:catalog, entry, quant}
+          q -> {:installed, Catalog.tag(entry, q)}
+        end
 
       Catalog.hf_tag?(ref) or (String.contains?(ref, "/") and not String.contains?(ref, " ")) ->
         {repo, quant} = Catalog.split_tag(ref)
@@ -414,6 +421,16 @@ defmodule OptimalSystemAgent.LocalModels do
       true ->
         :unknown
     end
+  end
+
+  # A benchmark is keyed by tag, but an alias shares its source's digest and
+  # therefore its speed.
+  defp measured_for(m, bench, installed) do
+    get_in(bench, [m.name, "decode_tps"]) ||
+      Enum.find_value(installed, fn other ->
+        other.digest == m.digest and other.name != m.name and
+          get_in(bench, [other.name, "decode_tps"])
+      end)
   end
 
   defp installed_tags do
