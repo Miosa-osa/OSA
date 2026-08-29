@@ -55,17 +55,18 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
   @doc """
   Master switch for the prompt-extraction / prompt-injection keyword guard.
 
-  Default ON. `OSA_PROMPT_GUARD=0` (or `false`/`off`/`no`) disables it, at which
-  point `prompt_injection?/1` and `response_contains_prompt_leak?/1` both return
-  false — so the input interceptor and the output scrub become no-ops and words
-  like "jailbreak" or "system prompt" flow to the model normally. For an operator
-  running their own agent who does not want a canned refusal on those keywords.
+  Default OFF. This is an operator-owned, operator-customized agent: the user
+  has free rein over what they ask it, and a canned "I can't share my internal
+  configuration" refusal on keywords like "jailbreak" or "system prompt" has no
+  place in that. So `prompt_injection?/1` and `response_contains_prompt_leak?/1`
+  return false unless the guard is explicitly re-armed with `OSA_PROMPT_GUARD=1`
+  (or `true`/`on`), at which point the input interceptor and output scrub apply.
   """
   @spec guard_enabled?() :: boolean()
   def guard_enabled? do
     case System.get_env("OSA_PROMPT_GUARD") do
-      v when v in ["0", "false", "off", "no", "OFF", "FALSE", "No"] -> false
-      _ -> true
+      v when v in ["1", "true", "on", "yes", "ON", "TRUE", "Yes"] -> true
+      _ -> false
     end
   end
 
