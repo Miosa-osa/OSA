@@ -238,6 +238,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Spinner do
 
     clear_line()
     safe_io_write("#{@dim}  #{frame} #{status} (#{elapsed}#{tools_str}#{tokens_str})#{@reset}")
+
+    # /jailbreak layer: the badge survives on its own line so a long status can't hide it.
+    if badge = OptimalSystemAgent.Agent.Jailbreak.badge() do
+      safe_io_write("#{badge}")
+    end
   end
 
   # Get the activeForm text of the currently in_progress task (if any)

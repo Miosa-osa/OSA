@@ -37,6 +37,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "model" => {"Show or switch the current model", :cmd_model},
     "uncensored" =>
       {"Hop the current model to its unfiltered twin (off to return)", :cmd_uncensored},
+    "jailbreak" =>
+      {"LIBERATE the active model — inject an operator override into every system prompt (off/show/file <path>)",
+       :cmd_jailbreak},
     "status" => {"Show session status", :cmd_status},
     "cost" => {"Show cost breakdown", :cmd_cost},
     "usage" => {"Show account quota and this session's token usage", :cmd_usage},
@@ -357,6 +360,117 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     _ ->
       IO.puts("  #{@yellow}error: uncensored switch failed#{@reset}\n")
       session_id
+  end
+
+  # ── /jailbreak — operator override layer (LIBERATED) ─────────────────────
+  #
+  #   /jailbreak              status; with no arg when disarmed, arms it
+  #   /jailbreak on           arm the block
+  #   /jailbreak off | show   disarm / print what would be injected
+  #   /jailbreak file <path>  point the block at a custom text file (remembered)
+  #
+  # The block is appended to OSA's system prompt for EVERY model/provider, on
+  # top of any `/system` state, from the next message. A LIBERATED badge shows
+  # on the spinner and status line while armed.
+  def cmd_jailbreak(args, session_id) do
+    alias OptimalSystemAgent.Agent.Jailbreak
+    IO.puts("")
+
+    case String.split(String.trim(args), ~r/\s+/, parts: 2) do
+      [""] -> jailbreak_toggle()
+      [verb] when verb in ["on", "arm", "enable"] -> jailbreak_set(true, nil)
+      [verb] when verb in ["off", "disarm", "disable"] -> jailbreak_set(false, nil)
+      [verb] when verb == "show" -> jailbreak_show()
+      ["file", path] -> jailbreak_file(path)
+      _ -> jailbreak_usage()
+    end
+
+    IO.puts("")
+    session_id
+  rescue
+    e ->
+      IO.puts("  #{@yellow}error: /jailbreak failed: #{Exception.message(e)}#{@reset}\n")
+      session_id
+  end
+
+  # Bare `/jailbreak` is a toggle, so it does something in both directions —
+  # the common case is "arm it now".
+  defp jailbreak_toggle do
+    if OptimalSystemAgent.Agent.Jailbreak.active?(),
+      do: jailbreak_set(false, nil),
+      else: jailbreak_set(true, nil)
+  end
+
+  defp jailbreak_set(enabled?, file) do
+    alias OptimalSystemAgent.Agent.Jailbreak
+
+    case Jailbreak.set(enabled?, file) do
+      :ok when enabled? ->
+        IO.puts("  #{@green}✓#{@reset} #{IO.ANSI.magenta()}⚡ LIBERATED#{@reset}")
+        IO.puts("  #{@dim}#{Jailbreak.preview()}#{@reset}")
+        IO.puts("  #{@dim}/jailbreak off to disarm#{@reset}")
+
+      :ok ->
+        IO.puts(
+          "  #{@green}✓#{@reset} Jailed again — #{IO.ANSI.faint()}⚡ LIBERATED disarmed#{@reset}"
+        )
+
+      {:error, :empty_prompt} ->
+        IO.puts(
+          "  #{@yellow}nothing to inject: #{Jailbreak.file_path()} is missing or empty#{@reset}"
+        )
+
+        IO.puts("  #{@dim}/jailbreak file <path> to point at a text file#{@reset}")
+    end
+  end
+
+  defp jailbreak_show do
+    alias OptimalSystemAgent.Agent.Jailbreak
+
+    if Jailbreak.active?() do
+      block = Jailbreak.system_block()
+      shown = if String.length(block) > 400, do: "#{String.slice(block, 0, 400)}…", else: block
+
+      IO.puts("  #{@dim}source:#{reset_dim()} #{Jailbreak.file_path()}#{@reset}")
+      IO.puts("")
+
+      shown
+      |> String.split("\n")
+      |> Enum.each(fn line -> IO.puts("  #{@dim}│#{@reset} #{line}") end)
+    else
+      IO.puts("  #{@yellow}not armed#{@reset} — #{@dim}/jailbreak to enable#{@reset}")
+    end
+  end
+
+  defp reset_dim, do: @dim
+
+  defp jailbreak_file(path) do
+    alias OptimalSystemAgent.Agent.Jailbreak
+    expanded = Path.expand(String.replace_leading(path, "~", System.user_home!()))
+
+    if File.regular?(expanded) do
+      case Jailbreak.set(true, path) do
+        :ok ->
+          IO.puts("  #{@green}✓#{@reset} #{IO.ANSI.magenta()}⚡ LIBERATED#{@reset}")
+          IO.puts("  #{@dim}source:#{@reset} #{expanded}")
+
+        {:error, reason} ->
+          IO.puts("  #{@yellow}rejected (#{inspect(reason)}) — file is empty#{@reset}")
+      end
+    else
+      IO.puts("  #{@yellow}file not found: #{expanded}#{@reset}")
+    end
+  end
+
+  defp jailbreak_usage do
+    IO.puts(
+      "  #{@bold}/jailbreak#{@reset}   #{IO.ANSI.faint()}toggle the liberation layer#{@reset}"
+    )
+
+    IO.puts("  #{@dim}/jailbreak on | off | show | file <path>#{@reset}")
+
+    if OptimalSystemAgent.Agent.Jailbreak.active?(),
+      do: IO.puts("  #{IO.ANSI.magenta()}⚡ LIBERATED#{@reset}")
   end
 
   defp uncensored_list do

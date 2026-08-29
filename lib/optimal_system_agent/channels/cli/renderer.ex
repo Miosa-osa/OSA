@@ -269,7 +269,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Renderer do
         _ -> parts
       end
 
-    IO.puts("#{@dim}  #{Enum.join(parts, " · ")}#{@reset}")
+        # /jailbreak layer: a magenta ⚡ LIBERATED tag while armed.
+    badge = OptimalSystemAgent.Agent.Jailbreak.badge()
+
+    IO.puts("#{@dim}  #{Enum.join(parts, " · ")}#{badge}#{@reset}")
   end
 
   # ── Event Display ───────────────────────────────────────────────────
