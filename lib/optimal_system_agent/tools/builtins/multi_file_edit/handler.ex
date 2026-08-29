@@ -251,7 +251,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Handler do
         {:error, dp, "old_string cannot be empty"}
 
       old == new ->
-        {:error, dp, "old_string and new_string are identical"}
+        # Mirror the not_found steer (P1-9): a bare "are identical" gives the
+        # model no next step, so it retries the same no-op hunk. `dp` is already
+        # shown by per_hunk_report, so the reason stays path-free.
+        {:error, dp,
+         "old_string and new_string are identical - nothing to change; if you intended an edit, " <>
+           "re-read the file and copy the exact current text into old_string and the changed text " <>
+           "into new_string; if it is already applied, move on rather than retrying"}
 
       not File.exists?(ep) ->
         {:error, dp, "file not found"}

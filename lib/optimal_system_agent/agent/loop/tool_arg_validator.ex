@@ -14,7 +14,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolArgValidator do
   model-facing error the loop feeds back verbatim as the tool result, so the
   model rewrites the call on its next step. Retries are capped at `@max_reask`
   per `{session_id, tool_name}` (tracked in the `:osa_reask_counts` ETS table)
-  to bound malformed-args loops; after the cap the message becomes terminal.
+  to bound malformed-args loops; once the cap is EXCEEDED the result turns
+  terminal - `{:error, message}` - so the executor surfaces it as a hard
+  failed-tool result rather than driving another correction round (P1-7).
 
   MCP tools and unknown/aliased names have no local schema and are passed
   through untouched (`:ok`) — MCP servers validate their own inputs.
@@ -33,10 +35,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolArgValidator do
 
   Returns `{:ok, tool_call}` to proceed — with `:arguments` replaced by the
   schema-COERCED map (see `Tools.ArgCoercion`), which the caller must be the
-  one it executes — or `{:reask, message}` where `message` starts with
-  `"Error:"` so downstream finalization treats it as a tool failure.
+  one it executes — or `{:reask, message}` (a correction offer) or, once the
+  retry cap is exceeded, `{:error, message}` (terminal). Both error messages
+  start with `"Error:"` so downstream finalization treats them as a tool
+  failure.
   """
-  @spec validate(map(), map()) :: {:ok, map()} | {:reask, String.t()}
+  @spec validate(map(), map()) ::
+          {:ok, map()} | {:reask, String.t()} | {:error, String.t()}
   def validate(tool_call, state) do
     session_id = Map.get(state, :session_id)
     tool_name = tool_call.name
@@ -72,18 +77,34 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolArgValidator do
       "[loop] REASK #{tool_name} (attempt #{attempt}/#{@max_reask}) — invalid arguments: #{reason}"
     )
 
-    message =
-      if attempt > @max_reask do
+    if attempt > @max_reask do
+      # Past the correction budget this is no longer a REASK (an offer to try
+      # again) - it is a TERMINAL tool failure. Return a plain `{:error, message}`
+      # so the executor surfaces it as a hard failed-tool result instead of
+      # re-driving the validate/reask cycle (P1-7). The message text is the same
+      # `"Error:"`-prefixed body a normal tool error carries, so downstream
+      # (`finalize_result` / `FailureSignature`) treats it as a failure.
+      #
+      # NOTE(turn-hardening): the sole caller, `ToolExecutor.run_tool/2`, matches
+      # only `{:reask, _}` and `{:ok, _}` on `validate/2`. It needs an
+      # `{:error, message} -> message` clause (mirroring its `{:reask, message} ->
+      # message`) so this terminal body reaches the model verbatim; without it a
+      # CaseClauseError is caught upstream and the stop-retrying text is lost.
+      # That one-line caller change is outside this workstream's file list.
+      message =
         "Error: Tool input for `#{tool_name}` is still invalid after #{@max_reask} " <>
           "corrections — #{reason} Stop retrying `#{tool_name}` with the same argument " <>
           "shape; re-read the tool schema or take a different approach."
-      else
+
+      {:error, message}
+    else
+      message =
         "Error: Your tool input for `#{tool_name}` was invalid: #{reason} " <>
           "Rewrite the `#{tool_name}` call with corrected arguments that match the tool " <>
           "schema (correction attempt #{attempt} of #{@max_reask})."
-      end
 
-    {:reask, message}
+      {:reask, message}
+    end
   end
 
   # Atomically increment and return the invalid-attempt counter for this

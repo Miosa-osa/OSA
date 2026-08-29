@@ -37,8 +37,10 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.FailureSignature do
   ## Thresholds
 
   Signatures accumulate in a sliding window of 20 entries on the threaded
-  `state` (`:recent_failure_signatures`); any cleanly-succeeding tool in an
-  iteration resets the window. A *strict* signature (tool + args digest + error
+  `state` (`:recent_failure_signatures`); a cleanly-succeeding tool clears only
+  the failure signatures for THAT SAME tool, so one interleaved success (a
+  `file_read`, say) can no longer starve the accumulator while a different
+  tool keeps failing. A *strict* signature (tool + args digest + error
   prefix) repeating 3+ times triggers a bounded recovery sequence
   (`:doom_recovery_count`, reset each user turn) that injects a recovery
   directive up to twice before hard-halting. Two occurrences (one short of the
@@ -88,17 +90,22 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.FailureSignature do
   def check(results, tool_calls, state) do
     iteration_signatures = collect_iteration_signatures(results, tool_calls)
 
-    any_clean_success =
-      Enum.any?(results, fn {_tc, {_msg, result_str}} -> not failure?(result_str) end)
+    # Tools that produced at least one clean (non-failure) result this iteration.
+    # A clean success is progress FOR THAT TOOL, so it clears that tool's failure
+    # signatures below — but ONLY that tool's (P1-8). Previously ANY clean
+    # success dropped the whole iteration's new sigs, so a single interleaved
+    # file_read success starved the accumulator and a real failing-edit loop
+    # never reached the threshold.
+    succeeded_tools =
+      results
+      |> Enum.filter(fn {_tc, {_msg, result_str}} -> not failure?(result_str) end)
+      |> Enum.map(fn {tc, _} -> tc.name end)
+      |> MapSet.new()
 
-    # When any tool succeeded cleanly this iteration, reset error signatures.
-    # Pattern-based detection (file rewrites) was removed — caused 4+ false positives.
-    new_sigs =
-      if any_clean_success do
-        []
-      else
-        Enum.map(iteration_signatures, fn entry -> {entry.strict, entry.broad} end)
-      end
+    # Always accumulate this iteration's failure signatures; the same-tool clear
+    # below removes only what a matching success invalidated. Pattern-based
+    # detection (file rewrites) was removed — caused 4+ false positives.
+    new_sigs = Enum.map(iteration_signatures, fn entry -> {entry.strict, entry.broad} end)
 
     Logger.debug("[doom] Checking #{length(results)} tool results for doom patterns")
 
@@ -110,6 +117,7 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.FailureSignature do
 
     updated_failure_signatures =
       (state.recent_failure_signatures ++ new_sigs)
+      |> Enum.reject(fn sig -> MapSet.member?(succeeded_tools, sig_tool(sig)) end)
       |> Enum.take(-@window_size)
 
     state = %{state | recent_failure_signatures: updated_failure_signatures}
@@ -144,6 +152,19 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.FailureSignature do
       true ->
         {:ok, state}
     end
+  end
+
+  # Tool name a stored signature belongs to: the segment before the first ":"
+  # in the strict/broad string (`"#{tc.name}:..."`). Tolerates the {strict,
+  # broad} tuple and the legacy bare-string entry of a resumed session.
+  defp sig_tool(sig) do
+    strict =
+      case sig do
+        {strict, _broad} -> strict
+        other -> other
+      end
+
+    strict |> to_string() |> String.split(":", parts: 2) |> List.first()
   end
 
   # Count occurrences of element `idx` of the stored {strict, broad} tuples.
