@@ -78,6 +78,15 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # step is what it gives back.
   @max_announcement_continues 1
 
+  # P4 (v1057): bound on the empty-answer continuation nudge (Hermes parity —
+  # see the clause in `handle_result/3`). When a generation trims to no visible
+  # answer AND calls no tools BUT carried internal reasoning, the model thought
+  # and then stopped without writing its conclusion; re-ask for the final answer
+  # up to this many times before falling through to the reasoning-only halt.
+  # Two: enough to recover a model that just needs one push, few enough that it
+  # can never become a spin (per-turn, reset at turn start).
+  @max_empty_answer_nudges 2
+
   # Should a text-only answer (visible content, no tool calls) be nudged back
   # into the loop on the strength of how its PROSE reads?
   #
@@ -198,8 +207,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       if iter == 0 do
         # P0-3: the gate-directive iteration budget is per-turn; clear any marker
         # left by a prior turn so a fresh turn starts with a full budget.
+        # P4 (v1057): `:empty_answer_nudges` is per-turn too — the loop state
+        # lives in the `Loop` GenServer across turns, so a fresh turn must start
+        # with the full empty-answer nudge budget rather than a spent one.
         state
         |> Map.put(:truncations, 0)
+        |> Map.put(:empty_answer_nudges, 0)
         |> Map.delete(:gate_directive_iteration)
       else
         state
@@ -1013,7 +1026,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # Note for compaction: turn boundaries are counted at `role: "user"`, so
   # these injected steers now register as boundaries. That is consistent with
   # how the compact boundary is already handled.
-  defp handle_result({:ok, %{content: content, tool_calls: []}}, state, _context) do
+  defp handle_result({:ok, %{content: content, tool_calls: []} = resp}, state, _context) do
     # Capture whether the model produced NO visible answer (pure reasoning / an
     # empty generation) BEFORE we substitute a "..." placeholder. This is what
     # distinguishes a genuine reasoning-only spin (wasted generation) from a
@@ -1277,6 +1290,56 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         # P0-4: fresh message segment before the next generation - see the
         # auto-continue clause above.
         LLMClient.start_new_message_segment()
+        run(state)
+
+      # P4 (v1057): bounded empty-answer continuation nudge (Hermes parity).
+      # The generation trimmed to NO visible answer AND called no tools BUT
+      # carried internal reasoning (`reasoning_present?/1`) — the model thought
+      # and then stopped without writing its conclusion. Re-ask for the final
+      # answer directly, up to @max_empty_answer_nudges times, BEFORE falling
+      # through to the reasoning-only halt below.
+      #
+      # Bounded three ways so it can never spin: a per-turn counter
+      # (`:empty_answer_nudges`, reset at turn start), the reasoning gate (a
+      # generation with no reasoning is not a "thought-then-stopped" case and
+      # declines here), and the fact that a TRUNCATED empty generation never
+      # reaches this clause at all — it carries `stop_reason: "max_tokens"` and
+      # is handled by the max_tokens clauses far above, so this cannot fight the
+      # overflow/truncation-retry logic. Once the cap is hit we STOP nudging and
+      # fall through to `visible_empty?`, which owns the reasoning-only halt.
+      visible_empty? and reasoning_present?(resp) and
+          Map.get(state, :empty_answer_nudges, 0) < @max_empty_answer_nudges ->
+        spent = Map.get(state, :empty_answer_nudges, 0)
+
+        Logger.info(
+          "[loop] Empty-answer nudge: generation produced only internal reasoning and no " <>
+            "final answer — re-asking for the answer (nudge #{spent + 1}/#{@max_empty_answer_nudges}, " <>
+            "iteration #{state.iteration})"
+        )
+
+        Bus.emit(:system_event, %{
+          event: :empty_answer_nudge,
+          session_id: state.session_id,
+          iteration: state.iteration,
+          nudge: spent + 1,
+          max_nudges: @max_empty_answer_nudges
+        })
+
+        nudge = %{
+          role: "user",
+          content:
+            "[System: your previous response contained only internal reasoning and no " <>
+              "final answer. Provide your final answer now.]"
+        }
+
+        state =
+          %{
+            state
+            | messages: state.messages ++ [%{role: "assistant", content: content}, nudge],
+              iteration: state.iteration + 1
+          }
+          |> Map.put(:empty_answer_nudges, spent + 1)
+
         run(state)
 
       # Reasoning-only spin backstop: the model produced NO visible answer AND no
@@ -1556,6 +1619,42 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         finish_turn(content, state)
     end
   end
+
+  # P4 (v1057): did THIS generation carry internal reasoning? A reasoner
+  # surfaces it on the result map in one of two shapes — accumulated reasoning
+  # TEXT under `:reasoning` (the OpenAI-compat / OpenRouter / Responses
+  # spelling) or structured Anthropic thinking blocks under `:thinking_blocks`
+  # (the same key `continue_after_tools/…` copies onto the assistant message).
+  # Either present-and-non-empty means the model spent the generation thinking,
+  # which is what distinguishes a "thought then stopped without answering" turn
+  # (worth one bounded re-ask) from a generation that produced literally
+  # nothing. When neither is present we cannot confirm reasoning, so the
+  # empty-answer nudge declines and the existing reasoning-only halt handles it.
+  #
+  # NOTE(v1057): a LOCAL Ollama reasoner strips its `<think>` tokens from
+  # `content` and surfaces reasoning only as live thinking deltas — it does not
+  # populate `:reasoning`/`:thinking_blocks` on the done result — so this
+  # predicate is conservatively false there and such a turn falls through to the
+  # reasoning-only halt (no regression, just no extra nudge). Surfacing a
+  # reasoning marker on the Ollama done result would extend coverage but lives
+  # in the provider, outside this workstream's file.
+  defp reasoning_present?(resp) when is_map(resp) do
+    reasoning_text? =
+      case Map.get(resp, :reasoning) do
+        text when is_binary(text) -> String.trim(text) != ""
+        _ -> false
+      end
+
+    thinking_blocks? =
+      case Map.get(resp, :thinking_blocks) do
+        list when is_list(list) -> list != []
+        _ -> false
+      end
+
+    reasoning_text? or thinking_blocks?
+  end
+
+  defp reasoning_present?(_), do: false
 
   # Terminal finish for a no-tool-call turn: run stop hooks (which may override
   # the response or force continuation), else return the content as the final
