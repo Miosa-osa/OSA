@@ -1113,3 +1113,158 @@ mod health_update_parse_tests {
         assert!(h.update.is_none());
     }
 }
+
+
+// === Local model manager (/models/local) ===
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LocalFit {
+    #[serde(default)]
+    pub verdict: String,
+    #[serde(default)]
+    pub est_tps: Option<f64>,
+    #[serde(default)]
+    pub weights_bytes: u64,
+    #[serde(default)]
+    pub kv_bytes: u64,
+    #[serde(default)]
+    pub gpu_share: f64,
+    #[serde(default)]
+    pub ctx: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LocalHardware {
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub gpu: Option<String>,
+    #[serde(default)]
+    pub vram_bytes: u64,
+    #[serde(default)]
+    pub ram_bytes: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LocalModelRow {
+    #[serde(default)]
+    pub tag: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub installed: bool,
+    #[serde(default)]
+    pub loaded: bool,
+    #[serde(default)]
+    pub size_bytes: u64,
+    #[serde(default)]
+    pub params: Option<String>,
+    #[serde(default)]
+    pub quant: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub fit: Option<LocalFit>,
+    #[serde(default)]
+    pub measured_tps: Option<f64>,
+    #[serde(default)]
+    pub catalog_id: Option<String>,
+    #[serde(default)]
+    pub blurb: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LocalModelsResponse {
+    #[serde(default)]
+    pub hardware: LocalHardware,
+    #[serde(default)]
+    pub ctx: u64,
+    #[serde(default)]
+    pub installed: Vec<LocalModelRow>,
+    #[serde(default)]
+    pub catalog: Vec<LocalModelRow>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LocalQuantRow {
+    #[serde(default)]
+    pub quant: String,
+    #[serde(default)]
+    pub bytes: u64,
+    #[serde(default)]
+    pub exact: bool,
+    #[serde(default)]
+    pub fit: Option<LocalFit>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LocalModelInfo {
+    #[serde(default)]
+    pub tag: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub installed: bool,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub family: Option<String>,
+    #[serde(default)]
+    pub params: Option<String>,
+    #[serde(default)]
+    pub quant: Option<String>,
+    #[serde(default)]
+    pub context_length: Option<u64>,
+    #[serde(default)]
+    pub size_bytes: u64,
+    #[serde(default)]
+    pub fit: Option<LocalFit>,
+    #[serde(default)]
+    pub quants: Vec<LocalQuantRow>,
+    #[serde(default)]
+    pub blurb: Option<String>,
+    #[serde(default)]
+    pub catalog_id: Option<String>,
+    #[serde(default)]
+    pub measured: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LocalBench {
+    #[serde(default)]
+    pub decode_tps: f64,
+    #[serde(default)]
+    pub prompt_tps: Option<f64>,
+    #[serde(default)]
+    pub load_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LocalInstallJob {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default, rename = "ref")]
+    pub reff: String,
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub completed: u64,
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default)]
+    pub bench: Option<LocalBench>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LocalInstallStarted {
+    #[serde(default)]
+    pub job_id: String,
+}
