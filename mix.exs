@@ -269,9 +269,16 @@ defmodule OptimalSystemAgent.MixProject do
   # Renames the generated release script (bin/osagent → bin/osagent_release)
   # and copies in our wrapper that dispatches subcommands via `eval`.
   defp copy_osagent_wrapper(release) do
-    # The custom wrapper is a POSIX `sh` script Windows cannot execute. On a
-    # Windows build host, skip it entirely and let install.ps1 call the stock
-    # bin\osagent.bat launcher (with serve/setup/doctor as release commands).
+    # The custom wrapper is a POSIX `sh` script Windows cannot execute, so it
+    # is skipped on a Windows build host and install.ps1's launcher drives the
+    # stock bin\osagent.bat instead.
+    #
+    # NOTE: the stock script does NOT understand serve/setup/doctor/
+    # opencomputers — its whole command set is start, start_iex, install, eval,
+    # rpc, remote, restart, stop, pid, version. Anything calling `osagent.bat
+    # serve` gets "ERROR: Unknown command serve" and an immediate exit. The
+    # Windows launcher therefore dispatches those four through `eval`, exactly
+    # as the sh wrapper below does; keep the two in sync when adding a command.
     # The Unix path below is unchanged so Linux/macOS never regress.
     if match?({:win32, _}, :os.type()) do
       release
