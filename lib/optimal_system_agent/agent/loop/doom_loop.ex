@@ -40,8 +40,11 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
   @doc false
   def max_total_tool_calls do
     case env_max_tool_calls() do
-      nil -> Application.get_env(:optimal_system_agent, :doom_loop_max_calls, @unbounded_tool_calls)
-      value -> value
+      nil ->
+        Application.get_env(:optimal_system_agent, :doom_loop_max_calls, @unbounded_tool_calls)
+
+      value ->
+        value
     end
   end
 
@@ -80,7 +83,6 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
   defp warn_threshold(:infinity), do: nil
   defp warn_threshold(max) when is_integer(max), do: trunc(max * @warn_threshold_pct)
   defp warn_threshold(_), do: nil
-
 
   @moduledoc """
   Doom loop detection for the agent loop — a coordinator over independent

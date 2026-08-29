@@ -36,6 +36,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
   # Tool schemas ride in a dedicated field of the request body, not in the
   # system-prompt text. See Providers.Behaviour.native_tool_schemas?/0.
+  @impl true
   def native_tool_schemas?, do: true
 
   @impl true
@@ -145,11 +146,34 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     e -> {:error, Exception.message(e)}
   end
 
+  @doc """
+  The URL of the daemon on THIS machine.
+
+  `:ollama_url` is whatever onboarding last wrote — picking a cloud model
+  leaves it at `https://ollama.com`. That is a hosted endpoint, not a local
+  daemon; anything that means "the local daemon" (the picker's reachability
+  probe, `/model list`, routing local weights) must not read it as one.
+  """
+  @spec local_daemon_url() :: String.t()
+  def local_daemon_url do
+    configured = Application.get_env(:optimal_system_agent, :ollama_url, @local_url)
+
+    if is_binary(configured) and String.starts_with?(configured, "https://"),
+      do: Application.get_env(:optimal_system_agent, :ollama_local_url, @local_url),
+      else: configured
+  end
+
   @doc false
+  # A hosted URL (`https://ollama.com`) cannot serve local weights at all, and
+  # it only serves a `:cloud` tag the account is entitled to. So whenever the
+  # local daemon has the model, the local daemon is the right route — the
+  # signed daemon proxies cloud tags key-free, and it is the ONLY thing that
+  # can run a GGUF pulled with `ollama pull hf.co/…`. Before, this only
+  # rerouted cloud tags: a local model selected while `OLLAMA_URL=https://ollama.com`
+  # was sent to ollama.com and failed.
   @spec resolve_request_url(String.t(), String.t() | nil, [String.t()]) :: String.t()
   def resolve_request_url(configured_url, model, local_model_names) do
-    if String.starts_with?(configured_url, "https://") and cloud_model?(model) and
-         model in local_model_names do
+    if String.starts_with?(configured_url, "https://") and model in local_model_names do
       @local_url
     else
       configured_url
@@ -157,7 +181,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   end
 
   defp request_url(configured_url, model) do
-    if String.starts_with?(configured_url, "https://") and cloud_model?(model) do
+    if String.starts_with?(configured_url, "https://") and is_binary(model) do
       local_url = Application.get_env(:optimal_system_agent, :ollama_local_url, @local_url)
 
       # Hosted tags are not guaranteed to appear in /api/tags even when the
@@ -175,7 +199,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
       case resolve_request_url(configured_url, model, local_model_names) do
         @local_url ->
-          Logger.info("[Ollama] Routing hosted tag #{model} through the signed local daemon")
+          Logger.info("[Ollama] Routing #{model} through the local daemon (it serves it)")
 
           local_url
 
@@ -917,7 +941,44 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   Test seam: the Ollama wire shape for a list of OSA messages.
   """
   def format_messages(messages) do
-    Enum.map(messages, fn
+    messages
+    |> Enum.map(&format_message/1)
+    |> demote_trailing_system()
+  end
+
+  # OSA injects `role: "system"` messages MID-conversation on purpose — the
+  # task brief, background-task notifications, compaction reminders, steer
+  # directives. Most chat templates render those wherever they land. Qwen 3.5's
+  # embedded Jinja template does not: any system message that is not the first
+  # message hits `raise_exception('System message must be at the beginning.')`,
+  # and Ollama surfaces that as a 400 before generation starts. So the
+  # abliterated SuperQwen GGUF answered `curl` fine and 400'd every real OSA
+  # turn.
+  #
+  # Keep the leading system message where it is; every later one becomes a
+  # user turn carrying the same text inside `<system-reminder>` tags. That is
+  # the shape the harness-side reminders already use, every template accepts
+  # it, and the model still reads it as an instruction rather than as chat.
+  @doc false
+  def demote_trailing_system([first | rest]) do
+    [first | Enum.map(rest, &demote_system/1)]
+  end
+
+  def demote_trailing_system([]), do: []
+
+  defp demote_system(%{"role" => "system", "content" => content} = msg) when is_binary(content) do
+    %{
+      msg
+      | "role" => "user",
+        "content" => "<system-reminder>\n" <> content <> "\n</system-reminder>"
+    }
+  end
+
+  defp demote_system(%{"role" => "system"} = msg), do: %{msg | "role" => "user"}
+  defp demote_system(msg), do: msg
+
+  defp format_message(message) do
+    case message do
       # Assistant messages that carry tool_calls must preserve them so that
       # the 2nd+ iteration has accurate conversation history.
       %{role: "assistant", tool_calls: tool_calls} = msg
@@ -977,7 +1038,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
       msg when is_map(msg) ->
         msg
-    end)
+    end
   end
 
   # Ollama's native `/api/chat` carries images as a SIBLING field of `content`:

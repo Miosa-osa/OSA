@@ -154,20 +154,32 @@ defmodule OptimalSystemAgent.Agent.DelegationRouterTest do
 
     test "loose steps the quality tier DOWN one, floored at :specialist" do
       # elite → specialist under loose
-      routed = capture_tier_router("do it", %{provider: :paid_primary, tier: :elite, priority: "loose"})
+      routed =
+        capture_tier_router("do it", %{provider: :paid_primary, tier: :elite, priority: "loose"})
+
       assert_received {:asked, :specialist, _}
       assert routed.priority == :loose
       assert routed.model_reason =~ "priority: loose"
     end
 
     test "loose never drops below :specialist (stays tool-capable)" do
-      capture_tier_router("do it", %{provider: :paid_primary, tier: :specialist, priority: "loose"})
+      capture_tier_router("do it", %{
+        provider: :paid_primary,
+        tier: :specialist,
+        priority: "loose"
+      })
+
       # specialist stepped toward utility would be :utility, but loose is floored
       assert_received {:asked, :specialist, _}
     end
 
     test "immediate steps the quality tier UP toward :elite" do
-      capture_tier_router("do it", %{provider: :paid_primary, tier: :specialist, priority: "immediate"})
+      capture_tier_router("do it", %{
+        provider: :paid_primary,
+        tier: :specialist,
+        priority: "immediate"
+      })
+
       assert_received {:asked, :elite, _}
     end
 
@@ -176,10 +188,15 @@ defmodule OptimalSystemAgent.Agent.DelegationRouterTest do
       # as the free candidate so ordering puts it first for loose.
       test_pid = self()
 
-      DelegationRouter.resolve("do it", %{provider: :openai, tier: :specialist, priority: "loose"},
+      DelegationRouter.resolve(
+        "do it",
+        %{provider: :openai, tier: :specialist, priority: "loose"},
         candidates: [:openai, :ollama],
         configured?: fn _ -> true end,
-        model_for: fn _tier, provider -> send(test_pid, {:picked, provider}); "#{provider}-m" end,
+        model_for: fn _tier, provider ->
+          send(test_pid, {:picked, provider})
+          "#{provider}-m"
+        end,
         tool_call: fn _, _ -> true end,
         context_window: fn _ -> 200_000 end,
         vision_capable: fn _, _ -> true end
@@ -211,7 +228,9 @@ defmodule OptimalSystemAgent.Agent.DelegationRouterTest do
       CostObservations.record(:paid_b, "paid_b-specialist-model", 0.2)
 
       routed =
-        DelegationRouter.resolve("do it", %{provider: :paid_a, tier: :specialist, priority: "loose"},
+        DelegationRouter.resolve(
+          "do it",
+          %{provider: :paid_a, tier: :specialist, priority: "loose"},
           candidates: [:paid_a, :paid_b],
           configured?: fn _ -> true end,
           model_for: fn tier, provider -> "#{provider}-#{tier}-model" end,
@@ -225,7 +244,9 @@ defmodule OptimalSystemAgent.Agent.DelegationRouterTest do
 
     test "with no observations, order is unchanged (first compatible)" do
       routed =
-        DelegationRouter.resolve("do it", %{provider: :paid_a, tier: :specialist, priority: "loose"},
+        DelegationRouter.resolve(
+          "do it",
+          %{provider: :paid_a, tier: :specialist, priority: "loose"},
           candidates: [:paid_a, :paid_b],
           configured?: fn _ -> true end,
           model_for: fn tier, provider -> "#{provider}-#{tier}-model" end,

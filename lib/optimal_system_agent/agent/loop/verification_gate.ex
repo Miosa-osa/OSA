@@ -838,52 +838,6 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
       "it later."
   end
 
-  # The agent exit. `task_wait` blocks on chosen agentIds until they reach a
-  # terminal state and returns their reports — the one affordance that both
-  # exists and is permitted here.
-  defp exits(agents, commands) do
-    agent_exit =
-      if agents == [] do
-        ""
-      else
-        ids = agents |> Enum.take(3) |> Enum.map_join(", ", &"\"#{Map.get(&1, :id)}\"")
-
-        "  1. JOIN THE TEAMMATE(S) IN ONE CALL: `task_wait` with " <>
-          "`agent_ids: [#{ids}]`. That blocks until they finish and hands you their " <>
-          "reports, which is what you were going to wait for anyway — then report " <>
-          "what they actually found. Do NOT poll `task_output` and do not read a " <>
-          "running agent's output file; both are forbidden by `delegate` and " <>
-          "neither waits.\n" <>
-          "  2. If their result is not needed for what you are about to say, say " <>
-          "only what you verified yourself and do not characterise their findings " <>
-          "at all.\n"
-      end
-
-    command_exit =
-      if commands == [] do
-        ""
-      else
-        n = if agents == [], do: 1, else: 3
-
-        "  #{n}. BLOCK ON THE COMMAND IN ONE CALL: `bash_output` with the " <>
-          "background_id above and `wait_ms` (e.g. 600000). That waits until it " <>
-          "reaches a terminal status and hands you its exit code and output. Do NOT " <>
-          "call `bash_output` without `wait_ms` in a loop; a bare call returns " <>
-          "instantly and tells you nothing new.\n"
-      end
-
-    agent_exit <> command_exit
-  end
-
-  # The escape is always the last numbered option, so its ordinal depends on how
-  # many exits were actually offered above it: two for agents (join, or decline
-  # to characterise), one for commands.
-  defp escape_ordinal(agents, commands) do
-    agent_exits = if agents == [], do: 0, else: 2
-    command_exits = if commands == [], do: 0, else: 1
-    agent_exits + command_exits + 1
-  end
-
   defp body(:failing_check, session_id, step, cap) do
     failing = VerificationEvidence.failing_check_since_write(session_id)
     cmd = (failing && Map.get(failing, :command)) || "your last check"
@@ -972,6 +926,52 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
       "value, no harness in the environment — say so explicitly on its own line, as " <>
       "`NO_RUNNABLE_TEST: <one-line reason>`, and finish. Do not use that to skip work " <>
       "you could have tested."
+  end
+
+  # The agent exit. `task_wait` blocks on chosen agentIds until they reach a
+  # terminal state and returns their reports — the one affordance that both
+  # exists and is permitted here.
+  defp exits(agents, commands) do
+    agent_exit =
+      if agents == [] do
+        ""
+      else
+        ids = agents |> Enum.take(3) |> Enum.map_join(", ", &"\"#{Map.get(&1, :id)}\"")
+
+        "  1. JOIN THE TEAMMATE(S) IN ONE CALL: `task_wait` with " <>
+          "`agent_ids: [#{ids}]`. That blocks until they finish and hands you their " <>
+          "reports, which is what you were going to wait for anyway — then report " <>
+          "what they actually found. Do NOT poll `task_output` and do not read a " <>
+          "running agent's output file; both are forbidden by `delegate` and " <>
+          "neither waits.\n" <>
+          "  2. If their result is not needed for what you are about to say, say " <>
+          "only what you verified yourself and do not characterise their findings " <>
+          "at all.\n"
+      end
+
+    command_exit =
+      if commands == [] do
+        ""
+      else
+        n = if agents == [], do: 1, else: 3
+
+        "  #{n}. BLOCK ON THE COMMAND IN ONE CALL: `bash_output` with the " <>
+          "background_id above and `wait_ms` (e.g. 600000). That waits until it " <>
+          "reaches a terminal status and hands you its exit code and output. Do NOT " <>
+          "call `bash_output` without `wait_ms` in a loop; a bare call returns " <>
+          "instantly and tells you nothing new.\n"
+      end
+
+    agent_exit <> command_exit
+  end
+
+  # The escape is always the last numbered option, so its ordinal depends on how
+  # many exits were actually offered above it: two for agents (join, or decline
+  # to characterise), one for commands.
+  defp escape_ordinal(agents, commands) do
+    agent_exits = if agents == [], do: 0, else: 2
+    command_exits = if commands == [], do: 0, else: 1
+    agent_exits + command_exits + 1
   end
 
   # ---------------------------------------------------------------------------

@@ -12,7 +12,9 @@ defmodule OptimalSystemAgent.Providers.SessionModelReachesWireTest do
   alias OptimalSystemAgent.Agent.Loop.ModelSwap
 
   test "the request body carries the exact session model, verbatim" do
-    body = OpenAICompat.build_stream_body("stealth/ox-alpha", [%{role: "user", content: "hi"}], [])
+    body =
+      OpenAICompat.build_stream_body("stealth/ox-alpha", [%{role: "user", content: "hi"}], [])
+
     assert body.model == "stealth/ox-alpha"
   end
 
@@ -20,7 +22,11 @@ defmodule OptimalSystemAgent.Providers.SessionModelReachesWireTest do
     # explicit(opts) is consulted before configured(provider) / fallback, so a
     # session pinned to ox-alpha is never silently replaced by the openrouter
     # default (anthropic/claude-opus-5).
-    assert ConfiguredModel.resolve([model: "stealth/ox-alpha"], :openrouter, "anthropic/claude-opus-5") ==
+    assert ConfiguredModel.resolve(
+             [model: "stealth/ox-alpha"],
+             :openrouter,
+             "anthropic/claude-opus-5"
+           ) ==
              "stealth/ox-alpha"
   end
 

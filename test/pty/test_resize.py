@@ -46,6 +46,8 @@ from stub_backend import (  # noqa: E402
     push_sse,
     release_health,
     release_turn,
+    report_real_version,
+    report_stale_version,
     reject_next_sse,
     reset_goal_state,
     set_claude_cli_state,
@@ -1532,9 +1534,11 @@ def test_a_stale_backend_says_so_instead_of_relabelling_the_tui(
     number. Every surface the user could check agreed with the daemon, and none
     of them revealed the disagreement.
 
-    The stub reports `STUB_VERSION`, which is deliberately never a real release
-    number, so attaching to it is exactly the stale-daemon shape. Two things are
-    asserted:
+    This test opts into `report_stale_version()` — `/health` then reports
+    `STALE_VERSION`, deliberately never a real release number, so attaching to
+    it is exactly the stale-daemon shape. (Every other test runs against the
+    working tree's real version so the mismatch banner cannot steal screen
+    rows from the bands under test.) Two things are asserted:
 
       1. the transcript carries a notice naming the mismatch, and
       2. it names the remedy the launcher actually performs — re-running `osa` —
@@ -1544,13 +1548,17 @@ def test_a_stale_backend_says_so_instead_of_relabelling_the_tui(
     A binary with the shipped defect fails (1): the connect is silent and the
     TUI relabels itself to the stub's version.
     """
-    with PtySession(backend.base_url, cols=100, rows=30) as s:
-        if not s.wait_for_text("Version mismatch", 15.0):
-            raise AssertionError(
-                "attaching to a backend reporting a different version produced "
-                "no mismatch notice, so a stale daemon is still silent.\n"
-                f"--- rendered screen ---\n{s.dump()}"
-            )
+    report_stale_version()
+    try:
+        with PtySession(backend.base_url, cols=100, rows=30) as s:
+            if not s.wait_for_text("Version mismatch", 15.0):
+                raise AssertionError(
+                    "attaching to a backend reporting a different version produced "
+                    "no mismatch notice, so a stale daemon is still silent.\n"
+                    f"--- rendered screen ---\n{s.dump()}"
+                )
+    finally:
+        report_real_version()
 
 
 def test_a_missing_session_recovers_without_a_reconnect_loop(

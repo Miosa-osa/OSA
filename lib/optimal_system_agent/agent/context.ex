@@ -87,8 +87,6 @@ defmodule OptimalSystemAgent.Agent.Context do
   defp response_reserve(max_tok),
     do: min(@response_reserve, max(div(max_tok, @response_reserve_frac), 512))
 
-  defp max_tokens, do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
-
   # ---------------------------------------------------------------------------
   # Public API
   # ---------------------------------------------------------------------------
@@ -173,16 +171,23 @@ defmodule OptimalSystemAgent.Agent.Context do
 
     # Subagents with a system_prompt_override use that instead of Soul.static_base.
     # This gives each agent role its own focused prompt from AGENT.md.
-    static_base =
+    #
+    # Operator `/system` overrides (`Agent.PromptOverrides`) apply ONLY on the
+    # Soul path: `inject` appends to the cached base, `replace` swaps it out.
+    # Either way the cached token count no longer describes the prompt, so it
+    # is re-estimated from the text actually sent.
+    {static_base, static_tokens} =
       case Map.get(state, :system_prompt_override) do
-        override when override in [nil, ""] -> Soul.static_base(variant)
-        override -> override
-      end
+        override when override in [nil, ""] ->
+          base = Soul.static_base(variant)
 
-    static_tokens =
-      case Map.get(state, :system_prompt_override) do
-        override when override in [nil, ""] -> Soul.static_token_count(variant)
-        override -> estimate_tokens(override)
+          case OptimalSystemAgent.Agent.PromptOverrides.apply(base, model) do
+            {^base, :none} -> {base, Soul.static_token_count(variant)}
+            {patched, _applied} -> {patched, estimate_tokens(patched)}
+          end
+
+        override ->
+          {override, estimate_tokens(override)}
       end
 
     # Tier 2: Dynamic context. Essentials fit into the leftover slack; the
@@ -304,8 +309,7 @@ defmodule OptimalSystemAgent.Agent.Context do
       system_prompt_budget: max_tok - reserve - conversation_tokens,
       system_prompt_actual: static_tokens + dynamic_tokens + tool_tokens,
       total_tokens: total_tokens,
-      utilization_pct:
-        if(max_tok > 0, do: Float.round(occupied / max_tok * 100, 1), else: 0.0),
+      utilization_pct: if(max_tok > 0, do: Float.round(occupied / max_tok * 100, 1), else: 0.0),
       headroom: max_tok - total_tokens,
       blocks: block_details
     }

@@ -55,8 +55,6 @@ defmodule OptimalSystemAgent.Agent.SecurityContext do
 
   @security_skills ~w(penetration-testing security-audit)
 
-  @security_roles ~w(pentester recon-specialist exploit-developer security-auditor)
-
   @doc """
   Check whether a security task is currently active.
 
@@ -421,7 +419,7 @@ defmodule OptimalSystemAgent.Agent.SecurityContext do
     """
   end
 
-  defp build_host_context(backend_name) do
+  defp build_host_context(_backend_name) do
     """
     <scan_methodology>
     When running security scans:

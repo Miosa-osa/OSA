@@ -290,7 +290,12 @@ defmodule OptimalSystemAgent.OS.ProcessGroup do
       _ -> []
     end
   rescue
-    _ -> []
+    e ->
+      Logger.warning(
+        "[ProcessGroup] children_of(#{os_pid}) failed (pgrep unavailable?): #{Exception.message(e)}"
+      )
+
+      []
   catch
     _, _ -> []
   end

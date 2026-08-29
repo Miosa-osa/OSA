@@ -38,15 +38,22 @@ defmodule OptimalSystemAgent.Agent.ModelIdentityConsistencyTest do
   end
 
   test "a session pinned to stealth/ox-alpha never announces the openrouter default model" do
-    text = system_text(state("id-#{System.unique_integer([:positive])}", :openrouter, "stealth/ox-alpha"))
+    text =
+      system_text(
+        state("id-#{System.unique_integer([:positive])}", :openrouter, "stealth/ox-alpha")
+      )
 
     assert text =~ "stealth/ox-alpha"
+
     refute text =~ "claude-opus-5",
            "the environment line must not fall back to the provider config default"
   end
 
   test "the environment line and the runtime line report the SAME model" do
-    text = system_text(state("id-#{System.unique_integer([:positive])}", :openrouter, "stealth/ox-alpha"))
+    text =
+      system_text(
+        state("id-#{System.unique_integer([:positive])}", :openrouter, "stealth/ox-alpha")
+      )
 
     # runtime block: "- Model: <m> (provider ...)"
     runtime_model =

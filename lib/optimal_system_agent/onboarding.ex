@@ -3092,23 +3092,19 @@ defmodule OptimalSystemAgent.Onboarding do
           model_count: non_neg_integer()
         }
   def probe_ollama_local(req_opts \\ []) do
-    url =
-      Application.get_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
+    # Probe the daemon on THIS machine, whatever `OLLAMA_URL` currently says.
+    # It used to read `:ollama_url` and give up unless the host was localhost —
+    # so after picking a cloud model (which writes `OLLAMA_URL=https://ollama.com`)
+    # the picker reported "Ollama (local)" unreachable and asked for a key,
+    # while a signed-in daemon sat on :11434 with the models loaded.
+    url = OptimalSystemAgent.Providers.Ollama.local_daemon_url()
 
-    # Only probe if URL looks local
-    uri = URI.parse(url)
-    host = uri.host || "localhost"
+    case Req.get([url: "#{url}/api/tags", receive_timeout: 3_000] ++ req_opts) do
+      {:ok, %{status: 200, body: %{"models" => models}}} ->
+        %{reachable: true, url: url, model_count: length(models)}
 
-    if host in ["localhost", "127.0.0.1", "::1"] do
-      case Req.get([url: "#{url}/api/tags", receive_timeout: 3_000] ++ req_opts) do
-        {:ok, %{status: 200, body: %{"models" => models}}} ->
-          %{reachable: true, url: url, model_count: length(models)}
-
-        _ ->
-          %{reachable: false, url: url, model_count: 0}
-      end
-    else
-      %{reachable: false, url: url, model_count: 0}
+      _ ->
+        %{reachable: false, url: url, model_count: 0}
     end
   rescue
     _ -> %{reachable: false, url: "http://localhost:11434", model_count: 0}

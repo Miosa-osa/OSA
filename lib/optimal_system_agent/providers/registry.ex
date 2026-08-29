@@ -2048,6 +2048,14 @@ defmodule OptimalSystemAgent.Providers.Registry do
       OptimalSystemAgent.Providers.OllamaCloud.cloud_tag?(m) ->
         :ollama_cloud
 
+      # A Hugging Face GGUF pulled straight into the daemon
+      # (`ollama pull hf.co/<user>/<repo>:<quant>`) keeps the `hf.co/` prefix as
+      # its tag. Nothing but local Ollama serves those ids; without this branch
+      # they fell to nil and were handed to whatever the node's default provider
+      # was (Ollama Cloud on a `:cloud` default), which does not have the model.
+      String.starts_with?(m, "hf.co/") or String.starts_with?(m, "huggingface.co/") ->
+        :ollama
+
       String.starts_with?(m, "claude") ->
         :anthropic
 

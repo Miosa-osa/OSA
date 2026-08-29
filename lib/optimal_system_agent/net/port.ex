@@ -18,6 +18,8 @@ defmodule OptimalSystemAgent.Net.Port do
   therefore always reported available.
   """
 
+  require Logger
+
   @app :optimal_system_agent
   @default_port 9089
 
@@ -116,9 +118,13 @@ defmodule OptimalSystemAgent.Net.Port do
         false
     end
   rescue
-    _ -> false
+    e ->
+      Logger.warning("[Net.Port] health probe crashed: #{Exception.message(e)}")
+      false
   catch
-    _, _ -> false
+    kind, reason ->
+      Logger.warning("[Net.Port] health probe #{kind}: #{inspect(reason)}")
+      false
   end
 
   defp recv_all(socket, acc) do

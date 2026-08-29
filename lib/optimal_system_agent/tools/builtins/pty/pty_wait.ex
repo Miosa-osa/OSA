@@ -82,8 +82,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.Pty.PtyWait do
   def destructive?(_input, _ctx), do: false
 
   @impl true
-
-  @impl true
   def safety, do: :read_only
 
   @impl true

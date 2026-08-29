@@ -24,9 +24,12 @@ defmodule OptimalSystemAgent.Utils.BrowserTest do
                {"xdg-open", ["https://x.test"]}
     end
 
-    test "Windows uses `cmd /c start`" do
+    test "Windows uses rundll32 (cmd /c start would mangle the URL as a window title)" do
+      # main superseded this PR's original `cmd /c start` with rundll32: `start`
+      # parses its first quoted argument as the window TITLE (so the URL is
+      # consumed) and `&` in a query string is a cmd separator that truncates it.
       assert Browser.command_for({:win32, :nt}, "https://x.test") ==
-               {"cmd", ["/c", "start", "https://x.test"]}
+               {"rundll32", ["url.dll,FileProtocolHandler", "https://x.test"]}
     end
   end
 
