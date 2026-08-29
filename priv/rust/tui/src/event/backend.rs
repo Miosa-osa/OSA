@@ -692,14 +692,6 @@ pub enum BackendEvent {
     AccountLoginUpdate(Result<crate::client::types::LoginSessionResponse, String>),
     /// A provider's dynamic model list loaded → switch picker to Models mode.
     ProviderModelsLoaded(Result<OnboardingModelsResponse, String>),
-    /// `/models/local` — the local catalog screen's data.
-    LocalCatalogLoaded(Result<crate::client::types::LocalModelsResponse, String>),
-    /// `/models/local/info` — one model's quant ladder and fit.
-    LocalModelInfoLoaded(Result<crate::client::types::LocalModelInfo, String>),
-    /// One poll of a pull job (`/models/local/install/:id`), or the start failing.
-    LocalInstallUpdate(Result<crate::client::types::LocalInstallJob, String>),
-    /// `/models/local/remove` finished — Ok(tag) or the reason.
-    LocalModelRemoved(Result<String, String>),
     /// A reading of `/auth/cli/claude` — what to install, what to run, and who
     /// is signed in. Drives the in-TUI vendor-CLI sign-in screen.
     ClaudeCliState(Result<crate::client::types::ClaudeCliState, String>),

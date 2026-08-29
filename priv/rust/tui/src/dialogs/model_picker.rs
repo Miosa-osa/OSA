@@ -16,8 +16,6 @@ use ratatui::{
 
 use crate::client::types::{DetectedProvidersResponse, OnboardingModel, OnboardingProvider};
 
-mod local;
-
 /// Narrowest the dialog is allowed to get before it simply takes the whole
 /// terminal. Also the width it used to be pinned at, unconditionally.
 const MIN_W: u16 = 82;
@@ -85,14 +83,6 @@ pub enum ModelPickerAction {
     /// Reachable from Providers mode any time (not just after a load
     /// failure) so a newcomer is never stuck on a stale/degraded list.
     Reload,
-    /// Fetch `/models/local` for the local catalog screen (non-terminal).
-    LoadLocalCatalog,
-    /// Fetch one local model's detail — quant ladder, fit, speed (non-terminal).
-    LoadLocalInfo { reff: String },
-    /// Start pulling a local model; the picker polls the job (non-terminal).
-    InstallLocal { reff: String, quant: Option<String> },
-    /// Delete an installed local model from disk (non-terminal).
-    RemoveLocal { tag: String },
 }
 
 // ── Internal enums ───────────────────────────────────────────────────────────
@@ -121,14 +111,6 @@ enum PickerMode {
     /// dialog. Owns the screen and the keyboard for the same reason
     /// `AccountLogin` does: the child's prompts have nowhere else to go.
     CliLogin,
-    /// Local model catalog: installed + curated, with fit for this machine.
-    LocalCatalog,
-    /// A `/models/local*` fetch is in flight.
-    LocalLoading,
-    /// One local model: quant ladder, pick one to install (or use it).
-    LocalDetail,
-    /// A pull is running; progress, then benchmark, then "use it".
-    LocalInstalling,
 }
 
 /// How the user proves who they are for a provider.
@@ -280,19 +262,6 @@ pub struct ModelPicker {
     /// the user knows they're on a degraded static catalog and can ask for
     /// a fresh one instead of silently being stuck on stale data.
     load_failed: bool,
-
-    /// Local catalog screen state (see `local.rs`).
-    local: Option<crate::client::types::LocalModelsResponse>,
-    local_cursor: usize,
-    local_scroll: usize,
-    local_info: Option<crate::client::types::LocalModelInfo>,
-    local_quant_cursor: usize,
-    local_job: Option<crate::client::types::LocalInstallJob>,
-    /// Armed by the first `d`; the second `d` on the same tag deletes.
-    local_pending_delete: Option<String>,
-    /// Where `Esc` from the catalog goes back to.
-    local_return: PickerMode,
-    local_error: Option<String>,
 }
 
 impl ModelPicker {
@@ -328,15 +297,6 @@ impl ModelPicker {
             usage_loaded: false,
             list_viewport: Cell::new((MAX_H as usize).saturating_sub(6)),
             load_failed: false,
-            local: None,
-            local_cursor: 0,
-            local_scroll: 0,
-            local_info: None,
-            local_quant_cursor: 0,
-            local_job: None,
-            local_pending_delete: None,
-            local_return: PickerMode::Providers,
-            local_error: None,
         }
     }
 
@@ -635,10 +595,6 @@ impl ModelPicker {
             PickerMode::KeyEntry => self.handle_key_entry_key(key),
             PickerMode::AccountLogin => self.handle_account_login_key(key),
             PickerMode::CliLogin => self.handle_cli_login_key(key),
-            PickerMode::LocalCatalog => self.handle_local_catalog_key(key),
-            PickerMode::LocalLoading => self.handle_local_loading_key(key),
-            PickerMode::LocalDetail => self.handle_local_detail_key(key),
-            PickerMode::LocalInstalling => self.handle_local_installing_key(key),
         }
     }
 
@@ -652,9 +608,6 @@ impl ModelPicker {
         }
         if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
             return None;
-        }
-        if key.code == KeyCode::Tab {
-            return self.open_local_catalog();
         }
         let vis = self.visible_providers();
         let total = vis.len() + 1; // +1 for the "Default" row
@@ -1134,10 +1087,6 @@ impl ModelPicker {
                 self.mode = PickerMode::Providers;
                 self.filter.clear();
             }
-            // Tab from the Ollama Local list: browse and install more.
-            KeyCode::Tab if self.models_provider == "ollama_local" => {
-                return self.open_local_catalog();
-            }
             KeyCode::Up | KeyCode::Char('k') if self.filter.is_empty() => {
                 self.models_cursor = self.models_cursor.saturating_sub(1);
                 self.adjust_models_scroll();
@@ -1492,10 +1441,6 @@ impl ModelPicker {
                     c.draw(frame, dialog_rect, &theme);
                 }
             }
-            PickerMode::LocalCatalog => self.draw_local_catalog(frame, inner, &theme),
-            PickerMode::LocalLoading => self.draw_local_loading(frame, inner, &theme),
-            PickerMode::LocalDetail => self.draw_local_detail(frame, inner, &theme),
-            PickerMode::LocalInstalling => self.draw_local_installing(frame, inner, &theme),
         }
     }
 
@@ -1759,7 +1704,6 @@ impl ModelPicker {
                 ("↑↓/jk", "nav"),
                 ("Enter", "open"),
                 ("type", "filter"),
-                ("Tab", "local models"),
                 ("Ctrl+R", "reload"),
                 ("Esc", "cancel"),
             ],
@@ -2055,21 +1999,15 @@ impl ModelPicker {
             }
         }
 
-        let help: &[(&str, &str)] = if self.models_provider == "ollama_local" {
-            &[
-                ("↑↓/jk", "nav"),
-                ("Enter", "select"),
-                ("Tab", "browse & install more"),
-                ("Esc", "back"),
-            ]
-        } else {
-            &[("↑↓/jk", "nav"), ("Enter", "select"), ("Esc", "back")]
-        };
         self.draw_help(
             frame,
             inner,
             theme,
-            help,
+            &[
+                ("↑↓/jk", "nav"),
+                ("Enter", "select"),
+                ("Esc", "back"),
+            ],
         );
     }
 

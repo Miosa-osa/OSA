@@ -211,12 +211,12 @@ defmodule OptimalSystemAgent.Tools.PromptAssemblerNativeDedupTest do
       assert Context.static_base_variant(:replicate, false) == :full
     end
 
-    test "a small window takes the smaller of lite / native, per transport" do
+    test "the lite path is untouched and wins over the cut" do
       Application.put_env(:optimal_system_agent, :dedupe_native_tool_prompt, true)
-      assert Context.static_base_variant(:anthropic, true) == :native_tools
-      assert Context.static_base_variant(:claude_cli, true) == :lite
-      Application.put_env(:optimal_system_agent, :dedupe_native_tool_prompt, false)
-      assert Context.static_base_variant(:anthropic, true) == :lite
+
+      assert Context.static_base_variant(:ollama, true) == :lite,
+             "on the lite path ToolFilter separately caps the native array, so the " <>
+               "prose and the array describe different sets and nothing may be dropped"
     end
 
     test "the config flag reverts everything without a code change" do

@@ -1803,35 +1803,6 @@ impl App {
             }
 
             // === Provider-first picker: dynamic model list loaded ===
-            BackendEvent::LocalCatalogLoaded(result) => {
-                if let Some(picker) = self.model_picker.as_mut() {
-                    picker.set_local_catalog(result);
-                }
-            }
-            BackendEvent::LocalModelInfoLoaded(result) => {
-                if let Some(picker) = self.model_picker.as_mut() {
-                    picker.set_local_info(result);
-                }
-            }
-            BackendEvent::LocalInstallUpdate(result) => {
-                if let Some(picker) = self.model_picker.as_mut() {
-                    picker.set_local_job(result);
-                }
-            }
-            BackendEvent::LocalModelRemoved(result) => {
-                let msg = match &result {
-                    Ok(tag) => Some((format!("Removed {}", tag), crate::components::toast::ToastLevel::Info)),
-                    Err(e) => Some((format!("Remove failed: {}", e), crate::components::toast::ToastLevel::Error)),
-                };
-                if let Some(picker) = self.model_picker.as_mut() {
-                    picker.set_local_removed(result);
-                }
-                if let Some((m, lvl)) = msg {
-                    self.toasts.push(m, lvl);
-                }
-                // The list is stale now; refetch it.
-                self.load_local_catalog();
-            }
             BackendEvent::ProviderModelsLoaded(result) => {
                 if let Some(picker) = self.model_picker.as_mut() {
                     match result {

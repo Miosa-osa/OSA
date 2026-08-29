@@ -133,13 +133,6 @@ impl App {
                 } => {
                     self.load_provider_models(provider, base_url, api_key);
                 }
-                // Local catalog: all non-terminal — the picker owns these screens.
-                ModelPickerAction::LoadLocalCatalog => self.load_local_catalog(),
-                ModelPickerAction::LoadLocalInfo { reff } => self.load_local_info(reff),
-                ModelPickerAction::InstallLocal { reff, quant } => {
-                    self.install_local_model(reff, quant);
-                }
-                ModelPickerAction::RemoveLocal { tag } => self.remove_local_model(tag),
                 // Hotfix: retry the catalog+detection fetch on demand — the
                 // picker stays open (on the fallback catalog, if that's why
                 // Reload was needed) until the fresh data arrives and

@@ -1903,7 +1903,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   defp apply_local_ceiling(trained, model, provider) do
     if provider in [:ollama, :lmstudio, :llamacpp] and not ollama_cloud_model?(model) do
-      ceiling = OptimalSystemAgent.LocalModels.num_ctx_ceiling(model)
+      ceiling = Application.get_env(:optimal_system_agent, :ollama_num_ctx, 32_768)
 
       # Floor against the model's REAL trained window too, not just the config
       # ceiling. A static/catalog entry (or a family prefix match) can advertise
