@@ -2872,18 +2872,47 @@ defmodule OptimalSystemAgent.Orchestrator do
     Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
       # Subscribe INSIDE this process — PubSub subscriptions are per-process
       Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{subagent_id}")
-      forwarder_loop(subagent_id, parent_id, role, 0)
+      forwarder_loop(subagent_id, parent_id, role, 0, 0)
     end)
   end
 
-  defp forwarder_loop(subagent_id, parent_id, role, tool_count) do
+  defp forwarder_loop(subagent_id, parent_id, role, tool_count, tokens) do
     receive do
+      # Token usage from a completed model call. Accumulate the running billed
+      # total and push it so the roster's "N tok" grows LIVE instead of sitting
+      # at 0. The old path read it via `Loop.get_state/1` — a GenServer.call to
+      # the subagent's Loop, which is BLOCKED in its own handle_call for the
+      # whole turn, so the call always timed out and returned 0 (the reported
+      # "still says zero tokens even though it's definitely doing something").
+      {:osa_event, %{type: :llm_response, usage: usage}} ->
+        tokens =
+          tokens + Map.get(usage, :input_tokens, 0) + Map.get(usage, :output_tokens, 0)
+
+        emit_event(
+          parent_id,
+          Map.merge(
+            %{
+              event: "orchestrator_agent_progress",
+              agent_name: subagent_id,
+              current_action: List.first(recent_actions(subagent_id)) || "working",
+              tool_uses: tool_count,
+              tokens_used: tokens,
+              recent_actions: recent_actions(subagent_id),
+              elapsed_ms: run_elapsed_ms(subagent_id),
+              description: ""
+            },
+            execution_event_fields(subagent_id)
+          )
+        )
+
+        forwarder_loop(subagent_id, parent_id, role, tool_count, tokens)
+
       # Tool call START — update action line with what the tool is doing
       {:osa_event, %{type: :tool_call, name: tool_name, phase: phase, args: args}}
       when phase in ["start", :start] ->
         action = format_action(tool_name, args)
         RunStore.progress(subagent_id, action, tool_count)
-        record_execution_progress(subagent_id, action, tool_count)
+        record_execution_progress(subagent_id, action, tool_count, tokens)
 
         emit_event(
           parent_id,
@@ -2893,7 +2922,7 @@ defmodule OptimalSystemAgent.Orchestrator do
               agent_name: subagent_id,
               current_action: action,
               tool_uses: tool_count,
-              tokens_used: forwarder_tokens(subagent_id),
+              tokens_used: tokens,
               recent_actions: recent_actions(subagent_id),
               # The backend's own clock for this run - see `run_elapsed_ms/1`. It
               # rides on every progress frame so a client that connected late, or
@@ -2917,14 +2946,14 @@ defmodule OptimalSystemAgent.Orchestrator do
         # facts. All three are now stated as themselves.
         emit_phase(parent_id, subagent_id, role, :working, action)
 
-        forwarder_loop(subagent_id, parent_id, role, tool_count)
+        forwarder_loop(subagent_id, parent_id, role, tool_count, tokens)
 
       # Tool call END — increment counter
       {:osa_event, %{type: :tool_call, name: tool_name, phase: phase}}
       when phase in ["end", :end] ->
         new_count = tool_count + 1
         RunStore.progress(subagent_id, to_string(tool_name), new_count)
-        record_execution_progress(subagent_id, nil, new_count)
+        record_execution_progress(subagent_id, nil, new_count, tokens)
 
         emit_event(
           parent_id,
@@ -2934,7 +2963,7 @@ defmodule OptimalSystemAgent.Orchestrator do
               agent_name: subagent_id,
               current_action: to_string(tool_name),
               tool_uses: new_count,
-              tokens_used: forwarder_tokens(subagent_id),
+              tokens_used: tokens,
               recent_actions: recent_actions(subagent_id),
               elapsed_ms: run_elapsed_ms(subagent_id),
               description: ""
@@ -2956,10 +2985,10 @@ defmodule OptimalSystemAgent.Orchestrator do
         # subagent is in.
         emit_phase(parent_id, subagent_id, role, :awaiting_model, "thinking after #{tool_name}")
 
-        forwarder_loop(subagent_id, parent_id, role, new_count)
+        forwarder_loop(subagent_id, parent_id, role, new_count, tokens)
 
       _ ->
-        forwarder_loop(subagent_id, parent_id, role, tool_count)
+        forwarder_loop(subagent_id, parent_id, role, tool_count, tokens)
     after
       # Idle safety net: stop forwarding after this many ms of SILENCE (no
       # events). The timer resets on every received event (the receive is
@@ -2984,20 +3013,6 @@ defmodule OptimalSystemAgent.Orchestrator do
   end
 
   defp format_action(tool_name, _), do: to_string(tool_name)
-
-  # Real token count for progress events. The forwarder runs in its own Task
-  # process (not the subagent's Loop), so a synchronous state read is safe and
-  # cannot deadlock. Falls back to 0 rather than a fabricated tool_count*500.
-  defp forwarder_tokens(subagent_id) do
-    case Loop.get_state(subagent_id) do
-      {:ok, %{tokens_used: t}} when is_integer(t) and t >= 0 -> t
-      _ -> 0
-    end
-  rescue
-    _ -> 0
-  catch
-    :exit, _ -> 0
-  end
 
   # Last-N tool actions (newest first) for the TUI trail — the FE renders the
   # last 3 with a "+N more tool uses" counter (CC MAX_PROGRESS_MESSAGES_TO_SHOW).
@@ -3096,14 +3111,14 @@ defmodule OptimalSystemAgent.Orchestrator do
     end
   end
 
-  defp record_execution_progress(agent_id, current_tool, tool_count) do
+  defp record_execution_progress(agent_id, current_tool, tool_count, tokens) do
     skills = ActiveSkills.list(agent_id)
     control = ExecutionControl.get(agent_id) || %{}
 
     ExecutionControl.progress(agent_id, %{
       current_tool: current_tool,
       tool_count: tool_count,
-      tokens_used: forwarder_tokens(agent_id),
+      tokens_used: tokens,
       active_skills: skills,
       skill_reason:
         if(skills == [],
