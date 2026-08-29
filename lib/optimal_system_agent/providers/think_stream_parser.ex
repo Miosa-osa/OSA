@@ -55,18 +55,15 @@ defmodule OptimalSystemAgent.Providers.ThinkStreamParser do
   @doc """
   Drain any held tail at end-of-stream. Returns `{visible, thinking, new_state}`.
 
-  A partial tag that never completed is emitted to whichever channel we were in
-  (visible if outside a think block, thinking if inside) so no characters are
-  silently dropped from the live display.
+  A non-empty `pending` is ALWAYS an incomplete tag fragment: `scan/4` only ever
+  holds a run that starts with `<` and is a strict prefix of a reasoning tag
+  (ordinary text is appended to a channel immediately, never held). If the stream
+  ends still holding one, the tag never completed, so the fragment is a dangling
+  `<` / `<th` with no meaning — drop it rather than leak the literal partial tag
+  into the visible answer (or the thinking box). Both channels come back empty.
   """
   @spec flush(t()) :: {String.t(), String.t(), t()}
-  def flush(%__MODULE__{pending: ""} = state), do: {"", "", state}
-
-  def flush(%__MODULE__{in_think: true, pending: pending}),
-    do: {"", pending, %__MODULE__{}}
-
-  def flush(%__MODULE__{in_think: false, pending: pending}),
-    do: {pending, "", %__MODULE__{}}
+  def flush(%__MODULE__{}), do: {"", "", %__MODULE__{}}
 
   # ── internal scan ────────────────────────────────────────────────────────
 
@@ -142,12 +139,21 @@ defmodule OptimalSystemAgent.Providers.ThinkStreamParser do
 
   # Given a buffer that starts with "<", decide whether it is a full tag,
   # a strict prefix of a tag (incomplete — hold for more), or neither.
+  #
+  # Tag matching is CASE-INSENSITIVE: models emit `<THINK>` / `<Thinking>` as
+  # readily as the lowercase forms, and the persisted sanitizer already strips
+  # them case-insensitively — so a case-sensitive parser here leaked `<THINK>`
+  # reasoning into the visible answer. The tags are pure ASCII, so comparing a
+  # downcased copy preserves byte lengths: `byte_size(tag)` is still exactly the
+  # number of bytes to consume from the ORIGINAL `buf`.
   defp classify(buf, tags) do
+    down = String.downcase(buf)
+
     cond do
-      tag = Enum.find(tags, &String.starts_with?(buf, &1)) ->
+      tag = Enum.find(tags, &String.starts_with?(down, &1)) ->
         {:match, byte_size(tag)}
 
-      Enum.any?(tags, &String.starts_with?(&1, buf)) ->
+      Enum.any?(tags, &String.starts_with?(&1, down)) ->
         :partial
 
       true ->

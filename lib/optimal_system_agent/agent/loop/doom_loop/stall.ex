@@ -56,9 +56,22 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.Stall do
   @doc """
   Check the incoming tool calls for a stall (non-progress).
 
+  `results` is the loop's `[{tool_call, {message, result_string}}]` list for the
+  current batch, used to make write/edit detection RESULT-AWARE (P1-8): a
+  reask, an error, or an identical/no-files-modified result executed no write
+  and must not count as progress. It is optional and defaults to `[]`; when it
+  is empty the check falls back to name-only write detection (unchanged
+  behaviour).
+
+  NOTE(turn-hardening): the orchestrator (`DoomLoop.check/3` in `doom_loop.ex`,
+  not in this workstream) still calls `Stall.check(tool_calls, state)` WITHOUT
+  results, so in production the result-aware path below is dormant and a failing
+  edit still counts as a write. Threading `results` into that one call site (it
+  already holds them for `IdenticalCall`/`FailureSignature`) activates the fix.
+
   Returns `{:ok, state}` to continue or `{:halt, message, state}` to stop.
   """
-  def check(tool_calls, state) do
+  def check(tool_calls, state, results \\ []) do
     names = Enum.map(tool_calls, & &1.name)
     seen_before = Map.get(state, :distinct_tools_seen, MapSet.new())
 
@@ -78,17 +91,38 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.Stall do
       (Map.get(state, :distinct_count_log, []) ++ count_entries)
       |> Enum.take(-(@stall_window_size + 1))
 
+    # Per-call "was this a REAL, successful write/edit?" flags, windowed
+    # alongside `name_window`. Result-aware when `results` are supplied; falls
+    # back to name-only (any write/edit-named call counts) when they are not,
+    # so callers that pass no results behave exactly as before (P1-8).
+    write_status_this_batch = Enum.map(tool_calls, &counts_as_write?(&1, results))
+
+    write_status_window =
+      (Map.get(state, :recent_write_status, []) ++ write_status_this_batch)
+      |> Enum.take(-@stall_window_size)
+
     state =
       state
       |> Map.put(:distinct_tools_seen, distinct_after)
       |> Map.put(:recent_tool_names, name_window)
       |> Map.put(:distinct_count_log, count_log)
+      |> Map.put(:recent_write_status, write_status_window)
 
     introduced_new_tool? =
       length(count_log) < @stall_window_size + 1 or
         List.last(count_log) > List.first(count_log)
 
-    wrote_or_edited? = Enum.any?(name_window, &write_or_edit_tool?/1)
+    # A window counts as "wrote or edited" when any covered call really wrote,
+    # OR when an OLDER window slot (present in `name_window` but not covered by
+    # the status window - a directly-seeded `recent_tool_names` in a test, or a
+    # pre-fix resumed session) is a write/edit tool. The uncovered slots are the
+    # oldest, since both windows are right-aligned.
+    uncovered = max(length(name_window) - length(write_status_window), 0)
+
+    wrote_or_edited? =
+      Enum.any?(write_status_window) or
+        (name_window |> Enum.take(uncovered) |> Enum.any?(&write_or_edit_tool?/1))
+
     investigated? = Enum.any?(name_window, &progress_tool?/1)
 
     stalled? =
@@ -239,13 +273,37 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.Stall do
     Map.put(state, :messages, Map.get(state, :messages, []) ++ [directive])
   end
 
-  # Whether an exhausted stall should hard-halt the run. Autonomous runs
-  # (config `stall_hard_halt: false`, or an :overdrive permission mode / :auto
-  # tier) escalate-only: keep nudging, never kill.
+  # An autonomous run (:overdrive mode / :auto tier) gets a hard stop too, but a
+  # far more lenient one than an attended run: it keeps checkpointing and
+  # nudging until roughly 2x the attended window of exhausted-stall detections
+  # has accumulated, then halts so an unattended rabbit hole cannot spin forever
+  # (P2-20). Attended runs still halt as soon as the graded escalation is
+  # exhausted.
+  @autonomous_hard_halt_after @stall_window_size * 2
+
+  # Whether an exhausted stall should hard-halt the run.
+  #
+  # Gated by `stall_hard_halt` (shipped `false`, so by default nothing hard-halts
+  # and the checkpoint path runs everywhere - attended behaviour unchanged). When
+  # hard-halting is enabled, an attended run halts immediately; an autonomous run
+  # (:overdrive / :auto) is given the lenient 2x-window budget above before it
+  # finally halts (P2-20).
   defp hard_halt?(state) do
-    Application.get_env(:optimal_system_agent, :stall_hard_halt, true) and
-      Map.get(state, :permission_mode) != :overdrive and
-      Map.get(state, :permission_tier) != :auto
+    cond do
+      not Application.get_env(:optimal_system_agent, :stall_hard_halt, true) ->
+        false
+
+      autonomous?(state) ->
+        Map.get(state, :stall_checkpoint_count, 0) >= @autonomous_hard_halt_after
+
+      true ->
+        true
+    end
+  end
+
+  defp autonomous?(state) do
+    Map.get(state, :permission_mode) == :overdrive or
+      Map.get(state, :permission_tier) == :auto
   end
 
   defp progress_tool?(name) do
@@ -267,5 +325,64 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.Stall do
       String.contains?(downcased, "write") or
       String.contains?(downcased, "edit") or
       String.contains?(downcased, "patch")
+  end
+
+  # A call counts as forward progress only when it is a write/edit tool AND it
+  # actually wrote something. A reask/error/no-op write executed nothing (P1-8).
+  defp counts_as_write?(tc, results) do
+    write_or_edit_tool?(tc.name) and write_succeeded?(tc, results)
+  end
+
+  # True when there is no evidence this write/edit failed. With a matching
+  # binary result we require a genuine successful write; without one (no results
+  # supplied, or no match) we fall back to name-only (assume it wrote), so
+  # callers that pass no results keep their prior behaviour.
+  defp write_succeeded?(tc, results) do
+    case find_result(tc, results) do
+      {:ok, result_str} when is_binary(result_str) -> write_result_success?(result_str)
+      _ -> true
+    end
+  end
+
+  defp find_result(tc, results) when is_list(results) do
+    Enum.find_value(results, :error, fn
+      {rtc, {_msg, result_str}} when is_map(rtc) ->
+        if same_call?(rtc, tc), do: {:ok, result_str}, else: nil
+
+      {rtc, result_str} when is_map(rtc) ->
+        if same_call?(rtc, tc), do: {:ok, result_str}, else: nil
+
+      _ ->
+        nil
+    end)
+  end
+
+  defp find_result(_tc, _results), do: :error
+
+  # Match the result's tool_call to the one being scored: by id when both carry
+  # one, else by name + arguments.
+  defp same_call?(a, b) when is_map(a) and is_map(b) do
+    aid = Map.get(a, :id)
+    bid = Map.get(b, :id)
+
+    if not is_nil(aid) and not is_nil(bid) do
+      aid == bid
+    else
+      Map.get(a, :name) == Map.get(b, :name) and
+        Map.get(a, :arguments) == Map.get(b, :arguments)
+    end
+  end
+
+  defp same_call?(_a, _b), do: false
+
+  # A write/edit result is a real write unless it errored/was blocked (a reask
+  # is `Error:`-prefixed too) or was an identical/no-files-modified no-op.
+  defp write_result_success?(result_str) do
+    trimmed = String.trim_leading(result_str)
+
+    not (String.starts_with?(trimmed, "Error:") or
+           String.starts_with?(trimmed, "Blocked:") or
+           String.contains?(result_str, "No change needed") or
+           String.contains?(result_str, "No changes needed"))
   end
 end

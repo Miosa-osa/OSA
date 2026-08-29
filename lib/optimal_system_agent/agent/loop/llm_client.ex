@@ -15,22 +15,19 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   alias OptimalSystemAgent.Utils.Mojibake
 
   # If no streaming token arrives for this long, the connection is treated as
-  # dead. NOT a total-duration cap — an active stream can run indefinitely.
+  # dead. NOT a total-duration cap — an active stream can run indefinitely; the
+  # watchdog resets on EVERY streamed event, so any real progress keeps it open.
   #
-  # Raised from 300s. Five minutes of silence is not reliable evidence of a dead
-  # connection: a loaded provider, a large model on a long multi-tool request, or
-  # a queue behind a rate limit all go quiet for longer than that while perfectly
-  # healthy. Observed failure — a background agent that had ALREADY finished its
-  # work (67 pages built, 157 tests passing, zero type errors) was killed
-  # mid-sentence writing its final report:
-  #
-  #     partial: "Zero TypeScript errors. Let me run the full test suite:"
-  #
-  # The stream died, the agent looked stalled, and two hours later it was
-  # reported as a `:timeout` failure with its completed results discarded. The
-  # cost of waiting longer is a slower report on a genuinely dead socket; the
-  # cost of waiting too little is throwing away finished work.
-  @default_idle_timeout_ms 1_800_000
+  # 5 minutes, matching Codex's `stream_idle_timeout_ms = 300_000`. This was
+  # briefly raised to 30 minutes on the reasoning that a loaded provider can go
+  # quiet while healthy — but 30 minutes does not distinguish a healthy-but-slow
+  # provider from a wedged one; it just lets a token-trickle keep-alive (a socket
+  # that dribbles a byte occasionally while making no real progress) hang the
+  # turn for the whole window before the watchdog notices. Five minutes of TRUE
+  # silence is strong evidence of a dead connection, and a genuinely long tool
+  # call still streams *something* well inside it. A provider that knows it needs
+  # a tighter bound passes a shorter `:idle_timeout` per request, which wins.
+  @default_idle_timeout_ms 300_000
 
   defp idle_timeout_ms do
     Application.get_env(
@@ -245,6 +242,34 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     )
   end
 
+  # Redact and broadcast one THINKING-channel delta to the local bus and the TUI
+  # PubSub bridge. `text` is already mojibake-repaired by the caller (the
+  # thinking channel threads its own carry). Kept separate from
+  # `emit_text_delta/4` because reasoning rides the thinking channel, not the
+  # answer channel, and carries no partial-recovery buffer.
+  #
+  # Reasoning routinely quotes back the contents of a file the model just read —
+  # .env dumps, Authorization headers, key material. It lands in terminal
+  # scrollback and in persisted session state, so it gets the same redaction
+  # every other user-visible provider text gets.
+  defp emit_thinking_delta("", _session_id), do: :ok
+
+  defp emit_thinking_delta(text, session_id) do
+    text = Trajectory.redact(text)
+
+    Bus.emit(:system_event, %{
+      event: :thinking_delta,
+      session_id: session_id,
+      delta: text
+    })
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{session_id}",
+      {:osa_event, %{type: :thinking_delta, session_id: session_id, text: text}}
+    )
+  end
+
   @doc """
   Synchronous LLM chat — routes through the configured provider/model for this session.
   """
@@ -355,10 +380,13 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       ArgumentError -> :ok
     end
 
-    # Start with an empty mojibake carry so a prior stream that aborted before
+    # Start with empty mojibake carries so a prior stream that aborted before
     # its `:done` (leaving a held partial sequence in this reused task process)
-    # cannot prepend stale bytes onto this stream's first delta.
+    # cannot prepend stale bytes onto this stream's first delta. The thinking
+    # channel gets its OWN carry, independent of the answer carry, so a partial
+    # sequence held on one channel never bleeds into the other.
     Process.delete({:moji_carry, session_id})
+    Process.delete({:moji_think_carry, session_id})
 
     caller = self()
 
@@ -405,6 +433,19 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
         Process.delete({:moji_carry, session_id})
 
+        # Same flush for the THINKING channel's independent carry, so the last
+        # characters of the reasoning are not lost when the stream ends holding a
+        # partial sequence. Emitted as one final thinking delta.
+        case Process.get({:moji_think_carry, session_id}, "") do
+          "" ->
+            :ok
+
+          think_carry ->
+            think_carry |> Mojibake.flush() |> emit_thinking_delta(session_id)
+        end
+
+        Process.delete({:moji_think_carry, session_id})
+
         # Repair the FINAL assembled content, not just the live deltas. This is
         # the string that is persisted to the transcript and re-rendered on
         # resume; the deltas above fix the live view, this fixes the copy that
@@ -450,23 +491,18 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         # under exactly the same one-way-door rule as `:text_delta`.
         Resilience.mark_output_observed()
 
-        # Reasoning routinely quotes back the contents of a file the model just
-        # read — .env dumps, Authorization headers, key material. It lands in
-        # terminal scrollback and in persisted session state, so it gets the
-        # same redaction every other user-visible provider text gets.
-        text = text |> Mojibake.repair() |> Trajectory.redact()
+        # Stateful mojibake repair for the THINKING channel, threaded through its
+        # OWN carry buffer (independent of the answer carry above). A corruption
+        # sequence split across two thinking chunks needs the same cross-delta
+        # stitching the answer path gets — a per-delta repair leaves a lone
+        # trailing `â` unrepairable — so hold the in-flight partial and flush it
+        # in the `:done` arm below. Skip the emit when the whole delta was held.
+        {text, think_carry} =
+          Mojibake.repair_stream(Process.get({:moji_think_carry, session_id}, ""), text)
 
-        Bus.emit(:system_event, %{
-          event: :thinking_delta,
-          session_id: session_id,
-          delta: text
-        })
+        Process.put({:moji_think_carry, session_id}, think_carry)
 
-        Phoenix.PubSub.broadcast(
-          OptimalSystemAgent.PubSub,
-          "osa:session:#{session_id}",
-          {:osa_event, %{type: :thinking_delta, session_id: session_id, text: text}}
-        )
+        if text != "", do: emit_thinking_delta(text, session_id)
 
       {:tool_use_block, tool_call} ->
         # Provider detected a complete tool_use block during streaming.

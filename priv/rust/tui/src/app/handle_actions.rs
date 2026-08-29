@@ -265,6 +265,22 @@ impl App {
             self.turn_done = true;
         }
 
+        // P2-19: a system/guard/control/error response is CHROME, not the
+        // model's answer. `finalize` REPLACES the streamed accumulation with the
+        // incoming text, so routing a guard string through it discards whatever
+        // the model had already streamed this turn - the model's real work
+        // vanishes behind an internal note that was addressed to the model, not
+        // the user. Snapshot the uncommitted streamed partial HERE, before
+        // `finalize` consumes the buffer; the `SystemAuthored` arm renders it
+        // under the agent header (exactly as the interrupt path preserves its
+        // partial) and the guard text as its own system line. Only computed for
+        // system-authored responses; empty otherwise.
+        let preserved_partial = if is_system_authored(response_type) {
+            self.assistant_stream.tail().to_string()
+        } else {
+            String::new()
+        };
+
         // Hand the buffer over to the backend's text. This is the ONE place a
         // streamed assistant message becomes final, and it happens BEFORE any
         // other state is touched so a repeat delivery is a true no-op — it must
@@ -355,6 +371,22 @@ impl App {
                 // distinction that was missing. The text itself is unchanged -
                 // only the attribution is corrected.
                 self.chat.end_agent_chunk_flow();
+
+                // P2-19: the model may have STREAMED a partial answer before the
+                // guard fired. It was snapshotted before `finalize` ran, so
+                // render it under the agent header first (like the interrupt
+                // path) - a guard firing mid-answer must not erase the model's
+                // work - then the guard text as its own system line.
+                if !preserved_partial.trim().is_empty() {
+                    if self.agent_header_sent {
+                        self.chat.add_agent_continuation(&preserved_partial);
+                    } else {
+                        self.chat
+                            .add_agent_message(&preserved_partial, signal.as_ref());
+                        self.agent_header_sent = true;
+                    }
+                }
+
                 self.chat.add_system_message(&text, "warning");
             }
             TurnEnding::Answered(final_text) => {
@@ -2386,14 +2418,26 @@ pub fn read_user_name_sync() -> Option<String> {
     None
 }
 
-/// WS5 — the backend ends an interrupted turn with one of these synthetic
-/// user-marker strings. Kept in sync with
-/// `OptimalSystemAgent.Agent.Loop.ReactLoop.interrupt_markers/0`.
+/// WS5 — the backend ends an interrupted turn with a synthetic user-marker
+/// string. The two known forms, both authored by
+/// `OptimalSystemAgent.Agent.Loop.ReactLoop.interrupt_markers/0`, are
+/// `"[Request interrupted by user]"` and
+/// `"[Request interrupted by user for tool use]"`.
+///
+/// P2-25: match the STABLE leading phrase plus the closing bracket rather than
+/// the two literals in full. `"[Request interrupted by user"` is the invariant
+/// part of every marker; the trailing qualifier (`" for tool use"`, or any
+/// future variant the backend adds) is the part that drifts. Full-equality
+/// matching coupled this predicate to the backend's exact wording with nothing
+/// but a comment holding the two in lockstep, so a one-word backend edit would
+/// silently make interrupts render as raw agent text. A prefix that also
+/// requires a trailing `]` survives qualifier drift while still rejecting a
+/// model line that merely STARTS with the phrase and then keeps going
+/// (`"[Request interrupted by user] extra"`). If the leading phrase itself ever
+/// changes, update it here and in `interrupt_markers/0` together.
 pub(crate) fn is_interrupt_marker(s: &str) -> bool {
-    matches!(
-        s,
-        "[Request interrupted by user]" | "[Request interrupted by user for tool use]"
-    )
+    let t = s.trim();
+    t.starts_with("[Request interrupted by user") && t.ends_with(']')
 }
 
 /// WS5 — composer content after pop-all-editable: queued items oldest-first,

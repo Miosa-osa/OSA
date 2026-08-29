@@ -92,10 +92,27 @@ defmodule OptimalSystemAgent.Utils.Mojibake do
       cond do
         # No marker in the trailing run — only orphaned continuation bytes whose
         # marker was already emitted; nothing to hold.
-        is_nil(hold) -> nil
-        # Too long to be a single in-flight char — treat as complete and repair now.
-        len - hold > @max_moji_cps -> nil
-        true -> hold
+        is_nil(hold) ->
+          nil
+
+        # Trailing run longer than one in-flight char (> @max_moji_cps cps): it
+        # is SEVERAL chars, so an incomplete char can sit at the very end. The
+        # old code returned `nil` here — repair the WHOLE combined string and
+        # hold nothing — but an incomplete tail makes the latin1 re-decode fail
+        # `String.valid?/1` for the ENTIRE latin1 segment, so `repair/1` left
+        # even the complete leading chars unrepaired (the tail poisoned the
+        # segment). Hold from the run's FIRST marker instead: the prefix BEFORE
+        # the run is a clean char boundary and is repaired now, and the whole run
+        # is held. Holding the whole run (not a sub-slice) is deliberate — a
+        # double-encoded char has NON-ADJACENT markers, so slicing to the last
+        # marker could split one and re-poison the prefix. Any complete chars in
+        # the held run flush on the next non-marker delta or at `flush/1`, so
+        # nothing is lost.
+        len - hold > @max_moji_cps ->
+          hold
+
+        true ->
+          hold
       end
     end
   end

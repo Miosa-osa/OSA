@@ -66,6 +66,18 @@ defmodule OptimalSystemAgent.Agent.Loop.Steer do
     ArgumentError -> 0
   end
 
+  @doc """
+  Steer directives currently in the in-memory ETS lane, WITHOUT a durable
+  read. A steer queued during a live turn is always in ETS, so this is the
+  cheap hot-path check (see `DurableInbox.live_count/2`).
+  """
+  @spec live_count(String.t()) :: non_neg_integer()
+  def live_count(session_id) when is_binary(session_id) do
+    DurableInbox.live_count(@table, session_id)
+  rescue
+    ArgumentError -> 0
+  end
+
   @doc false
   def checkout(session_id) do
     case DurableInbox.checkout(@table, session_id, :steers) do

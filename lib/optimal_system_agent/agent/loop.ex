@@ -497,20 +497,68 @@ defmodule OptimalSystemAgent.Agent.Loop do
   """
   @spec steer(String.t(), String.t()) :: :ok
   def steer(session_id, text) when is_binary(session_id) and is_binary(text) do
-    for target <- steer_targets(session_id) do
-      Steer.queue(target, text)
+    if stop_intent?(text) do
+      # P0-1: a dominant stop command ("stop", "cancel", "abort", ...) with no
+      # follow-on task directive is a HALT, not a course correction. A steer is
+      # injected as CONTINUE guidance, so queueing it here would re-drive the
+      # very work the user asked to end. Route it to the same cooperative cancel
+      # flag Esc/interrupt sets so the loop stops at its next cancel check, and
+      # do NOT also queue it as a continue-steer.
+      Logger.info("[loop] Steer recognised as stop intent for #{session_id} - cancelling turn")
+      _ = cancel(session_id)
+      :ok
+    else
+      for target <- steer_targets(session_id) do
+        Steer.queue(target, text)
 
-      try do
-        GenServer.cast(via(target), {:steer, text})
-      catch
-        :exit, _ -> :ok
+        try do
+          GenServer.cast(via(target), {:steer, text})
+        catch
+          :exit, _ -> :ok
+        end
       end
-    end
 
-    :ok
+      :ok
+    end
   catch
     :exit, _ -> :ok
   end
+
+  # Stop-intent detection (P0-1). A typed steer is normally injected as CONTINUE
+  # guidance, so a bare "stop" would re-drive the very work the user asked to end.
+  # This recognises a message that is PURELY a halt - a stop verb plus only
+  # filler/intensifiers - and routes it to cancel instead. It stays conservative:
+  # a message that names a real target keeps a content word after filler is
+  # stripped ("stop using markdown", "cancel the last edit"), so it remains a
+  # course-correction steer rather than killing the turn.
+  @stop_verbs MapSet.new(~w(stop halt cancel quit abort enough cease stahp stfu))
+
+  # Filler/intensifier/dismissive words that do not change a stop command's
+  # meaning. Stripped before the all-stop test so "stop doing shit please"
+  # reduces to ["stop"] and halts, while a real target word survives and keeps
+  # the message a steer. "wait" is filler (a bare "wait" must not kill a turn).
+  @stop_filler MapSet.new(
+                 ~w(please just now ok okay pls plz dude man bro yo no nah nope
+                    nvm wait the a an of it its that this these those your you u
+                    i we lol like fucking fuckin fuck shit damn hell bullshit
+                    crap ass doing working going already right here so really
+                    actually all everything anything)
+               )
+
+  @doc false
+  @spec stop_intent?(String.t()) :: boolean()
+  def stop_intent?(text) when is_binary(text) do
+    # Downcase, split on non-letters (drops punctuation like "stop!" / "stop,").
+    content =
+      text
+      |> String.downcase()
+      |> String.split(~r/[^a-z]+/u, trim: true)
+      |> Enum.reject(&MapSet.member?(@stop_filler, &1))
+
+    content != [] and Enum.all?(content, &MapSet.member?(@stop_verbs, &1))
+  end
+
+  def stop_intent?(_), do: false
 
   @doc """
   The session itself plus every `:running` descendant subagent of it.

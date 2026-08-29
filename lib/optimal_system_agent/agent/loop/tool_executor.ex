@@ -1317,6 +1317,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     # instead of silently executing with empty (%{}) arguments.
     case ToolArgValidator.validate(tool_call, state) do
       {:reask, message} -> message
+      # Past the reask cap the validator returns a TERMINAL error instead of an
+      # endless correction loop. Surface its text verbatim as the tool result,
+      # exactly like a reask, so the model sees the "stop retrying" guidance and
+      # routes around the tool rather than hitting a swallowed CaseClauseError.
+      {:error, message} -> message
       {:ok, validated_call} -> run_validated_tool(validated_call, state)
     end
   end

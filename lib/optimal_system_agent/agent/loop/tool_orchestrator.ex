@@ -35,6 +35,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
   the loop is now encapsulated here.
   """
 
+  alias OptimalSystemAgent.Agent.Cancellation
   alias OptimalSystemAgent.Agent.Loop.ToolError
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
   alias OptimalSystemAgent.Tools.ConflictScope
@@ -44,8 +45,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
 
   @default_max_concurrency 10
   @default_timeout_ms 60_000
-  # WS5 — shared cancel-flag table (same as ReactLoop) + await poll cadence.
-  @cancel_table :osa_cancel_flags
+  # WS5 - await poll cadence. The cancel flag is read via the shared
+  # `Cancellation` reader so a cancel breaks a long tool wait.
   @poll_interval_ms 200
 
   @type tool_call :: %{
@@ -619,13 +620,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
     :exit, _ -> :ok
   end
 
-  defp cancelled?(sid) when is_binary(sid) do
-    match?([{^sid, true}], :ets.lookup(@cancel_table, sid))
-  rescue
-    ArgumentError -> false
-  end
-
-  defp cancelled?(_), do: false
+  defp cancelled?(sid), do: Cancellation.cancelled?(sid)
 
   defp interrupted_result(tc) do
     {%{role: "tool", tool_call_id: tc.id, name: tc.name, content: "Error: Interrupted by user"},

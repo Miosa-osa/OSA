@@ -72,7 +72,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileEdit.Handler do
 
     cond do
       old == new ->
-        {:error, "old_string and new_string are identical"}
+        # Mirror the not_found branch (see already_applied_or_not_found/3): a
+        # bare "are identical" leaves the model with nowhere to go and it retries
+        # the same no-op call, so give it a next step (P1-9).
+        {:error,
+         "old_string and new_string are identical - nothing to change. " <>
+           "If you intended an edit, re-read #{path} with file_read and copy the exact " <>
+           "current text into old_string and the changed text into new_string. " <>
+           "If it is already applied, move on rather than retrying."}
 
       old == "" ->
         {:error, "old_string cannot be empty"}

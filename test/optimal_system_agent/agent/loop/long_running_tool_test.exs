@@ -10,7 +10,12 @@ defmodule OptimalSystemAgent.Agent.Loop.LongRunningToolTest do
 
   Two ceilings sat on that path: `StreamingToolExecutor.collect_results/1`
   awaiting each task for 600_000 ms, and `ReactLoop` passing a 300_000 ms
-  `:timeout_ms` into `ToolOrchestrator`. Both are unbounded by default now.
+  `:timeout_ms` into `ToolOrchestrator`. Both now default to a generous
+  20-minute backstop (was unbounded): leaving them unbounded let a single
+  wedged tool freeze a whole turn forever - the reported multi-minute hangs.
+  20 minutes sits above the 11m37s dispatch above, so real long work still
+  completes; only a genuine wedge is killed, and `:infinity` is still honoured
+  when a caller sets it explicitly.
   """
   use ExUnit.Case, async: false
 
@@ -53,13 +58,17 @@ defmodule OptimalSystemAgent.Agent.Loop.LongRunningToolTest do
            "the tool's own result must come back intact: #{inspect(results)}"
   end
 
-  test "the shipped defaults impose no tool ceiling" do
-    # The two knobs that killed the dispatch. Both default to no limit; either
-    # regressing to a number silently caps how long any turn may work.
-    assert Application.get_env(:optimal_system_agent, :tool_timeout_ms, :infinity) == :infinity
+  test "the shipped config sets no cap tighter than the safety backstop" do
+    # The two knobs that killed the dispatch. The code now applies a generous
+    # ~20-minute backstop at both layers so a wedged tool cannot freeze a turn
+    # forever; config stays UNSET, so an operator has imposed nothing tighter on
+    # top of it. What must never appear is a SHORT cap (the old 60s / 5-min),
+    # the actual regression: either knob may only be absent or generous.
+    tool = Application.get_env(:optimal_system_agent, :tool_timeout_ms)
+    await = Application.get_env(:optimal_system_agent, :tool_await_timeout_ms)
 
-    assert Application.get_env(:optimal_system_agent, :tool_await_timeout_ms, :infinity) ==
-             :infinity
+    assert tool in [nil, :infinity] or tool >= 900_000
+    assert await in [nil, :infinity] or await >= 900_000
   end
 
   describe "nothing else quietly caps a long autonomous run" do
