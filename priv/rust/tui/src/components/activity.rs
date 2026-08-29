@@ -35,6 +35,13 @@ pub enum ProcessingPhase {
     Synthesizing,
 }
 
+/// How long the token stream may go silent mid-turn (no thinking or text delta)
+/// before [`Activity::reconcile_stream_silence`] flips the phase to `Waiting` so
+/// the live spinner + elapsed replace the frozen thinking box. Short by design:
+/// the stall it targets is the seconds-long pause a cloud reasoning model takes
+/// between its thinking channel and its first content token.
+const STREAM_SILENCE_FLIP: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Why the turn is currently *blocked*, so the spinner can name the wait
 /// instead of showing a random flavor verb during a multi-minute stall (grok
 /// `WaitingReason::label()`, `acp/tracker.rs:124`). Set from the backend
@@ -447,6 +454,15 @@ pub struct Activity {
     /// tool edge). Drives the stall→red interpolation: no progress for ~3s bleeds
     /// the spinner/label color toward error-red (CC `stalledIntensity`).
     last_output_at: Option<std::time::Instant>,
+    /// Instant of the last STREAMED delta (a thinking or a text token), tracked
+    /// apart from `last_output_at` so `reconcile_stream_silence` can tell a
+    /// genuine mid-stream stall from other turn progress. Cloud reasoning models
+    /// (glm) emit all their reasoning on the thinking channel, then the server
+    /// PAUSES before content; during that gap the thinking box freezes with no
+    /// spinner and the screen looks wedged. Stamped only by `add_thinking_chars`
+    /// / `add_stream_chars` (the two per-delta accounting points) — NOT by tool
+    /// edges or usage reports, so it measures token silence specifically.
+    last_delta_at: Option<std::time::Instant>,
     /// Eased on-screen token counter — steps toward the real value in `tick()`
     /// (CC token easing) so the count glides instead of snapping on each usage
     /// report. Reset in `start()`.
@@ -603,38 +619,33 @@ pub fn progress_bar(done: u32, total: u32) -> String {
 const FLAVOR_VERB_GRACE_SECS: u64 = 4;
 
 /// How long the backend may say NOTHING before the spinner row states that fact
-/// outright.
+/// outright ("no response for Ns").
 ///
 /// The turn timer answers "how long has this turn been going", which is not the
 /// question a stalled user is asking. A turn that is streaming tokens and a turn
-/// whose provider socket went silent ninety minutes ago render identically:
+/// whose provider socket went silent minutes ago render identically:
 /// `Waiting for response… (1h51m10s · esc to interrupt)`. No amount of patience
 /// distinguishes them, because the only number on screen advances at exactly the
 /// same rate in both cases. That is the reported defect.
 ///
 /// `last_output_at` already knows the answer — every frame that carries turn
 /// progress stamps it (`add_stream_chars`, `add_thinking_chars`, `set_tokens`,
-/// the tool edges, and any non-`Waiting` phase transition) — but until now it
-/// only drove a color ramp that saturates after six seconds, so six seconds of
-/// silence and six thousand looked the same too.
+/// the tool edges, and any non-`Waiting` phase transition) — so the moment output
+/// stops it can start counting the true silence, independent of the turn age.
 ///
-/// The threshold is set ABOVE every bound the backend itself enforces on a
-/// silent model, so a healthy-but-slow turn can never trip it:
+/// 60 seconds, deliberately BELOW the idle watchdog that recovers the turn. A
+/// cloud reasoning model (glm) emits all its reasoning on the thinking channel
+/// and then the server can pause before the first content token; the phase
+/// reconciler flips to `Waiting` after a couple of silent seconds so the live
+/// spinner + elapsed show motion, and this notice then NAMES the wait once it has
+/// run a full minute. The `LLMClient` idle watchdog kills a truly silent
+/// cloud-reasoning request at 120s and RETRIES it, so a stall this row reports is
+/// one the backend is already on course to recover from — the row just stops
+/// looking frozen while it does.
 ///
-/// | backend bound on model silence                                  | value |
-/// |-----------------------------------------------------------------|-------|
-/// | `LLMClient` stream idle watchdog (`@idle_timeout_ms`)            | 300s  |
-/// | `Anthropic.collect_stream` inactivity guard                      | 620s  |
-/// | `openai_compat` / `Anthropic` `receive_timeout` (thinking)       | 600s  |
-///
-/// A provider call that produces nothing for 300s is killed by the watchdog and
-/// the turn reports it. So silence past 600s is not a slow model still working —
-/// it is a turn in a state every one of those guards should already have ended,
-/// which is exactly the state that has no other symptom on screen.
-///
-/// Deliberately NOT a timeout. Nothing is cancelled, nothing is retried, the
-/// turn is untouched. The row gains one true sentence.
-const SILENCE_NOTICE_SECS: u64 = 600;
+/// Deliberately NOT a timeout. Nothing is cancelled, nothing is retried by THIS
+/// row; the turn is untouched. The row gains one true sentence.
+const SILENCE_NOTICE_SECS: u64 = 60;
 
 /// The live threshold, which is [`SILENCE_NOTICE_SECS`] unless
 /// `OSA_SILENCE_NOTICE_SECS` overrides it.
@@ -642,7 +653,7 @@ const SILENCE_NOTICE_SECS: u64 = 600;
 /// A test seam, and the same one `SseClient::idle_timeout` already uses for the
 /// same reason: the only instrument that can prove this notice reaches a REAL
 /// terminal is `test/pty/`, which drives the real binary, and a probe cannot sit
-/// through ten real minutes of silence to see it. Read once — a threshold that
+/// through a full minute of real silence to see it. Read once — a threshold that
 /// changed mid-session would make the row's behaviour unreproducible.
 ///
 /// Out-of-range values are ignored rather than clamped: a caller who sets this
@@ -726,6 +737,7 @@ impl Activity {
             start_time: None,
             phase_since: None,
             last_output_at: None,
+            last_delta_at: None,
             displayed_tokens: 0,
             cancelling: false,
             thinking_since: None,
@@ -1289,6 +1301,44 @@ impl Activity {
         self.phase == ProcessingPhase::Thinking
     }
 
+    /// Whether the turn is currently parked in the `Waiting` phase, i.e. blocked
+    /// with no tokens arriving. The draw layer reads this to keep a MOVING
+    /// spinner + elapsed on screen even while a (now static) thinking box would
+    /// otherwise own the row.
+    pub fn is_waiting(&self) -> bool {
+        self.phase == ProcessingPhase::Waiting
+    }
+
+    /// B3-stall — flip a mid-stream turn to `Waiting` once the token stream has
+    /// gone silent for [`STREAM_SILENCE_FLIP`].
+    ///
+    /// glm cloud emits all its reasoning on the thinking channel, then the server
+    /// pauses before the first content token. During that gap nothing streams:
+    /// the thinking box freezes (no spinner, elapsed stuck on `finish()`) and the
+    /// phase would otherwise stay `Thinking`/`Streaming`, so the screen looks
+    /// wedged with no motion. Flipping to `Waiting` + `WaitingReason::Model` lets
+    /// the live spinner + elapsed take over (see the draw swap in `event_loop`).
+    /// A later delta restores `Thinking`/`Streaming` through the existing
+    /// `set_phase` calls on the delta paths. Tool-call phases are left untouched:
+    /// a running tool is work, not a stall, and the row already names it.
+    ///
+    /// Cheap and idempotent — safe to call every tick.
+    pub fn reconcile_stream_silence(&mut self) {
+        if !self.active {
+            return;
+        }
+        if self.phase != ProcessingPhase::Thinking && self.phase != ProcessingPhase::Streaming {
+            return;
+        }
+        let silent = self
+            .last_delta_at
+            .is_some_and(|t| t.elapsed() >= STREAM_SILENCE_FLIP);
+        if silent {
+            self.set_phase(ProcessingPhase::Waiting);
+            self.set_waiting_reason(Some(WaitingReason::Model));
+        }
+    }
+
     pub fn is_active(&self) -> bool {
         self.active
     }
@@ -1299,7 +1349,9 @@ impl Activity {
         // refresh the stall clock (progress means "not frozen").
         if n > 0 {
             self.clear_retry();
-            self.last_output_at = Some(std::time::Instant::now());
+            let now = std::time::Instant::now();
+            self.last_output_at = Some(now);
+            self.last_delta_at = Some(now);
         }
     }
 
@@ -1307,7 +1359,9 @@ impl Activity {
         self.thinking_chars += n;
         if n > 0 {
             self.clear_retry();
-            self.last_output_at = Some(std::time::Instant::now());
+            let now = std::time::Instant::now();
+            self.last_output_at = Some(now);
+            self.last_delta_at = Some(now);
         }
     }
 

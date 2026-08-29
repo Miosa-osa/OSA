@@ -46,8 +46,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.SessionAccess do
     end
   end
 
+  # On a loopback-only daemon a `local` requester also owns any "anonymous"-owned
+  # loop. A loop materialised under the `start_loop` "anonymous" default (a
+  # cold-start race where the tracked meta is not written yet, or any future path
+  # that skips the real owner) would otherwise mismatch `local` and 404, dropping
+  # the session on the next stream (re)connect.
   defp legacy_local_owner?(owner, "local", true) when is_binary(owner),
-    do: String.starts_with?(owner, "tui_")
+    do: String.starts_with?(owner, "tui_") or owner == "anonymous"
 
   defp legacy_local_owner?(_, _, _), do: false
 end

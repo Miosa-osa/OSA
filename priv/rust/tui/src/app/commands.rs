@@ -918,6 +918,9 @@ impl App {
             let req = crate::client::types::ModelSwitchRequest {
                 provider: provider.clone(),
                 model: model.clone(),
+                // User-initiated picker: make the choice sticky so a new session
+                // or restart keeps it instead of reverting to the boot default.
+                persist: true,
             };
             // Session-scoped: hot-swaps the LIVE session's Loop GenServer so
             // the very next turn in THIS conversation actually uses the new

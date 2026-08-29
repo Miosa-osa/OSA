@@ -464,6 +464,12 @@ pub struct ModelListResponse {
 pub struct ModelSwitchRequest {
     pub provider: String,
     pub model: String,
+    /// When true the backend persists this choice as the new sticky default
+    /// (app-env + ~/.osa/config.json) so a NEW session or a restart keeps it.
+    /// The user-initiated picker sets true; the `--model` launch flag and the
+    /// onboarding save-key swap set false so a one-off override never becomes
+    /// the accidental default.
+    pub persist: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

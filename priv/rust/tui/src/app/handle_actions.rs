@@ -1552,6 +1552,9 @@ impl App {
                     let req = crate::client::types::ModelSwitchRequest {
                         provider: runtime_provider,
                         model: model.clone(),
+                        // Onboarding already persisted via providers_save_key
+                        // above; don't double-write the default here.
+                        persist: false,
                     };
                     let event = match client.switch_session_model(&sid, &req).await {
                         Ok(resp) => BackendEvent::ModelSwitched(Ok(resp)),
@@ -1909,6 +1912,10 @@ impl App {
         let req = crate::client::types::ModelSwitchRequest {
             provider: provider.unwrap_or_default(),
             model: model.clone(),
+            // Deliberately non-sticky (see doc above): the launch flag swaps the
+            // LIVE loop for this run only and must never rewrite the on-disk
+            // default, so a later /new or /resume keeps the user's own choice.
+            persist: false,
         };
         let client = self.client.clone();
         let tx = self.event_tx.clone();

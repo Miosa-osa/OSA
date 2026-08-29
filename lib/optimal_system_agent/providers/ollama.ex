@@ -1175,6 +1175,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   | `opts[:think]` set | that value | `:opt` |
   | `:ollama_think` app env set (`OLLAMA_THINK`) | that value | `:config` |
   | not a reasoning model | `nil` (no field) | `:unsupported` |
+  | glm cloud model (always-on reasoner), any effort | `true` | `:cloud_default` |
   | reasoning model, cloud-served, effort `:fast` | `false` | `:fast_effort` |
   | reasoning model, cloud-served, effort > `:fast` | `true` | `:cloud_default` |
   | reasoning model, locally served | `false` | `:local_stall_guard` |
@@ -1200,6 +1201,15 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
       not thinking_model?(model) ->
         {nil, :unsupported}
+
+      # glm cloud models reason ALWAYS-ON. With think:false they do not emit the
+      # native `thinking` field, so their chain-of-thought spills into `content`
+      # and renders as the visible answer (the reported "whole monologue on
+      # screen"). Keep think:true so reasoning is routed to the collapsible
+      # thinking channel instead of leaking - even on :fast, where the flash
+      # model is already fast enough that the reasoning phase is cheap.
+      cloud_model?(model) and always_on_reasoner?(model) ->
+        {true, :cloud_default}
 
       cloud_model?(model) ->
         # Effort steers reasoning on cloud models too. With no explicit opt and
@@ -1240,6 +1250,17 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   """
   @spec cloud_model?(String.t() | nil) :: boolean()
   def cloud_model?(model), do: OptimalSystemAgent.Providers.OllamaCloud.cloud_tag?(model)
+
+  # Models whose reasoning is ALWAYS-ON: they reason regardless of `think`, so
+  # `think: false` does not save time - it only removes the native `thinking`
+  # channel, spilling the chain-of-thought into `content` (a visible-answer
+  # leak). For these we keep `think: true` even on :fast so reasoning stays in
+  # the collapsible thinking channel. glm-5.x is the known family.
+  @spec always_on_reasoner?(String.t() | nil) :: boolean()
+  defp always_on_reasoner?(model) when is_binary(model),
+    do: String.contains?(String.downcase(model), "glm")
+
+  defp always_on_reasoner?(_), do: false
 
   # Returns true for models known to enter unbounded thinking phases by default.
   @doc false

@@ -1807,6 +1807,7 @@ mod health_check_retry_tests {
         let req = crate::client::types::ModelSwitchRequest {
             provider: "ollama".to_string(),
             model: "qwen3:8b".to_string(),
+            persist: false,
         };
         let result = client.switch_session_model("session-abc-123", &req).await;
 

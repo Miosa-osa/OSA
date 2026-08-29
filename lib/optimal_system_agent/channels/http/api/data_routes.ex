@@ -15,8 +15,6 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
   require Logger
 
   alias OptimalSystemAgent.SDK.Memory
-  alias OptimalSystemAgent.System.AtomicFile
-  alias OptimalSystemAgent.System.JsonStore
   alias OptimalSystemAgent.Providers
   alias OptimalSystemAgent.Agent.Scheduler
   alias OptimalSystemAgent.Machines
@@ -161,17 +159,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
     with %{"provider" => prov_str, "model" => model_name} <- conn.body_params,
          true <- is_binary(prov_str) and prov_str != "",
          true <- is_binary(model_name) and model_name != "",
-         true <- prov_str in valid_names,
-         provider <- String.to_existing_atom(prov_str) do
-      Application.put_env(:optimal_system_agent, :default_provider, provider)
-      Application.put_env(:optimal_system_agent, :default_model, model_name)
-
-      # Providers read the scoped key :"#{provider}_model" (e.g. :openai_model,
-      # :anthropic_model, :ollama_model), NOT :default_model — so set the scoped
-      # key or the switch is a silent no-op for every non-ollama provider.
-      Application.put_env(:optimal_system_agent, :"#{provider}_model", model_name)
-
-      # Persist selection to ~/.osa/config.json so it survives restarts.
+         true <- prov_str in valid_names do
+      # Sets app-env (:default_provider/:default_model/:"#{provider}_model") and
+      # persists to ~/.osa/config.json so the selection survives restarts.
       persist_model_selection(prov_str, model_name)
 
       Logger.info("[Models] Switched to #{prov_str}/#{model_name}")
@@ -244,16 +234,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
     with %{"provider" => prov_str, "model" => model_name} <- conn.body_params,
          true <- is_binary(prov_str) and prov_str != "",
          true <- is_binary(model_name) and model_name != "",
-         true <- prov_str in valid_names,
-         provider <- String.to_existing_atom(prov_str) do
-      Application.put_env(:optimal_system_agent, :default_provider, provider)
-      Application.put_env(:optimal_system_agent, :default_model, model_name)
-
-      # Providers read the scoped key :"#{provider}_model" (e.g. :openai_model,
-      # :anthropic_model, :ollama_model), NOT :default_model — so set the scoped
-      # key or the switch is a silent no-op for every non-ollama provider.
-      Application.put_env(:optimal_system_agent, :"#{provider}_model", model_name)
-
+         true <- prov_str in valid_names do
       persist_model_selection(prov_str, model_name)
 
       Logger.info("[Models] Switched (current) to #{prov_str}/#{model_name}")
@@ -490,35 +471,10 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
   defp parse_sort_atom("importance"), do: :importance
   defp parse_sort_atom(_), do: :relevance
 
-  # Persist provider/model selection to ~/.osa/config.json so it survives restarts.
-  # Reads existing config (if any), merges the two keys, and writes back atomically.
+  # Persist provider/model selection (app-env + ~/.osa/config.json) so it
+  # survives restarts. Delegates to the shared OptimalSystemAgent.ModelSelection
+  # so /switch, /current and the session hot-swap route share one write path.
   defp persist_model_selection(provider, model) do
-    config_path =
-      Application.get_env(:optimal_system_agent, :bootstrap_dir, "~/.osa")
-      |> Path.expand()
-      |> Path.join("config.json")
-
-    # An unreadable config used to degrade to `%{}` here, so a model switch
-    # rewrote ~/.osa/config.json containing only "provider" and "model" and
-    # discarded everything else in it. Refuse instead — the merge is only
-    # meaningful if the read succeeded.
-    case JsonStore.read_map_for_write(config_path) do
-      {:error, :corrupt} ->
-        Logger.error("[Models] #{JsonStore.corrupt_message("model selection", config_path)}")
-
-      {:ok, existing} ->
-        updated = Map.merge(existing, %{"provider" => provider, "model" => model})
-
-        case Jason.encode(updated, pretty: true) do
-          {:ok, json} ->
-            File.mkdir_p!(Path.dirname(config_path))
-            AtomicFile.write!(config_path, json)
-
-          {:error, reason} ->
-            Logger.warning("[Models] Failed to persist model selection: #{inspect(reason)}")
-        end
-    end
-  rescue
-    e -> Logger.warning("[Models] Config persist error: #{Exception.message(e)}")
+    OptimalSystemAgent.ModelSelection.persist(provider, model)
   end
 end

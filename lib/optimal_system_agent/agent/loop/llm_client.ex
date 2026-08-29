@@ -29,12 +29,43 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   # a tighter bound passes a shorter `:idle_timeout` per request, which wins.
   @default_idle_timeout_ms 300_000
 
+  # Tighter idle window for CLOUD REASONING models (the Ollama Cloud family, e.g.
+  # the default `glm-5.2:cloud`). These emit all their reasoning on the thinking
+  # channel and then the server can PAUSE before the first content token; that
+  # post-reasoning silence is a real gap, not a slow-but-healthy trickle, so the
+  # full 5-minute default makes the turn look wedged for far too long. Thinking
+  # tokens reset the watchdog, so only a TRUE gap counts, and 2 minutes of it on
+  # a hosted model is strong evidence of a stall. RETRYABLE like the default (the
+  # watchdog fire arm is unchanged), so a trip recovers the turn on its own much
+  # sooner. A local model keeps the full 5 minutes (cold-load first token), and
+  # an explicit per-request `:idle_timeout` still wins.
+  @cloud_reasoning_idle_timeout_ms 120_000
+
   defp idle_timeout_ms do
     Application.get_env(
       :optimal_system_agent,
       :llm_stream_idle_timeout_ms,
       @default_idle_timeout_ms
     )
+  end
+
+  # The idle window for THIS request. An explicit per-request `:idle_timeout`
+  # always wins; otherwise a cloud reasoning model (detected by the same
+  # `:cloud`/`-cloud` tag convention `Registry.provider_for_model/1` uses) gets
+  # the tighter `@cloud_reasoning_idle_timeout_ms`, floored against any lower
+  # configured default. Every other request keeps the configured default.
+  defp request_idle_timeout_ms(opts, model) do
+    case Keyword.fetch(opts, :idle_timeout) do
+      {:ok, explicit} ->
+        explicit
+
+      :error ->
+        if OptimalSystemAgent.Providers.OllamaCloud.cloud_tag?(model) do
+          min(idle_timeout_ms(), @cloud_reasoning_idle_timeout_ms)
+        else
+          idle_timeout_ms()
+        end
+    end
   end
 
   # Process-dictionary key holding the id of the assistant message currently
@@ -636,7 +667,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       end)
 
     # Watchdog: polls heartbeat every 10s, kills if no progress for the idle timeout
-    idle_timeout = Keyword.get(opts, :idle_timeout, idle_timeout_ms())
+    idle_timeout = request_idle_timeout_ms(opts, model)
 
     watchdog =
       spawn_link(fn -> watchdog_loop(heartbeat, stream_task, idle_timeout, session_id) end)

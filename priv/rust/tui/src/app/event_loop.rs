@@ -1629,6 +1629,13 @@ impl App {
             // on turn end). Cheap when idle; the reconciler self-throttles.
             self.sync_turn_effects();
 
+            // 2e. B3-stall — when a mid-stream turn goes silent (glm cloud emits
+            // all its reasoning, then the server pauses before content) flip the
+            // phase to Waiting so the live spinner + elapsed surface instead of a
+            // frozen thinking box. Self-guards on active/phase; a later delta
+            // restores Thinking/Streaming via the delta-path `set_phase` calls.
+            self.activity.reconcile_stream_silence();
+
             // 3. Draw the live region (inline) or the modal / fullscreen view (full).
             // Wrap the frame in a DEC 2026 synchronized update (BSU/ESU) so the
             // terminal composites the whole frame atomically — no tearing or
@@ -2414,7 +2421,17 @@ impl App {
         let now = self.frame_now.get();
         let think = if !self.thinking_box.is_empty() && !self.activity.a11y() {
             self.activity_slot.set(Default::default());
-            self.thinking_box.desired_height(w)
+            let box_h = self.thinking_box.desired_height(w);
+            // B3-stall: during a silent gap (the reconciler flipped the phase to
+            // Waiting) keep the reasoning box AND reserve the activity spinner's
+            // rows beneath it, so a MOVING spinner + elapsed stays on screen
+            // instead of a frozen box. `activity.height()` is the exact count the
+            // draw swap carves off the bottom of this band, so the two agree.
+            if self.activity.is_waiting() {
+                box_h.saturating_add(self.activity.height())
+            } else {
+                box_h
+            }
         } else if self.activity.height() > 0 {
             let mut slot = self.activity_slot.get();
             let h = slot.resolve(self.activity.height(), self.activity.max_height(), now);
@@ -2512,7 +2529,36 @@ impl App {
         // In screen-reader mode the boxed thinking display is skipped in favor of
         // the activity's plain-text status line (screen readers choke on the box).
         if !self.thinking_box.is_empty() && !self.activity.a11y() {
-            self.thinking_box.draw(frame, a_think);
+            if self.activity.is_waiting() {
+                // B3-stall — the stream went silent after reasoning, so a static
+                // thinking box alone reads as frozen. Split this band: reasoning
+                // box on top, the LIVE activity spinner (+ "Waiting for
+                // response…" + elapsed) bottom-anchored beneath it, so the user
+                // always sees motion. `activity.height()` matches the extra rows
+                // reserved in `measure_bands`; both clamp to the real band height,
+                // so a short terminal simply shows fewer reasoning rows.
+                let act_h = self.activity.height().min(a_think.height);
+                let box_h = a_think.height.saturating_sub(act_h);
+                if box_h > 0 {
+                    self.thinking_box.draw(
+                        frame,
+                        Rect {
+                            height: box_h,
+                            ..a_think
+                        },
+                    );
+                }
+                self.activity.draw(
+                    frame,
+                    Rect {
+                        y: a_think.y.saturating_add(box_h),
+                        height: act_h,
+                        ..a_think
+                    },
+                );
+            } else {
+                self.thinking_box.draw(frame, a_think);
+            }
         } else {
             // Bottom-anchor the activity INSIDE its reserved slot. The slot is sized
             // to the verbosity ceiling (stable, so the viewport never rebuilds
