@@ -150,7 +150,31 @@ defmodule OptimalSystemAgent.Agent.DurableInbox do
   @spec count(atom(), String.t(), lane()) :: non_neg_integer()
   def count(table, session_id, lane) do
     restore(table, session_id, lane)
-    length(live_entries(table, session_id))
+
+    # Exclude already-claimed rows: `checkout/3` rejects `claimed => true`
+    # entries, so counting them here left a claimed-but-undelivered steer
+    # keeping count >= 1 forever, which re-ran finish_turn every turn (P1-10).
+    table
+    |> live_entries(session_id)
+    |> Enum.count(fn {_seq, entry} -> entry["claimed"] != true end)
+  end
+
+  @doc """
+  Count of unclaimed entries CURRENTLY in the ETS projection, WITHOUT restoring
+  from durable storage (no disk read).
+
+  `count/3` calls `restore/3`, which loads from disk whenever the ETS lane is
+  empty - a synchronous read on every no-entry check. On hot paths that only
+  need to know whether a live entry exists (a steer queued during THIS running
+  turn is always written to ETS), this skips that read. An entry that exists
+  only on disk (queued before a restart) is recovered by `restore/3`/`count/3`
+  at the next boundary that consults durable storage.
+  """
+  @spec live_count(atom(), String.t()) :: non_neg_integer()
+  def live_count(table, session_id) do
+    table
+    |> live_entries(session_id)
+    |> Enum.count(fn {_seq, entry} -> entry["claimed"] != true end)
   end
 
   defp live_entries(table, session_id) do

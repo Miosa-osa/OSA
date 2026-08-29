@@ -220,24 +220,21 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
   Wait for all in-flight tool executions to complete.
   Returns results in the same order as tool_calls were received.
 
-  **Unbounded by default.** This wrapper used to `Task.await(task, 600_000)`
-  every tool call, so a fleet dispatch that legitimately runs for hours was
-  killed at ten minutes and reported as a tool timeout — while the agents it
-  launched carried on running in the background, invisible to the turn that
-  started them. The turn lost its own work; nothing else stopped.
+  **Absolute backstop of 20 minutes by default.** This wrapper used to
+  `Task.await(task, 600_000)` every tool call, so a fleet dispatch that runs for
+  hours was killed at ten minutes and reported as a tool timeout. Dropping the
+  ceiling entirely swung the other way: a genuinely wedged tool then blocked the
+  whole turn forever with no way for the loop to recover. The default is now a
+  generous 20-minute backstop - beyond any legitimate interactive tool, but far
+  above a 200 ms file read - after which the task is killed and a readable tool
+  error is returned so the turn recovers instead of hanging.
 
-  A generic wrapper is the wrong place to enforce a duration. It cannot know
-  whether it is wrapping a 200 ms file read or a multi-agent dispatch, so any
-  single number it picks is both far too long for the first and far too short
-  for the second. Tools that need a bound already carry their own: shell has a
+  Tools that need a tighter bound already carry their own: shell has a
   per-command timeout, the HTTP providers have receive timeouts, and
-  `bounded_compaction/2` bounds the summarizer. Those are the layers that know
-  what they are timing.
-
-  Set `:tool_await_timeout_ms` to a positive integer to reimpose a ceiling
-  (useful in tests); anything else means no limit. A wedged tool is still
-  escapable — the turn is interruptible, which is the affordance that actually
-  belongs to the user rather than to a constant.
+  `bounded_compaction/2` bounds the summarizer. Set `:tool_await_timeout_ms` to
+  a positive integer to tighten the ceiling (useful in tests). A wedged tool is
+  also escapable directly - the turn is interruptible - but the backstop means
+  it cannot hang indefinitely on its own.
   """
   def collect_results(ctx) do
     # Wait for all in-flight tasks
@@ -253,12 +250,13 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
             # DoomLoop key on — the old "[timeout]"/"[crash]" bodies were
             # invisible to every one of those checks.
             #
-            # Only reachable when :tool_await_timeout_ms is configured; the
-            # default no longer times out at all. The message reports the
-            # configured bound rather than a hardcoded "10 minutes", which was
-            # already a lie whenever the constant and the text drifted.
+            # On the absolute backstop (default 20 minutes) the tool task is
+            # wedged: kill it so it cannot keep running invisibly after the turn
+            # recovers, then report a readable tool error naming the bound and
+            # that the tool was cancelled.
             :exit, {:timeout, _} ->
-              failure(tool_id, "tool timed out after #{timeout_text()}")
+              Task.shutdown(task, :brutal_kill)
+              failure(tool_id, "tool timed out after #{timeout_text()} and was cancelled")
 
             :exit, reason ->
               failure(tool_id, ToolError.exit_text(reason))
@@ -383,11 +381,16 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
       :none
   end
 
-  # No ceiling unless one is explicitly configured. See `collect_results/1`.
+  # Absolute backstop of 20 minutes so a wedged tool cannot block the whole turn
+  # forever. 20 minutes is beyond any legitimate interactive tool, but long
+  # enough that a genuinely long-running tool is not cut off mid-work. Override
+  # with :tool_await_timeout_ms (a positive integer) to tighten it in tests.
+  @default_await_timeout_ms 1_200_000
+
   defp await_timeout do
-    case Application.get_env(:optimal_system_agent, :tool_await_timeout_ms, :infinity) do
+    case Application.get_env(:optimal_system_agent, :tool_await_timeout_ms, @default_await_timeout_ms) do
       ms when is_integer(ms) and ms > 0 -> ms
-      _ -> :infinity
+      _ -> @default_await_timeout_ms
     end
   end
 
