@@ -431,6 +431,18 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             Some(BackendEvent::ThinkingDelta { text: ev.text })
         }
 
+        "phase_changed" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                phase: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("phase_changed", e)),
+            };
+            Some(BackendEvent::PhaseChanged { phase: ev.phase })
+        }
+
         "agent_response" => {
             #[derive(serde::Deserialize)]
             struct Ev {

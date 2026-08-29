@@ -80,6 +80,37 @@ impl WaitingReason {
     }
 }
 
+/// The turn phase the backend named explicitly, from its `phase_changed` signal
+/// (Grok `Event::PhaseChanged` + `Event::FirstToken`). The spinner already shows
+/// THAT the turn is busy; when this is set it can also state WHY - waiting on the
+/// model before the first token, streaming reasoning, or writing the answer -
+/// instead of a bare flavor verb.
+///
+/// Additive by construction: the field holding it defaults to `None`, and `None`
+/// is also the state whenever no phase signal has arrived, so every existing
+/// spinner behaviour (flavor verbs, the >2s silence flip, `WaitingReason`) is the
+/// unchanged fallback. See `set_stream_phase`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamPhase {
+    /// Request sent, no token back yet (`:waiting_for_model`).
+    WaitingModel,
+    /// The reasoning channel is streaming (`:streaming_reasoning`).
+    StreamingReasoning,
+    /// The answer channel is streaming (`:streaming_text`).
+    WritingAnswer,
+}
+
+impl StreamPhase {
+    /// Spinner label for the verb slot. No trailing ellipsis - the row appends it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::WaitingModel => "Waiting on model",
+            Self::StreamingReasoning => "Streaming reasoning",
+            Self::WritingAnswer => "Writing answer",
+        }
+    }
+}
+
 /// Live retry / rate-limit state held on the spinner row during a mid-turn
 /// stall (grok `turn_status.rs:647`, opencode `prompt/index.tsx:1564`). OSA
 /// already receives `BackendEvent::ProviderRetry`; this lets the spinner label
@@ -495,6 +526,12 @@ pub struct Activity {
     /// Named blocking reason (item 3). When the phase is `Waiting`, this
     /// replaces the flavor verb with e.g. "Waiting on subagent…".
     waiting_reason: Option<WaitingReason>,
+    /// Backend-named turn phase (Grok `PhaseChanged`). When `Some`, the spinner
+    /// states the phase outright ("Waiting on model" / "Streaming reasoning" /
+    /// "Writing answer") instead of a flavor verb. `None` by default and whenever
+    /// no phase signal has arrived, so the existing spinner behaviour is the
+    /// untouched fallback. Set via `set_stream_phase`.
+    named_phase: Option<StreamPhase>,
     /// Whether the turn is parked on the USER (permission prompt / question /
     /// plan approval). Drives the pulsing ◆ "you're the blocker" cue (item 5).
     pending_user: bool,
@@ -746,6 +783,7 @@ impl Activity {
             active_verb: None,
             retry: None,
             waiting_reason: None,
+            named_phase: None,
             pending_user: false,
             interrupt_armed: false,
             queued: 0,
@@ -802,6 +840,18 @@ impl Activity {
         self.waiting_reason = reason;
     }
 
+    /// Set (or clear with `None`) the backend-named turn phase (Grok
+    /// `PhaseChanged`). When `Some`, the spinner states the phase outright
+    /// ("Waiting on model" / "Streaming reasoning" / "Writing answer") in place of
+    /// a flavor verb; a running tool still takes precedence, and the higher-
+    /// priority spinner states (cancelling / pending-user / retry / a `Waiting`
+    /// reason) still win. Additive: `None` - the default until a `phase_changed`
+    /// signal arrives - leaves the spinner exactly as it was, so the >2s silence
+    /// flip and flavor verbs remain the unchanged fallback.
+    pub fn set_stream_phase(&mut self, phase: Option<StreamPhase>) {
+        self.named_phase = phase;
+    }
+
     /// Item 5 — mark/unmark the turn as blocked on the USER (permission prompt,
     /// question, or plan approval), driving the pulsing ◆ cue.
     pub fn set_pending_user(&mut self, pending: bool) {
@@ -849,6 +899,13 @@ impl Activity {
         if self.phase == ProcessingPhase::Waiting {
             if let Some(reason) = self.waiting_reason {
                 return reason.label().to_lowercase();
+            }
+        }
+        // Backend-named phase, mirroring the sighted spinner. A running tool
+        // names itself below, so (like the row) this is skipped during ToolCall.
+        if self.phase != ProcessingPhase::ToolCall {
+            if let Some(p) = self.named_phase {
+                return p.label().to_lowercase();
             }
         }
         // The in-flight tool run, in the words the committed summary line will
@@ -961,6 +1018,7 @@ impl Activity {
         self.thought_for = None;
         self.retry = None;
         self.waiting_reason = None;
+        self.named_phase = None;
         self.pending_user = false;
         self.interrupt_armed = false;
         self.queued = 0;
@@ -986,6 +1044,7 @@ impl Activity {
         self.thought_for = None;
         self.retry = None;
         self.waiting_reason = None;
+        self.named_phase = None;
         self.pending_user = false;
         self.interrupt_armed = false;
         self.queued = 0;
@@ -1921,6 +1980,24 @@ impl Component for Activity {
                 Span::styled(format!("{} ", spinner_char), style),
                 vec![Span::styled(format!("{}\u{2026}", label), style)],
             )
+        } else if self.named_phase.is_some() && self.phase != ProcessingPhase::ToolCall {
+            // The backend named the phase (Grok `PhaseChanged`): state it outright
+            // ("Waiting on model" / "Streaming reasoning" / "Writing answer") in
+            // place of a flavor verb. A running tool names itself, so this is
+            // suppressed during `ToolCall`. Reddens with the stall like the other
+            // labels, and is fitted to the same verb budget so the interrupt hint
+            // always survives.
+            let label = self.named_phase.unwrap().label();
+            let style = if silence.is_some() {
+                Style::default().fg(theme.colors.warning)
+            } else {
+                theme.spinner_verb()
+            };
+            let word = fit_verb(label, verb_budget);
+            (
+                Span::styled(format!("{} ", spinner_char), style),
+                vec![Span::styled(format!("{}\u{2026}", word), style)],
+            )
         } else {
             // When a task is in progress, show its concrete active step (Claude
             // Code's activeForm). Otherwise ONE flavor verb per turn (CC parity).
@@ -2385,6 +2462,39 @@ mod activity_tests {
         // Leaving Waiting clears the reason (turn resumed).
         act.set_phase(ProcessingPhase::Streaming);
         assert!(!render_activity_text(&act).contains("Waiting on subagent"));
+    }
+
+    #[test]
+    fn named_phase_states_the_phase_and_is_dormant_when_unset() {
+        // Grok PhaseChanged mapping: each phase gets a distinct, human label.
+        assert_eq!(StreamPhase::WaitingModel.label(), "Waiting on model");
+        assert_eq!(StreamPhase::StreamingReasoning.label(), "Streaming reasoning");
+        assert_eq!(StreamPhase::WritingAnswer.label(), "Writing answer");
+
+        let mut act = Activity::new();
+        act.start();
+        act.set_phase(ProcessingPhase::Streaming);
+
+        // Unset (the default, and the state whenever no phase signal has arrived):
+        // the spinner keeps its flavor verb, unchanged.
+        assert!(!render_activity_text(&act).contains("Writing answer"));
+
+        // Set: the spinner states the phase outright in place of the flavor verb.
+        act.set_stream_phase(Some(StreamPhase::WritingAnswer));
+        assert!(
+            render_activity_text(&act).contains("Writing answer"),
+            "named phase must render on the spinner"
+        );
+
+        // A running tool names itself, so the named phase is suppressed during a
+        // ToolCall (the row shows the tool verb, not the stale answer label).
+        act.set_phase(ProcessingPhase::ToolCall);
+        assert!(!render_activity_text(&act).contains("Writing answer"));
+
+        // Clearing falls back to the unchanged flavor-verb behaviour.
+        act.set_phase(ProcessingPhase::Streaming);
+        act.set_stream_phase(None);
+        assert!(!render_activity_text(&act).contains("Writing answer"));
     }
 
     #[test]
