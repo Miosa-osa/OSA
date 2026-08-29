@@ -301,6 +301,55 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     )
   end
 
+  # Grok-style phase-transition signal (borrowed: `Event::PhaseChanged` +
+  # `Event::FirstToken`). The spinner already shows THAT the turn is waiting; this
+  # names WHY - waiting on the model, streaming reasoning, or writing the answer -
+  # so the TUI activity row can label the phase instead of animating a flavor
+  # verb. Rides the SAME bus + `osa:session:<id>` PubSub pair every other streamed
+  # event uses, so the existing generic SSE forwarder ships it with no new route.
+  #
+  # Lightweight and additive: one emission per REAL transition, never per token.
+  # The `:streaming_reasoning` / `:streaming_text` transitions are guarded once
+  # per stream by `emit_phase_once/3` so a torrent of deltas fires each exactly
+  # once; `:waiting_for_model` is emitted once at stream start (below), which is
+  # already once per call.
+  defp emit_phase(phase, session_id) do
+    Bus.emit(:system_event, %{
+      event: :phase_changed,
+      session_id: session_id,
+      phase: phase
+    })
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{session_id}",
+      {:osa_event, %{type: :phase_changed, session_id: session_id, phase: phase}}
+    )
+  end
+
+  # Emit `phase` exactly once per stream: fire only when this session's guard flag
+  # is unset, then set it. The flag lives in the stream-task process dictionary
+  # (keyed by session, exactly like the mojibake carries) and is cleared at stream
+  # start AND in the `:done` arm - the same belt-and-suspenders reset the carries
+  # get - so a reused task process starts each stream's phase machine clean.
+  defp emit_phase_once(phase, session_id, flag_key) do
+    case Process.get({flag_key, session_id}) do
+      true ->
+        :ok
+
+      _ ->
+        Process.put({flag_key, session_id}, true)
+        emit_phase(phase, session_id)
+    end
+  end
+
+  # Clear this stream's phase guards. Mirrors the moji-carry deletes so the
+  # once-per-stream transitions cannot leak across streams sharing a task process.
+  defp reset_phase_flags(session_id) do
+    Process.delete({:osa_phase_reasoning_sent, session_id})
+    Process.delete({:osa_phase_text_sent, session_id})
+  end
+
   @doc """
   Synchronous LLM chat — routes through the configured provider/model for this session.
   """
@@ -419,11 +468,22 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     Process.delete({:moji_carry, session_id})
     Process.delete({:moji_think_carry, session_id})
 
+    # Grok phase signal: the request is going out and not one byte has come back
+    # yet. Clear this stream's phase guards (mirroring the moji-carry reset above)
+    # and announce the wait immediately, so the TUI can label the phase at stream
+    # start instead of after its heuristic grace window.
+    reset_phase_flags(session_id)
+    emit_phase(:waiting_for_model, session_id)
+
     caller = self()
 
     callback = fn
       {:text_delta, text} ->
         :atomics.add(heartbeat, 1, 1)
+        # First answer-channel delta → the model is writing its reply. Fired on
+        # ARRIVAL (once), before the mojibake hold decision below: content is
+        # streaming even when a partial byte sequence is held back this chunk.
+        emit_phase_once(:streaming_text, session_id, :osa_phase_text_sent)
         # Stateful mojibake repair. Per-delta repair cannot fix a corruption
         # sequence split across two streamed chunks (a delta ending in a lone
         # "â" has nothing to re-decode), which is the common case when a
@@ -477,6 +537,10 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
         Process.delete({:moji_think_carry, session_id})
 
+        # Clear this stream's phase guards so a reused stream-task process starts
+        # the next stream's phase machine clean (mirrors the moji-carry deletes).
+        reset_phase_flags(session_id)
+
         # Repair the FINAL assembled content, not just the live deltas. This is
         # the string that is persisted to the transcript and re-rendered on
         # resume; the deltas above fix the live view, this fixes the copy that
@@ -518,6 +582,10 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
       {:thinking_delta, text} ->
         :atomics.add(heartbeat, 1, 1)
+        # First reasoning-channel delta → the model is streaming its reasoning.
+        # Fired on ARRIVAL (once), before the mojibake hold below, for the same
+        # reason as `:streaming_text`.
+        emit_phase_once(:streaming_reasoning, session_id, :osa_phase_reasoning_sent)
         # Reasoning is rendered live in the TUI, so it is user-visible output
         # under exactly the same one-way-door rule as `:text_delta`.
         Resilience.mark_output_observed()

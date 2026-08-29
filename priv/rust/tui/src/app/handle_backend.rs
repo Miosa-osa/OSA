@@ -401,6 +401,23 @@ impl App {
                     }
                 }
             }
+            // Grok-style phase label: name WHY the spinner is up (waiting on the
+            // model vs streaming reasoning vs writing the answer). Gated on a live
+            // turn like the other stream frames; the >2s silence flip stays the
+            // fallback when no phase frame arrives. A new turn re-emits
+            // `waiting_for_model` at stream start, so the label refreshes itself.
+            BackendEvent::PhaseChanged { phase } => {
+                if self.turn_is_active() {
+                    use crate::components::activity::StreamPhase;
+                    let sp = match phase.as_str() {
+                        "waiting_for_model" => Some(StreamPhase::WaitingModel),
+                        "streaming_reasoning" => Some(StreamPhase::StreamingReasoning),
+                        "streaming_text" => Some(StreamPhase::WritingAnswer),
+                        _ => None,
+                    };
+                    self.activity.set_stream_phase(sp);
+                }
+            }
             BackendEvent::ThinkingDelta { text } => {
                 // U-B4 — gate on the active turn, mirroring `StreamingToken`.
                 // A stray reasoning frame arriving while Idle (e.g. a late
@@ -541,6 +558,10 @@ impl App {
                 } else {
                     self.activity.set_phase(ProcessingPhase::ToolCall);
                 }
+                // The model-stream phase label is meaningless once a tool is
+                // running; clear it so the row names the tool, not a stale
+                // "Writing answer". The next stream re-emits waiting_for_model.
+                self.activity.set_stream_phase(None);
                 // A shell call with run_in_background counts as a live background
                 // terminal until its `background_command_completed` event lands.
                 // A shell call WITHOUT it is a foreground command that Ctrl+B can

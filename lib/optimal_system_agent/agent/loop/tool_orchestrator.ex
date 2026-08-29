@@ -48,6 +48,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
   # WS5 - await poll cadence. The cancel flag is read via the shared
   # `Cancellation` reader so a cancel breaks a long tool wait.
   @poll_interval_ms 200
+  # WS-B interrupt salvage - drain window (Codex exec.rs io_drain, ~2s). On a
+  # user interrupt a pending tool is not brutal-killed outright: it is first
+  # given this long to finish/flush and return its result. `Task.shutdown/2`
+  # escalates to a kill on its own if the window elapses, so a tool that
+  # completes in time keeps its FULL output while a wedged one is still bounded.
+  @interrupt_drain_ms 2_000
 
   @type tool_call :: %{
           required(:id) => String.t(),
@@ -495,9 +501,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
     run_parallel(tool_calls, state, Keyword.put(opts, :max_concurrency, 1))
   end
 
-  # Poll-await a batch: finishes normally, hard-kills every still-running task
-  # the moment the session's cancel flag appears (WS5 interrupt), or kills on
-  # deadline (parity with the old async_stream on_timeout: :kill_task).
+  # Poll-await a batch: finishes normally, DRAINS-then-kills every still-running
+  # task the moment the session's cancel flag appears (WS5 interrupt, WS-B
+  # salvage), drops a single per-tool-cancelled call while its siblings finish,
+  # or kills on deadline (parity with the old async_stream on_timeout:
+  # :kill_task).
   # ── Stall reporting ───────────────────────────────────────────────────
   #
   # `timeout_ms` defaults to `:infinity` (react_loop.ex), deliberately: a
@@ -533,15 +541,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
   def collect_tasks(pending, done, sid, deadline, progress) do
     cond do
       cancelled?(sid) ->
-        killed =
-          Enum.map(pending, fn {tc, task} ->
-            case Task.shutdown(task, :brutal_kill) do
-              {:ok, result} -> {tc, result}
-              _ -> {tc, interrupted_result(tc)}
-            end
-          end)
-
-        Enum.reverse(done) ++ killed
+        # Session-wide interrupt: drain-then-kill EVERY pending tool. The drain
+        # window lets a tool about to finish flush and return its full result;
+        # a tool that does not complete is killed and we salvage whatever
+        # partial output its live snapshot still exposes.
+        salvaged = Enum.map(pending, fn {tc, task} -> {tc, interrupt_task(tc, task)} end)
+        Enum.reverse(done) ++ salvaged
 
       deadline != :infinity and System.monotonic_time(:millisecond) > deadline ->
         timed_out =
@@ -555,31 +560,85 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
         Enum.reverse(done) ++ timed_out
 
       true ->
-        progress = maybe_report_stall(pending, sid, progress)
-        yielded = Task.yield_many(Enum.map(pending, &elem(&1, 1)), @poll_interval_ms)
-        results = Map.new(yielded, fn {task, res} -> {task.ref, res} end)
+        # Per-tool targeted cancel: a cancel aimed at ONE tool_call_id drops
+        # just that wedged call (same drain + salvage) while its siblings keep
+        # running. The session-wide flag is handled above, so this fires only
+        # for the per-tool key.
+        {targeted, live} =
+          Enum.split_with(pending, fn {tc, _task} -> tool_cancelled?(sid, tc) end)
 
-        {still_pending, newly_done} =
-          Enum.reduce(pending, {[], done}, fn {tc, task}, {p, d} ->
-            case Map.get(results, task.ref) do
-              nil ->
-                {[{tc, task} | p], d}
-
-              {:ok, result} ->
-                {p, [{tc, result} | d]}
-
-              # RESPOND-TO-MODEL: the tool task died. `execute_tool_call/2`
-              # already recovers everything it can see, so reaching here means
-              # the process itself went down — surface the REASON to the model
-              # (it used to be a contentless "Tool execution failed") and keep
-              # the turn alive.
-              {:exit, reason} ->
-                {p, [{tc, error_result(tc, ToolError.exit_text(reason))} | d]}
-            end
+        done =
+          Enum.reduce(targeted, done, fn {tc, task}, acc ->
+            [{tc, interrupt_task(tc, task)} | acc]
           end)
 
-        collect_tasks(Enum.reverse(still_pending), newly_done, sid, deadline, progress)
+        if live == [] do
+          Enum.reverse(done)
+        else
+          progress = maybe_report_stall(live, sid, progress)
+          yielded = Task.yield_many(Enum.map(live, &elem(&1, 1)), @poll_interval_ms)
+          results = Map.new(yielded, fn {task, res} -> {task.ref, res} end)
+
+          {still_pending, newly_done} =
+            Enum.reduce(live, {[], done}, fn {tc, task}, {p, d} ->
+              case Map.get(results, task.ref) do
+                nil ->
+                  {[{tc, task} | p], d}
+
+                {:ok, result} ->
+                  {p, [{tc, result} | d]}
+
+                # RESPOND-TO-MODEL: the tool task died. `execute_tool_call/2`
+                # already recovers everything it can see, so reaching here means
+                # the process itself went down — surface the REASON to the model
+                # (it used to be a contentless "Tool execution failed") and keep
+                # the turn alive.
+                {:exit, reason} ->
+                  {p, [{tc, error_result(tc, ToolError.exit_text(reason))} | d]}
+              end
+            end)
+
+          collect_tasks(Enum.reverse(still_pending), newly_done, sid, deadline, progress)
+        end
     end
+  end
+
+  # Drain-then-kill one pending tool on interrupt. `Task.shutdown(task, ms)`
+  # returns the tool's result if it finished/flushed within the window (full
+  # output preserved); otherwise it kills the task and we recover whatever
+  # partial output the tool's live snapshot still exposes.
+  defp interrupt_task(tc, task) do
+    case Task.shutdown(task, @interrupt_drain_ms) do
+      {:ok, result} -> result
+      _ -> interrupted_result(tc, interrupt_partial_output(tc))
+    end
+  end
+
+  # Best-effort partial-output salvage for a tool killed mid-interrupt. Bytes an
+  # ordinary foreground tool captured die WITH its task, so the only recoverable
+  # output is one held by a SEPARATE process the tool was polling - a background
+  # shell command, reachable by the `background_id` in the call's arguments
+  # (bash_output / task_output). Anything else yields nil and we keep the plain
+  # interrupted message.
+  defp interrupt_partial_output(tc) do
+    args = decode_arguments(tc)
+    id = args["background_id"] || args[:background_id]
+
+    if is_binary(id) and id != "" do
+      case OptimalSystemAgent.Shell.BackgroundManager.output(id) do
+        {:ok, %{output: out}} when is_binary(out) ->
+          if String.trim(out) == "", do: nil, else: out
+
+        _ ->
+          nil
+      end
+    else
+      nil
+    end
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
   end
 
   @doc false
@@ -622,9 +681,25 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
 
   defp cancelled?(sid), do: Cancellation.cancelled?(sid)
 
-  defp interrupted_result(tc) do
+  # Per-tool cancel check: true when a targeted cancel was aimed at THIS call.
+  # (`Cancellation.cancelled?/2` also OR's in the session-wide flag, which is
+  # already false wherever this is consulted, so it reads as per-tool only.)
+  defp tool_cancelled?(sid, tc), do: Cancellation.cancelled?(sid, Map.get(tc, :id))
+
+  # Contentless interrupt message. Pinned by the cancel tests and used by the
+  # pre-flight short-circuit, which has no task and therefore no partial output.
+  defp interrupted_result(tc), do: interrupted_result(tc, nil)
+
+  defp interrupted_result(tc, nil) do
     {%{role: "tool", tool_call_id: tc.id, name: tc.name, content: "Error: Interrupted by user"},
      "Error: Interrupted by user"}
+  end
+
+  # Killed mid-run but its snapshot still had bytes - hand them back with a
+  # clear header instead of throwing the work away (Codex io_drain parity).
+  defp interrupted_result(tc, partial) when is_binary(partial) do
+    content = "Error: Interrupted by user (interrupted - partial output below)\n\n" <> partial
+    {%{role: "tool", tool_call_id: tc.id, name: tc.name, content: content}, content}
   end
 
   defp error_result(tc, msg) do

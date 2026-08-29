@@ -47,6 +47,13 @@ pub enum BackendEvent {
         text: String,
     },
 
+    /// Grok-style phase label for the waiting spinner: which phase the turn is
+    /// in (`waiting_for_model` / `streaming_reasoning` / `streaming_text`). It
+    /// names WHY the spinner is up; additive and absent on older backends.
+    PhaseChanged {
+        phase: String,
+    },
+
     // === Agent Response ===
     //
     // The turn's finished assistant text. `message_id` says WHICH message this
