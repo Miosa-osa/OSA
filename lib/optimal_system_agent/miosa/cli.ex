@@ -24,6 +24,8 @@ defmodule OptimalSystemAgent.MIOSA.CLI do
 
   alias OptimalSystemAgent.MIOSA.Platform
 
+  require Logger
+
   @binary "miosa"
   @npm_install "npm install -g @miosa/cli"
   @curl_install "curl https://miosa.ai/install.sh | sh"
@@ -56,7 +58,9 @@ defmodule OptimalSystemAgent.MIOSA.CLI do
       _ -> nil
     end
   rescue
-    _ -> nil
+    e ->
+      Logger.warning("MIOSA CLI version detection failed: #{Exception.message(e)}")
+      nil
   end
 
   @doc """

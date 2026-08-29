@@ -1753,7 +1753,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       end
     end
   rescue
-    _ -> :error
+    e ->
+      Logger.warning("[loop] spill_overflow failed: #{Exception.message(e)}")
+      :error
   end
 
   @doc """

@@ -436,8 +436,6 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
     [%{"uri" => "file://" <> cwd, "name" => Path.basename(cwd)}]
   rescue
     _ -> []
-  catch
-    _, _ -> []
   end
 
   defp handle_response(id, result, %{init_id: id} = state) do

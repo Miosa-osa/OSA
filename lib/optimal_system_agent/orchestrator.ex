@@ -52,7 +52,7 @@ defmodule OptimalSystemAgent.Orchestrator do
   def runner_key(agent_id), do: "subagent-runner:" <> agent_id
 
   # Slack between the INNER join deadline (inside the task, in
-  # `execute_and_collect/6`) and the OUTER one (`join_subagent_task/3`). The
+  # `execute_and_collect/5`) and the OUTER one (`join_subagent_task/3`). The
   # inner path must always fire first: it is the only one that force-terminates
   # the orphaned child, snapshots its transcript and settles its run row. The
   # same window is reused as the post-deadline grace before anything is reaped.
@@ -322,7 +322,10 @@ defmodule OptimalSystemAgent.Orchestrator do
     try do
       Hooks.run(:subagent_start, hook_payload)
     rescue
-      _ -> :ok
+      e ->
+        Logger.warning("[Orchestrator] subagent_start hook failed: #{Exception.message(e)}")
+
+        :ok
     catch
       :exit, _ -> :ok
     end
@@ -516,7 +519,7 @@ defmodule OptimalSystemAgent.Orchestrator do
 
         # Execute the task (blocking call)
         result =
-          execute_and_collect(subagent_id, task, parent_id, role, max_iter, worktree_info,
+          execute_and_collect(subagent_id, task, parent_id, role, worktree_info,
             display_name: display_name,
             batch_id: batch_id,
             resumed_from: Map.get(config, :resumed_from),
@@ -545,7 +548,10 @@ defmodule OptimalSystemAgent.Orchestrator do
             result: hook_result
           })
         rescue
-          _ -> :ok
+          e ->
+            Logger.warning("[Orchestrator] subagent_stop hook failed: #{Exception.message(e)}")
+
+            :ok
         catch
           :exit, _ -> :ok
         end
@@ -598,7 +604,7 @@ defmodule OptimalSystemAgent.Orchestrator do
   # ── Joining a spawned subagent task ───────────────────────────────────
   #
   # The subagent's transcript snapshot is written INSIDE the task process:
-  # `execute_and_collect/6` calls `force_terminate_orphan/1`,
+  # `execute_and_collect/5` calls `force_terminate_orphan/1`,
   # `RunStore.save_messages/3` and `RunStore.complete/2` after its own inner
   # join returns. So killing the task process destroys exactly the persistence
   # `resume_subagent/2` depends on, and leaves the run row `:running` forever.
@@ -668,7 +674,7 @@ defmodule OptimalSystemAgent.Orchestrator do
   end
 
   @doc false
-  # The inner join deadline `execute_and_collect/6` will use for this config —
+  # The inner join deadline `execute_and_collect/5` will use for this config —
   # resolved identically there, so the outer deadline can be derived from it.
   def subagent_join_timeout_ms(config) do
     Map.get(config, :timeout_ms) ||
@@ -1844,7 +1850,6 @@ defmodule OptimalSystemAgent.Orchestrator do
          task,
          parent_id,
          role,
-         _max_iter,
          worktree_info,
          opts \\ []
        ) do
@@ -2755,7 +2760,7 @@ defmodule OptimalSystemAgent.Orchestrator do
   Terminal `RunStore` status for a non-completion reason.
 
   `:cancelled` (an explicit user interrupt/Esc reaching the child, see
-  `execute_and_collect/7`'s `:exit, :killed` handling) is a first-class RunStore
+  `execute_and_collect/6`'s `:exit, :killed` handling) is a first-class RunStore
   status — persisting it as `:failed` durably mislabels deliberate user action
   as a fault. Every other reason (timeout, crash, already_started, ...) is a
   genuine failure.

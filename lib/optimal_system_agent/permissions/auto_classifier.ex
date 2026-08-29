@@ -197,7 +197,12 @@ defmodule OptimalSystemAgent.Permissions.AutoClassifier do
         end
     end
   rescue
-    _ -> :inconclusive
+    e ->
+      Logger.warning(
+        "[auto_classifier] shell_fast_path failed, deferring to ask: #{Exception.message(e)}"
+      )
+
+      :inconclusive
   catch
     _, _ -> :inconclusive
   end
@@ -341,7 +346,7 @@ defmodule OptimalSystemAgent.Permissions.AutoClassifier do
     end
   rescue
     e ->
-      Logger.debug("[auto_classifier] model call failed: #{inspect(e)}")
+      Logger.warning("[auto_classifier] model call failed: #{Exception.message(e)}")
       :unavailable
   catch
     kind, reason ->
@@ -527,7 +532,12 @@ defmodule OptimalSystemAgent.Permissions.AutoClassifier do
       _ -> true
     end
   rescue
-    _ -> true
+    e ->
+      Logger.warning(
+        "[auto_classifier] budget check failed, treating as within budget: #{Exception.message(e)}"
+      )
+
+      true
   catch
     _, _ -> true
   end

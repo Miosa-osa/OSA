@@ -117,8 +117,6 @@ defmodule OptimalSystemAgent.MCP.Discovery do
     OptimalSystemAgent.Settings.get_trusted(key)
   rescue
     _ -> nil
-  catch
-    _, _ -> nil
   end
 
   @doc """
@@ -220,7 +218,7 @@ defmodule OptimalSystemAgent.MCP.Discovery do
     |> Enum.sort_by(& &1.name)
   rescue
     e ->
-      Logger.debug("[MCP.Discovery] read_all/0 failed: #{inspect(e)}")
+      Logger.warning("[MCP.Discovery] read_all/0 failed: #{Exception.message(e)}")
       []
   end
 
