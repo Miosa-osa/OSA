@@ -920,7 +920,44 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   Test seam: the Ollama wire shape for a list of OSA messages.
   """
   def format_messages(messages) do
-    Enum.map(messages, fn
+    messages
+    |> Enum.map(&format_message/1)
+    |> demote_trailing_system()
+  end
+
+  # OSA injects `role: "system"` messages MID-conversation on purpose — the
+  # task brief, background-task notifications, compaction reminders, steer
+  # directives. Most chat templates render those wherever they land. Qwen 3.5's
+  # embedded Jinja template does not: any system message that is not the first
+  # message hits `raise_exception('System message must be at the beginning.')`,
+  # and Ollama surfaces that as a 400 before generation starts. So the
+  # abliterated SuperQwen GGUF answered `curl` fine and 400'd every real OSA
+  # turn.
+  #
+  # Keep the leading system message where it is; every later one becomes a
+  # user turn carrying the same text inside `<system-reminder>` tags. That is
+  # the shape the harness-side reminders already use, every template accepts
+  # it, and the model still reads it as an instruction rather than as chat.
+  @doc false
+  def demote_trailing_system([first | rest]) do
+    [first | Enum.map(rest, &demote_system/1)]
+  end
+
+  def demote_trailing_system([]), do: []
+
+  defp demote_system(%{"role" => "system", "content" => content} = msg) when is_binary(content) do
+    %{
+      msg
+      | "role" => "user",
+        "content" => "<system-reminder>\n" <> content <> "\n</system-reminder>"
+    }
+  end
+
+  defp demote_system(%{"role" => "system"} = msg), do: %{msg | "role" => "user"}
+  defp demote_system(msg), do: msg
+
+  defp format_message(message) do
+    case message do
       # Assistant messages that carry tool_calls must preserve them so that
       # the 2nd+ iteration has accurate conversation history.
       %{role: "assistant", tool_calls: tool_calls} = msg
@@ -980,7 +1017,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
       msg when is_map(msg) ->
         msg
-    end)
+    end
   end
 
   # Ollama's native `/api/chat` carries images as a SIBLING field of `content`:

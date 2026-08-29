@@ -53,6 +53,51 @@ defmodule OptimalSystemAgent.Providers.OllamaTest do
     end
   end
 
+  describe "format_messages/1 — mid-conversation system messages" do
+    test "keeps the leading system message and demotes later ones to user reminders" do
+      out =
+        Ollama.format_messages([
+          %{role: "system", content: "BASE"},
+          %{role: "user", content: "hi"},
+          %{role: "system", content: "task brief"},
+          %{role: "assistant", content: "ok"},
+          %{role: "system", content: "steer"}
+        ])
+
+      assert Enum.map(out, & &1["role"]) == ["system", "user", "user", "assistant", "user"]
+      assert Enum.at(out, 0)["content"] == "BASE"
+      assert Enum.at(out, 2)["content"] == "<system-reminder>\ntask brief\n</system-reminder>"
+      assert Enum.at(out, 4)["content"] =~ "steer"
+    end
+
+    test "a conversation with no leading system message is also normalised" do
+      out =
+        Ollama.format_messages([%{role: "user", content: "hi"}, %{role: "system", content: "x"}])
+
+      assert Enum.map(out, & &1["role"]) == ["user", "user"]
+    end
+
+    test "tool and assistant messages are untouched" do
+      out =
+        Ollama.format_messages([
+          %{role: "system", content: "BASE"},
+          %{
+            role: "assistant",
+            content: "",
+            tool_calls: [%{id: "1", name: "echo", arguments: %{}}]
+          },
+          %{role: "tool", content: "done", tool_call_id: "1", name: "echo"}
+        ])
+
+      assert [
+               %{"role" => "system"},
+               %{"role" => "assistant", "tool_calls" => [_]},
+               %{"role" => "tool"}
+             ] =
+               out
+    end
+  end
+
   describe "local_daemon_url/0" do
     setup do
       prev = Application.get_env(:optimal_system_agent, :ollama_url)
