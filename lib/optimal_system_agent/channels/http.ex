@@ -276,6 +276,76 @@ defmodule OptimalSystemAgent.Channels.HTTP do
     |> send_resp(200, body)
   end
 
+  # ── Local model manager (the TUI's catalog screen; CLI twin is /models) ──
+  #
+  # Same gate as the onboarding routes: a bearer once setup is complete, open
+  # before it so the first-run picker can install a model. Every handler
+  # delegates to `LocalModels`, which never raises on a daemon that is down.
+
+  get "/models/local" do
+    local_models_reply(conn, fn ->
+      ov = OptimalSystemAgent.LocalModels.overview()
+
+      {:ok,
+       %{
+         hardware:
+           Map.put(
+             ov.hardware,
+             :summary,
+             OptimalSystemAgent.LocalModels.Hardware.summary(ov.hardware)
+           ),
+         ctx: ov.ctx,
+         installed: OptimalSystemAgent.LocalModels.to_json(ov.installed),
+         catalog: OptimalSystemAgent.LocalModels.to_json(ov.catalog),
+         error: ov.error
+       }}
+    end)
+  end
+
+  get "/models/local/info" do
+    conn = Plug.Conn.fetch_query_params(conn)
+    ref = conn.query_params["ref"] || ""
+
+    local_models_reply(conn, fn ->
+      with {:ok, m} <- OptimalSystemAgent.LocalModels.inspect_model(ref) do
+        {:ok, OptimalSystemAgent.LocalModels.to_json(m)}
+      end
+    end)
+  end
+
+  post "/models/local/install" do
+    with_json_body(conn, fn params ->
+      local_models_reply(conn, fn ->
+        with ref when is_binary(ref) and ref != "" <-
+               params["ref"] || {:error, "ref is required"},
+             {:ok, id} <- OptimalSystemAgent.LocalModels.Installer.start(ref, params["quant"]) do
+          {:ok, %{job_id: id}}
+        end
+      end)
+    end)
+  end
+
+  get "/models/local/install/:id" do
+    local_models_reply(conn, fn ->
+      case OptimalSystemAgent.LocalModels.Installer.status(id) do
+        nil -> {:error, "no such job"}
+        job -> {:ok, OptimalSystemAgent.LocalModels.to_json(job)}
+      end
+    end)
+  end
+
+  post "/models/local/remove" do
+    with_json_body(conn, fn params ->
+      local_models_reply(conn, fn ->
+        with tag when is_binary(tag) and tag != "" <-
+               params["tag"] || {:error, "tag is required"},
+             :ok <- OptimalSystemAgent.LocalModels.remove(tag) do
+          {:ok, %{removed: tag}}
+        end
+      end)
+    end)
+  end
+
   get "/onboarding/models" do
     conn = Plug.Conn.fetch_query_params(conn)
     provider = conn.query_params["provider"] || "ollama_local"
@@ -615,6 +685,53 @@ defmodule OptimalSystemAgent.Channels.HTTP do
       end
     else
       :ok
+    end
+  end
+
+  # Shared tail of the /models/local routes: gate, run, encode.
+  defp local_models_reply(conn, fun) do
+    case verify_bearer_when_required(conn) do
+      :unauthorized ->
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(401, Jason.encode!(%{error: "unauthorized"}))
+
+      :ok ->
+        {status, body} =
+          try do
+            case fun.() do
+              {:ok, data} -> {200, data}
+              {:error, reason} -> {400, %{error: to_string(reason)}}
+            end
+          rescue
+            e -> {500, %{error: Exception.message(e)}}
+          catch
+            :exit, reason -> {500, %{error: inspect(reason)}}
+          end
+
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(status, Jason.encode!(body))
+    end
+  end
+
+  defp with_json_body(conn, fun) do
+    case Plug.Conn.read_body(conn) do
+      {:ok, raw, conn} ->
+        case Jason.decode(raw) do
+          {:ok, %{} = params} ->
+            fun.(params)
+
+          _ ->
+            conn
+            |> put_resp_content_type("application/json")
+            |> send_resp(400, Jason.encode!(%{error: "invalid JSON body"}))
+        end
+
+      _ ->
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(400, Jason.encode!(%{error: "could not read body"}))
     end
   end
 
