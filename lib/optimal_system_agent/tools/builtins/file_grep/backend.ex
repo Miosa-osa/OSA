@@ -91,6 +91,34 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Backend do
   def available?, do: executable() != nil
 
   @doc """
+  `true` when `path` is itself a symlink, tested with `File.lstat/1`, which does
+  NOT resolve the link, unlike `File.stat/1` and `File.dir?/1`.
+
+  The pure-Elixir `file_grep` fallback (reached only when ripgrep is absent)
+  descends the tree with `File.ls/1` and classifies entries with `File.dir?/1`,
+  which FOLLOWS symlinks. A self-referential directory symlink (an Elixir
+  `_build` is full of symlinked dep dirs, and any `a -> ..` loops onto itself)
+  then walks unboundedly. ripgrep skips symlink loops by default; this predicate
+  restores the same guard for the fallback, in one place both engines' policy can
+  point at.
+
+  NOTE(v1056): the fallback walk lives in `FileGrep.Handler.walk/2`, which is
+  outside this workstream's edit set, so this guard is not yet wired in. That
+  `walk/2` must drop any directory entry for which this returns `true` before
+  adding it to the descent frontier (e.g. `Enum.reject(dirs, &Backend.symlink?/1)`
+  alongside the existing `@pruned_dirs` prune), so `.git`/`_build`/`deps`/
+  `node_modules` continue to be pruned DURING descent and symlinked dirs are
+  never followed.
+  """
+  @spec symlink?(String.t()) :: boolean()
+  def symlink?(path) do
+    case File.lstat(path) do
+      {:ok, %{type: :symlink}} -> true
+      _ -> false
+    end
+  end
+
+  @doc """
   Structured availability for `osa doctor` and the `/doctor` HTTP report.
 
   Returns `{:pass, detail}` when ripgrep is on the PATH, `{:optional, detail}`

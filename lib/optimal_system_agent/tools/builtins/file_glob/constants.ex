@@ -55,11 +55,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGlob.Constants do
   @doc """
   Hard ceiling on how long the directory walk may run.
 
-  `Path.wildcard/2` walks the WHOLE tree under `path` and follows symlinks, so a
-  repo root with a large symlinked `_build`/`deps` can walk for minutes and
-  freeze the turn - the operator then interrupts, killing all in-flight work.
-  Past this deadline the walk is killed and the tool returns actionable guidance
-  ("narrow the path") instead of hanging. Override with `:file_glob_timeout_ms`.
+  Bounds BOTH search engines. When ripgrep is on the PATH the handler runs
+  `rg --files` under this deadline; otherwise it runs `Path.wildcard/2`, which
+  walks the WHOLE tree and follows symlinks, so a repo root with a large
+  symlinked `_build`/`deps` can walk for minutes and freeze the turn - the
+  operator then interrupts, killing all in-flight work. Past this deadline the
+  walk is killed and the tool returns actionable guidance ("narrow the path")
+  instead of hanging. Override with `:file_glob_timeout_ms`.
   """
   @walk_timeout_ms 15_000
   def walk_timeout_ms do
