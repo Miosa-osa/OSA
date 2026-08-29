@@ -42,7 +42,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
 
   alias OptimalSystemAgent.Security.{
     NotesStore,
-    StructuredNotes,
     ShadowGraph,
     TaskDifficultyAssessment,
     VulnDeduplication,
@@ -82,8 +81,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
     EvalHarness,
     ValidationResult,
     ActionReviewer,
-    SandboxArtifacts,
-    ExecutionEnvironment
+    SandboxArtifacts
   }
 
   alias OptimalSystemAgent.Tools.UseContext
@@ -1438,7 +1436,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
     end
   end
 
-  defp format_proxy({:ok, rec}), do: {:ok, "proxy ingested count=#{rec.count} path=#{rec.path || "-"}"}
+  defp format_proxy({:ok, rec}),
+    do: {:ok, "proxy ingested count=#{rec.count} path=#{rec.path || "-"}"}
+
   defp format_proxy({:error, reason}), do: {:error, reason}
 
   defp do_proxy_start(session_id, _input) do
@@ -1607,14 +1607,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
 
   defp sandbox_pull_paths(input) do
     cond do
-      is_list(Map.get(input, "changed_files")) -> input["changed_files"]
+      is_list(Map.get(input, "changed_files")) ->
+        input["changed_files"]
+
       is_binary(Map.get(input, "payload")) ->
         case Jason.decode(input["payload"]) do
           {:ok, list} when is_list(list) -> Enum.map(list, &to_string/1)
           _ -> String.split(input["payload"], "\n", trim: true)
         end
-      is_binary(Map.get(input, "needle")) -> [input["needle"]]
-      true -> []
+
+      is_binary(Map.get(input, "needle")) ->
+        [input["needle"]]
+
+      true ->
+        []
     end
   end
 

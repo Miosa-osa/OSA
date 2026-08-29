@@ -128,14 +128,19 @@ defmodule OptimalSystemAgent.Providers.BatchTest do
 
     test "rejects a non-openai provider without touching http" do
       assert {:error, reason} =
-               Batch.submit(@sample_requests, provider: :groq, api_key: "x", http: fn _ -> :boom end)
+               Batch.submit(@sample_requests,
+                 provider: :groq,
+                 api_key: "x",
+                 http: fn _ -> :boom end
+               )
 
       assert reason =~ ":openai"
     end
   end
 
   describe "status/2" do
-    for state <- ~w(validating in_progress finalizing completed failed expired cancelling cancelled) do
+    for state <-
+          ~w(validating in_progress finalizing completed failed expired cancelling cancelled) do
       test "parses the #{state} state" do
         state = unquote(state)
 
@@ -174,7 +179,9 @@ defmodule OptimalSystemAgent.Providers.BatchTest do
     end
 
     test "returns {:error, _} on an HTTP failure" do
-      http = scripted([{:ok, %{status: 404, body: %{"error" => %{"message" => "no such batch"}}}}])
+      http =
+        scripted([{:ok, %{status: 404, body: %{"error" => %{"message" => "no such batch"}}}}])
+
       assert {:error, reason} = Batch.status("nope", http: http, api_key: "sk-test")
       assert reason =~ "status fetch failed"
     end
@@ -218,6 +225,7 @@ defmodule OptimalSystemAgent.Providers.BatchTest do
       assert length(rows) == 2
 
       by_id = Map.new(rows, &{&1.custom_id, &1})
+
       assert by_id["request-0"].response["choices"] |> hd() |> get_in(["message", "content"]) ==
                "answer one"
 

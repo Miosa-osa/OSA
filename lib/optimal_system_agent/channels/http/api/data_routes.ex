@@ -16,6 +16,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
 
   alias OptimalSystemAgent.SDK.Memory
   alias OptimalSystemAgent.Providers
+  alias OptimalSystemAgent.System.AtomicFile
+  alias OptimalSystemAgent.System.JsonStore
   alias OptimalSystemAgent.Agent.Scheduler
   alias OptimalSystemAgent.Machines
 

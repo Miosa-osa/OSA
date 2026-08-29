@@ -28,13 +28,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.WorkspaceMap do
   @impl true
   def safety, do: :read_only
 
-  @impl true
   # Deferred: discoverable mid-turn via `tool_search`, absent from the default
   # toolbox. Every schema in the default set is re-sent on EVERY request, so a
   # tool most turns never touch is paid for by all of them.
-  @impl true
   def should_defer?, do: true
 
+  @impl true
   def name, do: "workspace_map"
 
   # Description convention (matching the tool-prompt style used across builtins):

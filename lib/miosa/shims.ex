@@ -256,7 +256,6 @@ defmodule MiosaSignal.Classifier do
   defdelegate infer_structure(event), to: OptimalSystemAgent.Events.Classifier
   defdelegate dimension_score(event), to: OptimalSystemAgent.Events.Classifier
   defdelegate data_score(event), to: OptimalSystemAgent.Events.Classifier
-  defdelegate type_score(event), to: OptimalSystemAgent.Events.Classifier
   defdelegate context_score(event), to: OptimalSystemAgent.Events.Classifier
   defdelegate code_like?(str), to: OptimalSystemAgent.Events.Classifier
 end

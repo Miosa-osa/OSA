@@ -71,6 +71,7 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
 
   # Tool schemas ride in a dedicated field of the request body, not in the
   # system-prompt text. See Providers.Behaviour.native_tool_schemas?/0.
+  @impl true
   def native_tool_schemas?, do: true
 
   @impl true

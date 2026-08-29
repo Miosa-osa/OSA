@@ -1458,6 +1458,20 @@ defmodule OptimalSystemAgent.Agent.Loop do
     end
   end
 
+  # Accept both an atom (CLI path) and a string (HTTP JSON path) provider, and
+  # only return a provider that is actually registered.
+  defp normalize_provider(provider) when is_atom(provider) and not is_nil(provider) do
+    if provider in OptimalSystemAgent.Providers.Registry.list_providers(), do: provider, else: nil
+  end
+
+  defp normalize_provider(provider) when is_binary(provider) do
+    Enum.find(OptimalSystemAgent.Providers.Registry.list_providers(), fn a ->
+      Atom.to_string(a) == provider
+    end)
+  end
+
+  defp normalize_provider(_), do: nil
+
   @impl true
   def handle_call({:process, message}, from, state) do
     handle_call({:process, message, []}, from, state)
@@ -1574,20 +1588,6 @@ defmodule OptimalSystemAgent.Agent.Loop do
     {:reply, {:ok, budget}, state}
   end
 
-  # Accept both an atom (CLI path) and a string (HTTP JSON path) provider, and
-  # only return a provider that is actually registered.
-  defp normalize_provider(provider) when is_atom(provider) and not is_nil(provider) do
-    if provider in OptimalSystemAgent.Providers.Registry.list_providers(), do: provider, else: nil
-  end
-
-  defp normalize_provider(provider) when is_binary(provider) do
-    Enum.find(OptimalSystemAgent.Providers.Registry.list_providers(), fn a ->
-      Atom.to_string(a) == provider
-    end)
-  end
-
-  defp normalize_provider(_), do: nil
-
   # Update a live session's working_dir (e.g. a later turn sent from a different
   # folder). Publishes into the process dictionary too so any immediate cwd
   # lookup in this process resolves to the new dir.
@@ -1697,47 +1697,6 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
     {:reply, {:ok, stats},
      republish_context(%{state | messages: compacted}, compacted != messages)}
-  end
-
-  # After a MANUAL compaction, make the meter describe the conversation that now
-  # exists.
-  #
-  # `last_input_tokens` is written in exactly one other place
-  # (`Accounting.maybe_put_last_input/2`) and only when a provider reported a
-  # positive input count, so after a fold it still holds the PRE-compaction
-  # prompt size. `Telemetry.emit_context_pressure/1` prefers that field over any
-  # local estimate, which is why the status bar and the low-context banner both
-  # went on describing a conversation that had just been replaced:
-  #
-  #     ✓ Compacted ~135.4k → ~6.7k tokens (976 messages folded) · 1m 16s
-  #     …
-  #     Context low (6% remaining) · Run /compact to compact & continue
-  #     ⣿⣿⣿⣿⣿⣿⣿░ 88% ctx
-  #
-  # Both loop-driven paths already do exactly this for exactly this reason —
-  # `TurnPipeline.compact_and_refresh_tokens/1` at the turn boundary and
-  # `ReactLoop.refresh_tokens_after_fold/2` mid-turn. These two GenServer
-  # handlers are `/compact`, the form people actually type, and neither was
-  # covered. Re-emitting the pressure event is the other half: without it the
-  # refreshed figure would sit in state until the next turn boundary.
-  #
-  # Skipped when the fold changed nothing, so a declined compaction cannot
-  # replace a provider-reported count with a local estimate.
-  @spec republish_context(map(), boolean()) :: map()
-  defp republish_context(state, false), do: state
-
-  defp republish_context(state, true) do
-    state =
-      Map.put(
-        state,
-        :last_input_tokens,
-        OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
-      )
-
-    Telemetry.emit_context_pressure(state)
-    state
-  rescue
-    _ -> state
   end
 
   def handle_call(:enter_plan_mode, _from, state) do
@@ -1852,6 +1811,47 @@ defmodule OptimalSystemAgent.Agent.Loop do
       end
 
     {:reply, result, state}
+  end
+
+  # After a MANUAL compaction, make the meter describe the conversation that now
+  # exists.
+  #
+  # `last_input_tokens` is written in exactly one other place
+  # (`Accounting.maybe_put_last_input/2`) and only when a provider reported a
+  # positive input count, so after a fold it still holds the PRE-compaction
+  # prompt size. `Telemetry.emit_context_pressure/1` prefers that field over any
+  # local estimate, which is why the status bar and the low-context banner both
+  # went on describing a conversation that had just been replaced:
+  #
+  #     ✓ Compacted ~135.4k → ~6.7k tokens (976 messages folded) · 1m 16s
+  #     …
+  #     Context low (6% remaining) · Run /compact to compact & continue
+  #     ⣿⣿⣿⣿⣿⣿⣿░ 88% ctx
+  #
+  # Both loop-driven paths already do exactly this for exactly this reason —
+  # `TurnPipeline.compact_and_refresh_tokens/1` at the turn boundary and
+  # `ReactLoop.refresh_tokens_after_fold/2` mid-turn. These two GenServer
+  # handlers are `/compact`, the form people actually type, and neither was
+  # covered. Re-emitting the pressure event is the other half: without it the
+  # refreshed figure would sit in state until the next turn boundary.
+  #
+  # Skipped when the fold changed nothing, so a declined compaction cannot
+  # replace a provider-reported count with a local estimate.
+  @spec republish_context(map(), boolean()) :: map()
+  defp republish_context(state, false), do: state
+
+  defp republish_context(state, true) do
+    state =
+      Map.put(
+        state,
+        :last_input_tokens,
+        OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
+      )
+
+    Telemetry.emit_context_pressure(state)
+    state
+  rescue
+    _ -> state
   end
 
   # Mid-session toggles must keep the role allowlist. Rebuilding from
@@ -2008,6 +2008,40 @@ defmodule OptimalSystemAgent.Agent.Loop do
     end
   end
 
+  # A poke that lands on a non-idle loop. The NOTIFICATION is not lost — this
+  # clause drops the announcement, not the queue entry, and `drain/1` is the
+  # only thing that consumes one. What used to be missing was anybody asking
+  # again: the turn in flight would end, go idle, and never look. It looks now,
+  # from the tail of `run_and_reply/1` and from the plan-mode return, via
+  # `TaskNotifications.settle/1`.
+  #
+  # So this stays a no-op deliberately rather than re-queuing or retrying: two
+  # mechanisms racing to start the same synthetic turn is a worse failure than
+  # the one being fixed, and the turn boundary is the point where reading the
+  # result is actually useful.
+  def handle_cast(:poke, state) do
+    Logger.debug(
+      "[loop] poke for #{state.session_id} arrived mid-turn (status #{inspect(state.status)}) — " <>
+        "deferred to the turn boundary, not dropped"
+    )
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_cast({:rewind_conversation, messages, meta}, state) do
+    new_state = %{
+      state
+      | messages: messages,
+        iteration: Map.get(meta, :iteration, state.iteration),
+        plan_mode: Map.get(meta, :plan_mode, state.plan_mode),
+        turn_count: Map.get(meta, :turn_count, state.turn_count)
+    }
+
+    Checkpoint.checkpoint_state(new_state)
+    {:noreply, new_state}
+  end
+
   defp mark_inbox_receipt(messages, receipt) do
     Enum.map(messages, &Map.put(&1, :durable_inbox_ids, receipt))
   end
@@ -2046,40 +2080,6 @@ defmodule OptimalSystemAgent.Agent.Loop do
         Logger.error("[loop] durable inbox delivery failed: #{inspect(reason)}")
         error
     end
-  end
-
-  # A poke that lands on a non-idle loop. The NOTIFICATION is not lost — this
-  # clause drops the announcement, not the queue entry, and `drain/1` is the
-  # only thing that consumes one. What used to be missing was anybody asking
-  # again: the turn in flight would end, go idle, and never look. It looks now,
-  # from the tail of `run_and_reply/1` and from the plan-mode return, via
-  # `TaskNotifications.settle/1`.
-  #
-  # So this stays a no-op deliberately rather than re-queuing or retrying: two
-  # mechanisms racing to start the same synthetic turn is a worse failure than
-  # the one being fixed, and the turn boundary is the point where reading the
-  # result is actually useful.
-  def handle_cast(:poke, state) do
-    Logger.debug(
-      "[loop] poke for #{state.session_id} arrived mid-turn (status #{inspect(state.status)}) — " <>
-        "deferred to the turn boundary, not dropped"
-    )
-
-    {:noreply, state}
-  end
-
-  @impl true
-  def handle_cast({:rewind_conversation, messages, meta}, state) do
-    new_state = %{
-      state
-      | messages: messages,
-        iteration: Map.get(meta, :iteration, state.iteration),
-        plan_mode: Map.get(meta, :plan_mode, state.plan_mode),
-        turn_count: Map.get(meta, :turn_count, state.turn_count)
-    }
-
-    Checkpoint.checkpoint_state(new_state)
-    {:noreply, new_state}
   end
 
   # Termination is split by two independent questions, not by exit reason alone:

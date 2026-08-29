@@ -42,6 +42,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.PlatformVM do
   alias OptimalSystemAgent.Sandbox.Sprites
   alias OptimalSystemAgent.Tools.Builtins.ComputerUse.Shared
 
+  @compile {:no_warn_undefined, OptimalSystemAgent.Sandbox.Sprites}
+
   require Logger
 
   # ---------------------------------------------------------------------------

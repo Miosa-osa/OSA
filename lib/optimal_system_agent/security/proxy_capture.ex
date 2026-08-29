@@ -153,7 +153,8 @@ defmodule OptimalSystemAgent.Security.ProxyCapture do
   end
 
   defp http_replay? do
-    Code.ensure_loaded?(OptimalSystemAgent.Security.HttpReplay) and function_exported?(OptimalSystemAgent.Security.HttpReplay, :ingest_har, 2)
+    Code.ensure_loaded?(OptimalSystemAgent.Security.HttpReplay) and
+      function_exported?(OptimalSystemAgent.Security.HttpReplay, :ingest_har, 2)
   end
 
   defp parse_har_local(json) do

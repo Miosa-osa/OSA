@@ -33,7 +33,14 @@ defmodule OptimalSystemAgent.Agent.Loop.PermissionEnforcementTest do
 
     # Interactive prompts default OFF in the test env; each test opts in.
     prior = Application.get_env(:optimal_system_agent, :interactive_permissions, false)
-    on_exit(fn -> Application.put_env(:optimal_system_agent, :interactive_permissions, prior) end)
+
+    on_exit(fn ->
+      Application.put_env(:optimal_system_agent, :interactive_permissions, prior)
+      # Symmetric cleanup: rules saved by THIS test (e.g. file_write
+      # allow_always/deny_always) must not leak into whichever module the
+      # seed schedules next - they persist in the shared permissions file.
+      if is_binary(file), do: File.rm(file)
+    end)
 
     :ok
   end

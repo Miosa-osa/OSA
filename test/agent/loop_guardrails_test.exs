@@ -982,7 +982,10 @@ defmodule OptimalSystemAgent.Agent.Loop.GuardrailsTest do
     end
 
     test "several shell commands are still not a blind edit" do
-      refute Guardrails.blind_file_write?([tool_call("shell_execute"), tool_call("shell_execute")])
+      refute Guardrails.blind_file_write?([
+               tool_call("shell_execute"),
+               tool_call("shell_execute")
+             ])
     end
 
     test "file_transform alone returns false — it is designed to need no read" do
