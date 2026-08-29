@@ -64,7 +64,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalPrompt do
           fallback(goal)
       end
 
-    body <> off_track_note(status)
+    body <> precedence_note() <> off_track_note(status)
   end
 
   # ── Rendering ──────────────────────────────────────────────────────────
@@ -105,6 +105,42 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalPrompt do
     _ -> ""
   catch
     _, _ -> ""
+  end
+
+  # ── Overlay precedence (v1057) ─────────────────────────────────────────
+  #
+  # Per-turn procedural overlays are injected OUTSIDE this module and can pull
+  # against each other on the same turn: message_handler.ex's
+  # `maybe_add_explore_directive` ("DISPATCH an explorer agent first ... Wait
+  # for the explorer's report before writing any code") and
+  # `maybe_add_delegation_directive` ("Dispatch `explorer` first"), the
+  # "do NOT poll" rules in delegate/prompt.ex and agent/reminders.ex, and this
+  # template's own "take the next concrete action" push. With no defined
+  # precedence these contradict, producing rabbit-holing and over-caution.
+  # Codex resolves the same tension by shipping ONE canonical base prompt with
+  # an explicit precedence order. We cannot rewrite those overlays from here
+  # (they live in other modules, outside this change's allowlist), so we state
+  # the tie-breaker at the one point every continuation turn passes through.
+  # Kept additive: a short block appended to the rendered body, no existing
+  # overlay removed.
+  #
+  # NOTE(v1057): the fuller consolidation - collapsing the overlays in
+  # message_handler.ex (maybe_add_explore_directive / maybe_add_delegation_directive
+  # / maybe_add_debugging_directive) and the "do NOT poll" copies in
+  # delegate/prompt.ex, agent/reminders.ex, and agent/task_notifications.ex into
+  # a single precedence-ordered base prompt - is a cross-module design pass and
+  # is deliberately out of scope for this additive fix.
+  defp precedence_note do
+    "\n\nWhen turn-level directives conflict, resolve them in this order:\n" <>
+      "- The user's explicit current request wins. Any per-turn system directive " <>
+      "(explore first, dispatch a team, keep a task list, wait for a subagent before " <>
+      "acting) is scaffolding for that request, not a competing objective.\n" <>
+      "- When those directives pull in different directions, prefer acting on the " <>
+      "concrete request over ceremony: take the next real action (read, edit, run, " <>
+      "test) rather than adding a preparatory step the request did not ask for.\n" <>
+      "- Explore or dispatch a subagent before acting only when the task genuinely " <>
+      "needs it - many files, or code you do not yet understand - not by default. A " <>
+      "single, well-understood change needs no plan, task list, or explorer first."
   end
 
   defp off_track_note(:off_track) do
