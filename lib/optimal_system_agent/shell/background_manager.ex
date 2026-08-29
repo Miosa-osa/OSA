@@ -73,6 +73,50 @@ defmodule OptimalSystemAgent.Shell.BackgroundManager do
   @spec output(String.t()) :: {:ok, map()} | {:error, :not_found}
   def output(id), do: with_worker(id, &BackgroundTask.snapshot/1)
 
+  @doc """
+  Terminal output tail for a background command, read FRESH from the worker at
+  call time. Used by `BackgroundNotifier` when it builds a completion summary so
+  the notice carries the command's FINAL frame - not a mid-flight progress line
+  (e.g. a download's "61% 10GB/16GB") that happened to sit at the front of the
+  retained tail window.
+
+  The worker lingers for `retain_ms` after finishing, so this reads the true
+  terminal snapshot. Returns `""` when the id is unknown or the worker has
+  already retired, so the caller can fall back to whatever tail the completion
+  event carried.
+  """
+  @spec final_tail(String.t(), non_neg_integer()) :: String.t()
+  def final_tail(id, max_chars \\ 400) do
+    case output(id) do
+      {:ok, %{output: output}} -> terminal_tail(output, max_chars)
+      _ -> ""
+    end
+  end
+
+  @doc """
+  Collapse carriage-return progress frames in `output` to their final rendered
+  form, then return the last `max_chars` characters (the TERMINAL snapshot).
+
+  Progress bars overwrite a single line with `\\r` (`" 61%\\r 62%\\r100%"`); only
+  the segment after the last `\\r` on each line is what the terminal actually
+  shows. Collapsing first, then taking the END, yields the completed frame -
+  never an intermediate one, and never the FRONT of the tail window (the old
+  bug that surfaced a stale in-flight frame after completion).
+  """
+  @spec terminal_tail(binary() | term(), non_neg_integer()) :: String.t()
+  def terminal_tail(output, max_chars \\ 400) do
+    collapsed =
+      output
+      |> to_string()
+      |> String.split("\n")
+      |> Enum.map(&last_cr_frame/1)
+      |> Enum.join("\n")
+      |> String.trim()
+
+    len = String.length(collapsed)
+    if len > max_chars, do: String.slice(collapsed, len - max_chars, max_chars), else: collapsed
+  end
+
   @doc "Kill a running background command by id. Returns its final snapshot."
   @spec kill(String.t()) :: {:ok, map()} | {:error, :not_found}
   def kill(id), do: with_worker(id, &BackgroundTask.kill/1)
@@ -135,6 +179,22 @@ defmodule OptimalSystemAgent.Shell.BackgroundManager do
   end
 
   # ── Private ──────────────────────────────────────────────────────────
+
+  # Keep only the final overwrite frame of a single line: the text after its
+  # last carriage return. A lone trailing `\r` (a CRLF split on "\n") is
+  # stripped first so a normal line is left intact.
+  defp last_cr_frame(line) do
+    line = String.trim_trailing(line, "\r")
+
+    case :binary.matches(line, "\r") do
+      [] ->
+        line
+
+      matches ->
+        {pos, len} = List.last(matches)
+        binary_part(line, pos + len, byte_size(line) - pos - len)
+    end
+  end
 
   defp with_worker(id, fun) do
     case Registry.lookup(@registry, id) do

@@ -24,6 +24,7 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
   require Logger
 
   alias OptimalSystemAgent.Agent.TaskNotifications
+  alias OptimalSystemAgent.Shell.BackgroundManager
 
   # --- Client API ---
 
@@ -106,8 +107,19 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
       end
 
     code = if is_integer(ev[:exit_code]), do: " (exit code #{ev[:exit_code]})", else: ""
-    tail = ev[:output_tail] |> to_string() |> String.slice(0, 400)
     task_id = to_string(ev[:background_id] || "")
+
+    # FINAL terminal snapshot, not a mid-flight progress frame. Read the tail
+    # FRESH from the worker (it lingers for retain_ms after finishing) and fall
+    # back to the terminal END of the tail the event carried if the worker has
+    # already retired. The old code sliced the FRONT of the 2000-byte tail
+    # window, so a download's in-flight "61% 10GB/16GB" surfaced AFTER
+    # completion instead of the last frame.
+    tail =
+      case BackgroundManager.final_tail(task_id, 400) do
+        "" -> BackgroundManager.terminal_tail(ev[:output_tail], 400)
+        fresh -> fresh
+      end
 
     summary =
       "Background command '#{ev[:command]}' #{verb}#{code}" <>

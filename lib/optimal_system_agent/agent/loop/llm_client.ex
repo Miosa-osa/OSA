@@ -439,8 +439,16 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       "[llm] stream — #{length(messages)} messages (sanitized): #{inspect(sanitize_for_log(messages))} session=#{session_id}"
     )
 
-    # Heartbeat: atomics counter incremented on every streaming event.
-    # The watchdog checks if the counter has changed since last poll.
+    # Heartbeat: atomics counter incremented on every streaming event AND on
+    # every raw chunk the provider receives from the wire BEFORE it is parsed
+    # (the provider bumps this SAME atomic via `opts[:heartbeat]`, injected
+    # below). The watchdog checks if the counter has changed since last poll.
+    #
+    # Grok dual idle-timeout: resetting on raw bytes, not only on parsed events,
+    # means a stream that is flowing bytes the parser has not yet turned into an
+    # event never false-times-out. The idle timeout then fires only on a TRULY
+    # silent pipe (no bytes at all for the window), where the retryable restart
+    # is genuinely warranted.
     heartbeat = :atomics.new(1, signed: false)
     :atomics.put(heartbeat, 1, 1)
 
@@ -655,6 +663,13 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
     # TEMP measurement instrumentation (OSA_CONTEXT_TRACE=1). No-op when unset.
     OptimalSystemAgent.Agent.Loop.ContextTrace.dump(session_id, messages, opts, mode: "stream")
+
+    # Hand the watchdog atomic to the provider so it can reset the idle timer on
+    # EVERY raw chunk it receives (before parsing), not only on the parsed events
+    # this module's callback resets it on. Same atomic, same `:atomics.add/3`
+    # reset the `:text_delta` arm uses — the provider just calls it from the wire
+    # chunk point. A stream with any bytes flowing then never false-times-out.
+    opts = Keyword.put(opts, :heartbeat, heartbeat)
 
     Process.put(:osa_stream_start_time, System.monotonic_time(:millisecond))
 

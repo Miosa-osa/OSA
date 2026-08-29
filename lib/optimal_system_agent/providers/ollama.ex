@@ -324,7 +324,14 @@ defmodule OptimalSystemAgent.Providers.Ollama do
           # Split inline <think>…</think> reasoning out of the live stream so
           # the tags + reasoning never leak into the visible answer (GLM cloud
           # models such as glm-5.2:cloud inline reasoning in the content field).
-          think: ThinkStreamParser.new()
+          think: ThinkStreamParser.new(),
+          # WS1 (Grok dual idle-timeout): the llm_client idle-watchdog atomic.
+          # Bumped on EVERY raw chunk received from the curl port below — before
+          # parsing, even for keepalive/blank/non-JSON bytes — so the idle timer
+          # measures TRUE silence on the pipe, not just gaps between parsed
+          # events. `nil` when called outside the agent loop (direct provider
+          # test), which `bump_heartbeat/1` treats as a no-op.
+          heartbeat: Keyword.get(opts, :heartbeat)
         })
 
       File.rm(body_file)
@@ -404,6 +411,10 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   defp cloud_stream_loop(port, callback, acc) do
     receive do
       {^port, {:data, {:eol, line}}} ->
+        # Raw bytes arrived → reset the idle watchdog BEFORE parsing, so even a
+        # keepalive or non-JSON line counts as the pipe being alive (WS1).
+        bump_heartbeat(Map.get(acc, :heartbeat))
+
         case Jason.decode(line) do
           {:ok, %{"done" => true} = resp} ->
             # Final chunk — extract usage stats. Tool calls may have arrived in
@@ -537,7 +548,9 @@ defmodule OptimalSystemAgent.Providers.Ollama do
         end
 
       {^port, {:data, {:noeol, _partial}}} ->
-        # Partial line, wait for more
+        # Partial line — raw bytes still flowing, so reset the idle watchdog
+        # (WS1), then wait for more.
+        bump_heartbeat(Map.get(acc, :heartbeat))
         cloud_stream_loop(port, callback, acc)
 
       {^port, {:exit_status, 0}} ->
@@ -604,11 +617,18 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       think: ThinkStreamParser.new()
     })
 
+    # WS1 (Grok dual idle-timeout): the llm_client idle-watchdog atomic. Reset on
+    # EVERY raw chunk Finch delivers — before parsing — so a stream trickling
+    # bytes never false-times-out; only a truly silent socket trips the idle
+    # timer. `nil` outside the agent loop, which `bump_heartbeat/1` no-ops.
+    heartbeat = Keyword.get(opts, :heartbeat)
+
     req_opts =
       [
         json: body,
         receive_timeout: receive_timeout_ms(),
         into: fn {:data, data}, {req, resp} ->
+          bump_heartbeat(heartbeat)
           acc = Process.get(stream_key)
           acc = handle_stream_chunk(data, callback, acc)
           Process.put(stream_key, acc)
@@ -1353,6 +1373,16 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
   defp generate_id,
     do: OptimalSystemAgent.Utils.ID.generate()
+
+  # WS1 (Grok dual idle-timeout): bump the llm_client idle-watchdog atomic passed
+  # in via `opts[:heartbeat]`. Called from BOTH streaming receive points — the
+  # cloud curl port and the local Finch `into:` reader — on every raw chunk
+  # BEFORE parsing, so the watchdog resets on ANY bytes flowing, not only on
+  # parsed stream events, and the idle timeout fires only on a genuinely silent
+  # socket. Same `:atomics.add/3` reset the llm_client `:text_delta` arm uses.
+  # `nil` (no agent-loop watchdog, e.g. a direct provider unit test) is a no-op.
+  defp bump_heartbeat(nil), do: :ok
+  defp bump_heartbeat(heartbeat), do: :atomics.add(heartbeat, 1, 1)
 
   defp handle_stream_chunk(data, callback, acc) do
     {lines, new_buffer} = split_ndjson(acc.buffer <> data)

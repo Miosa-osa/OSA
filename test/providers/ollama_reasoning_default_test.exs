@@ -51,7 +51,14 @@ defmodule OptimalSystemAgent.Providers.OllamaReasoningDefaultTest do
 
     test "the size-qualified '-cloud' tag shape counts as cloud too" do
       assert Ollama.cloud_model?(@cloud_sized)
-      assert {true, :cloud_default} = Ollama.reasoning_decision(@cloud_sized, [])
+
+      # reasoning_decision consults Effort.current() for a non-glm cloud model,
+      # and the ambient effort can be left at :fast by a prior test (it lives in
+      # session settings / app env). Pin :medium so this default-effort
+      # assertion is deterministic instead of order-dependent.
+      Effort.with_process_override(:medium, fn ->
+        assert {true, :cloud_default} = Ollama.reasoning_decision(@cloud_sized, [])
+      end)
     end
 
     test "regression: a cloud reasoning model is NEVER silently sent think: false" do
@@ -75,7 +82,11 @@ defmodule OptimalSystemAgent.Providers.OllamaReasoningDefaultTest do
     end
 
     test "the size-qualified '-cloud' tag gets think: true too" do
-      assert Ollama.build_cloud_body(@cloud_sized, @msgs, [], [])["think"] == true
+      # Pin :medium: a non-glm cloud model's think decision follows effort, which
+      # a prior test can leave at :fast. Deterministic instead of order-dependent.
+      Effort.with_process_override(:medium, fn ->
+        assert Ollama.build_cloud_body(@cloud_sized, @msgs, [], [])["think"] == true
+      end)
     end
 
     test "a non-reasoning model's cloud body has no think field" do
