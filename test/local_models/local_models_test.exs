@@ -378,6 +378,21 @@ defmodule OptimalSystemAgent.LocalModelsTest do
     end
   end
 
+  describe "note/1" do
+    test "summarises fit, speed and capabilities for a picker row" do
+      row = %{
+        fit: %{verdict: :fits, est_tps: 26.4},
+        measured_tps: nil,
+        capabilities: ["tools", "vision"],
+        size_bytes: 17_200_000_000
+      }
+
+      assert LocalModels.note(row) == "✓ fits in VRAM · ~26 tok/s est. · 17.2 GB · tools, vision"
+      assert LocalModels.note(%{row | measured_tps: 25.6}) =~ "25.6 tok/s measured"
+      assert LocalModels.note(%{row | fit: nil, capabilities: [], size_bytes: 0}) == ""
+    end
+  end
+
   describe "/models command" do
     test "is registered and prints usage for bad input" do
       assert "models" in Commands.list()

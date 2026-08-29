@@ -2938,9 +2938,24 @@ defmodule OptimalSystemAgent.Onboarding do
 
   # ── Private: Model Fetching ──────────────────────────────────────────
 
+  defp local_model_notes do
+    OptimalSystemAgent.LocalModels.overview().installed
+    |> Map.new(&{&1.tag, OptimalSystemAgent.LocalModels.note(&1)})
+  rescue
+    _ -> %{}
+  catch
+    :exit, _ -> %{}
+  end
+
   defp fetch_ollama_models(url) do
     case Req.get("#{url}/api/tags", receive_timeout: 10_000) do
       {:ok, %{status: 200, body: %{"models" => models}}} when is_list(models) ->
+        # The picker renders `note` under each row: say whether the model fits
+        # THIS machine, how fast it decodes (measured beats estimated) and
+        # what it can do. `LocalModels` never raises, so a hiccup there costs
+        # the notes, not the list.
+        notes = local_model_notes()
+
         parsed =
           Enum.map(models, fn m ->
             name = m["name"] || m["model"] || "unknown"
@@ -2953,7 +2968,8 @@ defmodule OptimalSystemAgent.Onboarding do
               ctx: 0,
               tools: true,
               size_bytes: size,
-              params: params
+              params: params,
+              note: Map.get(notes, name)
             }
           end)
 

@@ -142,6 +142,31 @@ defmodule OptimalSystemAgent.LocalModels do
     %{hardware: hw, ctx: ctx, installed: installed_rows, catalog: catalog_rows, error: error}
   end
 
+  @doc "One-line summary of a row for pickers: fit · speed · capabilities."
+  @spec note(row()) :: String.t()
+  def note(row) do
+    fit =
+      case row.fit && row.fit.verdict do
+        :fits -> "✓ fits in VRAM"
+        :partial -> "⚠ partial offload"
+        :cpu -> "⚠ CPU only"
+        :no -> "✗ won't fit"
+        _ -> nil
+      end
+
+    speed =
+      cond do
+        row.measured_tps -> "#{row.measured_tps} tok/s measured"
+        row.fit && row.fit.est_tps -> "~#{round(row.fit.est_tps)} tok/s est."
+        true -> nil
+      end
+
+    caps = if row.capabilities == [], do: nil, else: Enum.join(row.capabilities, ", ")
+    size = if row.size_bytes > 0, do: "#{Float.round(row.size_bytes / 1.0e9, 1)} GB"
+
+    [fit, speed, size, caps] |> Enum.reject(&is_nil/1) |> Enum.join(" · ")
+  end
+
   # ── inspect one ─────────────────────────────────────────────────────────
 
   @doc """
