@@ -95,9 +95,13 @@ defmodule OptimalSystemAgent.Events.TuiForwarder do
 
     :ok
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("[TuiForwarder] forward failed: #{Exception.message(e)}")
+      :ok
   catch
-    _, _ -> :ok
+    kind, reason ->
+      Logger.warning("[TuiForwarder] forward #{kind}: #{inspect(reason)}")
+      :ok
   end
 
   # ── Sub-event reshaping ───────────────────────────────────────────────

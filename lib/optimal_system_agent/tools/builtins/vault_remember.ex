@@ -1,6 +1,9 @@
 defmodule OptimalSystemAgent.Tools.Builtins.VaultRemember do
   @behaviour MiosaTools.Behaviour
 
+  @compile {:no_warn_undefined,
+            [OptimalSystemAgent.Vault, OptimalSystemAgent.Vault.FactExtractor]}
+
   @impl true
   def available?, do: true
 

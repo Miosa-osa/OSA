@@ -586,10 +586,20 @@ defmodule OptimalSystemAgent.CLI.Doctor do
   defp executable?(path) do
     case File.stat(path) do
       {:ok, %{access: access}} when access in [:read_write, :read] ->
-        # Check execute permission via the mode bits
-        case File.stat(path) do
-          {:ok, %File.Stat{mode: mode}} -> Bitwise.band(mode, 0o111) != 0
-          _ -> false
+        # Windows has no execute bit. Erlang synthesises `mode` from the
+        # read-only attribute, so every file reports 0o100666 and
+        # `band(mode, 0o111)` is always 0 — which made doctor report a
+        # perfectly good osagent-tui.exe as "found but not executable".
+        # Executability there is decided by the extension (PATHEXT), so a
+        # readable file is as much as this check can honestly assert.
+        if match?({:win32, _}, :os.type()) do
+          true
+        else
+          # Check execute permission via the mode bits
+          case File.stat(path) do
+            {:ok, %File.Stat{mode: mode}} -> Bitwise.band(mode, 0o111) != 0
+            _ -> false
+          end
         end
 
       _ ->

@@ -154,7 +154,12 @@ defmodule OptimalSystemAgent.MCP.Config do
 
     native ++ imported
   rescue
-    _ -> load!()
+    e ->
+      Logger.warning(
+        "[MCP.Config] load_startup failed, falling back to load!/0: #{Exception.message(e)}"
+      )
+
+      load!()
   end
 
   @doc """
@@ -245,8 +250,6 @@ defmodule OptimalSystemAgent.MCP.Config do
     OptimalSystemAgent.Settings.get_trusted(key)
   rescue
     _ -> nil
-  catch
-    _, _ -> nil
   end
 
   @doc """

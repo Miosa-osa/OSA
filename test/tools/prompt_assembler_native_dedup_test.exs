@@ -192,7 +192,16 @@ defmodule OptimalSystemAgent.Tools.PromptAssemblerNativeDedupTest do
       prev = Application.get_env(:optimal_system_agent, :dedupe_native_tool_prompt)
 
       on_exit(fn ->
-        Application.put_env(:optimal_system_agent, :dedupe_native_tool_prompt, prev)
+        # `prev` is `nil` when the key was never set (the shipped default). Writing
+        # that `nil` back with `put_env` is NOT the same as leaving it unset:
+        # `dedupe_native_tool_prompt?/0` reads `get_env(_, true) == true`, so an
+        # explicit `nil` decodes as `false` and silently flips every later test's
+        # static base from `:native_tools` to `:lite`. Restore by deleting when it
+        # was unset, matching the idiom the other suites in this repo use.
+        case prev do
+          nil -> Application.delete_env(:optimal_system_agent, :dedupe_native_tool_prompt)
+          v -> Application.put_env(:optimal_system_agent, :dedupe_native_tool_prompt, v)
+        end
       end)
 
       :ok
@@ -211,12 +220,12 @@ defmodule OptimalSystemAgent.Tools.PromptAssemblerNativeDedupTest do
       assert Context.static_base_variant(:replicate, false) == :full
     end
 
-    test "the lite path is untouched and wins over the cut" do
+    test "a small window takes the smaller of lite / native, per transport" do
       Application.put_env(:optimal_system_agent, :dedupe_native_tool_prompt, true)
-
-      assert Context.static_base_variant(:ollama, true) == :lite,
-             "on the lite path ToolFilter separately caps the native array, so the " <>
-               "prose and the array describe different sets and nothing may be dropped"
+      assert Context.static_base_variant(:anthropic, true) == :native_tools
+      assert Context.static_base_variant(:claude_cli, true) == :lite
+      Application.put_env(:optimal_system_agent, :dedupe_native_tool_prompt, false)
+      assert Context.static_base_variant(:anthropic, true) == :lite
     end
 
     test "the config flag reverts everything without a code change" do

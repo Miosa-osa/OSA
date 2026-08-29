@@ -22,8 +22,16 @@ defmodule OptimalSystemAgent.Agent.Context.EvictionTest do
   setup do
     prev = Application.get_env(:optimal_system_agent, :ollama_num_ctx)
     # A window this small cannot fit the static base + reserve, so the dynamic
-    # budget bottoms out at its floor and essentials are forced out.
-    Application.put_env(:optimal_system_agent, :ollama_num_ctx, 8_192)
+    # budget bottoms out below zero and essentials are forced out. It must stay
+    # below the SMALLEST base any transport can hand this state. That is now the
+    # de-duplicated native-tools base (the #193 change), MEASURED at ~6.4k tokens
+    # for `:ollama` and drifting a few hundred either way with the host's tool
+    # availability. 8_192 used to sit under the old `:lite` base (~13.2k) but
+    # sits ABOVE the native one, so the prompt fit and the overflow contract went
+    # untested. 4_096 is below the base itself (before the 1_024 reserve is even
+    # counted), so raw_budget is negative on every platform, not just the ones
+    # whose tool set keeps the base large.
+    Application.put_env(:optimal_system_agent, :ollama_num_ctx, 4_096)
 
     on_exit(fn ->
       if prev do
@@ -190,7 +198,7 @@ defmodule OptimalSystemAgent.Agent.Context.EvictionTest do
       log = capture_log(fn -> Context.build(squeezed_state()) end)
 
       assert log =~ "PROMPT DOES NOT FIT"
-      assert log =~ "window=8192"
+      assert log =~ "window=4096"
       assert log =~ "SYMPTOM"
     end
 

@@ -10,6 +10,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   require Logger
 
   alias OptimalSystemAgent.Agent.{Compactor, ContextDiscovery, Loop, SessionPersistence, Tasks}
+  alias OptimalSystemAgent.Agent.PromptOverrides
+  alias OptimalSystemAgent.LocalModels
+  alias OptimalSystemAgent.LocalModels.{Fit, Hardware}
   alias OptimalSystemAgent.Budget
   alias OptimalSystemAgent.Channels.CLI.{MessageQueue, Renderer, Session, TaskDisplay}
   alias OptimalSystemAgent.ContextRefs.Parser, as: ContextRefsParser
@@ -34,7 +37,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "clear" => {"Clear conversation and start fresh session", :cmd_clear},
     "new" => {"Start a new session (alias for /clear)", :cmd_clear},
     "compact" => {"Force context compaction", :cmd_compact},
-    "model" => {"Show or switch the current model", :cmd_model},
+    "model" => {"Show or switch the current model (list = local Ollama models)", :cmd_model},
+    "system" =>
+      {"Inject into or replace the system prompt for the current model (persists)", :cmd_system},
+    "models" =>
+      {"Local models: what fits this machine, install, remove, load, unload, bench", :cmd_models},
     "uncensored" =>
       {"Hop the current model to its unfiltered twin (off to return)", :cmd_uncensored},
     "jailbreak" =>
@@ -281,6 +288,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     IO.puts("")
 
     case String.trim(args) do
+      arg when arg in ["list", "ls", "local"] ->
+        model_list_local(session_id)
+
       "" ->
         provider = Application.get_env(:optimal_system_agent, :default_provider, :unknown)
         model = get_model_name(provider)
@@ -292,6 +302,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         IO.puts("  #{@dim}Context:#{@reset}   #{format_context_window(ctx)} tokens")
         print_auth_mode(provider)
         print_resolved_model(provider, model)
+        print_system_override_line(model)
 
       model_arg ->
         IO.puts("  #{@dim}Switching model...#{@reset}")
@@ -360,6 +371,1018 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     _ ->
       IO.puts("  #{@yellow}error: uncensored switch failed#{@reset}\n")
       session_id
+  end
+
+  # `/model list` — what the local Ollama daemon can actually serve, so a tag
+  # pulled outside OSA (`ollama pull hf.co/…`) is one copy-paste from `/model`.
+  defp model_list_local(session_id) do
+    {_provider, current} = session_provider_model(session_id)
+
+    case OptimalSystemAgent.Providers.Ollama.list_models(
+           OptimalSystemAgent.Providers.Ollama.local_daemon_url()
+         ) do
+      {:ok, []} ->
+        IO.puts("  #{@dim}No local Ollama models. Pull one with `ollama pull <tag>`.#{@reset}")
+
+      {:ok, models} ->
+        IO.puts("  #{@bold}Local Ollama models#{@reset}")
+        IO.puts("")
+
+        models
+        |> Enum.sort_by(& &1.name)
+        |> Enum.each(fn m ->
+          marker = if m.name == current, do: "#{@green}●#{@reset}", else: "#{@dim}•#{@reset}"
+          IO.puts("  #{marker} #{m.name} #{@dim}#{format_gb(m.size)}#{@reset}")
+        end)
+
+        IO.puts("")
+        IO.puts("  #{@dim}Switch with /model <tag>#{@reset}")
+
+      {:error, reason} ->
+        IO.puts("  #{@yellow}Ollama not reachable: #{inspect(reason)}#{@reset}")
+    end
+  end
+
+  defp format_gb(0), do: ""
+  defp format_gb(bytes) when is_integer(bytes), do: "#{Float.round(bytes / 1.0e9, 1)} GB"
+  defp format_gb(_), do: ""
+
+  # ── /system — operator system prompt overrides ────────────────────────────
+  #
+  #   /system                   status for the current model
+  #   /system show              print the saved operator text
+  #   /system inject <text>     append <text> to OSA's built-in prompt
+  #   /system replace <text>    <text> becomes the WHOLE system prompt
+  #   /system inject @file.md   read the text from a file (same for replace)
+  #   /system off | on          disable / re-enable without deleting
+  #   /system clear             delete the override for this model
+  #   /system list              every saved override
+  #
+  # Add `--all` right after the verb to target every model ("*") instead of
+  # the current one. Saved in ~/.osa/system_prompts.json; applies next turn.
+  def cmd_system(args, session_id) do
+    IO.puts("")
+    {_provider, current} = session_provider_model(session_id)
+
+    {verb, rest} =
+      case String.split(String.trim(args), ~r/\s+/, parts: 2) do
+        [""] -> {"", ""}
+        [v] -> {String.downcase(v), ""}
+        [v, r] -> {String.downcase(v), r}
+      end
+
+    {target, rest} = system_target(rest, current)
+
+    case verb do
+      "" -> system_status(current)
+      "show" -> system_show(target)
+      "list" -> system_list()
+      v when v in ["inject", "add", "append"] -> system_set(target, :inject, rest)
+      v when v in ["replace", "wipe", "only", "set"] -> system_set(target, :replace, rest)
+      v when v in ["off", "disable"] -> system_enable(target, false)
+      v when v in ["on", "enable"] -> system_enable(target, true)
+      v when v in ["clear", "remove", "delete", "reset"] -> system_clear(target)
+      v when v in ["file", "edit", "open"] -> system_file(target, rest)
+      _ -> system_usage()
+    end
+
+    IO.puts("")
+    session_id
+  rescue
+    e ->
+      IO.puts("  #{@yellow}error: /system failed: #{Exception.message(e)}#{@reset}\n")
+      session_id
+  end
+
+  # One line under `/model` so the overlay state is visible where the model is.
+  defp print_system_override_line(model) do
+    case PromptOverrides.effective(model) do
+      nil ->
+        IO.puts("  #{@dim}System:#{@reset}    default")
+
+      {key, %{mode: mode}} ->
+        scope = if key == PromptOverrides.all_key(), do: ", all models", else: ""
+        IO.puts("  #{@dim}System:#{@reset}    custom (#{mode}#{scope}) — /system show")
+    end
+  end
+
+  defp system_target(rest, current) do
+    case String.split(rest, ~r/\s+/, parts: 2) do
+      ["--all" | tail] -> {PromptOverrides.all_key(), Enum.join(tail, "")}
+      ["all" | tail] when tail != [] -> {PromptOverrides.all_key(), Enum.join(tail, "")}
+      _ -> {current, rest}
+    end
+  end
+
+  defp system_status(current) do
+    IO.puts("  #{@bold}System prompt#{@reset}  #{@dim}model:#{@reset} #{current}")
+
+    case PromptOverrides.effective(current) do
+      nil ->
+        own = PromptOverrides.get(current)
+
+        if own && !own.enabled do
+          IO.puts(
+            "  #{@dim}Override saved but OFF (#{own.mode}, #{String.length(own.text)} chars) — /system on#{@reset}"
+          )
+        else
+          IO.puts("  #{@dim}Built-in prompt only.#{@reset}")
+          IO.puts("")
+
+          IO.puts(
+            "  #{@bold}Easiest:#{@reset} #{@cyan}/system file#{@reset} — creates #{PromptOverrides.file_for(current)}"
+          )
+
+          IO.puts(
+            "  #{@dim}Write your prompt in it; it's live on the next message. No restart.#{@reset}"
+          )
+
+          IO.puts(
+            "  #{@dim}Or inline: /system inject <text> · /system replace <text> · /system inject @file.md#{@reset}"
+          )
+        end
+
+      {key, entry} ->
+        scope =
+          cond do
+            key == PromptOverrides.all_key() -> "all models"
+            String.ends_with?(key, "default.md") -> "all models, from file"
+            String.ends_with?(key, ".md") -> "this model, from file #{key}"
+            true -> "this model"
+          end
+
+        verb =
+          if entry.mode == :replace,
+            do: "REPLACES built-in prompt",
+            else: "injected on top of built-in prompt"
+
+        IO.puts(
+          "  #{@green}ON#{@reset} #{verb} #{@dim}(#{scope}, #{String.length(entry.text)} chars)#{@reset}"
+        )
+
+        IO.puts("  #{@dim}/system show to print it · /system off · /system clear#{@reset}")
+    end
+  end
+
+  defp system_show(target) do
+    case PromptOverrides.get(target) do
+      nil ->
+        IO.puts("  #{@dim}Nothing saved for #{target}.#{@reset}")
+
+      entry ->
+        state = if entry.enabled, do: "#{@green}on#{@reset}", else: "#{@yellow}off#{@reset}"
+        IO.puts("  #{@bold}#{target}#{@reset}  #{@dim}#{entry.mode}#{@reset}  #{state}")
+        IO.puts("")
+        IO.puts(entry.text)
+    end
+  end
+
+  defp system_file(target, rest) do
+    mode = if String.contains?(String.downcase(rest), "replace"), do: :replace, else: :inject
+
+    case PromptOverrides.create_file(target, mode) do
+      {:ok, path} ->
+        IO.puts("  #{@green}✓#{@reset} #{path}")
+        IO.puts("")
+        IO.puts("  Open that file in any editor and write your prompt. It's picked up")
+        IO.puts("  automatically on your next message — no command, no restart.")
+        IO.puts("")
+
+        IO.puts(
+          "  #{@dim}The header inside sets the mode (inject = on top of OSA's prompt, replace = the whole prompt).#{@reset}"
+        )
+
+        IO.puts(
+          "  #{@dim}/system to check it's active · /system clear to remove · /system file --all for every model#{@reset}"
+        )
+
+      {:error, reason} ->
+        IO.puts("  #{@yellow}error: could not create prompt file: #{inspect(reason)}#{@reset}")
+    end
+  end
+
+  defp system_list do
+    overrides = PromptOverrides.list()
+    files = PromptOverrides.list_files()
+
+    if map_size(overrides) == 0 and map_size(files) == 0 do
+      IO.puts("  #{@dim}No system prompt overrides saved.#{@reset}")
+
+      IO.puts(
+        "  #{@dim}/system file to create one, or drop a .md into #{PromptOverrides.prompts_dir()}#{@reset}"
+      )
+    else
+      if map_size(files) > 0 do
+        IO.puts(
+          "  #{@bold}Prompt files#{@reset}  #{@dim}#{PromptOverrides.prompts_dir()}#{@reset}"
+        )
+
+        files
+        |> Enum.sort_by(&elem(&1, 0))
+        |> Enum.each(fn {model, {path, e}} ->
+          IO.puts(
+            "  #{@green}on #{@reset} #{@dim}#{String.pad_trailing(to_string(e.mode), 7)}#{@reset} #{model} #{@dim}(#{Path.basename(path)}, #{String.length(e.text)} chars)#{@reset}"
+          )
+        end)
+
+        IO.puts("")
+      end
+    end
+
+    if map_size(overrides) > 0 do
+      IO.puts(
+        "  #{@bold}Saved system prompt overrides#{@reset}  #{@dim}#{PromptOverrides.path()}#{@reset}"
+      )
+
+      IO.puts("")
+
+      overrides
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.each(fn {model, e} ->
+        state = if e.enabled, do: "#{@green}on #{@reset}", else: "#{@yellow}off#{@reset}"
+
+        IO.puts(
+          "  #{state} #{@dim}#{String.pad_trailing(to_string(e.mode), 7)}#{@reset} #{model} #{@dim}(#{String.length(e.text)} chars)#{@reset}"
+        )
+      end)
+    end
+  end
+
+  defp system_set(_target, _mode, ""), do: system_usage()
+
+  defp system_set(target, mode, text) do
+    case system_read_text(text) do
+      {:ok, body} ->
+        case PromptOverrides.set(target, mode, body) do
+          :ok ->
+            what =
+              if mode == :replace,
+                do: "now REPLACES the built-in prompt",
+                else: "injected on top of the built-in prompt"
+
+            IO.puts(
+              "  #{@green}#{@reset} Saved for #{target} — #{what} #{@dim}(#{String.length(String.trim(body))} chars, takes effect next turn)#{@reset}"
+            )
+
+          {:error, reason} ->
+            IO.puts("  #{@yellow}error: could not save: #{inspect(reason)}#{@reset}")
+        end
+
+      {:error, reason} ->
+        IO.puts("  #{@yellow}error: #{reason}#{@reset}")
+    end
+  end
+
+  # `@path` reads the text from a file — pasting a 3k-char prompt into a REPL
+  # line is miserable; a file is not.
+  defp system_read_text("@" <> path) do
+    expanded = Path.expand(path)
+
+    case File.read(expanded) do
+      {:ok, body} when byte_size(body) > 0 -> {:ok, body}
+      {:ok, _} -> {:error, "#{expanded} is empty"}
+      {:error, reason} -> {:error, "cannot read #{expanded}: #{:file.format_error(reason)}"}
+    end
+  end
+
+  # Inline text: a REPL line has no newlines, so `\\n` / `\\t` are the way to
+  # type a multi-line prompt. File contents are taken verbatim.
+  defp system_read_text(text),
+    do: {:ok, text |> String.replace("\\n", "\n") |> String.replace("\\t", "\t")}
+
+  defp system_enable(target, enabled?) do
+    case PromptOverrides.enable(target, enabled?) do
+      :ok ->
+        IO.puts(
+          "  #{@green}#{@reset} Override for #{target} #{if enabled?, do: "ON", else: "OFF (text kept)"}"
+        )
+
+      {:error, :not_found} ->
+        IO.puts("  #{@dim}Nothing saved for #{target}.#{@reset}")
+
+      {:error, reason} ->
+        IO.puts("  #{@yellow}error: #{inspect(reason)}#{@reset}")
+    end
+  end
+
+  defp system_clear(target) do
+    case PromptOverrides.clear(target) do
+      :ok ->
+        IO.puts("  #{@green}#{@reset} Cleared override for #{target} — built-in prompt restored")
+
+      {:error, reason} ->
+        IO.puts("  #{@yellow}error: #{inspect(reason)}#{@reset}")
+    end
+  end
+
+  defp system_usage do
+    IO.puts("  #{@bold}/system#{@reset} — operator system prompt, saved per model")
+    IO.puts("")
+
+    IO.puts(
+      "  #{@cyan}/system file#{@reset}               create #{PromptOverrides.prompts_dir()}/<model>.md — edit it, done"
+    )
+
+    IO.puts(
+      "  #{@cyan}/system file replace#{@reset}       same, but the file becomes the ENTIRE prompt"
+    )
+
+    IO.puts("  #{@cyan}/system#{@reset}                    status for the current model")
+    IO.puts("  #{@cyan}/system inject#{@reset} <text>     append <text> to the built-in prompt")
+
+    IO.puts(
+      "  #{@cyan}/system replace#{@reset} <text>    <text> becomes the entire system prompt"
+    )
+
+    IO.puts(
+      "  #{@cyan}/system inject#{@reset} @file.md   read the text from a file (also for replace)"
+    )
+
+    IO.puts("  #{@cyan}/system show#{@reset}               print the saved text")
+
+    IO.puts(
+      "  #{@cyan}/system off#{@reset} | #{@cyan}on#{@reset}           disable / re-enable, text kept"
+    )
+
+    IO.puts("  #{@cyan}/system clear#{@reset}              delete it for this model")
+    IO.puts("  #{@cyan}/system list#{@reset}               every saved override")
+    IO.puts("")
+
+    IO.puts(
+      "  #{@dim}Add --all after the verb to target every model. Use \\n for newlines inline. Saved in #{PromptOverrides.path()}#{@reset}"
+    )
+  end
+
+  # ── /models — local model manager ─────────────────────────────────────────
+  #
+  #   /models                    installed + catalog, each with a fit verdict
+  #   /models info <model>       capabilities, size per quant, fit, est./measured tok/s
+  #   /models install <model>    pull (catalog id, hf.co/… tag, or any Ollama tag), then benchmark
+  #   /models install <model> <quant>
+  #   /models use <model>        switch this session AND make it the default
+  #   /models remove <model>
+  #   /models load | unload <model>
+  #   /models bench <model>      measure tok/s
+  #   /models alias <model> <short-name>
+  #   /models hardware           what was detected
+  #   /models search <words>     Hugging Face GGUF search
+  def cmd_models(args, session_id) do
+    IO.puts("")
+
+    {verb, rest} =
+      case String.split(String.trim(args), ~r/\s+/, parts: 2) do
+        [""] -> {"", ""}
+        [v] -> {String.downcase(v), ""}
+        [v, r] -> {String.downcase(v), String.trim(r)}
+      end
+
+    case {verb, rest} do
+      {"", _} ->
+        models_overview(session_id)
+
+      {v, _} when v in ["list", "ls"] ->
+        models_overview(session_id)
+
+      {v, ""}
+      when v in [
+             "info",
+             "show",
+             "install",
+             "pull",
+             "use",
+             "remove",
+             "rm",
+             "delete",
+             "load",
+             "unload",
+             "bench",
+             "alias",
+             "search"
+           ] ->
+        models_usage()
+
+      {v, ref} when v in ["info", "show"] ->
+        models_info(ref)
+
+      {v, ref} when v in ["install", "pull", "get"] ->
+        models_install(ref, session_id)
+
+      {"use", ref} ->
+        models_use(ref, session_id)
+
+      {v, ref} when v in ["remove", "rm", "delete"] ->
+        models_remove(ref)
+
+      {"load", ref} ->
+        models_simple(LocalModels.load(ref), "Loaded #{ref} into VRAM (kept resident)")
+
+      {"unload", ref} ->
+        models_simple(LocalModels.unload(ref), "Unloaded #{ref} from VRAM")
+
+      {"bench", ref} ->
+        models_bench(ref)
+
+      {"alias", ref} ->
+        models_alias(ref)
+
+      {v, _} when v in ["hardware", "hw", "specs"] ->
+        models_hardware()
+
+      {v, arg} when v in ["ctx", "context", "window"] ->
+        models_ctx(arg, session_id)
+
+      {"search", q} ->
+        models_search(q)
+
+      _ ->
+        models_usage()
+    end
+
+    IO.puts("")
+    session_id
+  rescue
+    e ->
+      IO.puts("  #{@yellow}error: /models failed: #{Exception.message(e)}#{@reset}\n")
+      session_id
+  end
+
+  defp models_overview(session_id) do
+    ov = LocalModels.overview()
+    {_prov, current} = session_provider_model(session_id)
+
+    IO.puts(
+      "  #{@bold}This machine#{@reset}  #{@dim}#{Hardware.summary(ov.hardware)} · fit at #{format_context_window(ov.ctx)} ctx#{@reset}"
+    )
+
+    if ov.error do
+      IO.puts("  #{@yellow}Ollama: #{ov.error}#{@reset}")
+    end
+
+    IO.puts("")
+    IO.puts("  #{@bold}Installed#{@reset}")
+
+    if ov.installed == [] do
+      IO.puts("  #{@dim}nothing local yet — pick one below with /models install <id>#{@reset}")
+    else
+      Enum.each(ov.installed, fn r ->
+        mark =
+          cond do
+            r.tag == current -> "#{@green}●#{@reset}"
+            r.loaded -> "#{@cyan}●#{@reset}"
+            true -> "#{@dim}○#{@reset}"
+          end
+
+        IO.puts("  #{mark} #{@bold}#{r.tag}#{@reset}")
+        IO.puts("      #{@dim}#{models_line(r)}#{@reset}")
+      end)
+
+      IO.puts(
+        "  #{@dim}● current   #{@cyan}●#{@reset}#{@dim} loaded in VRAM   ○ on disk#{@reset}"
+      )
+    end
+
+    IO.puts("")
+
+    IO.puts(
+      "  #{@bold}Available#{@reset}  #{@dim}(curated abliterated / uncensored GGUFs — /models install <id>)#{@reset}"
+    )
+
+    Enum.each(ov.catalog, fn r ->
+      IO.puts("  #{fit_badge(r.fit)} #{@bold}#{r.entry.id}#{@reset}  #{@dim}#{r.name}#{@reset}")
+      IO.puts("      #{@dim}#{models_line(r)}#{@reset}")
+    end)
+
+    IO.puts("")
+
+    IO.puts(
+      "  #{@dim}/models info <id> for detail · /models install <id> · /models use <id> · /models hardware#{@reset}"
+    )
+  end
+
+  defp models_line(r) do
+    size = if r.size_bytes > 0, do: gb(r.size_bytes), else: "?"
+    exact = if r.fit && !r.fit.weights_exact && !r.installed, do: "~", else: ""
+    caps = if r.capabilities == [], do: "", else: " · " <> Enum.join(r.capabilities, ", ")
+
+    speed =
+      cond do
+        r.measured_tps -> " · #{r.measured_tps} tok/s measured"
+        r.fit && r.fit.est_tps -> " · ~#{round(r.fit.est_tps)} tok/s est."
+        true -> ""
+      end
+
+    "#{exact}#{size} #{r.quant || ""} · #{r.params || "?"} · #{r.fit && Fit.label(r.fit.verdict)}#{speed}#{caps}"
+  end
+
+  defp fit_badge(nil), do: "#{@dim}?#{@reset}"
+  defp fit_badge(%{verdict: :fits}), do: "#{@green}✓#{@reset}"
+  defp fit_badge(%{verdict: :partial}), do: "#{@yellow}⚠#{@reset}"
+  defp fit_badge(%{verdict: :cpu}), do: "#{@yellow}⚠#{@reset}"
+  defp fit_badge(%{verdict: :no}), do: "#{@red}✗#{@reset}"
+
+  defp gb(bytes), do: "#{Float.round(bytes / 1.0e9, 1)} GB"
+
+  defp models_info(ref) do
+    IO.puts("  #{@dim}Looking up #{ref}…#{@reset}")
+
+    case LocalModels.inspect_model(ref) do
+      {:error, e} ->
+        IO.puts("  #{@yellow}#{e}#{@reset}")
+
+      {:ok, m} ->
+        hw = Hardware.detect()
+        IO.puts("  #{@bold}#{m.name}#{@reset}")
+        IO.puts("  #{@dim}Tag:#{@reset}          #{m.tag}")
+        IO.puts("  #{@dim}Installed:#{@reset}    #{if m.installed, do: "yes", else: "no"}")
+        if m.family, do: IO.puts("  #{@dim}Family:#{@reset}       #{m.family}")
+        if m.params, do: IO.puts("  #{@dim}Parameters:#{@reset}   #{m.params}")
+
+        if m.context_length do
+          IO.puts(
+            "  #{@dim}Context:#{@reset}      #{format_context_window(m.context_length)} tokens trained"
+          )
+        end
+
+        if m.installed, do: models_osa_profile(m.tag)
+
+        IO.puts(
+          "  #{@dim}Capabilities:#{@reset} #{if m.capabilities == [], do: "?", else: Enum.join(m.capabilities, ", ")}"
+        )
+
+        if m.entry && m.entry.blurb != "", do: IO.puts("  #{@dim}#{m.entry.blurb}#{@reset}")
+        IO.puts("")
+        IO.puts("  #{@bold}On this machine#{@reset}  #{@dim}#{Hardware.summary(hw)}#{@reset}")
+
+        if m.quants != [] do
+          Enum.each(trim_quants(m.quants), fn q ->
+            chosen = if q.quant == String.upcase(m.quant || ""), do: "#{@bold}", else: ""
+            est = if q.fit.est_tps, do: "~#{round(q.fit.est_tps)} tok/s", else: "—"
+            approx = if q.exact, do: "", else: "~"
+
+            IO.puts(
+              "  #{fit_badge(q.fit)} #{chosen}#{String.pad_trailing(q.quant, 8)}#{@reset} #{approx}#{String.pad_leading(gb(q.bytes), 9)}  #{String.pad_trailing(Fit.label(q.fit.verdict), 22)} #{est}"
+            )
+          end)
+
+          IO.puts(
+            "  #{@dim}bold = recommended · /models install #{(m.entry && m.entry.id) || m.tag} <quant> to pick another#{@reset}"
+          )
+        else
+          f = m.fit
+
+          IO.puts(
+            "  #{fit_badge(f)} #{Fit.label(f.verdict)} — weights #{gb(f.weights_bytes)} + KV #{gb(f.kv_bytes)} @ #{format_context_window(f.ctx)} ctx"
+          )
+
+          cond do
+            m.measured ->
+              IO.puts(
+                "  #{@dim}Speed:#{@reset}        #{m.measured["decode_tps"]} tok/s measured#{if m.measured["prompt_tps"], do: " (prompt #{m.measured["prompt_tps"]} tok/s)"}"
+              )
+
+            f.est_tps ->
+              IO.puts(
+                "  #{@dim}Speed:#{@reset}        ~#{round(f.est_tps)} tok/s estimated · /models bench #{m.tag} to measure"
+              )
+
+            true ->
+              :ok
+          end
+        end
+
+        if !hw.bandwidth_known and hw.gpu do
+          IO.puts(
+            "  #{@dim}(GPU not in the bandwidth table — speed estimates use a conservative default)#{@reset}"
+          )
+        end
+    end
+  end
+
+  # How OSA will actually drive this model: the window it allocates, which
+  # prompt variant that selects (and its size), where compaction fires, and
+  # how many tools ride in the request. This is the "does it work on a small
+  # window" answer, in numbers, before the first turn.
+  defp models_osa_profile(tag) do
+    alias OptimalSystemAgent.Agent.Context
+    alias OptimalSystemAgent.Agent.Loop.CompactionThresholds
+    alias OptimalSystemAgent.Soul
+
+    window = ProviderRegistry.effective_context_window(tag, :ollama)
+    small? = Context.small_window?(tag, :ollama)
+    variant = Context.static_base_variant(:ollama, small?)
+    static = Soul.static_token_count(variant)
+    compact = CompactionThresholds.compact_at(window)
+    tools = if small?, do: "10 core tools + tool_search", else: "all tools"
+
+    IO.puts("")
+    IO.puts("  #{@bold}OSA on this model#{@reset}")
+
+    IO.puts(
+      "  #{@dim}Window:#{@reset}       #{format_context_window(window)} tokens (auto — largest that fits VRAM)"
+    )
+
+    IO.puts(
+      "  #{@dim}Prompt:#{@reset}       #{variant} variant, #{format_context_window(static)} tokens#{operator_prompt_note(tag)}"
+    )
+
+    IO.puts(
+      "  #{@dim}Compaction:#{@reset}   at #{format_context_window(compact)} tokens (#{div(compact * 100, max(window, 1))}%)"
+    )
+
+    IO.puts("  #{@dim}Tools:#{@reset}        #{tools}")
+
+    IO.puts(
+      "  #{@dim}Free for chat:#{@reset} ~#{format_context_window(max(compact - static, 0))} tokens before the first compaction"
+    )
+  end
+
+  defp operator_prompt_note(tag) do
+    case PromptOverrides.effective(tag) do
+      {_, %{mode: mode, text: text}} ->
+        " + your #{mode} prompt (~#{format_context_window(OptimalSystemAgent.Agent.Context.estimate_tokens(text))})"
+
+      nil ->
+        ""
+    end
+  end
+
+  # A repo like bartowski's 70B ships 29 quants. Show the ones worth choosing
+  # between: everything that runs, capped at 10 from the largest down, plus
+  # the smallest one that does not — so the cliff is visible.
+  defp trim_quants(quants) when length(quants) <= 10, do: quants
+
+  defp trim_quants(quants) do
+    {runs, no} = Enum.split_with(quants, &(&1.fit.verdict != :no))
+    kept = runs |> Enum.sort_by(& &1.bytes, :desc) |> Enum.take(10) |> Enum.sort_by(& &1.bytes)
+    kept ++ Enum.take(no, 1)
+  end
+
+  defp models_install(ref, session_id) do
+    {ref, quant} =
+      case String.split(ref, ~r/\s+/, parts: 2) do
+        [r, q] -> {r, q}
+        [r] -> {r, nil}
+      end
+
+    IO.puts("  #{@dim}Checking #{ref}…#{@reset}")
+
+    with {:ok, m} <- LocalModels.inspect_model(ref),
+         :ok <- models_confirm_fit(m, quant) do
+      tag =
+        if quant && m.entry,
+          do: OptimalSystemAgent.LocalModels.Catalog.tag(m.entry, quant),
+          else: m.tag
+
+      IO.puts("  #{@dim}Pulling #{tag} (#{gb(m.size_bytes)})…#{@reset}")
+
+      progress = fn %{status: status, completed: c, total: t} ->
+        if t > 0 do
+          pct = div(c * 100, t)
+
+          IO.write(
+            "\r  #{@dim}#{String.slice(status, 0, 30)}#{@reset} #{String.pad_leading("#{pct}%", 4)}  #{gb(c)} / #{gb(t)}      "
+          )
+        else
+          IO.write("\r  #{@dim}#{status}#{@reset}                                        ")
+        end
+      end
+
+      case LocalModels.install(tag, on_progress: progress, quant: quant) do
+        {:ok, %{tag: tag, bench: bench}} ->
+          IO.write("\r")
+          IO.puts("  #{@green}✓#{@reset} Installed #{@bold}#{tag}#{@reset}")
+
+          if bench do
+            IO.puts(
+              "  #{@dim}Measured:#{@reset} #{bench.decode_tps} tok/s decode#{if bench.prompt_tps, do: ", #{bench.prompt_tps} tok/s prompt"}"
+            )
+          end
+
+          IO.puts("  #{@dim}/models use #{tag} to switch to it#{@reset}")
+
+        {:error, e} ->
+          IO.write("\r")
+          IO.puts("  #{@yellow}Pull failed: #{e}#{@reset}")
+      end
+    else
+      {:error, e} -> IO.puts("  #{@yellow}#{e}#{@reset}")
+      :abort -> :ok
+    end
+
+    _ = session_id
+  end
+
+  # Refuse a pull that cannot run; warn (but continue) on partial offload.
+  defp models_confirm_fit(%{fit: nil}, _quant), do: :ok
+
+  defp models_confirm_fit(%{fit: fit, quants: quants} = m, quant) do
+    fit =
+      case quant && Enum.find(quants, &(&1.quant == String.upcase(quant))) do
+        %{fit: f} -> f
+        _ -> fit
+      end
+
+    case fit.verdict do
+      :no ->
+        IO.puts(
+          "  #{@red}✗ #{m.name} won't fit: needs #{gb(fit.total_bytes)} (weights #{gb(fit.weights_bytes)} + KV), this machine has #{gb(fit.budget_bytes)} usable.#{@reset}"
+        )
+
+        IO.puts(
+          "  #{@dim}Try a smaller quant (/models info #{(m.entry && m.entry.id) || m.tag}) or a smaller model.#{@reset}"
+        )
+
+        :abort
+
+      :partial ->
+        IO.puts(
+          "  #{@yellow}⚠ Partial offload: only #{round(fit.gpu_share * 100)}% of the weights fit in VRAM; expect ~#{round(fit.est_tps || 0)} tok/s. Pulling anyway.#{@reset}"
+        )
+
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp models_use(ref, session_id) do
+    case LocalModels.resolve(ref) do
+      {:installed, tag} ->
+        case swap_to(:ollama, tag, session_id) do
+          :ok ->
+            case LocalModels.set_default(tag) do
+              :ok ->
+                IO.puts("  #{@dim}Saved as default for new sessions.#{@reset}")
+
+              {:error, e} ->
+                IO.puts("  #{@yellow}Switched, but could not save default: #{e}#{@reset}")
+            end
+
+          _ ->
+            :ok
+        end
+
+      {:catalog, entry, _} ->
+        IO.puts(
+          "  #{@yellow}#{entry.name} is not installed. /models install #{entry.id}#{@reset}"
+        )
+
+      _ ->
+        IO.puts("  #{@yellow}#{ref} is not installed. /models to see what is.#{@reset}")
+    end
+  end
+
+  defp models_remove(ref) do
+    case LocalModels.resolve(ref) do
+      {:installed, tag} -> models_simple(LocalModels.remove(tag), "Removed #{tag}")
+      _ -> IO.puts("  #{@yellow}#{ref} is not installed.#{@reset}")
+    end
+  end
+
+  defp models_bench(ref) do
+    case LocalModels.resolve(ref) do
+      {:installed, tag} ->
+        IO.puts("  #{@dim}Benchmarking #{tag} (64 tokens)…#{@reset}")
+
+        case LocalModels.bench(tag) do
+          {:ok, b} ->
+            IO.puts(
+              "  #{@green}✓#{@reset} #{@bold}#{b.decode_tps} tok/s#{@reset} decode#{if b.prompt_tps, do: " · #{b.prompt_tps} tok/s prompt"} · load #{b.load_ms} ms"
+            )
+
+          {:error, e} ->
+            IO.puts("  #{@yellow}#{e}#{@reset}")
+        end
+
+      _ ->
+        IO.puts("  #{@yellow}#{ref} is not installed.#{@reset}")
+    end
+  end
+
+  defp models_alias(rest) do
+    case String.split(rest, ~r/\s+/, parts: 2) do
+      [from, to] ->
+        case LocalModels.resolve(from) do
+          {:installed, tag} ->
+            models_simple(
+              LocalModels.alias_tag(tag, to),
+              "#{to} → #{tag} (same weights, no extra disk)"
+            )
+
+          _ ->
+            IO.puts("  #{@yellow}#{from} is not installed.#{@reset}")
+        end
+
+      _ ->
+        IO.puts("  #{@yellow}usage: /models alias <model> <short-name>#{@reset}")
+    end
+  end
+
+  defp models_hardware do
+    hw = Hardware.refresh()
+    IO.puts("  #{@bold}Hardware#{@reset}")
+
+    IO.puts(
+      "  #{@dim}GPU:#{@reset}        #{hw.gpu || "none"}#{if hw.gpu, do: " (#{hw.backend})"}"
+    )
+
+    IO.puts("  #{@dim}VRAM:#{@reset}       #{gb(hw.vram_bytes)}")
+    IO.puts("  #{@dim}RAM:#{@reset}        #{gb(hw.ram_bytes)}")
+    IO.puts("  #{@dim}CPU:#{@reset}        #{hw.cpu || "?"} · #{hw.cores} threads")
+
+    IO.puts(
+      "  #{@dim}Bandwidth:#{@reset}  #{hw.bandwidth_gbps} GB/s#{if hw.bandwidth_known, do: "", else: " (default — GPU not in table)"}"
+    )
+
+    ctx_mode =
+      case Application.get_env(:optimal_system_agent, :ollama_num_ctx) do
+        n when is_integer(n) -> "pinned to #{format_context_window(n)} (OLLAMA_NUM_CTX)"
+        _ -> "auto — largest window that fits VRAM per model (OLLAMA_NUM_CTX=<n> to pin)"
+      end
+
+    IO.puts("  #{@dim}Context:#{@reset}    #{ctx_mode}")
+  end
+
+  # /models ctx            show the window for the current model and why
+  # /models ctx auto       largest window whose KV cache fits VRAM (default)
+  # /models ctx max        the model's full trained window, fit or not
+  # /models ctx <n>        pin a number (e.g. 131072 or 128k)
+  # Persists as OLLAMA_NUM_CTX in ~/.osa/.env and applies to the next turn.
+  defp models_ctx(arg, session_id) do
+    {_provider, model} = session_provider_model(session_id)
+    trained = trained_window(model)
+
+    choice =
+      case String.downcase(String.trim(arg)) do
+        "" ->
+          :show
+
+        "auto" ->
+          :auto
+
+        "max" when is_integer(trained) ->
+          trained
+
+        "max" ->
+          {:error, "trained window unknown for #{model} — pin a number instead"}
+
+        s ->
+          case Integer.parse(String.replace(s, ~r/[_,]/, "")) do
+            {n, ""} when n >= 2048 -> n
+            {n, "k"} when n >= 2 -> n * 1024
+            _ -> {:error, "usage: /models ctx auto | max | <tokens>"}
+          end
+      end
+
+    case choice do
+      {:error, msg} ->
+        IO.puts("  #{@yellow}#{msg}#{@reset}")
+
+      :show ->
+        models_ctx_report(model, trained)
+
+      value ->
+        env_value = if value == :auto, do: "auto", else: Integer.to_string(value)
+        Application.put_env(:optimal_system_agent, :ollama_num_ctx, value)
+        LocalModels.forget_auto_num_ctx(model)
+
+        try do
+          OptimalSystemAgent.CLI.Setup.save_env("OLLAMA_NUM_CTX", env_value)
+        rescue
+          _ -> :ok
+        end
+
+        IO.puts(
+          "  #{@green}✓#{@reset} Context window: #{env_value} #{@dim}(saved as OLLAMA_NUM_CTX; applies from the next message)#{@reset}"
+        )
+
+        models_ctx_report(model, trained)
+    end
+  end
+
+  defp models_ctx_report(model, trained) do
+    window = ProviderRegistry.effective_context_window(model, :ollama)
+    mode = Application.get_env(:optimal_system_agent, :ollama_num_ctx)
+    kv_type = Application.get_env(:optimal_system_agent, :ollama_kv_cache_type, "f16")
+
+    IO.puts("")
+    IO.puts("  #{@bold}Context window · #{model}#{@reset}")
+
+    IO.puts(
+      "  #{@dim}In use:#{@reset}     #{format_context_window(window)} tokens (#{if is_integer(mode), do: "pinned", else: "auto"})"
+    )
+
+    if trained,
+      do: IO.puts("  #{@dim}Trained:#{@reset}    #{format_context_window(trained)} tokens")
+
+    IO.puts("  #{@dim}KV cache:#{@reset}   #{kv_type} on the daemon (OLLAMA_KV_CACHE_TYPE)")
+
+    case LocalModels.inspect_model(model) do
+      {:ok, %{installed: true, fit: %{} = f}} ->
+        per_token = div(round(f.kv_bytes / Fit.kv_cache_scale()), max(f.ctx, 1))
+        spec = %{weights_bytes: f.weights_bytes, kv_bytes_per_token: per_token}
+        hw = Hardware.detect()
+        at = Fit.assess(spec, hw, window)
+
+        IO.puts(
+          "  #{@dim}Fit:#{@reset}        #{fit_badge(at)} #{Fit.label(at.verdict)} — weights #{gb(at.weights_bytes)} + KV #{gb(at.kv_bytes)} of #{gb(at.budget_bytes)} usable"
+        )
+
+        if at.verdict in [:partial, :no] do
+          IO.puts(
+            "  #{@yellow}⚠ At this window the KV cache does not fit VRAM: expect ~#{round(at.est_tps || 0)} tok/s (spills to RAM).#{@reset}"
+          )
+
+          IO.puts(
+            "  #{@dim}Fix: quantise the daemon's KV cache — OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 (½) or q4_0 (¼) on the Ollama service,#{@reset}"
+          )
+
+          IO.puts(
+            "  #{@dim}then set the same OLLAMA_KV_CACHE_TYPE in ~/.osa/.env so OSA sizes it right.#{@reset}"
+          )
+        end
+
+        if is_integer(trained) and window < trained do
+          f16 = per_token * trained
+
+          IO.puts(
+            "  #{@dim}Full #{format_context_window(trained)} needs KV #{gb(f16)} at f16 · #{gb(div(f16, 2))} at q8_0 · #{gb(div(f16, 4))} at q4_0.#{@reset}"
+          )
+        end
+
+      _ ->
+        :ok
+    end
+
+    IO.puts("  #{@dim}/models ctx auto · max · <tokens>#{@reset}")
+  end
+
+  defp trained_window(model) do
+    case OptimalSystemAgent.LocalModels.OllamaAdmin.show(model) do
+      {:ok, %{context_length: n}} when is_integer(n) and n > 0 -> n
+      _ -> nil
+    end
+  end
+
+  defp models_search(q) do
+    IO.puts("  #{@dim}Searching Hugging Face for “#{q}” GGUFs…#{@reset}")
+
+    case OptimalSystemAgent.LocalModels.HuggingFace.search(q, limit: 15) do
+      {:ok, []} ->
+        IO.puts("  #{@dim}nothing found#{@reset}")
+
+      {:ok, list} ->
+        Enum.each(list, fn r ->
+          IO.puts("  #{@dim}•#{@reset} #{r.id} #{@dim}(#{r.downloads} downloads)#{@reset}")
+        end)
+
+        IO.puts(
+          "  #{@dim}/models info hf.co/<repo> to size one · /models install hf.co/<repo>:<quant>#{@reset}"
+        )
+
+      {:error, e} ->
+        IO.puts("  #{@yellow}#{e}#{@reset}")
+    end
+  end
+
+  defp models_simple(:ok, msg), do: IO.puts("  #{@green}✓#{@reset} #{msg}")
+  defp models_simple({:error, e}, _), do: IO.puts("  #{@yellow}#{e}#{@reset}")
+
+  defp models_usage do
+    IO.puts("  #{@bold}/models#{@reset} — local models on this machine")
+    IO.puts("")
+
+    IO.puts(
+      "  #{@cyan}/models#{@reset}                      installed + curated catalog, with fit for this hardware"
+    )
+
+    IO.puts(
+      "  #{@cyan}/models info#{@reset} <model>         capabilities, size per quant, est./measured tok/s"
+    )
+
+    IO.puts(
+      "  #{@cyan}/models install#{@reset} <model> [q]  pull it (catalog id, hf.co/repo:quant, or Ollama tag), then benchmark"
+    )
+
+    IO.puts(
+      "  #{@cyan}/models use#{@reset} <model>          switch this session and make it the default"
+    )
+
+    IO.puts("  #{@cyan}/models remove#{@reset} <model>       delete from disk")
+
+    IO.puts(
+      "  #{@cyan}/models load#{@reset} | #{@cyan}unload#{@reset} <model> keep in VRAM / evict now"
+    )
+
+    IO.puts("  #{@cyan}/models bench#{@reset} <model>        measure tok/s")
+    IO.puts("  #{@cyan}/models alias#{@reset} <model> <name> short tag for a long hf.co/… name")
+    IO.puts("  #{@cyan}/models search#{@reset} <words>       find GGUFs on Hugging Face")
+    IO.puts("  #{@cyan}/models hardware#{@reset}             what was detected")
+
+    IO.puts(
+      "  #{@cyan}/models ctx#{@reset} auto|max|<n>      context window for the current model (persists)"
+    )
   end
 
   # ── /jailbreak — operator override layer (LIBERATED) ─────────────────────
@@ -884,9 +1907,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
                 IO.puts("  #{@dim}Transcript kept.#{@reset}")
 
               {:error, :not_enough_checkpoints} ->
-                IO.puts(
-                  "  #{@yellow}error: not enough file checkpoints to revert #{n}#{@reset}"
-                )
+                IO.puts("  #{@yellow}error: not enough file checkpoints to revert #{n}#{@reset}")
 
               {:error, reason} ->
                 IO.puts("  #{@yellow}error: #{inspect(reason)}#{@reset}")

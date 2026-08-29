@@ -1903,7 +1903,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   defp apply_local_ceiling(trained, model, provider) do
     if provider in [:ollama, :lmstudio, :llamacpp] and not ollama_cloud_model?(model) do
-      ceiling = Application.get_env(:optimal_system_agent, :ollama_num_ctx, 32_768)
+      ceiling = OptimalSystemAgent.LocalModels.num_ctx_ceiling(model)
 
       # Floor against the model's REAL trained window too, not just the config
       # ceiling. A static/catalog entry (or a family prefix match) can advertise
@@ -2047,6 +2047,14 @@ defmodule OptimalSystemAgent.Providers.Registry do
       # was routed to :openai.
       OptimalSystemAgent.Providers.OllamaCloud.cloud_tag?(m) ->
         :ollama_cloud
+
+      # A Hugging Face GGUF pulled straight into the daemon
+      # (`ollama pull hf.co/<user>/<repo>:<quant>`) keeps the `hf.co/` prefix as
+      # its tag. Nothing but local Ollama serves those ids; without this branch
+      # they fell to nil and were handed to whatever the node's default provider
+      # was (Ollama Cloud on a `:cloud` default), which does not have the model.
+      String.starts_with?(m, "hf.co/") or String.starts_with?(m, "huggingface.co/") ->
+        :ollama
 
       String.starts_with?(m, "claude") ->
         :anthropic

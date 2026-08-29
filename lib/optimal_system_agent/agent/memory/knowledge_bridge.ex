@@ -29,7 +29,11 @@ defmodule OptimalSystemAgent.Agent.Memory.KnowledgeBridge do
 
   require Logger
 
-  alias OptimalSystemAgent.Agent.Learning
+  # Memory.Learning, not Agent.Learning: the wrong-namespace alias shipped
+  # with an UndefinedFunctionError swallowed by the sync's rescue, so no
+  # LearnedPattern/KnownError triples were ever bridged. (Found by review;
+  # a no_warn_undefined briefly masked the compiler warning that exposed it.)
+  alias OptimalSystemAgent.Memory.Learning
 
   @sync_interval_ms 60_000
   @store_name "osa_default"

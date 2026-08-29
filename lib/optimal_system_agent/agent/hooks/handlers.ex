@@ -214,7 +214,9 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
 
     {:ok, payload}
   rescue
-    _ -> {:ok, payload}
+    e ->
+      Logger.warning("[hooks] session_announce failed: #{Exception.message(e)}")
+      {:ok, payload}
   end
 
   def session_announce(payload), do: {:ok, payload}
@@ -484,7 +486,9 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
 
     {:ok, payload}
   rescue
-    _ -> {:ok, payload}
+    e ->
+      Logger.warning("[hooks] learning_observer failed: #{Exception.message(e)}")
+      {:ok, payload}
   end
 
   def learning_observer(payload), do: {:ok, payload}
@@ -508,7 +512,9 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
     OptimalSystemAgent.Agent.Memory.Episodic.record(:tool_use, content, session_id)
     {:ok, payload}
   rescue
-    _ -> {:ok, payload}
+    e ->
+      Logger.warning("[hooks] episodic_recorder failed: #{Exception.message(e)}")
+      {:ok, payload}
   end
 
   def episodic_recorder(payload), do: {:ok, payload}
@@ -545,7 +551,9 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
         {:ok, payload}
     end
   rescue
-    _ -> {:ok, payload}
+    e ->
+      Logger.warning("[hooks] episodic_turn_recorder failed: #{Exception.message(e)}")
+      {:ok, payload}
   end
 
   def episodic_turn_recorder(payload), do: {:ok, payload}

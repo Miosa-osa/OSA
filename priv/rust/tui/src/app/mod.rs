@@ -1714,8 +1714,14 @@ mod modal_overlay_tests {
 pub fn open_in_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let candidates: [&str; 1] = ["open"];
+    // NOT `explorer`. explorer.exe is the file manager: handed a URL it
+    // frequently opens a FOLDER window at the working directory instead of
+    // handing the address to the default browser, so the user is sent to a
+    // file listing and the sign-in page never loads. `rundll32
+    // url.dll,FileProtocolHandler` invokes the registered protocol handler
+    // directly, which is what "open this URL" actually means on Windows.
     #[cfg(target_os = "windows")]
-    let candidates: [&str; 1] = ["explorer"];
+    let candidates: [&str; 1] = ["rundll32"];
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let candidates: [&str; 3] = ["xdg-open", "gio", "wslview"];
 
@@ -1725,6 +1731,9 @@ pub fn open_in_browser(url: &str) {
             let mut cmd = std::process::Command::new(bin);
             if bin == "gio" {
                 cmd.arg("open");
+            }
+            if bin == "rundll32" {
+                cmd.arg("url.dll,FileProtocolHandler");
             }
             let spawned = cmd
                 .arg(&url)
