@@ -239,16 +239,11 @@ defmodule OptimalSystemAgent.Memory.Learning do
           capture_error_pattern(obs.tool_name, cat, sub, suggestion)
         end
 
-        # Phase 3: CAPTURE success patterns
-        if obs.type == :success do
-          Consolidator.upsert(%{
-            description: "Tool #{obs.tool_name} succeeded",
-            trigger: "success:#{obs.tool_name}",
-            response: "continue",
-            category: "success",
-            tags: "success,#{obs.tool_name}"
-          })
-        end
+        # Success outcomes are telemetry, never patterns. The old code upserted
+        # a "Tool X succeeded" row per tool call (2,779 rows, success_rate 1.0,
+        # zero discriminative value — audited 2026-08-27). VIGIL-classified
+        # failures below remain the only pattern source.
+        _ = obs
 
         # Phase 4: ADAPT — trigger consolidation on schedule
         cond do
