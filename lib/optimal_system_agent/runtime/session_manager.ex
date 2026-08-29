@@ -320,7 +320,20 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
     #
     # Materialising here makes this consistent with every other session-scoped entry
     # point, and means the choice is applied to the Loop the first turn will use.
-    _ = ensure_loop(session_id)
+    #
+    # Materialise under the session's REAL owner, not the `start_loop` default of
+    # "anonymous". A no-opts `ensure_loop/1` registered the Loop in
+    # `SessionRegistry` owned by "anonymous"; the SSE client authorises as "local",
+    # so the next stream (re)connect saw an owner mismatch → 404 → the TUI dropped
+    # the session ("no longer available") and started a fresh one, losing context.
+    # `start_loop` overwrites the tracked meta, so read the owner BEFORE the call.
+    owner =
+      case tracked_session_meta(session_id) do
+        %{user_id: uid} when is_binary(uid) and uid != "" -> uid
+        _ -> "anonymous"
+      end
+
+    _ = ensure_loop(session_id, user_id: owner, channel: :http)
 
     # Resolve the context window HERE, before the call — not inside it.
     #
