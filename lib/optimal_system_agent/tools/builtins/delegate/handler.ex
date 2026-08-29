@@ -27,6 +27,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   alias OptimalSystemAgent.Agent.TaskNotifications
   alias OptimalSystemAgent.Agent.Loop
 
+  # Foreground fan-out await ceiling (15 min). A foreground (background:false)
+  # wave blocks the parent's turn until the SLOWEST workstream joins, so an
+  # unbounded (days-scale) backstop would freeze the turn; cap the blocking join
+  # here. Background waves are unaffected — they do not hold the turn.
+  @foreground_await_timeout_ms 900_000
+
   # ── Stage 1: Input validation ──────────────────────────────────────────
 
   @spec validate(map(), UseContext.t()) ::
@@ -418,16 +424,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
         build_config(prompt, role, args, parent_id, parent_depth, Map.get(t, :name))
       end)
 
-    # await_timeout defaults to :infinity in run_parallel so long teammates
-    # aren't killed at 10 min; an optional timeout_ms arg bounds it.
-    parallel_opts =
-      [batch_id: batch_id] ++
-        case parse_timeout_ms(Map.get(args, "timeout_ms")) do
-          nil -> []
-          ms -> [await_timeout: ms]
-        end
+    # An explicit timeout_ms always bounds the wave; the DEFAULT differs by
+    # posture (below).
+    explicit_await =
+      case parse_timeout_ms(Map.get(args, "timeout_ms")) do
+        nil -> []
+        ms -> [await_timeout: ms]
+      end
 
     if fanout_background?(args, configs) do
+      # Background wave: it does NOT hold the parent's turn, so its ceiling is
+      # left as-is — only an explicit timeout_ms bounds it, otherwise
+      # run_parallel keeps its own (days-scale) backstop.
       dispatch_fanout_background(
         batch_id,
         umbrella_task,
@@ -436,10 +444,32 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
         parent_id,
         parent_depth,
         configs,
-        parallel_opts
+        [batch_id: batch_id] ++ explicit_await
       )
     else
-      run_fanout(umbrella_task, tasks, args, parent_id, parent_depth, configs, parallel_opts)
+      # Foreground wave: it blocks the parent INSIDE its tool phase until the
+      # SLOWEST workstream joins. run_parallel's await_timeout default is
+      # @default_subagent_timeout_ms (~3 days), NOT :infinity, so an unbounded
+      # join would freeze the turn — cap it at @foreground_await_timeout_ms
+      # (15 min) when the caller gave no explicit timeout_ms.
+      #
+      # NOTE(turn-hardening): the actual blocking (Task.await) lives inside
+      # Orchestrator.run_parallel, so there is no poll loop here to wrap with a
+      # Cancellation.cancelled? check — only the ceiling is reduced at this layer.
+      foreground_await =
+        if explicit_await == [],
+          do: [await_timeout: @foreground_await_timeout_ms],
+          else: explicit_await
+
+      run_fanout(
+        umbrella_task,
+        tasks,
+        args,
+        parent_id,
+        parent_depth,
+        configs,
+        [batch_id: batch_id] ++ foreground_await
+      )
     end
   end
 

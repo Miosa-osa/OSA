@@ -6,11 +6,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.Pty.PtyWait do
 
   use OptimalSystemAgent.Tools.Behaviour
 
+  alias OptimalSystemAgent.Agent.Cancellation
   alias OptimalSystemAgent.Shell.Pty.Manager
   alias OptimalSystemAgent.Tools.Builtins.Pty.Shared
 
   @default_timeout_ms 10_000
   @max_timeout_ms 600_000
+
+  # How often the (otherwise blocking) wait is probed for a user cancel. Small
+  # enough to feel instant. It does NOT change the wait's condition semantics:
+  # the underlying Manager.wait runs untouched with the full timeout inside a
+  # Task, and this only polls it from the outside so an interrupt can break it.
+  @cancel_poll_ms 250
 
   @impl true
   def name, do: "pty_wait"
@@ -80,17 +87,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.Pty.PtyWait do
   def safety, do: :read_only
 
   @impl true
-  def execute(input), do: run(input)
+  def execute(input), do: run(input, nil)
 
   @impl true
-  def execute(input, _ctx), do: run(input)
+  def execute(input, ctx), do: run(input, ctx_session_id(ctx))
 
-  defp run(input) do
+  defp run(input, session_id) do
     with {:ok, session} <- Shared.session_id(input),
          {:ok, condition} <- Shared.parse_condition(input["condition"]) do
       timeout = clamp_timeout(input["timeout_ms"])
 
-      case Manager.wait(session, condition, timeout) do
+      case wait_cancelable(session, condition, timeout, session_id) do
         {:ok, outcome} -> {:ok, Shared.format_outcome(outcome)}
         {:error, :not_found} -> {:error, "No such pty session: #{session}"}
         {:error, reason} when is_binary(reason) -> {:error, reason}
@@ -98,6 +105,52 @@ defmodule OptimalSystemAgent.Tools.Builtins.Pty.PtyWait do
       end
     end
   end
+
+  # No session context (nil) → nothing to cancel against; skip the check and run
+  # the original single blocking wait exactly.
+  defp wait_cancelable(session, condition, timeout, nil) do
+    Manager.wait(session, condition, timeout)
+  end
+
+  # Cancel-aware wait. The 10-min ceiling and the exact condition semantics
+  # (single waiter, full timeout — chunking would reset a `stable_ms` window) are
+  # preserved by running Manager.wait untouched inside a Task and polling it with
+  # Task.yield, so a user cancel can break the wait between polls.
+  defp wait_cancelable(session, condition, timeout, session_id) do
+    task =
+      Task.Supervisor.async_nolink(OptimalSystemAgent.TaskSupervisor, fn ->
+        Manager.wait(session, condition, timeout)
+      end)
+
+    poll_wait(task, session_id)
+  end
+
+  defp poll_wait(task, session_id) do
+    case Task.yield(task, @cancel_poll_ms) do
+      {:ok, result} ->
+        result
+
+      {:exit, reason} ->
+        {:error, inspect(reason)}
+
+      nil ->
+        if Cancellation.cancelled?(session_id) do
+          Task.shutdown(task, :brutal_kill)
+          {:error, "pty_wait was interrupted by a cancel before the condition was met"}
+        else
+          poll_wait(task, session_id)
+        end
+    end
+  end
+
+  defp ctx_session_id(ctx) when is_map(ctx) do
+    case Map.get(ctx, :session_id) do
+      sid when is_binary(sid) -> sid
+      _ -> nil
+    end
+  end
+
+  defp ctx_session_id(_), do: nil
 
   defp clamp_timeout(n) when is_integer(n) and n > 0, do: min(n, @max_timeout_ms)
   defp clamp_timeout(_), do: @default_timeout_ms

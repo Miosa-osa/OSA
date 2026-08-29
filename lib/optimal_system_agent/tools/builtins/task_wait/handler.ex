@@ -21,12 +21,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
       elapses, then format their results
   """
 
+  alias OptimalSystemAgent.Agent.Cancellation
   alias OptimalSystemAgent.Agent.RunStore
   alias OptimalSystemAgent.Tools.Builtins.TaskWait.Depth
   alias OptimalSystemAgent.Tools.UseContext
 
   @terminal_statuses [:completed, :failed, :cancelled]
   @poll_interval_ms 500
+
+  # Ceiling on the SYNCHRONOUS join wait — NOT the agents' lifetime, which stays
+  # days-scale via `default_timeout_ms/0`. A blocking task_wait must not freeze
+  # the turn for the days-scale backstop, so the effective wait is capped at
+  # 5 min; on cap-expiry (or a user cancel) the still-running agents are returned
+  # as the existing healthy, non-error result and keep running in the background.
+  @max_wait_ms 300_000
 
   # Default wait bound = the shared agent-LIFETIME backstop, which is measured in
   # DAYS (see Orchestrator.@default_subagent_timeout_ms / :subagent_join_timeout_ms).
@@ -85,7 +93,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
   def execute(%{"agent_ids" => agent_ids} = input, ctx) do
     caller_id = session_id(ctx)
     require_all = Map.get(input, "require_all", true) != false
-    timeout_ms = parse_timeout_ms(Map.get(input, "timeout_ms")) || default_timeout_ms()
+    # Bound ONLY the synchronous wait: the requested/default bound may be days
+    # (the shared agent-lifetime backstop), but the blocking join is capped at
+    # @max_wait_ms so the turn cannot freeze on it.
+    requested_ms = parse_timeout_ms(Map.get(input, "timeout_ms")) || default_timeout_ms()
+    timeout_ms = min(requested_ms, @max_wait_ms)
     deadline = System.monotonic_time(:millisecond) + timeout_ms
 
     # The launch notice hands the model the full `agent:<parent>:<name>` id, but
@@ -102,7 +114,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
     Depth.enter(caller_id)
 
     try do
-      runs = poll(resolved_ids, require_all, deadline)
+      runs = poll(resolved_ids, require_all, deadline, caller_id)
       {:ok, format_results(resolved_ids, runs, require_all, children)}
     after
       Depth.exit_wait(caller_id)
@@ -115,7 +127,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
 
   # ── Private ──────────────────────────────────────────────────────────────
 
-  defp poll(agent_ids, require_all, deadline) do
+  defp poll(agent_ids, require_all, deadline, session_id) do
     runs = Map.new(agent_ids, fn id -> {id, RunStore.get(id)} end)
 
     satisfied? =
@@ -130,11 +142,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
       System.monotonic_time(:millisecond) >= deadline ->
         runs
 
+      # Cancel-aware: a user interrupt breaks the blocking join early. The
+      # still-running agents are returned unchanged (non-error) and keep running
+      # in the background — their completion is delivered as a task-notification.
+      cancelled?(session_id) ->
+        runs
+
       true ->
         Process.sleep(@poll_interval_ms)
-        poll(agent_ids, require_all, deadline)
+        poll(agent_ids, require_all, deadline, session_id)
     end
   end
+
+  # Guard for a missing/unknown session id (no session context) — skip the check.
+  defp cancelled?(sid) when is_binary(sid) and sid != "unknown", do: Cancellation.cancelled?(sid)
+  defp cancelled?(_), do: false
 
   # An unknown id (typo, never launched) is treated as terminal so a single
   # bad id can't block the join forever — it is surfaced in the formatted

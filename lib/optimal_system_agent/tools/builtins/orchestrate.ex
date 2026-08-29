@@ -17,6 +17,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.Orchestrate do
 
   require Logger
 
+  # Synchronous swarm-join backstop. The shared agent-lifetime default is
+  # ~3 days (Orchestrator.@default_subagent_timeout_ms), which froze the turn for
+  # that long if a swarm agent hung. Cap the blocking join at 15 min so the turn
+  # cannot freeze indefinitely; work that legitimately needs longer belongs in
+  # the background.
+  #
+  # NOTE(turn-hardening): threaded as the `:timeout` opt into
+  # Swarm.Patterns.dispatch, which honours it on the parallel path. There is no
+  # poll/await in THIS module to wrap with a Cancellation.cancelled? check — the
+  # blocking happens inside dispatch (async_stream) — so only the ceiling is
+  # reduced here, not a per-tick cancel probe.
+  @swarm_join_timeout_ms 900_000
+
   @impl true
   def available?, do: true
 
@@ -87,7 +100,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.Orchestrate do
     try do
       case OptimalSystemAgent.Swarm.Patterns.dispatch(strategy, session_id, task,
              depth: depth,
-             priority: priority
+             priority: priority,
+             timeout: @swarm_join_timeout_ms
            ) do
         {:ok, result} -> {:ok, result}
         {:error, reason} -> {:error, "Orchestration failed: #{inspect(reason)}"}
