@@ -22,12 +22,26 @@ defmodule OptimalSystemAgent.Providers.OllamaTest do
              ) == "https://ollama.com"
     end
 
-    test "does not reroute local-weight models to a different daemon" do
+    # ollama.com cannot serve local weights, so "keep the configured hosted URL"
+    # was never a working route for them — it was a guaranteed failure whenever
+    # a cloud pick had left `OLLAMA_URL=https://ollama.com` behind.
+    test "routes local-weight models the daemon has through the local daemon" do
       assert Ollama.resolve_request_url(
                "https://ollama.com",
                "llama3.2:3b",
                ["llama3.2:3b"]
-             ) == "https://ollama.com"
+             ) == "http://localhost:11434"
+
+      assert Ollama.resolve_request_url(
+               "https://ollama.com",
+               "hf.co/Jiunsong/SuperQwen3.8-27b-abliterated-GGUF:Q4_K_M",
+               ["hf.co/Jiunsong/SuperQwen3.8-27b-abliterated-GGUF:Q4_K_M"]
+             ) == "http://localhost:11434"
+    end
+
+    test "keeps the hosted URL for a model the local daemon does not have" do
+      assert Ollama.resolve_request_url("https://ollama.com", "llama3.2:3b", []) ==
+               "https://ollama.com"
     end
 
     test "preserves an already-local configured URL" do
@@ -36,6 +50,30 @@ defmodule OptimalSystemAgent.Providers.OllamaTest do
                "glm-5.2:cloud",
                ["glm-5.2:cloud"]
              ) == "http://ollama.internal:11434"
+    end
+  end
+
+  describe "local_daemon_url/0" do
+    setup do
+      prev = Application.get_env(:optimal_system_agent, :ollama_url)
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:optimal_system_agent, :ollama_url, prev),
+          else: Application.delete_env(:optimal_system_agent, :ollama_url)
+      end)
+
+      :ok
+    end
+
+    test "a hosted OLLAMA_URL is not the local daemon" do
+      Application.put_env(:optimal_system_agent, :ollama_url, "https://ollama.com")
+      assert Ollama.local_daemon_url() == "http://localhost:11434"
+    end
+
+    test "a plain-http configured URL is kept (LAN daemon)" do
+      Application.put_env(:optimal_system_agent, :ollama_url, "http://ollama.internal:11434")
+      assert Ollama.local_daemon_url() == "http://ollama.internal:11434"
     end
   end
 

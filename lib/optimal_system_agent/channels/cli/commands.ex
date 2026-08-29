@@ -371,7 +371,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   defp model_list_local(session_id) do
     {_provider, current} = session_provider_model(session_id)
 
-    case OptimalSystemAgent.Providers.Ollama.list_models() do
+    case OptimalSystemAgent.Providers.Ollama.list_models(
+           OptimalSystemAgent.Providers.Ollama.local_daemon_url()
+         ) do
       {:ok, []} ->
         IO.puts("  #{@dim}No local Ollama models. Pull one with `ollama pull <tag>`.#{@reset}")
 

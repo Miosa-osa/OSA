@@ -145,11 +145,34 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     e -> {:error, Exception.message(e)}
   end
 
+  @doc """
+  The URL of the daemon on THIS machine.
+
+  `:ollama_url` is whatever onboarding last wrote — picking a cloud model
+  leaves it at `https://ollama.com`. That is a hosted endpoint, not a local
+  daemon; anything that means "the local daemon" (the picker's reachability
+  probe, `/model list`, routing local weights) must not read it as one.
+  """
+  @spec local_daemon_url() :: String.t()
+  def local_daemon_url do
+    configured = Application.get_env(:optimal_system_agent, :ollama_url, @local_url)
+
+    if is_binary(configured) and String.starts_with?(configured, "https://"),
+      do: Application.get_env(:optimal_system_agent, :ollama_local_url, @local_url),
+      else: configured
+  end
+
   @doc false
+  # A hosted URL (`https://ollama.com`) cannot serve local weights at all, and
+  # it only serves a `:cloud` tag the account is entitled to. So whenever the
+  # local daemon has the model, the local daemon is the right route — the
+  # signed daemon proxies cloud tags key-free, and it is the ONLY thing that
+  # can run a GGUF pulled with `ollama pull hf.co/…`. Before, this only
+  # rerouted cloud tags: a local model selected while `OLLAMA_URL=https://ollama.com`
+  # was sent to ollama.com and failed.
   @spec resolve_request_url(String.t(), String.t() | nil, [String.t()]) :: String.t()
   def resolve_request_url(configured_url, model, local_model_names) do
-    if String.starts_with?(configured_url, "https://") and cloud_model?(model) and
-         model in local_model_names do
+    if String.starts_with?(configured_url, "https://") and model in local_model_names do
       @local_url
     else
       configured_url
@@ -157,7 +180,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   end
 
   defp request_url(configured_url, model) do
-    if String.starts_with?(configured_url, "https://") and cloud_model?(model) do
+    if String.starts_with?(configured_url, "https://") and is_binary(model) do
       local_url = Application.get_env(:optimal_system_agent, :ollama_local_url, @local_url)
 
       # Hosted tags are not guaranteed to appear in /api/tags even when the
@@ -175,7 +198,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
       case resolve_request_url(configured_url, model, local_model_names) do
         @local_url ->
-          Logger.info("[Ollama] Routing hosted tag #{model} through the signed local daemon")
+          Logger.info("[Ollama] Routing #{model} through the local daemon (it serves it)")
 
           local_url
 
