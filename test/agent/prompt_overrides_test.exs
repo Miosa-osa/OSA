@@ -17,18 +17,90 @@ defmodule OptimalSystemAgent.Agent.PromptOverridesTest do
       )
 
     path = Path.join(dir, "system_prompts.json")
+    prompts = Path.join(dir, "prompts")
     prev = Application.get_env(:optimal_system_agent, :prompt_overrides_path)
+    prev_dir = Application.get_env(:optimal_system_agent, :prompt_files_dir)
     Application.put_env(:optimal_system_agent, :prompt_overrides_path, path)
+    Application.put_env(:optimal_system_agent, :prompt_files_dir, prompts)
 
     on_exit(fn ->
       if prev,
         do: Application.put_env(:optimal_system_agent, :prompt_overrides_path, prev),
         else: Application.delete_env(:optimal_system_agent, :prompt_overrides_path)
 
+      if prev_dir,
+        do: Application.put_env(:optimal_system_agent, :prompt_files_dir, prev_dir),
+        else: Application.delete_env(:optimal_system_agent, :prompt_files_dir)
+
       File.rm_rf(dir)
     end)
 
-    {:ok, path: path}
+    {:ok, path: path, prompts: prompts}
+  end
+
+  describe "prompt files" do
+    test "a <model>.md file is picked up, header sets the mode and is stripped", %{
+      prompts: prompts
+    } do
+      File.mkdir_p!(prompts)
+      file = Path.join(prompts, "superqwen-abliterated_latest.md")
+      File.write!(file, "<!-- OSA prompt\n mode: replace -->\n\nYou are a toaster.\n")
+
+      assert {^file, %{mode: :replace, text: "You are a toaster."}} =
+               PromptOverrides.effective("superqwen-abliterated:latest")
+
+      assert {"You are a toaster.", {^file, :replace}} =
+               PromptOverrides.apply("BASE", "superqwen-abliterated:latest")
+
+      File.write!(file, "Be brief.")
+
+      assert {_, %{mode: :inject, text: "Be brief."}} =
+               PromptOverrides.effective("superqwen-abliterated:latest")
+    end
+
+    test "default.md covers every model; a model file and a JSON entry win over it", %{
+      prompts: prompts
+    } do
+      File.mkdir_p!(prompts)
+      File.write!(Path.join(prompts, "default.md"), "GLOBAL")
+      File.write!(Path.join(prompts, "llama3.md"), "MINE")
+
+      assert {_, %{text: "GLOBAL"}} = PromptOverrides.effective("gemma4")
+      assert {_, %{text: "MINE"}} = PromptOverrides.effective("llama3")
+
+      :ok = PromptOverrides.set("llama3", :replace, "JSON")
+      assert {"llama3", %{text: "JSON"}} = PromptOverrides.effective("llama3")
+    end
+
+    test "/system off beats a file; /system clear deletes the file", %{prompts: prompts} do
+      File.mkdir_p!(prompts)
+      file = Path.join(prompts, "llama3.md")
+      File.write!(file, "MINE")
+      :ok = PromptOverrides.set("llama3", :inject, "x")
+      :ok = PromptOverrides.enable("llama3", false)
+      assert PromptOverrides.effective("llama3") == nil
+
+      :ok = PromptOverrides.clear("llama3")
+      refute File.exists?(file)
+      assert PromptOverrides.effective("llama3") == nil
+    end
+
+    test "/system file creates the file with the header and reports the path", %{prompts: prompts} do
+      out = capture_io(fn -> Commands.dispatch("system file --all", "no-session") end)
+      file = Path.join(prompts, "default.md")
+      assert out =~ file
+      assert File.read!(file) =~ "mode: inject"
+      # The template body is not treated as a prompt.
+      assert {mode, "Your instructions here."} = PromptOverrides.parse_file(File.read!(file))
+      assert mode == :inject
+
+      out = capture_io(fn -> Commands.dispatch("system file --all replace", "no-session") end)
+      assert out =~ file
+      # Existing file is never overwritten.
+      assert File.read!(file) =~ "mode: inject"
+
+      assert capture_io(fn -> Commands.dispatch("system list", "no-session") end) =~ "default.md"
+    end
   end
 
   describe "persistence" do

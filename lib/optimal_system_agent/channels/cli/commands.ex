@@ -435,6 +435,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       v when v in ["off", "disable"] -> system_enable(target, false)
       v when v in ["on", "enable"] -> system_enable(target, true)
       v when v in ["clear", "remove", "delete", "reset"] -> system_clear(target)
+      v when v in ["file", "edit", "open"] -> system_file(target, rest)
       _ -> system_usage()
     end
 
@@ -478,13 +479,30 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
             "  #{@dim}Override saved but OFF (#{own.mode}, #{String.length(own.text)} chars) — /system on#{@reset}"
           )
         else
+          IO.puts("  #{@dim}Built-in prompt only.#{@reset}")
+          IO.puts("")
+
           IO.puts(
-            "  #{@dim}Built-in prompt only. /system inject <text> or /system replace <text>#{@reset}"
+            "  #{@bold}Easiest:#{@reset} #{@cyan}/system file#{@reset} — creates #{PromptOverrides.file_for(current)}"
+          )
+
+          IO.puts(
+            "  #{@dim}Write your prompt in it; it's live on the next message. No restart.#{@reset}"
+          )
+
+          IO.puts(
+            "  #{@dim}Or inline: /system inject <text> · /system replace <text> · /system inject @file.md#{@reset}"
           )
         end
 
       {key, entry} ->
-        scope = if key == PromptOverrides.all_key(), do: "all models", else: "this model"
+        scope =
+          cond do
+            key == PromptOverrides.all_key() -> "all models"
+            String.ends_with?(key, "default.md") -> "all models, from file"
+            String.ends_with?(key, ".md") -> "this model, from file #{key}"
+            true -> "this model"
+          end
 
         verb =
           if entry.mode == :replace,
@@ -512,12 +530,59 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     end
   end
 
+  defp system_file(target, rest) do
+    mode = if String.contains?(String.downcase(rest), "replace"), do: :replace, else: :inject
+
+    case PromptOverrides.create_file(target, mode) do
+      {:ok, path} ->
+        IO.puts("  #{@green}✓#{@reset} #{path}")
+        IO.puts("")
+        IO.puts("  Open that file in any editor and write your prompt. It's picked up")
+        IO.puts("  automatically on your next message — no command, no restart.")
+        IO.puts("")
+
+        IO.puts(
+          "  #{@dim}The header inside sets the mode (inject = on top of OSA's prompt, replace = the whole prompt).#{@reset}"
+        )
+
+        IO.puts(
+          "  #{@dim}/system to check it's active · /system clear to remove · /system file --all for every model#{@reset}"
+        )
+
+      {:error, reason} ->
+        IO.puts("  #{@yellow}error: could not create prompt file: #{inspect(reason)}#{@reset}")
+    end
+  end
+
   defp system_list do
     overrides = PromptOverrides.list()
+    files = PromptOverrides.list_files()
 
-    if map_size(overrides) == 0 do
+    if map_size(overrides) == 0 and map_size(files) == 0 do
       IO.puts("  #{@dim}No system prompt overrides saved.#{@reset}")
+
+      IO.puts(
+        "  #{@dim}/system file to create one, or drop a .md into #{PromptOverrides.prompts_dir()}#{@reset}"
+      )
     else
+      if map_size(files) > 0 do
+        IO.puts(
+          "  #{@bold}Prompt files#{@reset}  #{@dim}#{PromptOverrides.prompts_dir()}#{@reset}"
+        )
+
+        files
+        |> Enum.sort_by(&elem(&1, 0))
+        |> Enum.each(fn {model, {path, e}} ->
+          IO.puts(
+            "  #{@green}on #{@reset} #{@dim}#{String.pad_trailing(to_string(e.mode), 7)}#{@reset} #{model} #{@dim}(#{Path.basename(path)}, #{String.length(e.text)} chars)#{@reset}"
+          )
+        end)
+
+        IO.puts("")
+      end
+    end
+
+    if map_size(overrides) > 0 do
       IO.puts(
         "  #{@bold}Saved system prompt overrides#{@reset}  #{@dim}#{PromptOverrides.path()}#{@reset}"
       )
@@ -606,6 +671,15 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   defp system_usage do
     IO.puts("  #{@bold}/system#{@reset} — operator system prompt, saved per model")
     IO.puts("")
+
+    IO.puts(
+      "  #{@cyan}/system file#{@reset}               create #{PromptOverrides.prompts_dir()}/<model>.md — edit it, done"
+    )
+
+    IO.puts(
+      "  #{@cyan}/system file replace#{@reset}       same, but the file becomes the ENTIRE prompt"
+    )
+
     IO.puts("  #{@cyan}/system#{@reset}                    status for the current model")
     IO.puts("  #{@cyan}/system inject#{@reset} <text>     append <text> to the built-in prompt")
 
