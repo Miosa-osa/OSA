@@ -892,15 +892,12 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         if m.params, do: IO.puts("  #{@dim}Parameters:#{@reset}   #{m.params}")
 
         if m.context_length do
-          used =
-            if m.installed,
-              do: " · OSA uses #{format_context_window(LocalModels.num_ctx_ceiling(m.tag))} here",
-              else: ""
-
           IO.puts(
-            "  #{@dim}Context:#{@reset}      #{format_context_window(m.context_length)} tokens trained#{used}"
+            "  #{@dim}Context:#{@reset}      #{format_context_window(m.context_length)} tokens trained"
           )
         end
+
+        if m.installed, do: models_osa_profile(m.tag)
 
         IO.puts(
           "  #{@dim}Capabilities:#{@reset} #{if m.capabilities == [], do: "?", else: Enum.join(m.capabilities, ", ")}"
@@ -952,6 +949,54 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
             "  #{@dim}(GPU not in the bandwidth table — speed estimates use a conservative default)#{@reset}"
           )
         end
+    end
+  end
+
+  # How OSA will actually drive this model: the window it allocates, which
+  # prompt variant that selects (and its size), where compaction fires, and
+  # how many tools ride in the request. This is the "does it work on a small
+  # window" answer, in numbers, before the first turn.
+  defp models_osa_profile(tag) do
+    alias OptimalSystemAgent.Agent.Context
+    alias OptimalSystemAgent.Agent.Loop.CompactionThresholds
+    alias OptimalSystemAgent.Soul
+
+    window = ProviderRegistry.effective_context_window(tag, :ollama)
+    small? = Context.small_window?(tag, :ollama)
+    variant = Context.static_base_variant(:ollama, small?)
+    static = Soul.static_token_count(variant)
+    compact = CompactionThresholds.compact_at(window)
+    tools = if small?, do: "10 core tools + tool_search", else: "all tools"
+
+    IO.puts("")
+    IO.puts("  #{@bold}OSA on this model#{@reset}")
+
+    IO.puts(
+      "  #{@dim}Window:#{@reset}       #{format_context_window(window)} tokens (auto — largest that fits VRAM)"
+    )
+
+    IO.puts(
+      "  #{@dim}Prompt:#{@reset}       #{variant} variant, #{format_context_window(static)} tokens#{operator_prompt_note(tag)}"
+    )
+
+    IO.puts(
+      "  #{@dim}Compaction:#{@reset}   at #{format_context_window(compact)} tokens (#{div(compact * 100, max(window, 1))}%)"
+    )
+
+    IO.puts("  #{@dim}Tools:#{@reset}        #{tools}")
+
+    IO.puts(
+      "  #{@dim}Free for chat:#{@reset} ~#{format_context_window(max(compact - static, 0))} tokens before the first compaction"
+    )
+  end
+
+  defp operator_prompt_note(tag) do
+    case PromptOverrides.effective(tag) do
+      {_, %{mode: mode, text: text}} ->
+        " + your #{mode} prompt (~#{format_context_window(OptimalSystemAgent.Agent.Context.estimate_tokens(text))})"
+
+      nil ->
+        ""
     end
   end
 

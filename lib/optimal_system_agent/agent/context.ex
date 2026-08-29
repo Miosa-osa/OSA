@@ -424,15 +424,26 @@ defmodule OptimalSystemAgent.Agent.Context do
   #                    which have no native tool channel at all.
   @doc false
   @spec static_base_variant(atom(), boolean()) :: :lite | :native_tools | :full
-  def static_base_variant(_provider, true), do: :lite
+  # A small window gets the SMALLEST base the transport can carry. MEASURED
+  # with the lean template: :full 17,215 · :lite 13,201 · :native_tools 8,950.
+  # `:lite` used to win here unconditionally, which handed a 32k-window local
+  # model a prefix 4.2k tokens LARGER than the native-schema one — on the
+  # model that could least afford it — for no capability gain: on a native
+  # transport the tool descriptions ride in the request as schemas either
+  # way, and `tool_search` still reaches everything the 10-tool budget
+  # leaves out. `:lite` remains the answer for prompt-text transports, where
+  # the inlined core-tool prose is the only copy the model gets.
+  def static_base_variant(provider, true) do
+    if native_base?(provider), do: :native_tools, else: :lite
+  end
 
   def static_base_variant(provider, _lite?) do
-    if Soul.dedupe_native_tool_prompt?() and
-         OptimalSystemAgent.Providers.Registry.native_tool_schemas?(provider) do
-      :native_tools
-    else
-      :full
-    end
+    if native_base?(provider), do: :native_tools, else: :full
+  end
+
+  defp native_base?(provider) do
+    Soul.dedupe_native_tool_prompt?() and
+      OptimalSystemAgent.Providers.Registry.native_tool_schemas?(provider)
   end
 
   # ---------------------------------------------------------------------------
