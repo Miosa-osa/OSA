@@ -18,6 +18,16 @@ defmodule OptimalSystemAgent.LocalModels do
   @floor_ctx 32_768
   @ctx_buckets [32_768, 49_152, 65_536, 98_304, 131_072, 196_608, 262_144]
 
+  # `auto_num_ctx/1` runs inside `Registry.effective_context_window/2`, which
+  # `Loop.handle_call({:swap_provider, ...})` invokes on the model-switch path,
+  # under the 5_000 ms `GenServer.call` default. The `/api/show` here is the
+  # SECOND daemon round-trip on that path (the context-window probe is the
+  # first), so it must fail FAST against an unreachable or half-open daemon
+  # rather than fall back to Finch's 5 s connect default: 3 s probe + 5 s here
+  # overran the call and the swap landed while the caller reported failure. A
+  # local daemon connects in well under this; only a black hole waits it out.
+  @auto_ctx_probe_opts [connect_options: [timeout: 500], receive_timeout: 800, retry: false]
+
   @type row :: %{
           tag: String.t(),
           name: String.t(),
@@ -569,7 +579,7 @@ defmodule OptimalSystemAgent.LocalModels do
   def forget_auto_num_ctx(model), do: :persistent_term.erase({__MODULE__, :auto_ctx, model})
 
   defp compute_auto_num_ctx(model) do
-    with {:ok, d} <- OllamaAdmin.show(model),
+    with {:ok, d} <- OllamaAdmin.show(model, @auto_ctx_probe_opts),
          size when size > 0 <- installed_size(model) do
       spec = %{
         weights_bytes: size,
