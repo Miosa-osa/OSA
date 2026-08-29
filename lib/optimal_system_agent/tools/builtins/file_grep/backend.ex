@@ -59,6 +59,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Backend do
   alias OptimalSystemAgent.Tools.UseContext
 
   @binary "rg"
+  # Location of the OSA-bundled ripgrep inside the release. No per-OS/arch
+  # subpath is used because none exists for `priv/bin` in this repo; the release
+  # build places the correct platform binary at this single path.
+  @bundled_subpath "priv/bin/rg"
   @warn_once_table :osa_file_grep_backend_warned
 
   @install_hint "Install ripgrep to restore it: `apt install ripgrep` / `brew install ripgrep` / " <>
@@ -73,16 +77,33 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Backend do
   @type t :: :ripgrep | {:fallback, :missing} | {:fallback, :failed}
 
   @doc """
-  Absolute path to the ripgrep binary, or `nil` when it is not on the PATH.
+  Absolute path to the ripgrep binary, or `nil` when it cannot be found.
 
-  Uses `System.find_executable/1` rather than attempting the spawn and rescuing,
-  so "not installed" is established BEFORE a failure has to be interpreted. The
-  rescue in the caller stays as a backstop for the races this cannot see (the
-  binary deleted between the lookup and the spawn, an exec permission error),
-  but it is no longer how the common case is detected.
+  Resolves in three tiers, returning the first that exists and is executable:
+
+    1. an **OSA-bundled** `rg` shipped under `priv/bin` - so the fast engine is
+       present even on a host that never installed ripgrep (Grok bundles it for
+       the same reason);
+    2. `System.find_executable/1` - `rg` on the daemon's PATH (the prior
+       behavior, and still the tier the tests exercise on a dev/CI box);
+    3. `nil` - the pure-Elixir fallback, unchanged.
+
+  Uses lookup (not a rescued spawn) so "not installed" is established BEFORE a
+  failure has to be interpreted. The rescue in the caller stays as a backstop
+  for the races this cannot see (the binary deleted between the lookup and the
+  spawn, an exec permission error), but it is no longer how the common case is
+  detected.
+
+  NOTE(v1057): tier (1) is empty until the release build (release.yml) drops the
+  correct per-platform `rg` binary at `priv/bin/rg`. The code is ready for it
+  now: place an executable there and it is preferred automatically; leave it out
+  and resolution is unchanged from the PATH-only behavior. A runtime download of
+  the binary is deliberately NOT done here - fetching and executing an untrusted
+  binary at runtime is a security risk and out of scope; bundling happens at
+  build time.
   """
   @spec executable() :: String.t() | nil
-  def executable, do: System.find_executable(@binary)
+  def executable, do: bundled_executable() || System.find_executable(@binary)
 
   @doc """
   `true` when ripgrep can be executed from this node.
@@ -206,6 +227,26 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Backend do
   end
 
   # ── Private ──────────────────────────────────────────────────────────
+
+  # Tier (1) of `executable/0`: an `rg` bundled inside the release's `priv/bin`.
+  # Returns the absolute path only when the file is actually there AND carries an
+  # executable bit, so a stray non-executable placeholder never shadows the PATH
+  # copy. `Application.app_dir/2` raises when the app is not loaded (some test
+  # harnesses), so the whole probe is guarded - an absent bundle must degrade to
+  # the PATH tier, never fail the lookup.
+  defp bundled_executable do
+    path = Application.app_dir(:optimal_system_agent, @bundled_subpath)
+    if executable_file?(path), do: path, else: nil
+  rescue
+    _ -> nil
+  end
+
+  defp executable_file?(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} -> Bitwise.band(mode, 0o111) != 0
+      _ -> false
+    end
+  end
 
   defp session_key(%UseContext{session_id: id}), do: id || "_no_session_"
   defp session_key(%{session_id: id}) when is_binary(id), do: id
