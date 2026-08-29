@@ -891,11 +891,16 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         if m.family, do: IO.puts("  #{@dim}Family:#{@reset}       #{m.family}")
         if m.params, do: IO.puts("  #{@dim}Parameters:#{@reset}   #{m.params}")
 
-        if m.context_length,
-          do:
-            IO.puts(
-              "  #{@dim}Context:#{@reset}      #{format_context_window(m.context_length)} tokens"
-            )
+        if m.context_length do
+          used =
+            if m.installed,
+              do: " · OSA uses #{format_context_window(LocalModels.num_ctx_ceiling(m.tag))} here",
+              else: ""
+
+          IO.puts(
+            "  #{@dim}Context:#{@reset}      #{format_context_window(m.context_length)} tokens trained#{used}"
+          )
+        end
 
         IO.puts(
           "  #{@dim}Capabilities:#{@reset} #{if m.capabilities == [], do: "?", else: Enum.join(m.capabilities, ", ")}"
@@ -1139,9 +1144,13 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       "  #{@dim}Bandwidth:#{@reset}  #{hw.bandwidth_gbps} GB/s#{if hw.bandwidth_known, do: "", else: " (default — GPU not in table)"}"
     )
 
-    IO.puts(
-      "  #{@dim}Fit context:#{@reset} #{format_context_window(LocalModels.context_for_fit())} tokens (OLLAMA_NUM_CTX)"
-    )
+    ctx_mode =
+      case Application.get_env(:optimal_system_agent, :ollama_num_ctx) do
+        n when is_integer(n) -> "pinned to #{format_context_window(n)} (OLLAMA_NUM_CTX)"
+        _ -> "auto — largest window that fits VRAM per model (OLLAMA_NUM_CTX=<n> to pin)"
+      end
+
+    IO.puts("  #{@dim}Context:#{@reset}    #{ctx_mode}")
   end
 
   defp models_search(q) do

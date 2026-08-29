@@ -354,6 +354,23 @@ config :optimal_system_agent,
         else:
           Application.compile_env(:optimal_system_agent, :ollama_url, "http://localhost:11434")
       ),
+  # Context window ceiling for LOCAL models. `auto` (default) picks the largest
+  # window whose KV cache still fits in VRAM beside the weights — never below
+  # 32k, never above the model's trained window. A number pins it.
+  ollama_num_ctx:
+    (case System.get_env("OLLAMA_NUM_CTX") do
+       nil ->
+         :auto
+
+       "auto" ->
+         :auto
+
+       s ->
+         case Integer.parse(s) do
+           {n, _} when n >= 2048 -> n
+           _ -> :auto
+         end
+     end),
   ollama_model:
     System.get_env("OLLAMA_MODEL") ||
       Application.compile_env(:optimal_system_agent, :ollama_model, "glm-5.2:cloud"),

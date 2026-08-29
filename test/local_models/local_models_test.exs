@@ -393,6 +393,39 @@ defmodule OptimalSystemAgent.LocalModelsTest do
     end
   end
 
+  describe "auto_ctx_for/3" do
+    test "SuperQwen 27B Q4 on a 24 GiB card: 64k fits (17.2 + 4.3 + 1 GB), 96k does not, never below 32k" do
+      spec = %{weights_bytes: 17_200_000_000, quant: "Q4_K_M", kv_bytes_per_token: 64 * 1024}
+      assert LocalModels.auto_ctx_for(spec, hw(), 262_144) == 65_536
+      # A 48 GB card takes the whole trained window's worth up to the cap.
+      assert LocalModels.auto_ctx_for(spec, hw(%{vram_bytes: 48 * @gib}), 262_144) == 262_144
+      # Capped by the trained window.
+      assert LocalModels.auto_ctx_for(spec, hw(%{vram_bytes: 48 * @gib}), 131_072) == 131_072
+      # Too big for any bucket still returns the floor rather than nothing.
+      assert LocalModels.auto_ctx_for(%{spec | weights_bytes: 23_000_000_000}, hw(), 262_144) ==
+               32_768
+    end
+  end
+
+  describe "to_json/1" do
+    test "flattens the catalog entry, stringifies atoms and drops model_info" do
+      row = %{
+        tag: "hf.co/x:Q4_K_M",
+        fit: %{verdict: :fits, est_tps: 26.4, weights_exact: true},
+        entry: %{id: "x", blurb: "b", tags: ["t"], repo: "x/y", quants: ["Q4_K_M"], name: "X"},
+        model_info: %{"big" => "blob"},
+        installed: false
+      }
+
+      json = LocalModels.to_json(row)
+      assert json.fit.verdict == "fits"
+      assert json.catalog_id == "x" and json.repo == "x/y" and json.catalog_quants == ["Q4_K_M"]
+      refute Map.has_key?(json, :entry) or Map.has_key?(json, :model_info)
+      assert json.installed == false
+      assert Jason.encode!(json)
+    end
+  end
+
   describe "/models command" do
     test "is registered and prints usage for bad input" do
       assert "models" in Commands.list()

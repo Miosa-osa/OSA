@@ -15,6 +15,9 @@ defmodule OptimalSystemAgent.LocalModels do
   alias OptimalSystemAgent.LocalModels.{Catalog, Fit, Hardware, HuggingFace, OllamaAdmin}
   alias OptimalSystemAgent.System.{AtomicFile, JsonStore}
 
+  @floor_ctx 32_768
+  @ctx_buckets [32_768, 49_152, 65_536, 98_304, 131_072, 196_608, 262_144]
+
   @type row :: %{
           tag: String.t(),
           name: String.t(),
@@ -166,6 +169,38 @@ defmodule OptimalSystemAgent.LocalModels do
 
     [fit, speed, size, caps] |> Enum.reject(&is_nil/1) |> Enum.join(" · ")
   end
+
+  @doc "JSON-safe shape of a row / inspect result / fit for the HTTP API."
+  @spec to_json(term()) :: term()
+  def to_json(%{} = map) do
+    map
+    |> Map.drop([:entry, :model_info])
+    |> Map.new(fn
+      {:fit, fit} -> {:fit, to_json(fit)}
+      {:quants, qs} when is_list(qs) -> {:quants, Enum.map(qs, &to_json/1)}
+      {:hardware, hw} -> {:hardware, hw}
+      {k, v} when is_atom(v) and not is_boolean(v) and not is_nil(v) -> {k, Atom.to_string(v)}
+      {k, v} -> {k, v}
+    end)
+    |> then(fn m ->
+      case Map.get(map, :entry) do
+        %{id: id, blurb: blurb, tags: tags, repo: repo, quants: quants} ->
+          Map.merge(m, %{
+            catalog_id: id,
+            blurb: blurb,
+            tags: tags,
+            repo: repo,
+            catalog_quants: quants
+          })
+
+        _ ->
+          m
+      end
+    end)
+  end
+
+  def to_json(list) when is_list(list), do: Enum.map(list, &to_json/1)
+  def to_json(other), do: other
 
   # ── inspect one ─────────────────────────────────────────────────────────
 
@@ -480,7 +515,77 @@ defmodule OptimalSystemAgent.LocalModels do
 
   @doc false
   def context_for_fit do
-    Application.get_env(:optimal_system_agent, :ollama_num_ctx) || 32_768
+    case Application.get_env(:optimal_system_agent, :ollama_num_ctx) do
+      n when is_integer(n) -> n
+      _ -> @floor_ctx
+    end
+  end
+
+  # ── context window ceiling ─────────────────────────────────────────────
+
+  @doc """
+  The `num_ctx` ceiling for a local model. `OLLAMA_NUM_CTX=<n>` pins it;
+  `auto` (the default) returns the largest bucket whose KV cache fits in
+  VRAM beside the weights on THIS machine, floored at 32k. Cached per model.
+  """
+  @spec num_ctx_ceiling(String.t() | nil) :: pos_integer()
+  def num_ctx_ceiling(model) do
+    case Application.get_env(:optimal_system_agent, :ollama_num_ctx) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> auto_num_ctx(model)
+    end
+  end
+
+  @doc false
+  def auto_num_ctx(model) when is_binary(model) do
+    key = {__MODULE__, :auto_ctx, model}
+
+    case :persistent_term.get(key, nil) do
+      nil ->
+        ctx = compute_auto_num_ctx(model)
+        :persistent_term.put(key, ctx)
+        ctx
+
+      ctx ->
+        ctx
+    end
+  end
+
+  def auto_num_ctx(_), do: @floor_ctx
+
+  @doc false
+  def forget_auto_num_ctx(model), do: :persistent_term.erase({__MODULE__, :auto_ctx, model})
+
+  defp compute_auto_num_ctx(model) do
+    with {:ok, d} <- OllamaAdmin.show(model),
+         size when size > 0 <- installed_size(model) do
+      spec = %{
+        weights_bytes: size,
+        quant: d.quant,
+        family: d.family,
+        kv_bytes_per_token: d.kv_bytes_per_token
+      }
+
+      auto_ctx_for(spec, Hardware.detect(), d.context_length)
+    else
+      _ -> @floor_ctx
+    end
+  rescue
+    _ -> @floor_ctx
+  catch
+    :exit, _ -> @floor_ctx
+  end
+
+  @doc "Pure: largest bucket that fully fits, floored at 32k, capped at the trained window."
+  @spec auto_ctx_for(Fit.spec(), Hardware.t(), pos_integer() | nil) :: pos_integer()
+  def auto_ctx_for(spec, hw, trained) do
+    cap = if is_integer(trained) and trained > 0, do: trained, else: List.last(@ctx_buckets)
+
+    @ctx_buckets
+    |> Enum.filter(&(&1 <= cap))
+    |> Enum.filter(&(Fit.assess(spec, hw, &1).verdict == :fits))
+    |> Enum.max(fn -> @floor_ctx end)
+    |> max(@floor_ctx)
   end
 
   defp bench_path do
