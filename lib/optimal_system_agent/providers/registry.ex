@@ -2475,12 +2475,24 @@ defmodule OptimalSystemAgent.Providers.Registry do
   def resolved_default_model(provider \\ nil) do
     provider = provider || resolved_default_provider()
 
-    # provider_info/1 replies {:ok, map}. Matching a bare map here silently
-    # yielded nil for every provider — the same tuple-vs-map slip that made
-    # `osa.run --format json` report a cost of 0.
-    case provider_info(provider) do
-      {:ok, %{default_model: model}} when is_binary(model) and model != "" -> model
-      _ -> nil
+    # Honor a persisted per-provider choice first. A model switch writes the
+    # scoped :"#{provider}_model" key (config.json + app-env), and that should
+    # win over the catalog default so a new session picks up what the user last
+    # selected. Ollama already reads :ollama_model; this extends the same
+    # courtesy to every provider. Falls back to the provider's catalog default
+    # (e.g. glm-5.2:cloud) when nothing has been persisted.
+    case Application.get_env(:optimal_system_agent, :"#{provider}_model") do
+      model when is_binary(model) and model != "" ->
+        model
+
+      _ ->
+        # provider_info/1 replies {:ok, map}. Matching a bare map here silently
+        # yielded nil for every provider — the same tuple-vs-map slip that made
+        # `osa.run --format json` report a cost of 0.
+        case provider_info(provider) do
+          {:ok, %{default_model: model}} when is_binary(model) and model != "" -> model
+          _ -> nil
+        end
     end
   rescue
     _ -> nil

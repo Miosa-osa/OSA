@@ -1069,6 +1069,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
 
         case SessionManager.swap_provider(session_id, provider, model) do
           {:ok, info} ->
+            # Persist ONLY on the explicit flag. The user-initiated model picker
+            # sends persist=true so the choice sticks across new sessions and
+            # restarts; the `--model` launch flag and onboarding send false so a
+            # one-off override never becomes the accidental default.
+            if body["persist"] == true do
+              OptimalSystemAgent.ModelSelection.persist(provider, model)
+            end
+
             resp =
               Jason.encode!(
                 %{
