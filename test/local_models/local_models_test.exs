@@ -393,6 +393,34 @@ defmodule OptimalSystemAgent.LocalModelsTest do
     end
   end
 
+  describe "kv_cache_scale/0" do
+    setup do
+      prev = Application.get_env(:optimal_system_agent, :ollama_kv_cache_type)
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:optimal_system_agent, :ollama_kv_cache_type, prev),
+          else: Application.delete_env(:optimal_system_agent, :ollama_kv_cache_type)
+      end)
+
+      :ok
+    end
+
+    test "a q4_0 KV cache lets SuperQwen's full 262k window fit a 24 GiB card" do
+      spec = %{weights_bytes: 17_200_000_000, quant: "Q4_K_M", kv_bytes_per_token: 64 * 1024}
+      Application.put_env(:optimal_system_agent, :ollama_kv_cache_type, "f16")
+      assert Fit.assess(spec, hw(), 262_144).verdict == :partial
+      assert LocalModels.auto_ctx_for(spec, hw(), 262_144) == 65_536
+
+      Application.put_env(:optimal_system_agent, :ollama_kv_cache_type, "q8_0")
+      assert LocalModels.auto_ctx_for(spec, hw(), 262_144) == 131_072
+
+      Application.put_env(:optimal_system_agent, :ollama_kv_cache_type, "q4_0")
+      assert Fit.assess(spec, hw(), 262_144).verdict == :fits
+      assert LocalModels.auto_ctx_for(spec, hw(), 262_144) == 262_144
+    end
+  end
+
   describe "auto_ctx_for/3" do
     test "SuperQwen 27B Q4 on a 24 GiB card: 64k fits (17.2 + 4.3 + 1 GB), 96k does not, never below 32k" do
       spec = %{weights_bytes: 17_200_000_000, quant: "Q4_K_M", kv_bytes_per_token: 64 * 1024}

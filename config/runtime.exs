@@ -371,6 +371,15 @@ config :optimal_system_agent,
            _ -> :auto
          end
      end),
+  # The daemon's KV cache quantisation (OLLAMA_KV_CACHE_TYPE on the Ollama
+  # service: f16 | q8_0 | q4_0). OSA cannot read the daemon's env, so mirror
+  # the value here; it scales the KV-cache term of every fit / auto-window
+  # calculation (q8_0 halves it, q4_0 quarters it).
+  ollama_kv_cache_type:
+    (case System.get_env("OLLAMA_KV_CACHE_TYPE") do
+       nil -> "f16"
+       s -> String.downcase(String.trim(s))
+     end),
   ollama_model:
     System.get_env("OLLAMA_MODEL") ||
       Application.compile_env(:optimal_system_agent, :ollama_model, "glm-5.2:cloud"),

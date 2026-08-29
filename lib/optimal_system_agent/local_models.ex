@@ -462,6 +462,10 @@ defmodule OptimalSystemAgent.LocalModels do
       MapSet.member?(installed, ref <> ":latest") ->
         {:installed, ref <> ":latest"}
 
+      String.ends_with?(ref, ":latest") and
+          MapSet.member?(installed, String.trim_trailing(ref, ":latest")) ->
+        {:installed, ref}
+
       entry = Catalog.find(ref) ->
         {_, quant} = Catalog.split_tag(ref)
         quant = if Catalog.hf_tag?(ref) or String.contains?(ref, "/"), do: quant, else: nil
@@ -500,10 +504,18 @@ defmodule OptimalSystemAgent.LocalModels do
     end
   end
 
+  # `superqwen-abliterated` and `superqwen-abliterated:latest` are the same
+  # tag to Ollama; config.json usually carries the short form.
   defp installed_size(tag) do
     case OllamaAdmin.installed() do
-      {:ok, list} -> Enum.find_value(list, 0, &(&1.name == tag && &1.size_bytes))
-      _ -> 0
+      {:ok, list} ->
+        Enum.find_value(list, 0, fn m ->
+          (m.name == tag or m.name == tag <> ":latest" or m.name <> ":latest" == tag) and
+            m.size_bytes
+        end)
+
+      _ ->
+        0
     end
   end
 

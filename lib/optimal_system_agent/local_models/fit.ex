@@ -148,6 +148,23 @@ defmodule OptimalSystemAgent.LocalModels.Fit do
   @hybrid_families ~w(qwen35 qwen3.5 qwen36 qwen3.6 qwen3.8 gemma4 lfm2 deepseek)
   defp hybrid_family?(family), do: Enum.any?(@hybrid_families, &String.starts_with?(family, &1))
 
+  @doc """
+  How much of the f16 KV cache the daemon actually allocates, from
+  `:ollama_kv_cache_type` (mirrors `OLLAMA_KV_CACHE_TYPE` on the Ollama
+  service): f16 → 1.0, q8_0 → 0.5, q4_0 → 0.25.
+  """
+  @spec kv_cache_scale() :: float()
+  def kv_cache_scale do
+    case Application.get_env(:optimal_system_agent, :ollama_kv_cache_type, "f16") do
+      "q8_0" -> 0.5
+      "q4_0" -> 0.25
+      "q4_1" -> 0.28
+      "q5_0" -> 0.34
+      "q5_1" -> 0.38
+      _ -> 1.0
+    end
+  end
+
   @doc "From GGUF `model_info` (Ollama `/api/show`): exact KV bytes per token, or nil."
   @spec kv_from_model_info(map()) :: non_neg_integer() | nil
   def kv_from_model_info(info) when is_map(info) do
@@ -182,7 +199,7 @@ defmodule OptimalSystemAgent.LocalModels.Fit do
   @spec assess(spec(), Hardware.t(), pos_integer()) :: t()
   def assess(spec, hw, ctx) when is_integer(ctx) and ctx > 0 do
     {weights, exact} = weights_bytes(spec)
-    kv = kv_bytes_per_token(spec) * ctx
+    kv = round(kv_bytes_per_token(spec) * ctx * kv_cache_scale())
     total = weights + kv + @overhead
 
     vram_budget = round(hw.vram_bytes * @vram_usable)

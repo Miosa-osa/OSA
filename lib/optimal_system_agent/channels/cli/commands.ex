@@ -785,6 +785,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       {v, _} when v in ["hardware", "hw", "specs"] ->
         models_hardware()
 
+      {v, arg} when v in ["ctx", "context", "window"] ->
+        models_ctx(arg, session_id)
+
       {"search", q} ->
         models_search(q)
 
@@ -1198,6 +1201,127 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     IO.puts("  #{@dim}Context:#{@reset}    #{ctx_mode}")
   end
 
+  # /models ctx            show the window for the current model and why
+  # /models ctx auto       largest window whose KV cache fits VRAM (default)
+  # /models ctx max        the model's full trained window, fit or not
+  # /models ctx <n>        pin a number (e.g. 131072 or 128k)
+  # Persists as OLLAMA_NUM_CTX in ~/.osa/.env and applies to the next turn.
+  defp models_ctx(arg, session_id) do
+    {_provider, model} = session_provider_model(session_id)
+    trained = trained_window(model)
+
+    choice =
+      case String.downcase(String.trim(arg)) do
+        "" ->
+          :show
+
+        "auto" ->
+          :auto
+
+        "max" when is_integer(trained) ->
+          trained
+
+        "max" ->
+          {:error, "trained window unknown for #{model} — pin a number instead"}
+
+        s ->
+          case Integer.parse(String.replace(s, ~r/[_,]/, "")) do
+            {n, ""} when n >= 2048 -> n
+            {n, "k"} when n >= 2 -> n * 1024
+            _ -> {:error, "usage: /models ctx auto | max | <tokens>"}
+          end
+      end
+
+    case choice do
+      {:error, msg} ->
+        IO.puts("  #{@yellow}#{msg}#{@reset}")
+
+      :show ->
+        models_ctx_report(model, trained)
+
+      value ->
+        env_value = if value == :auto, do: "auto", else: Integer.to_string(value)
+        Application.put_env(:optimal_system_agent, :ollama_num_ctx, value)
+        LocalModels.forget_auto_num_ctx(model)
+
+        try do
+          OptimalSystemAgent.CLI.Setup.save_env("OLLAMA_NUM_CTX", env_value)
+        rescue
+          _ -> :ok
+        end
+
+        IO.puts(
+          "  #{@green}✓#{@reset} Context window: #{env_value} #{@dim}(saved as OLLAMA_NUM_CTX; applies from the next message)#{@reset}"
+        )
+
+        models_ctx_report(model, trained)
+    end
+  end
+
+  defp models_ctx_report(model, trained) do
+    window = ProviderRegistry.effective_context_window(model, :ollama)
+    mode = Application.get_env(:optimal_system_agent, :ollama_num_ctx)
+    kv_type = Application.get_env(:optimal_system_agent, :ollama_kv_cache_type, "f16")
+
+    IO.puts("")
+    IO.puts("  #{@bold}Context window · #{model}#{@reset}")
+
+    IO.puts(
+      "  #{@dim}In use:#{@reset}     #{format_context_window(window)} tokens (#{if is_integer(mode), do: "pinned", else: "auto"})"
+    )
+
+    if trained,
+      do: IO.puts("  #{@dim}Trained:#{@reset}    #{format_context_window(trained)} tokens")
+
+    IO.puts("  #{@dim}KV cache:#{@reset}   #{kv_type} on the daemon (OLLAMA_KV_CACHE_TYPE)")
+
+    case LocalModels.inspect_model(model) do
+      {:ok, %{installed: true, fit: %{} = f}} ->
+        per_token = div(round(f.kv_bytes / Fit.kv_cache_scale()), max(f.ctx, 1))
+        spec = %{weights_bytes: f.weights_bytes, kv_bytes_per_token: per_token}
+        hw = Hardware.detect()
+        at = Fit.assess(spec, hw, window)
+
+        IO.puts(
+          "  #{@dim}Fit:#{@reset}        #{fit_badge(at)} #{Fit.label(at.verdict)} — weights #{gb(at.weights_bytes)} + KV #{gb(at.kv_bytes)} of #{gb(at.budget_bytes)} usable"
+        )
+
+        if at.verdict in [:partial, :no] do
+          IO.puts(
+            "  #{@yellow}⚠ At this window the KV cache does not fit VRAM: expect ~#{round(at.est_tps || 0)} tok/s (spills to RAM).#{@reset}"
+          )
+
+          IO.puts(
+            "  #{@dim}Fix: quantise the daemon's KV cache — OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 (½) or q4_0 (¼) on the Ollama service,#{@reset}"
+          )
+
+          IO.puts(
+            "  #{@dim}then set the same OLLAMA_KV_CACHE_TYPE in ~/.osa/.env so OSA sizes it right.#{@reset}"
+          )
+        end
+
+        if is_integer(trained) and window < trained do
+          f16 = per_token * trained
+
+          IO.puts(
+            "  #{@dim}Full #{format_context_window(trained)} needs KV #{gb(f16)} at f16 · #{gb(div(f16, 2))} at q8_0 · #{gb(div(f16, 4))} at q4_0.#{@reset}"
+          )
+        end
+
+      _ ->
+        :ok
+    end
+
+    IO.puts("  #{@dim}/models ctx auto · max · <tokens>#{@reset}")
+  end
+
+  defp trained_window(model) do
+    case OptimalSystemAgent.LocalModels.OllamaAdmin.show(model) do
+      {:ok, %{context_length: n}} when is_integer(n) and n > 0 -> n
+      _ -> nil
+    end
+  end
+
   defp models_search(q) do
     IO.puts("  #{@dim}Searching Hugging Face for “#{q}” GGUFs…#{@reset}")
 
@@ -1252,6 +1376,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     IO.puts("  #{@cyan}/models alias#{@reset} <model> <name> short tag for a long hf.co/… name")
     IO.puts("  #{@cyan}/models search#{@reset} <words>       find GGUFs on Hugging Face")
     IO.puts("  #{@cyan}/models hardware#{@reset}             what was detected")
+
+    IO.puts(
+      "  #{@cyan}/models ctx#{@reset} auto|max|<n>      context window for the current model (persists)"
+    )
   end
 
   defp uncensored_list do
