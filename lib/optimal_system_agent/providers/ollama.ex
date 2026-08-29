@@ -468,6 +468,30 @@ defmodule OptimalSystemAgent.Providers.Ollama do
             Logger.info("[Ollama] Cloud stream: got #{length(tool_calls)} tool calls mid-stream")
             cloud_stream_loop(port, callback, %{acc | tool_calls: acc.tool_calls ++ tool_calls})
 
+          {:ok, %{"message" => %{"thinking" => think_token, "content" => token}}}
+          when is_binary(think_token) and think_token != "" and
+                 is_binary(token) and token != "" ->
+            # A SINGLE chunk carrying BOTH native reasoning AND visible content.
+            # The thinking-only arm below matches any chunk with a non-empty
+            # `thinking` key, so without this arm a both-present chunk routed the
+            # reasoning and silently DROPPED the content. Emit the reasoning to
+            # the thinking box, then run the content through the SAME
+            # ThinkStreamParser the content-only arm uses (state threaded), so
+            # the visible answer is never lost.
+            callback.({:thinking_delta, think_token})
+
+            {visible, thinking, think_state} =
+              ThinkStreamParser.feed(acc.think, token)
+
+            if thinking != "", do: callback.({:thinking_delta, thinking})
+            if visible != "", do: callback.({:text_delta, visible})
+
+            cloud_stream_loop(port, callback, %{
+              acc
+              | content: acc.content <> token,
+                think: think_state
+            })
+
           {:ok, %{"message" => %{"thinking" => think_token}}}
           when is_binary(think_token) and think_token != "" ->
             # Native reasoning channel (`think: true`). Reasoning arrives on its
@@ -1151,7 +1175,8 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   | `opts[:think]` set | that value | `:opt` |
   | `:ollama_think` app env set (`OLLAMA_THINK`) | that value | `:config` |
   | not a reasoning model | `nil` (no field) | `:unsupported` |
-  | reasoning model, cloud-served | `true` | `:cloud_default` |
+  | reasoning model, cloud-served, effort `:fast` | `false` | `:fast_effort` |
+  | reasoning model, cloud-served, effort > `:fast` | `true` | `:cloud_default` |
   | reasoning model, locally served | `false` | `:local_stall_guard` |
 
   Both explicit routes override in BOTH directions and for BOTH serving modes:
@@ -1163,7 +1188,8 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   prompt content, so it cannot perturb a cached prompt prefix either way.
   """
   @spec reasoning_decision(String.t() | nil, keyword()) ::
-          {boolean() | nil, :opt | :config | :unsupported | :cloud_default | :local_stall_guard}
+          {boolean() | nil,
+           :opt | :config | :unsupported | :cloud_default | :fast_effort | :local_stall_guard}
   def reasoning_decision(model, opts \\ []) do
     cond do
       is_boolean(val = Keyword.get(opts, :think)) ->
@@ -1176,7 +1202,16 @@ defmodule OptimalSystemAgent.Providers.Ollama do
         {nil, :unsupported}
 
       cloud_model?(model) ->
-        {true, :cloud_default}
+        # Effort steers reasoning on cloud models too. With no explicit opt and
+        # no OLLAMA_THINK config (both checked above and still overriding both
+        # ways), consult the current effort: :fast asks for a quick, concise
+        # turn, so disable the extra reasoning phase; any higher effort keeps the
+        # cloud default of think:true. Default effort is :medium, so the
+        # non-fast default is unchanged.
+        case OptimalSystemAgent.Agent.Effort.current() do
+          :fast -> {false, :fast_effort}
+          _ -> {true, :cloud_default}
+        end
 
       true ->
         # Locally served reasoning model: keep the guard against unbounded
@@ -1356,6 +1391,30 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   @doc false
   def process_ndjson_line(line, callback, acc) do
     case Jason.decode(line) do
+      # A SINGLE chunk carrying BOTH native reasoning AND visible content. The
+      # content-only arm below would otherwise match first and DROP the
+      # `thinking` field (native reasoning lost). Emit reasoning to the thinking
+      # box, then run the content through the SAME ThinkStreamParser path so
+      # neither channel is lost. Mirrors `cloud_stream_loop/3`, so the local and
+      # cloud paths agree on a both-present chunk.
+      {:ok, %{"message" => %{"thinking" => think_text, "content" => text}}}
+      when is_binary(think_text) and think_text != "" and
+             is_binary(text) and text != "" ->
+        callback.({:thinking_delta, think_text})
+        text = Mojibake.repair(text)
+
+        case Map.get(acc, :think) do
+          %ThinkStreamParser{} = ts ->
+            {visible, thinking, think_state} = ThinkStreamParser.feed(ts, text)
+            if thinking != "", do: callback.({:thinking_delta, thinking})
+            if visible != "", do: callback.({:text_delta, visible})
+            %{acc | content: acc.content <> text, think: think_state}
+
+          _ ->
+            callback.({:text_delta, text})
+            %{acc | content: acc.content <> text}
+        end
+
       {:ok, %{"message" => %{"content" => text}}} when is_binary(text) and text != "" ->
         text = Mojibake.repair(text)
 
