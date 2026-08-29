@@ -156,6 +156,29 @@ defmodule OptimalSystemAgent.Agent.PromptOverridesTest do
       assert out =~ "cannot read"
     end
 
+    test "inline \\n becomes a real newline; file contents are verbatim", %{path: path} do
+      capture_io(fn ->
+        Commands.dispatch("system inject --all line one\\nline two", "no-session")
+      end)
+
+      assert %{text: "line one\nline two"} = PromptOverrides.get("*")
+
+      file = Path.join(Path.dirname(path), "verbatim.md")
+      File.write!(file, "keep \\n literal")
+      capture_io(fn -> Commands.dispatch("system replace --all @#{file}", "no-session") end)
+      assert %{text: "keep \\n literal"} = PromptOverrides.get("*")
+    end
+
+    test "/model shows the override state" do
+      assert capture_io(fn -> Commands.dispatch("model", "no-session") end) =~
+               ~r/System:.*default/
+
+      :ok = PromptOverrides.set(PromptOverrides.all_key(), :inject, "x")
+
+      assert capture_io(fn -> Commands.dispatch("model", "no-session") end) =~
+               "custom (inject, all models)"
+    end
+
     test "/system is registered for autocomplete" do
       assert "system" in Commands.list()
     end

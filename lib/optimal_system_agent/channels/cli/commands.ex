@@ -295,6 +295,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         IO.puts("  #{@dim}Context:#{@reset}   #{format_context_window(ctx)} tokens")
         print_auth_mode(provider)
         print_resolved_model(provider, model)
+        print_system_override_line(model)
 
       model_arg ->
         IO.puts("  #{@dim}Switching model...#{@reset}")
@@ -443,6 +444,18 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       session_id
   end
 
+  # One line under `/model` so the overlay state is visible where the model is.
+  defp print_system_override_line(model) do
+    case PromptOverrides.effective(model) do
+      nil ->
+        IO.puts("  #{@dim}System:#{@reset}    default")
+
+      {key, %{mode: mode}} ->
+        scope = if key == PromptOverrides.all_key(), do: ", all models", else: ""
+        IO.puts("  #{@dim}System:#{@reset}    custom (#{mode}#{scope}) — /system show")
+    end
+  end
+
   defp system_target(rest, current) do
     case String.split(rest, ~r/\s+/, parts: 2) do
       ["--all" | tail] -> {PromptOverrides.all_key(), Enum.join(tail, "")}
@@ -558,7 +571,10 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     end
   end
 
-  defp system_read_text(text), do: {:ok, text}
+  # Inline text: a REPL line has no newlines, so `\\n` / `\\t` are the way to
+  # type a multi-line prompt. File contents are taken verbatim.
+  defp system_read_text(text),
+    do: {:ok, text |> String.replace("\\n", "\n") |> String.replace("\\t", "\t")}
 
   defp system_enable(target, enabled?) do
     case PromptOverrides.enable(target, enabled?) do
@@ -610,7 +626,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     IO.puts("")
 
     IO.puts(
-      "  #{@dim}Add --all after the verb to target every model. Saved in #{PromptOverrides.path()}#{@reset}"
+      "  #{@dim}Add --all after the verb to target every model. Use \\n for newlines inline. Saved in #{PromptOverrides.path()}#{@reset}"
     )
   end
 
