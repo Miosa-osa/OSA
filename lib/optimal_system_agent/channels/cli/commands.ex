@@ -74,6 +74,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "ask-user" => {"Let the agent ask you questions mid-task (off by default)", :cmd_ask_user},
     "effort" => {"Set thinking effort level (low/medium/high/max)", :cmd_effort},
     "fast" => {"Toggle fast mode (low effort)", :cmd_fast},
+    "think" => {"Toggle model reasoning on/off (off = faster replies)", :cmd_think},
     "permissions" => {"View and manage permission rules", :cmd_permissions},
     "hooks" => {"View registered hooks", :cmd_hooks},
     "metrics" => {"Show telemetry metrics", :cmd_metrics},
@@ -2983,6 +2984,63 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       IO.puts("  #{@yellow}error: invalid level#{@reset}")
       IO.puts("  #{@dim}Valid levels: fast, medium, high, xhigh, ultra#{@reset}\n")
       session_id
+  end
+
+  # `/think` — force the model's reasoning phase on or off.
+  #
+  #   /think        show current state
+  #   /think off    no reasoning — fast replies (sends think:false to the model)
+  #   /think on     reasoning on
+  #
+  # Sets `:ollama_think` (the `OLLAMA_THINK` config knob) live AND persists it to
+  # ~/.osa/.env, so it survives a restart. Applies from the next message.
+  def cmd_think(args, session_id) do
+    IO.puts("")
+
+    cur = Application.get_env(:optimal_system_agent, :ollama_think)
+
+    case String.downcase(String.trim(args)) do
+      "" ->
+        state =
+          case cur do
+            false -> "#{@yellow}off#{@reset} (fast — no reasoning)"
+            true -> "#{@green}on#{@reset} (reasoning)"
+            _ -> "#{@dim}model default#{@reset}"
+          end
+
+        IO.puts("  #{@bold}Thinking#{@reset}  #{state}")
+        IO.puts("  #{@dim}/think off for fast replies · /think on for reasoning#{@reset}")
+
+      v when v in ["off", "false", "no", "0"] ->
+        set_think(false)
+
+      v when v in ["on", "true", "yes", "1"] ->
+        set_think(true)
+
+      _ ->
+        IO.puts("  #{@yellow}usage: /think on | off#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  defp set_think(enabled?) do
+    Application.put_env(:optimal_system_agent, :ollama_think, enabled?)
+
+    try do
+      OptimalSystemAgent.CLI.Setup.save_env("OLLAMA_THINK", to_string(enabled?))
+    rescue
+      _ -> :ok
+    end
+
+    if enabled? do
+      IO.puts("  #{@green}✓#{@reset} Thinking #{@bold}ON#{@reset} — the model reasons before replying")
+    else
+      IO.puts("  #{@green}✓#{@reset} Thinking #{@bold}OFF#{@reset} — fast replies, no reasoning phase")
+    end
+
+    IO.puts("  #{@dim}Applies from your next message. Saved as OLLAMA_THINK.#{@reset}")
   end
 
   def cmd_fast(_args, session_id) do
