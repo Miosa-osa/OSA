@@ -37,7 +37,7 @@ defmodule OptimalSystemAgent.Security.WeaponCatalog do
 
   """
 
-  alias OptimalSystemAgent.Security.{ThreatIntel, Cvss}
+  alias OptimalSystemAgent.Security.{ThreatIntel, Cvss, CodeReachable}
 
   @typedoc "Attack domain"
   @type domain() ::
@@ -103,7 +103,9 @@ defmodule OptimalSystemAgent.Security.WeaponCatalog do
       score: score,
       maturity: maturity,
       cvss_score: Map.get(finding, :cvss_score) || Map.get(finding, "cvss_score"),
-      is_kev: ThreatIntel.known_exploited?(Map.get(finding, :cve)),
+      is_kev:
+        Map.get(finding, :is_kev) || Map.get(finding, "is_kev") ||
+          ThreatIntel.known_exploited?(Map.get(finding, :cve)),
       code_reachable: CodeReachable.check(finding),
       evidence_count:
         Enum.count(Map.get(finding, :evidence, []) || Map.get(finding, "evidence", [])),
@@ -139,12 +141,11 @@ defmodule OptimalSystemAgent.Security.WeaponCatalog do
   """
   @spec add(weapon(), [map()]) :: :ok | {:error, String.t()}
   def add(weapon, _current_weapons \\ []) when is_map(weapon) do
-    # Validate weapon structure
-    unless Map.has_key?(weapon, :domain) and Map.has_key?(weapon, :score) do
-      return({:error, "weapon must have :domain and :score"})
+    if Map.has_key?(weapon, :domain) and Map.has_key?(weapon, :score) do
+      :ok
+    else
+      {:error, "weapon must have :domain and :score"}
     end
-
-    :ok
   end
 
   @doc """
@@ -180,15 +181,19 @@ defmodule OptimalSystemAgent.Security.WeaponCatalog do
   the score thresholds defined in this module.
   """
   @spec promote(weapon()) :: weapon()
+  def promote(%{maturity: :poc} = weapon), do: Map.put(weapon, :maturity, :reliable)
+  def promote(%{maturity: :reliable} = weapon), do: Map.put(weapon, :maturity, :production)
+  def promote(%{maturity: :production} = weapon), do: weapon
+
   def promote(%{score: s} = weapon) when s >= @production_threshold do
-    %{weapon | maturity: :production}
+    Map.put(weapon, :maturity, :production)
   end
 
   def promote(%{score: s} = weapon) when s >= @reliable_threshold do
-    %{weapon | maturity: :reliable}
+    Map.put(weapon, :maturity, :reliable)
   end
 
-  def promote(weapon), do: weapon
+  def promote(weapon), do: Map.put(weapon, :maturity, :poc)
 
   # ── Domain classification ────────────────────────────────────────────────
 

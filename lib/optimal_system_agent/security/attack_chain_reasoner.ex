@@ -105,26 +105,26 @@ defmodule OptimalSystemAgent.Security.AttackChainReasoner do
   meet the minimum evidence threshold (0.4).
   """
   @spec extend(chain()) :: {:extended, chain()} | :unchanged
+  def extend(%{hops: []}), do: :unchanged
+
   def extend(%{hops: hops} = chain) when is_list(hops) do
-    last_target = List.last(hops).target
-    extensions = ShadowGraph.outgoing_edges(last_target)
+    last_hop = List.last(hops)
+    last_target = Map.get(last_hop, :target) || Map.get(last_hop, "target")
+
+    extensions =
+      if is_binary(last_target), do: ShadowGraph.outgoing_edges(last_target), else: []
 
     new_hops =
       extensions
-      |> Enum.filter(&(&1.evidence_quality >= 0.4))
       |> Enum.map(&to_hop/1)
+      |> Enum.filter(&(&1.evidence_quality >= 0.4))
 
-    if length(new_hops) > 0 do
-      extended_chain = %{
-        chain
-        | hops: hops ++ new_hops,
-          confidence: score_path(hops ++ new_hops)
-      }
+    extended_chain =
+      chain
+      |> Map.put(:hops, hops ++ new_hops)
+      |> Map.put(:confidence, score_path(hops ++ new_hops))
 
-      {:extended, extended_chain}
-    else
-      :unchanged
-    end
+    {:extended, extended_chain}
   end
 
   def extend(_), do: :unchanged
@@ -133,11 +133,13 @@ defmodule OptimalSystemAgent.Security.AttackChainReasoner do
 
   @spec explore_from(String.t(), map()) :: [chain()]
   defp explore_from(root, graph) when is_binary(root) and is_map(graph) do
-    edges = Map.get(graph, root, [])
-    paths = []
+    edges =
+      graph
+      |> Map.get(:edges, [])
+      |> Enum.filter(&(&1.source == root))
 
     Enum.map(edges, fn edge ->
-      target = get_target(edge)
+      target = Map.get(edge, :target)
 
       hop = %{
         source: root,
@@ -150,10 +152,10 @@ defmodule OptimalSystemAgent.Security.AttackChainReasoner do
       }
 
       %{
-        id: "#{root}->#{target}",
+        id: "#{root}->#{Map.get(edge, :target)}",
         hops: [hop],
         start_asset: root,
-        end_asset: target,
+        end_asset: Map.get(edge, :target),
         total_cost: hop_score(hop),
         confidence: score_path([hop]),
         path_description: build_description(hop)
@@ -162,7 +164,11 @@ defmodule OptimalSystemAgent.Security.AttackChainReasoner do
   end
 
   @spec hop_score(map()) :: float()
-  defp hop_score(%{edge_weight: w, evidence_quality: eq, has_kev: kev}) do
+  defp hop_score(hop) when is_map(hop) do
+    w = Map.get(hop, :edge_weight, 0.5)
+    eq = Map.get(hop, :evidence_quality, 0.5)
+    kev = Map.get(hop, :has_kev, false)
+
     base = Cvss.base_score(w)
     kev_bonus = if kev, do: 1.5, else: 0.0
     base + eq * 2.0 + kev_bonus
