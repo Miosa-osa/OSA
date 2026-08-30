@@ -846,10 +846,22 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     # Agent.Context already budgets the assembled prompt against this same
     # effective window, prompt_tokens stays under max_ctx and is never truncated;
     # any leftover room becomes generation headroom.
+    # STABLE num_ctx: request the FULL effective window every turn, not a value
+    # sized to the current prompt. The per-turn sizing grew num_ctx as the
+    # conversation grew, and each bucket crossing forced Ollama to reload the
+    # model — a 30s+ cold read on a 21 GB model — mid-session, and it thrashed
+    # against any externally warmed instance. With a q4_0 KV cache a full-window
+    # allocation is cheap (~700 MiB at 128k), so pin num_ctx to the window and
+    # the model loads once and stays resident. Set :ollama_num_ctx_dynamic true
+    # to restore the old prompt-sized behaviour.
     num_ctx =
-      (prompt_tokens + num_predict + 512)
-      |> round_up_ctx()
-      |> min(max_ctx)
+      if Application.get_env(:optimal_system_agent, :ollama_num_ctx_dynamic, false) == true do
+        (prompt_tokens + num_predict + 512)
+        |> round_up_ctx()
+        |> min(max_ctx)
+      else
+        max_ctx
+      end
 
     # Never advertise a generation cap larger than the window itself.
     num_predict = min(num_predict, num_ctx)
