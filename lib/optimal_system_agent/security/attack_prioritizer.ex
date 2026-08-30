@@ -125,7 +125,7 @@ defmodule OptimalSystemAgent.Security.AttackPrioritizer do
     confidence = Map.get(weapon, :score, 0.5)
     kev_bonus = if weapon.is_kev, do: 1.5, else: 0.0
     maturity_bonus = maturity_bonus(weapon.maturity || :poc)
-    exploitability = Map.get(weapon, :code_reachable, false) ? 1.0 : 0.3
+    exploitability = if Map.get(weapon, :code_reachable), do: 1.0, else: 0.3
 
     # Weighted composite: CVSS (40%), confidence (25%), KEV (15%), maturity (10%), exploitability (10%)
     result = cvss * 0.4 + confidence * 2.5 + kev_bonus + maturity_bonus * 2.0 + exploitability
