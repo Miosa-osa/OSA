@@ -359,8 +359,12 @@ config :optimal_system_agent,
   # 32k, never above the model's trained window. A number pins it.
   ollama_num_ctx:
     (case System.get_env("OLLAMA_NUM_CTX") do
+       # Baked default: this build runs a 128k-capable local MoE with a q4_0 KV
+       # cache, and the backend is spawned by launchers that do not propagate
+       # ~/.osa/.env — so the env-driven :auto path never saw the real values.
+       # Pin 128k here so the window is deterministic regardless of spawn path.
        nil ->
-         :auto
+         215_040
 
        "auto" ->
          :auto
@@ -377,7 +381,9 @@ config :optimal_system_agent,
   # calculation (q8_0 halves it, q4_0 quarters it).
   ollama_kv_cache_type:
     (case System.get_env("OLLAMA_KV_CACHE_TYPE") do
-       nil -> "f16"
+       # Baked default: the daemon runs q4_0 (systemd drop-in); mirror it so the
+       # fit / auto-window math matches reality without depending on env.
+       nil -> "q4_0"
        s -> String.downcase(String.trim(s))
      end),
   ollama_model:
@@ -394,7 +400,9 @@ config :optimal_system_agent,
     (case System.get_env("OLLAMA_THINK") do
        "true" -> true
        "false" -> false
-       _ -> nil
+       # Baked default OFF: an unrecognised local reasoning model otherwise
+       # thinks on every turn (2s+ to say hi). Explicit OLLAMA_THINK=true re-arms.
+       _ -> false
      end),
   # OLLAMA_TOOLS: force tool schemas to be sent ("true") or withheld ("false")
   # for ALL Ollama models, overriding `Ollama.tools_decision/2` in both
