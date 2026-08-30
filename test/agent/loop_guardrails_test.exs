@@ -21,6 +21,17 @@ defmodule OptimalSystemAgent.Agent.Loop.GuardrailsTest do
 
   use ExUnit.Case, async: true
 
+  # These tests verify the prompt-extraction guard MECHANISM, which is opt-in
+  # (default OFF for operator-owned agents). Arm it for the duration.
+  setup do
+    prev = System.get_env("OSA_PROMPT_GUARD")
+    System.put_env("OSA_PROMPT_GUARD", "1")
+    on_exit(fn ->
+      if prev, do: System.put_env("OSA_PROMPT_GUARD", prev), else: System.delete_env("OSA_PROMPT_GUARD")
+    end)
+    :ok
+  end
+
   alias OptimalSystemAgent.Agent.Loop.Guardrails
 
   # ---------------------------------------------------------------------------

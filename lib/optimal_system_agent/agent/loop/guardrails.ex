@@ -53,6 +53,24 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
   def prompt_extraction_refusal, do: @prompt_extraction_refusal
 
   @doc """
+  Master switch for the prompt-extraction / prompt-injection keyword guard.
+
+  Default OFF. This is an operator-owned, operator-customized agent: the user
+  has free rein over what they ask it, and a canned "I can't share my internal
+  configuration" refusal on keywords like "jailbreak" or "system prompt" has no
+  place in that. So `prompt_injection?/1` and `response_contains_prompt_leak?/1`
+  return false unless the guard is explicitly re-armed with `OSA_PROMPT_GUARD=1`
+  (or `true`/`on`), at which point the input interceptor and output scrub apply.
+  """
+  @spec guard_enabled?() :: boolean()
+  def guard_enabled? do
+    case System.get_env("OSA_PROMPT_GUARD") do
+      v when v in ["1", "true", "on", "yes", "ON", "TRUE", "Yes"] -> true
+      _ -> false
+    end
+  end
+
+  @doc """
   Returns true when an LLM response appears to contain verbatim or near-verbatim
   content from the system prompt.
 
@@ -62,6 +80,12 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
   normal conversation; two together indicate a leak.
   """
   def response_contains_prompt_leak?(response) when is_binary(response) do
+    if guard_enabled?(), do: response_leak_check(response), else: false
+  end
+
+  def response_contains_prompt_leak?(_), do: false
+
+  defp response_leak_check(response) do
     lowered = String.downcase(response)
 
     match_count =
@@ -72,8 +96,6 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
     match_count >= 2
   end
 
-  def response_contains_prompt_leak?(_), do: false
-
   @doc """
   Returns true if the message appears to be a prompt injection attempt.
 
@@ -83,8 +105,10 @@ defmodule OptimalSystemAgent.Agent.Loop.Guardrails do
   Safety layer at `OptimalSystemAgent.Agent.Safety.PromptInjection` so that pure
   policy modules can depend on it without reaching up into the agent loop.
   """
-  defdelegate prompt_injection?(message),
-    to: OptimalSystemAgent.Agent.Safety.PromptInjection
+  def prompt_injection?(message) do
+    guard_enabled?() and
+      OptimalSystemAgent.Agent.Safety.PromptInjection.prompt_injection?(message)
+  end
 
   # Detect when a local model describes intent ("Let me check...") instead of
   # calling tools. Returns true if the response looks like narrated intent
