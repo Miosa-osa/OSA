@@ -1249,6 +1249,27 @@ defmodule OptimalSystemAgent.Agent.RunStore do
     Application.get_env(:optimal_system_agent, :agent_runs_dir) || default_runs_dir()
   end
 
+  @doc """
+  Clear all in-memory run state: the runs, tree-edge, and lease-owner tables.
+
+  Test support. RunStore's ETS tables are process-global and outlive a single
+  test, so a run started by one test stays visible to the next — which flakes
+  order-dependent assertions (e.g. "an unknown agent id → No run found" seeing a
+  leftover run). Call this in `setup` for hermetic run-store tests (mirrors
+  `Tools.FileState.reset/0`). (#208)
+  """
+  @spec reset() :: :ok
+  def reset do
+    ensure_table()
+    ensure_lease_table()
+    :ets.delete_all_objects(@table)
+    :ets.delete_all_objects(@edges_table)
+    :ets.delete_all_objects(@lease_owners)
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
   defp ensure_table do
     case :ets.whereis(@table) do
       :undefined ->

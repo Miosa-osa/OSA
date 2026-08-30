@@ -20,14 +20,24 @@ defmodule OptimalSystemAgent.Agent.ScratchpadTest do
   # default the decision table describes) for the duration. `async: false`
   # because this mutates global application env.
   setup do
-    prev = Application.get_env(:optimal_system_agent, :ollama_think)
+    # Start each test from a clean global scratchpad/provider config. Both keys
+    # are process-global Application env; a sibling test (or another file)
+    # leaving :scratchpad_enabled set flipped the `refute inject?(:anthropic)`
+    # cases to true in the full suite while they passed in isolation. Save,
+    # clear, and restore both so the module is hermetic. (#208)
+    prev_think = Application.get_env(:optimal_system_agent, :ollama_think)
+    prev_scratch = Application.get_env(:optimal_system_agent, :scratchpad_enabled)
     Application.delete_env(:optimal_system_agent, :ollama_think)
+    Application.delete_env(:optimal_system_agent, :scratchpad_enabled)
 
     on_exit(fn ->
-      case prev do
-        nil -> Application.delete_env(:optimal_system_agent, :ollama_think)
-        v -> Application.put_env(:optimal_system_agent, :ollama_think, v)
+      restore = fn
+        key, nil -> Application.delete_env(:optimal_system_agent, key)
+        key, v -> Application.put_env(:optimal_system_agent, key, v)
       end
+
+      restore.(:ollama_think, prev_think)
+      restore.(:scratchpad_enabled, prev_scratch)
     end)
 
     :ok

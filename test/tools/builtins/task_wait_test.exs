@@ -12,6 +12,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWaitTest do
   alias OptimalSystemAgent.Tools.UseContext
 
   setup do
+    # Start from a clean global RunStore. Its ETS tables are process-global and
+    # outlive a test, so runs from sibling/other tests (e.g. the incomplete
+    # agent:p:neverdone / agent:p:stuck runs created here) leaked into the
+    # "unknown agent id -> No run found" join and flaked it in the full suite.
+    # (#208)
+    OptimalSystemAgent.Agent.RunStore.reset()
+
     tmp = Path.join(System.tmp_dir!(), "osa_task_wait_#{System.unique_integer([:positive])}")
     File.mkdir_p!(tmp)
     prev = Application.get_env(:optimal_system_agent, :agent_runs_dir)
