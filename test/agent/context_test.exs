@@ -77,9 +77,13 @@ defmodule OptimalSystemAgent.Agent.ContextTest do
 
       %{messages: [_system | conversation]} = Context.build(state)
 
-      assert length(conversation) == 2
-      assert List.first(conversation).role == "user"
-      assert List.last(conversation).role == "assistant"
+      # For plain-prefix (Ollama) providers the volatile block is appended as a
+      # trailing <system-reminder> message (KV-cache prefix stability), so the
+      # real conversation is the head of the list; a trailing reminder may follow.
+      real = Enum.reject(conversation, &String.contains?(to_string(&1.content), "<system-reminder>"))
+      assert length(real) == 2
+      assert List.first(real).role == "user"
+      assert List.last(real).role == "assistant"
     end
 
     test "build/2 (with signal arg) delegates to build/1" do
@@ -213,10 +217,14 @@ defmodule OptimalSystemAgent.Agent.ContextTest do
     test "system prompt contains session id" do
       session_id = "ctx-runtime-session-#{:erlang.unique_integer([:positive])}"
       state = base_state(%{session_id: session_id})
-      %{messages: [system_msg | _]} = Context.build(state)
+      %{messages: msgs} = Context.build(state)
 
-      prompt_text = extract_system_text(system_msg)
-      assert String.contains?(prompt_text, session_id)
+      # The runtime block (session id, timestamp) is emitted every turn. For
+      # plain-prefix providers it rides in the trailing <system-reminder>
+      # message rather than the cached system prompt — so assert it appears
+      # SOMEWHERE in the assembled request, not specifically in the system block.
+      all_text = Enum.map_join(msgs, "\n", &to_string(&1.content))
+      assert String.contains?(all_text, session_id)
     end
   end
 

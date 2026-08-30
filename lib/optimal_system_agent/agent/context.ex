@@ -233,7 +233,32 @@ defmodule OptimalSystemAgent.Agent.Context do
         "total=#{total_tokens}/#{max_tok} (#{Float.round(total_tokens / max_tok * 100, 1)}%)"
     )
 
-    system_msg = build_system_message(static_base, world_state, volatile, provider, model)
+    # KV-cache prefix stability for plain-prefix caches (Ollama / lmstudio /
+    # llamacpp). Those runtimes reuse the longest byte-identical PREFIX of the
+    # request; the moment a byte changes, everything after it re-prefills. The
+    # `volatile` block (clock, turn count, recall) changes every turn — and
+    # sitting at the tail of the system message, BEFORE the conversation, it
+    # invalidated the cache for the whole conversation on every turn (~7s of
+    # re-prefill on a local model). This is the same failure `PromptCache`
+    # relocates for the Anthropic route; the plain-prefix route never got it.
+    #
+    # Fix: keep the system message to the STABLE core (static + world_state),
+    # and move `volatile` to a trailing message AFTER the conversation. Now the
+    # system prompt + history form a stable prefix the KV cache reuses in full,
+    # and only the small volatile tail + the new user message re-prefill. The
+    # model sees identical information — this is a reorder, not a removal — and
+    # trailing runtime context reads as recency, which local models attend to
+    # well. Verified informational (nothing parses volatile by position).
+    plain_prefix? =
+      OptimalSystemAgent.Providers.Registry.plain_prefix_cache?(provider, model)
+
+    {system_msg, volatile_tail} =
+      if plain_prefix? and is_binary(volatile) and volatile != "" do
+        {build_system_message(static_base, world_state, "", provider, model),
+         volatile_tail_message(volatile)}
+      else
+        {build_system_message(static_base, world_state, volatile, provider, model), nil}
+      end
 
     # Per-process build counter. Assembling this message is the expensive part
     # of preparing a request — 21 dynamic blocks, each with its own budget —
@@ -243,7 +268,19 @@ defmodule OptimalSystemAgent.Agent.Context do
     # than a belief. See `ReactLoop.cached_context/1`.
     Process.put(:osa_context_builds, Process.get(:osa_context_builds, 0) + 1)
 
-    %{messages: [system_msg | conversation]}
+    messages = [system_msg | conversation]
+    messages = if volatile_tail, do: messages ++ [volatile_tail], else: messages
+
+    %{messages: messages}
+  end
+
+  # The volatile block as a trailing message. Wrapped in <system-reminder> so
+  # the model reads it as operating context, not as something the user typed —
+  # the same convention `Providers.Ollama.demote_trailing_system/1` already
+  # uses. Role "user" because a trailing "system" role is rejected by strict
+  # chat templates (Qwen) and demoted to exactly this shape anyway.
+  defp volatile_tail_message(volatile) do
+    %{role: "user", content: "<system-reminder>\n" <> volatile <> "\n</system-reminder>"}
   end
 
   @doc """

@@ -886,6 +886,25 @@ defmodule OptimalSystemAgent.Providers.Registry do
   def anthropic_prompt_cache?(_target, _model), do: false
 
   @doc """
+  True for providers whose prompt cache is a plain **byte-prefix** match of the
+  request — the local runtimes (Ollama, LM Studio, llama.cpp). Their llama.cpp
+  KV cache reuses the longest identical prefix and re-prefills from the first
+  changed byte; there is no `cache_control` field to place breakpoints with.
+
+  `Agent.Context` uses this to keep the volatile block (clock, turn count,
+  recall) OUT of the system message and in a trailing message instead, so the
+  stable system-prompt-plus-history prefix stays byte-identical turn to turn and
+  the cache reuses all of it — the plain-prefix analogue of what
+  `Providers.PromptCache` does for the Anthropic route. Anthropic itself is
+  excluded here: it has its own `cache_control` path and must not be double-handled.
+  """
+  @spec plain_prefix_cache?(atom() | {:compat, atom()}, String.t() | nil) :: boolean()
+  def plain_prefix_cache?(provider, model \\ nil)
+  def plain_prefix_cache?(p, _model) when p in [:ollama, :lmstudio, :llamacpp], do: true
+  def plain_prefix_cache?({:compat, p}, _model) when p in [:ollama, :lmstudio, :llamacpp], do: true
+  def plain_prefix_cache?(_target, _model), do: false
+
+  @doc """
   The model this request will actually be served by — never the raw `opts` value.
 
   `is_binary(model)` in `anthropic_prompt_cache?/2` is correct as a guard and
