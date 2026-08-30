@@ -61,6 +61,59 @@ defmodule OptimalSystemAgent.Security.ShadowGraph do
   @spec new() :: graph()
   def new, do: %{nodes: %{}, edges: [], processed_notes: MapSet.new()}
 
+  @table :osa_security_shadow_graph
+
+  @doc """
+  Session-scoped graph view. Returns the stored graph for `session_id`, or an
+  empty graph when nothing was stored yet.
+  """
+  @spec get_graph(String.t()) :: graph()
+  def get_graph(session_id) when is_binary(session_id) do
+    ensure_table()
+
+    case :ets.lookup(@table, session_id) do
+      [{^session_id, graph}] -> graph
+      [] -> new()
+    end
+  end
+
+  @doc "Store a session's graph so path queries (roots, outgoing edges) can find it."
+  @spec store_graph(String.t(), graph()) :: :ok
+  def store_graph(session_id, graph) when is_binary(session_id) and is_map(graph) do
+    ensure_table()
+    :ets.insert(@table, {session_id, graph})
+    :ok
+  end
+
+  @doc "Single-hop attack paths (edges) for a session's stored graph."
+  @spec attack_paths(String.t()) :: [edge()]
+  def attack_paths(session_id) when is_binary(session_id) do
+    get_graph(session_id) |> Map.get(:edges, [])
+  end
+
+  @doc "Root nodes (discovered hosts) for a session's graph."
+  @spec roots(String.t()) :: [node_id()]
+  def roots(session_id) when is_binary(session_id) do
+    get_graph(session_id) |> hosts() |> Enum.map(& &1.id)
+  end
+
+  @doc "All stored edges whose source is `node_id`, across sessions."
+  @spec outgoing_edges(node_id()) :: [edge()]
+  def outgoing_edges(node_id) when is_binary(node_id) do
+    ensure_table()
+
+    :ets.tab2list(@table)
+    |> Enum.flat_map(fn {_sid, graph} -> Map.get(graph, :edges, []) end)
+    |> Enum.filter(&(&1.source == node_id))
+  end
+
+  defp ensure_table do
+    case :ets.whereis(@table) do
+      :undefined -> :ets.new(@table, [:named_table, :public, :set, read_concurrency: true])
+      _ -> :ok
+    end
+  end
+
   @doc "Update the graph from a list of structured notes."
   @spec update_from_notes(graph(), [map()]) :: graph()
   def update_from_notes(graph, notes) when is_list(notes) do

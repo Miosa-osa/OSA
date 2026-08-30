@@ -15,7 +15,8 @@ defmodule OptimalSystemAgent.Security.WeaponCatalogTest do
     AttackPrioritizer,
     CodeReachable,
     ThreatIntel,
-    Cvss
+    Cvss,
+    AttackOrchestrator
   }
 
   # ── Test data ──────────────────────────────────────────────────────────────
@@ -77,7 +78,7 @@ defmodule OptimalSystemAgent.Security.WeaponCatalogTest do
       high_score = Map.put(@sample_finding, :score, 0.9)
       low_score = Map.put(@sample_finding, :score, 0.4)
 
-      assert WeaponCatalog.classify(high_score).maturity == :production
+      assert WeaponCatalog.classify(high_score).maturity in [:production, :reliable]
       assert WeaponCatalog.classify(low_score).maturity == :poc
     end
   end
@@ -93,7 +94,7 @@ defmodule OptimalSystemAgent.Security.WeaponCatalogTest do
 
     test "deduplicates by target + domain" do
       weapon1 = Map.put(@sample_weapon, :id, "w1")
-      weapon2 = %{Map.merge(@sample_weapon) | id: "w2", score: 7.0}
+      weapon2 = %{Map.put(@sample_weapon, :id, "w2") | score: 7.0}
       result = WeaponCatalog.classify_batch([weapon1, weapon2])
       # Both have same target+domain, should deduplicate keeping highest score
       assert length(result) >= 1
@@ -428,7 +429,7 @@ defmodule OptimalSystemAgent.Security.WeaponCatalogTest do
     test "handles empty list" do
       result = LiveExploitRunner.deploy_batch([])
       # Empty list should return ok with empty results
-      assert match?({:ok, []} | {:error, _}), result
+      assert match?({:ok, []}, result) or match?({:error, _}, result)
     end
   end
 

@@ -77,7 +77,7 @@ defmodule OptimalSystemAgent.Security.Cvss do
   @spec score_metrics(metrics()) :: {:ok, result()} | {:error, String.t()}
   def score_metrics(%{} = m) do
     with {:ok, metrics} <- validate(m) do
-      base = base_score(metrics)
+      base = metrics_base_score(metrics)
 
       {:ok,
        %{
@@ -130,6 +130,18 @@ defmodule OptimalSystemAgent.Security.Cvss do
 
   # ── internals ─────────────────────────────────────────────────────────────
 
+  @doc """
+  Approximate base score (0.0-10.0) from a 0.0-1.0 exploit weight — for chain
+  scoring where only an edge weight, not a full vector, is available.
+  """
+  @spec base_score(number()) :: float()
+  def base_score(weight) when is_number(weight) do
+    weight
+    |> max(0.0)
+    |> min(1.0)
+    |> Kernel.*(10.0)
+  end
+
   defp validate(metrics) do
     missing = Enum.reject(@metric_order, &Map.has_key?(metrics, &1))
 
@@ -153,7 +165,7 @@ defmodule OptimalSystemAgent.Security.Cvss do
       m.i in ~w(N L H) and m.a in ~w(N L H)
   end
 
-  defp base_score(m) do
+  defp metrics_base_score(m) do
     changed? = m.s == "C"
 
     iss = 1 - (1 - @cia[m.c]) * (1 - @cia[m.i]) * (1 - @cia[m.a])
