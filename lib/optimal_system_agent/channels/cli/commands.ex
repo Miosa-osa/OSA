@@ -174,9 +174,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     IO.puts("")
     IO.puts("  #{@dim}Compacting context...#{@reset}")
 
-    # CC parity: `/compact <instructions>` threads user guidance into the
-    # summary prompt via the proactive path; bare `/compact` keeps the
-    # legacy reactive Loop.compact path.
+    # Both forms use the aggressive proactive fold (the 9-section LLM summary
+    # that folds old turns down to a small summary + recent tail).
+    # `/compact <instructions>` threads user guidance into the summary prompt;
+    # bare `/compact` folds with no extra instructions. The old bare path used
+    # the light reactive `Loop.compact` trimmer, which only shaved ~15% off.
     case String.trim(args || "") do
       "" ->
         compact_without_instructions(session_id)
@@ -204,34 +206,27 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       session_id
   end
 
-  # Bare `/compact` — original reactive compaction with before/after stats.
+  # Bare `/compact` — aggressive proactive fold (no extra instructions), with
+  # before/after stats. Same crush as `/compact <instructions>`.
   defp compact_without_instructions(session_id) do
-    case Loop.get_state(session_id) do
-      {:ok, state} ->
-        before_tokens = state[:tokens_used] || state[:estimated_tokens] || 0
+    case Loop.proactive_compact(session_id, nil) do
+      {:ok, stats} ->
+        saved = stats.tokens_before - stats.tokens_after
 
-        case Loop.compact(session_id) do
-          :ok ->
-            case Loop.get_state(session_id) do
-              {:ok, after_state} ->
-                after_tokens = after_state[:tokens_used] || after_state[:estimated_tokens] || 0
-                saved = before_tokens - after_tokens
-                pct = if before_tokens > 0, do: round(saved / before_tokens * 100), else: 0
+        pct =
+          if stats.tokens_before > 0,
+            do: round(saved / stats.tokens_before * 100),
+            else: 0
 
-                IO.puts(
-                  "  #{@green}#{@reset} Compacted: #{format_tokens(before_tokens)} -> #{format_tokens(after_tokens)} (#{pct}% reduction)"
-                )
+        IO.puts(
+          "  #{@green}#{@reset} Compacted: #{format_tokens(stats.tokens_before)} -> #{format_tokens(stats.tokens_after)} (#{pct}% reduction)"
+        )
 
-              _ ->
-                IO.puts("  #{@green}#{@reset} Compacted successfully")
-            end
-
-          {:error, reason} ->
-            IO.puts("  #{@yellow}error: #{reason}#{@reset}")
-        end
-
-      _ ->
+      {:error, :no_session} ->
         IO.puts("  #{@yellow}error: no active session#{@reset}")
+
+      {:error, reason} ->
+        IO.puts("  #{@yellow}error: #{inspect(reason)}#{@reset}")
     end
   end
 
