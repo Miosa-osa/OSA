@@ -182,7 +182,7 @@ defmodule OptimalSystemAgent.Security.AttackOrchestrator do
     results =
       Enum.map(prioritized, fn weapon ->
         case LiveExploitRunner.deploy(weapon) do
-          {:ok, result} when is_map(result) and Map.get(result, :confirmed) == true ->
+          {:ok, %{confirmed: true} = result} ->
             %{state.completed | end: [weapon.target]}
             {:depleted, result}
 
