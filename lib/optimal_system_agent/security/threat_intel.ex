@@ -291,5 +291,5 @@ defmodule OptimalSystemAgent.Security.ThreatIntel do
     Date.day_number_diff(date2, date1) |> int_max(0)
   end
 
-  defp int_max(a, b), do: if (a > b, do: a, else: b)
+  defp int_max(a, b), do: if(a > b, do: a, else: b)
 end
