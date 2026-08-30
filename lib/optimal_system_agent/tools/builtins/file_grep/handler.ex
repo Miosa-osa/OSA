@@ -33,6 +33,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
                          "the ordinary search skips. They are shown because the ordinary search " <>
                          "found nothing — the paths are real.)"
 
+  # Directories the ordinary search never descends into. Defined here, ABOVE
+  # the widened-result labelling that reads it — a module attribute is resolved
+  # at compile time in file order, so a reference above the definition silently
+  # reads `nil`.
+  @pruned_dirs ~w(.git node_modules _build deps target __pycache__ .venv venv
+                  .tox .mypy_cache .pytest_cache .next .nuxt .gradle vendor)
+
   # ── Stage 1: Input validation ─────────────────────────────────────────
 
   @spec validate(map(), UseContext.t()) ::
@@ -182,8 +189,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
   defp do_empty_result(pattern, path, opts, backend) do
     case try_ripgrep(pattern, path, opts, unrestricted: true) do
       {:ok, output} ->
+        # The widened pass lifts .gitignore AND the dotfile skip, but it does
+        # NOT lift ripgrep's built-in dependency-directory filtering — and
+        # outside a git repo there is no .gitignore for the ordinary pass to
+        # consult either, so `node_modules` hits can come back here with no
+        # note at all (the fallback's `covered_scan` labels the same result).
+        # When every match line names a file under a dependency/build
+        # directory, say so, exactly as the fallback does.
+        note =
+          if all_under_pruned_dirs?(output, path),
+            do: @pruned_matches_note,
+            else: @ignored_matches_note
+
         {:ok,
-         (output <> @ignored_matches_note)
+         (output <> note)
          |> bound_output()
          |> with_spread_trailer()}
 
@@ -191,6 +210,45 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
         # "Nothing found" is the one answer a degraded backend gets wrong, so it
         # is the one answer that names the engine that produced it.
         {:ok, @no_matches_anywhere <> Backend.empty_result_note(backend)}
+    end
+  end
+
+  # True when every match line in a widened ripgrep result names a file under
+  # one of the pruned dependency/build directories relative to `path`. Match
+  # lines look like `path:line:text` (or `path-line-text` with context); a
+  # summary line never contains a path separator followed by the file name, so
+  # checking the path component of each line is enough. An empty output is not
+  # "all pruned" — the caller treats it as no matches.
+  defp all_under_pruned_dirs?(output, path) do
+    lines =
+      output
+      |> String.split("\n", trim: true)
+      |> Enum.reject(&(&1 == "--"))
+
+    lines != [] and Enum.all?(lines, fn line -> under_pruned_dir?(line, path) end)
+  end
+
+  defp under_pruned_dir?(line, root) do
+    file = line |> split_match_path() |> hd()
+
+    case Path.relative_to(file, root) do
+      :error ->
+        false
+
+      relative ->
+        relative
+        |> Path.split()
+        |> Enum.any?(&(&1 in @pruned_dirs))
+    end
+  end
+
+  # `path:line:text` / `path-line-text` — the separator runs are what rg emits;
+  # a Windows-style path cannot appear here on a POSIX node, and on Windows the
+  # separators rg itself prints are still `:`/`-`.
+  defp split_match_path(line) do
+    case :binary.split(line, [":", "-"]) do
+      [file | _] -> [file]
+      [] -> [line]
     end
   end
 
@@ -546,8 +604,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
   # Returns `{files, truncated?}` — the boolean is the whole point. A caller
   # that cannot tell a complete search from a partial one cannot tell "absent"
   # from "not looked at".
-  @pruned_dirs ~w(.git node_modules _build deps target __pycache__ .venv venv
-                  .tox .mypy_cache .pytest_cache .next .nuxt .gradle vendor)
 
   defp collect_files(path, glob, mode \\ []) do
     if File.regular?(path) do

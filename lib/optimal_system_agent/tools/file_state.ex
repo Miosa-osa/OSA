@@ -500,8 +500,16 @@ defmodule OptimalSystemAgent.Tools.FileState do
 
   # Canonical absolute path: expand, then resolve the full symlink chain so the
   # key agrees across file_read (resolves symlinks), file_write and
-  # multi_file_edit (expand only) — resolution here makes them converge.
-  defp canonical(path), do: OptimalSystemAgent.Agent.Safety.PathCanon.canonicalize(path)
+  # multi_file_edit (expand only) — resolution here makes them converge. The
+  # key is also Unicode NFC-normalised: macOS stores names in NFD while callers
+  # commonly type NFC, and a rescue read under one form must satisfy
+  # check_read/2 for the other — otherwise the caller reads successfully and is
+  # then told it never read the file.
+  defp canonical(path) do
+    path
+    |> OptimalSystemAgent.Agent.Safety.PathCanon.canonicalize()
+    |> :unicode.characters_to_nfc_binary()
+  end
 
   defp stat(path) do
     case File.stat(path, time: :posix) do

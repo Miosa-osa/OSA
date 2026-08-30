@@ -9,9 +9,29 @@ defmodule OptimalSystemAgent.Agent.ScratchpadTest do
     - Anthropic uses native thinking (no injection)
     - Thinking events are emitted via Bus
   """
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Agent.Scratchpad
+
+  # `inject?/1` consults `Ollama.reasoning_decision/2`, which honours the
+  # `:ollama_think` app env — and runtime.exs bakes `false` for an unset
+  # OLLAMA_THINK. Under that baked value a cloud tag answers {false, :config}
+  # and the scaffold decision flips, so pin the env to UNSET (the serving-mode
+  # default the decision table describes) for the duration. `async: false`
+  # because this mutates global application env.
+  setup do
+    prev = Application.get_env(:optimal_system_agent, :ollama_think)
+    Application.delete_env(:optimal_system_agent, :ollama_think)
+
+    on_exit(fn ->
+      case prev do
+        nil -> Application.delete_env(:optimal_system_agent, :ollama_think)
+        v -> Application.put_env(:optimal_system_agent, :ollama_think, v)
+      end
+    end)
+
+    :ok
+  end
 
   # ---------------------------------------------------------------------------
   # inject?/1 — provider-based injection decision

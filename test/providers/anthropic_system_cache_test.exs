@@ -253,7 +253,9 @@ defmodule OptimalSystemAgent.Providers.AnthropicSystemCacheTest do
     test "a caller exceeding the limit has its LATEST markers dropped, not its earliest" do
       # Earliest markers cover the longest stable prefix, so they are the ones
       # worth keeping. Six marked blocks in, at most four out, and the survivors
-      # must be the first four.
+      # must be the first four. The 10s assert_receive window in the helper is
+      # generous because under full-suite load the stub round-trip can be slow;
+      # a timeout there is a load flake, not a regression signal.
       blocks =
         for i <- 1..6 do
           %{type: "text", text: "block #{i} " <> String.duplicate("x", 200)}
@@ -365,6 +367,8 @@ defmodule OptimalSystemAgent.Providers.AnthropicSystemCacheTest do
       model: @model
     )
 
+    # 10s window: under full-suite load the stub round-trip can be slow, and a
+    # timeout here is a load flake rather than a regression signal.
     assert_receive {:captured_body, body}, 10_000
     body
   end

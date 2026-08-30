@@ -73,7 +73,7 @@ defmodule OptimalSystemAgent.Security.ThreatIntel do
     case cve && lookup(cve) do
       {:ok, entry} ->
         ransomware_bonus =
-          case entry["known_ransomware_campaign_use"] || entry["KnownRansomwareCampaignUse"] do
+          case entry["knownRansomwareCampaignUse"] || entry["known_ransomware_campaign_use"] do
             nil -> 0.0
             val when is_binary(val) -> String.upcase(val) |> ransomware_score()
             _ -> 0.0
@@ -251,7 +251,11 @@ defmodule OptimalSystemAgent.Security.ThreatIntel do
 
   defp ransomware_score(nil), do: 0.0
   defp ransomware_score("known"), do: 1.0
-  defp ransom_score("more_than_known_ransomware_campaign_use"), do: 1.5
+  defp ransomware_score(val) when is_binary(val), do: String.upcase(val) |> ransom_score()
+  defp ransomware_score(_), do: 0.0
+
+  defp ransom_score("KNOWN"), do: 1.0
+  defp ransom_score("MORE_THAN_KNOWN_RANSOMWARE_CAMPAIGN_USE"), do: 1.5
   defp ransom_score(_), do: 0.0
 
   @doc "Calculate the recency bonus for a KEV entry based on its date_added."
@@ -277,8 +281,8 @@ defmodule OptimalSystemAgent.Security.ThreatIntel do
   @doc "Parse a KEV date string (YYYY-MM-DD format)."
   @spec parse_date(String.t()) :: {:ok, Date.t()} | :error
   def parse_date(date_str) when is_binary(date_str) do
-    case Date.parse(date_str) do
-      {:ok, date, _} -> {:ok, date}
+    case Date.from_iso8601(date_str) do
+      {:ok, date} -> {:ok, date}
       {:error, _reason} -> :error
     end
   end
@@ -288,7 +292,7 @@ defmodule OptimalSystemAgent.Security.ThreatIntel do
   @doc "Compute days between two dates."
   @spec days_between(Date.t(), Date.t()) :: non_neg_integer()
   def days_between(date1, date2) when is_struct(date1, Date) and is_struct(date2, Date) do
-    Date.day_number_diff(date2, date1) |> int_max(0)
+    Date.diff(date2, date1) |> int_max(0)
   end
 
   defp int_max(a, b), do: if(a > b, do: a, else: b)

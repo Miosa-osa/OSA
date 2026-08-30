@@ -151,21 +151,53 @@ defmodule OptimalSystemAgent.ReleaseNotes do
   # against it said "up to date". Sorting is ours to do, under the same
   # normalization every other compare here uses.
   defp latest_release_tag do
-    case OptimalSystemAgent.Git.cmd(["tag", "--list", "v*"], stderr_to_stdout: true) do
-      {out, 0} ->
-        out
-        |> String.split("\n", trim: true)
-        |> Enum.map(&String.trim/1)
-        |> Enum.filter(&Regex.match?(~r/^v?\d+\.\d+\.\d+/, &1))
-        |> Enum.map(&String.trim_leading(&1, "v"))
-        |> Enum.filter(&parseable?/1)
-        |> Enum.max_by(&parse_semver!/1, Version, fn -> nil end)
+    if osa_source_checkout?() do
+      case OptimalSystemAgent.Git.cmd(["tag", "--list", "v*"], stderr_to_stdout: true) do
+        {out, 0} ->
+          out
+          |> String.split("\n", trim: true)
+          |> Enum.map(&String.trim/1)
+          |> Enum.filter(&Regex.match?(~r/^v?\d+\.\d+\.\d+/, &1))
+          |> Enum.map(&String.trim_leading(&1, "v"))
+          |> Enum.filter(&parseable?/1)
+          |> Enum.max_by(&parse_semver!/1, Version, fn -> nil end)
 
-      _ ->
-        nil
+        _ ->
+          nil
+      end
     end
   rescue
     _ -> nil
+  end
+
+  # Git tags only name OSA's own releases when we are inside OSA's own source
+  # checkout. Launched from another project's directory, `git tag` returns THAT
+  # project's tags — a neighbour repo whose newest tag out-ranks OSA's running
+  # version then masquerades as an OSA release and produces a phantom
+  # "update available" (e.g. running OSA inside a CLI repo tagged v1.1.x). Only
+  # trust the tag list when `origin` is the OSA repository; otherwise fall back
+  # to the bundled changelog, which can only ever ESCALATE, so the honest answer
+  # becomes "could not check" rather than a false update.
+  @source_repo "miosa-osa/osa"
+  defp osa_source_checkout? do
+    case OptimalSystemAgent.Git.cmd(["remote", "get-url", "origin"], stderr_to_stdout: true) do
+      {out, 0} -> owner_repo(out) == @source_repo
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  # "https://github.com/Miosa-osa/OSA.git" or "git@github.com:Miosa-osa/OSA.git"
+  #   -> "miosa-osa/osa"  (owner/repo, case-folded, ".git" stripped)
+  defp owner_repo(remote_url) do
+    remote_url
+    |> String.trim()
+    |> String.downcase()
+    |> String.replace_suffix(".git", "")
+    |> String.split(~r{[/:]}, trim: true)
+    |> Enum.take(-2)
+    |> Enum.join("/")
   end
 
   defp parse_semver!(v) do

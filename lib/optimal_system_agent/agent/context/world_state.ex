@@ -137,6 +137,22 @@ defmodule OptimalSystemAgent.Agent.Context.WorldState do
       semantics: :replace,
       rank: 2
     },
+    # The durable Task Brief (audit gap M1) is a WORLD-STATE section, not a
+    # per-turn essential. It is immutable per session, so once emitted its
+    # digest never changes and the ledger replays it byte-for-byte — a stable
+    # part of the system message. It used to ride in the volatile group, and
+    # the KV-cache volatile-tail reorder (2e00ff46) then demoted it onto a
+    # trailing role:"user" message: no longer in the role:"system" block the
+    # Compactor preserves verbatim, so a compaction pass could fold away the
+    # founding instruction of a days-long run — the exact failure M1 exists to
+    # prevent. Rank 0: the founding goal outranks every advisory block.
+    %{
+      id: :task_brief,
+      label: "task_brief",
+      name: "task brief",
+      semantics: :replace,
+      rank: 0
+    },
     %{
       id: :context_guidance,
       label: "scratchpad",

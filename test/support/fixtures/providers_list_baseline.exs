@@ -39,6 +39,18 @@
         ctx: 1_000_000,
         recommended: true
       },
+      # DELIBERATE post-snapshot addition, not drift. The bare GLM-5.3 flagship
+      # (glm-5.3:cloud) went live on Ollama (2026-08-30, no longer a 404) and was
+      # added to `Providers.OllamaCloud`, so it flows into `providers_list/0` and
+      # the frozen baseline has to carry it too.
+      %{
+        id: "glm-5.3:cloud",
+        name: "GLM-5.3",
+        tools: true,
+        note: "1M ctx, 753B MoE - Z.ai flagship, long-horizon agentic coding",
+        ctx: 1_048_576,
+        recommended: false
+      },
       # DELIBERATE post-snapshot addition, not drift. The GLM-5.3 Flash line
       # shipped (2026-08-26); `glm-5.3-flash:cloud` was added to
       # `Providers.OllamaCloud` (first natively-multimodal GLM text tag), so it
@@ -99,6 +111,17 @@
         tools: true,
         note: "512K ctx, native multimodal + agentic",
         ctx: 524_288,
+        recommended: false
+      },
+      # DELIBERATE post-snapshot addition, not drift. The M2-series MiniMax M2.7
+      # (minimax-m2.7:cloud) was added to `Providers.OllamaCloud`, so it flows
+      # into `providers_list/0` and the frozen baseline has to carry it too.
+      %{
+        id: "minimax-m2.7:cloud",
+        name: "MiniMax M2.7",
+        tools: true,
+        note: "192K ctx, 229B - M2-series coding + agentic",
+        ctx: 196_608,
         recommended: false
       },
       %{

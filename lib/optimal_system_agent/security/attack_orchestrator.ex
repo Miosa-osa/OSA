@@ -77,6 +77,9 @@ defmodule OptimalSystemAgent.Security.AttackOrchestrator do
       confidence_threshold: confidence_threshold
     }
 
+    ensure_registry()
+    :ets.insert(:osa_attack_ora, {session_id, self()})
+
     {:ok, state}
   end
 
@@ -182,7 +185,9 @@ defmodule OptimalSystemAgent.Security.AttackOrchestrator do
     results =
       Enum.map(prioritized, fn weapon ->
         case LiveExploitRunner.deploy(weapon) do
-          {:ok, result} when is_map(result) and Map.get(result, :confirmed) == true ->
+          {:ok, result}
+          when is_map(result) and is_map_key(result, :confirmed) and
+                 :erlang.map_get(:confirmed, result) == true ->
             %{state.completed | end: [weapon.target]}
             {:depleted, result}
 
@@ -204,7 +209,22 @@ defmodule OptimalSystemAgent.Security.AttackOrchestrator do
 
     # Step 7: Check for post-exploitation opportunities via ChainReasoner
     chains = AttackChainReasoner.find_chains(state.session_id)
-    new_weapons = Enum.map(chains, &WeaponCatalog.add/2)
+
+    new_weapons =
+      chains
+      |> Enum.flat_map(& &1.hops)
+      |> Enum.map(fn hop ->
+        %{
+          id: "chain-#{:erlang.phash2(hop, 1000)}",
+          domain: hop.vulnerability_class || :rce,
+          target: hop.target,
+          score: hop_score_to_weapon_score(hop),
+          maturity: :poc,
+          is_kev: hop.has_kev,
+          code_reachable: true,
+          evidence_count: 1
+        }
+      end)
 
     final_state = %{state | weapons: state.weapons ++ new_weapons}
 
@@ -213,18 +233,19 @@ defmodule OptimalSystemAgent.Security.AttackOrchestrator do
 
   @doc """
   Get the next target to attack based on prioritization.
-  Considers confidence threshold and evidence quality.
+
+  Ranks the session's weapons via AttackPrioritizer and returns the first
+  entry whose confidence meets the state's threshold, or nil.
   """
   @spec next_target(state()) :: map() | nil
-  def next_target(%{next_target: target}) when is_map(target) do
-    if target.confidence >= target.confidence_threshold do
-      target
-    else
-      AttackPrioritizer.next_above_threshold(state)
-    end
+  def next_target(%{weapons: weapons, confidence_threshold: threshold})
+      when is_list(weapons) and weapons != [] do
+    weapons
+    |> AttackPrioritizer.rank()
+    |> Enum.find(&(&1.confidence >= threshold))
   end
 
-  def next_target(state), do: next_target(state, state.weapons)
+  def next_target(_state), do: nil
 
   # ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -242,5 +263,19 @@ defmodule OptimalSystemAgent.Security.AttackOrchestrator do
   @spec session_id_of_finding(map()) :: String.t() | nil
   defp session_id_of_finding(finding) when is_map(finding) do
     Map.get(finding, :session_id) || Map.get(finding, "session_id")
+  end
+
+  @spec ensure_registry() :: :ok
+  defp ensure_registry do
+    case :ets.whereis(:osa_attack_ora) do
+      :undefined -> :ets.new(:osa_attack_ora, [:named_table, :public, :set])
+      _ -> :ok
+    end
+  end
+
+  @spec hop_score_to_weapon_score(map()) :: float()
+  defp hop_score_to_weapon_score(hop) do
+    (Map.get(hop, :edge_weight, 0.5) * 0.6 + Map.get(hop, :evidence_quality, 0.5) * 0.4)
+    |> min(1.0)
   end
 end

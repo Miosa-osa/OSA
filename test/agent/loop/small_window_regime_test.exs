@@ -44,11 +44,23 @@ defmodule OptimalSystemAgent.Agent.Loop.SmallWindowRegimeTest do
     previous = Application.get_env(:optimal_system_agent, :effort_level)
     Effort.set(:medium)
 
+    # The premise of this file is that @small_model's window is capped by the
+    # LOCAL num_ctx ceiling. runtime.exs bakes :ollama_num_ctx to 215_040 when
+    # OLLAMA_NUM_CTX is unset, which caps nothing below 40k — pin a genuinely
+    # small ceiling so the small-window regime is exercised deterministically.
+    prev_num_ctx = Application.get_env(:optimal_system_agent, :ollama_num_ctx)
+    Application.put_env(:optimal_system_agent, :ollama_num_ctx, 32_768)
+
     on_exit(fn ->
       if previous do
         Application.put_env(:optimal_system_agent, :effort_level, previous)
       else
         Application.delete_env(:optimal_system_agent, :effort_level)
+      end
+
+      case prev_num_ctx do
+        nil -> Application.delete_env(:optimal_system_agent, :ollama_num_ctx)
+        v -> Application.put_env(:optimal_system_agent, :ollama_num_ctx, v)
       end
     end)
 

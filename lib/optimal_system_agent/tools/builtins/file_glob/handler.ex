@@ -161,8 +161,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGlob.Handler do
   # when the caller NAMES a noise dir in the pattern, so `.git/**` still works
   # (matching `filter_git?` in `glob_in/2`).
   defp ripgrep_files(exe, pattern, base) do
+    # `rg --glob` matches against each path RELATIVE TO THE CURRENT WORKING
+    # DIRECTORY (or absolute, for absolute paths), not relative to the search
+    # root — so a base-relative pattern like `.git/*` never matches
+    # `/somewhere/else/.git/HEAD` when the process cwd is elsewhere. Pass the
+    # pattern twice: as given, and anchored under `**/`, which is the
+    # base-relative reading the caller (and `Path.wildcard/2`, the fallback
+    # walk) means. Deduplicated so a pattern already written anchored does not
+    # double-match.
+    globs = Enum.uniq([pattern, "**/" <> pattern])
+
     args =
-      ["--files", "--hidden", "--glob", pattern] ++
+      ["--files", "--hidden"] ++
+        Enum.flat_map(globs, &["--glob", &1]) ++
         noise_exclusion_globs(pattern) ++ [base]
 
     case BoundedCmd.run(exe, args,

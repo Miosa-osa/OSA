@@ -146,7 +146,17 @@ defmodule OptimalSystemAgent.GitTest do
   defp benign_repo, do: build_repo("osa_git_benign", fn _dir -> :ok end)
 
   defp build_repo(name, poison) do
-    dir = Path.join(System.tmp_dir!(), "#{name}_#{:erlang.phash2(name)}")
+    # Scoped to THIS OS process: two concurrent `mix test` runs used to derive
+    # the identical phash2-only path, and one run's rebuild (rm_rf + re-init)
+    # tore the repo out from under the other — a half-built fixture (no
+    # .git/config, empty evil/) then failed the security assertions with the
+    # hardening looking guilty when it was innocent. Same convention
+    # topology_test uses for its fixtures.
+    dir =
+      Path.join(
+        System.tmp_dir!(),
+        "#{name}_#{System.pid()}_#{:erlang.phash2(name)}"
+      )
 
     if not File.dir?(Path.join(dir, ".git")) do
       File.rm_rf!(dir)
