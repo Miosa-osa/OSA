@@ -22,6 +22,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileReadDiagnosticsTest do
   @unix? match?({:unix, _}, :os.type())
 
   setup do
+    # Start each test from a clean read-ledger. FileState is a process-global
+    # ETS table shared by the whole suite; accumulated entries from earlier tests
+    # (not concurrency — this module is async: false) are what made the
+    # rescued-read assertion flake in the full run but pass in isolation.
+    OptimalSystemAgent.Tools.FileState.reset()
+
     tmp =
       System.tmp_dir!()
       |> OptimalSystemAgent.Agent.Safety.PathCanon.canonicalize()
