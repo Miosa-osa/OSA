@@ -22,6 +22,27 @@ defmodule OptimalSystemAgent.Agent.ContextTest do
 
   alias OptimalSystemAgent.Agent.Context
 
+  # Every test starts from a clean :default_provider. It is a process-global
+  # Application env that this file's "provider-specific system message format"
+  # describe (and other test files) set to :anthropic. A leaked non-plain-prefix
+  # provider makes build/1 route the runtime block through the cached system
+  # prompt and drop the current session id — which flaked "contains session id"
+  # in the full suite while it passed in isolation. Reset per test; describes
+  # that need a specific provider still set it themselves after this. (#208)
+  setup do
+    prev_provider = Application.get_env(:optimal_system_agent, :default_provider)
+    Application.delete_env(:optimal_system_agent, :default_provider)
+
+    on_exit(fn ->
+      case prev_provider do
+        nil -> Application.delete_env(:optimal_system_agent, :default_provider)
+        v -> Application.put_env(:optimal_system_agent, :default_provider, v)
+      end
+    end)
+
+    :ok
+  end
+
   # ---------------------------------------------------------------------------
   # Minimal valid state fixture
   # ---------------------------------------------------------------------------
