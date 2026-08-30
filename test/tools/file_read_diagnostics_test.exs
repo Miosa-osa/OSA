@@ -18,10 +18,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileReadDiagnosticsTest do
 
   setup do
     tmp =
-      Path.join(
-        System.tmp_dir!(),
-        "osa_file_read_diag_#{System.unique_integer([:positive])}"
-      )
+      System.tmp_dir!()
+      |> OptimalSystemAgent.Agent.Safety.PathCanon.canonicalize()
+      |> Path.join("osa_file_read_diag_#{System.unique_integer([:positive])}")
 
     File.mkdir_p!(tmp)
     on_exit(fn -> File.rm_rf(tmp) end)

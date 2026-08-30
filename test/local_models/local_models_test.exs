@@ -56,6 +56,24 @@ defmodule OptimalSystemAgent.LocalModelsTest do
   end
 
   describe "Fit.assess/3" do
+    setup do
+      # The KV-cache term is scaled by the daemon's quantisation
+      # (`ollama_kv_cache_type`, baked to "q4_0" by runtime.exs). The fit
+      # expectations below are written against the f16 (unscaled) cache, so
+      # pin the scale explicitly instead of inheriting the operator's config.
+      prev = Application.get_env(:optimal_system_agent, :ollama_kv_cache_type)
+      Application.put_env(:optimal_system_agent, :ollama_kv_cache_type, "f16")
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:optimal_system_agent, :ollama_kv_cache_type)
+          v -> Application.put_env(:optimal_system_agent, :ollama_kv_cache_type, v)
+        end
+      end)
+
+      :ok
+    end
+
     test "a 16.5 GB hybrid 27B fits a 24 GB card at 32k ctx and gets a bandwidth-based estimate" do
       f =
         Fit.assess(
@@ -422,6 +440,20 @@ defmodule OptimalSystemAgent.LocalModelsTest do
   end
 
   describe "auto_ctx_for/3" do
+    setup do
+      prev = Application.get_env(:optimal_system_agent, :ollama_kv_cache_type)
+      Application.put_env(:optimal_system_agent, :ollama_kv_cache_type, "f16")
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:optimal_system_agent, :ollama_kv_cache_type)
+          v -> Application.put_env(:optimal_system_agent, :ollama_kv_cache_type, v)
+        end
+      end)
+
+      :ok
+    end
+
     test "SuperQwen 27B Q4 on a 24 GiB card: 64k fits (17.2 + 4.3 + 1 GB), 96k does not, never below 32k" do
       spec = %{weights_bytes: 17_200_000_000, quant: "Q4_K_M", kv_bytes_per_token: 64 * 1024}
       assert LocalModels.auto_ctx_for(spec, hw(), 262_144) == 65_536

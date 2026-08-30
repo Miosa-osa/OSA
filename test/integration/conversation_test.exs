@@ -55,9 +55,14 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
       }
 
       context = Context.build(state, nil)
-      [system_msg | _] = context.messages
 
-      assert String.contains?(system_msg.content, "telegram")
+      # The runtime block (session id, channel, model identity) rides in the
+      # volatile tail — a trailing user-role reminder — when the resolved
+      # provider is a plain-prefix KV cache (ollama/lmstudio/llamacpp), and
+      # inline in the system message otherwise. Either way it must be present
+      # exactly once in the assembled prompt.
+      all_content = Enum.map_join(context.messages, "\n", & &1.content)
+      assert String.contains?(all_content, "telegram")
     end
 
     test "context includes the session id in runtime block" do
@@ -71,9 +76,9 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
       }
 
       context = Context.build(state, nil)
-      [system_msg | _] = context.messages
+      all_content = Enum.map_join(context.messages, "\n", & &1.content)
 
-      assert String.contains?(system_msg.content, session_id)
+      assert String.contains?(all_content, session_id)
     end
 
     test "build returns messages list with system message first" do
@@ -89,9 +94,17 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
 
       context = Context.build(state, nil)
 
-      # Total messages = system + conversation messages
-      assert length(context.messages) == 3
-      assert List.first(context.messages).role == "system"
+      # System message first, then the conversation in order. A trailing
+      # volatile-tail message MAY follow (KV-cache prefix stability, commit
+      # 2e00ff46: when the resolved provider is a plain-prefix cache like
+      # ollama, the volatile Runtime Context block rides AFTER the
+      # conversation as a user-role reminder). The contract under test is
+      # ordering, not an exact count that depends on the operator's provider
+      # configuration.
+      roles = Enum.map(context.messages, & &1.role)
+      assert hd(roles) == "system"
+      assert Enum.drop(roles, 1) == ["user", "assistant"] ++ Enum.drop(roles, 3)
+      assert Enum.count(roles, &(&1 == "system")) == 1
     end
 
     test "token_budget returns a breakdown map with expected keys" do

@@ -246,12 +246,36 @@ defmodule OptimalSystemAgent.Agent.RunLeaseCrossProcessTest do
     test "a live owner keeps the lease even past expiry (OS check vetoes the steal)", ctx do
       # process_a records the REAL os pid + start time, so it is demonstrably
       # alive. Expiry alone must not be enough to steal from it.
+      #
+      # The OS check reads /proc/<pid>/stat — Linux procfs. On macOS there is
+      # no /proc, so `owner_alive?/1` returns :unknown and the guard defers to
+      # the expiry that already elapsed (fails open by design: an inconclusive
+      # answer must not wedge a lease forever). The veto itself is exercised on
+      # Linux CI; here we assert the documented degradation instead of a
+      # behaviour this kernel cannot answer.
       as_process(ctx.process_a, fn -> RunStore.claim_lease("r") end)
       age_lease(ctx.dir, "r")
 
       as_process(ctx.process_b, fn ->
-        assert {:held, _} = RunStore.lease_state("r")
-        assert {:error, {:held_by, _}} = RunStore.claim_lease("r")
+        result = RunStore.lease_state("r")
+
+        case result do
+          {:held, _} ->
+            :ok
+
+          {:expired, _} ->
+            # procfs absent → owner_alive? :unknown → expiry governs. The
+            # steal is CORRECT here; the veto is the Linux path.
+            assert File.dir?("/proc/self") == false
+
+          other ->
+            flunk("unexpected lease_state: #{inspect(other)}")
+        end
+
+        # Either way, B's claim must not silently succeed while the state is held.
+        if match?({:held, _}, result) do
+          assert {:error, {:held_by, _}} = RunStore.claim_lease("r")
+        end
       end)
     end
 

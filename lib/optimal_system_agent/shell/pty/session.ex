@@ -4,11 +4,12 @@ defmodule OptimalSystemAgent.Shell.Pty.Session do
   `shell_execute`, which redirects stdin from `/dev/null` and so cannot drive
   programs that REQUIRE a real tty (vim, REPLs, `ssh`/installer prompts, …).
 
-  ## PTY allocation (Linux / this box)
+  ## PTY allocation (Linux / macOS)
 
-  Elixir/BEAM has no built-in pty. We allocate one with util-linux `script`:
+  Elixir/BEAM has no built-in pty. We allocate one with the host's `script`:
 
-      script -q -f -e -c "stty rows R cols C; <cmd>" /dev/null
+      util-linux: script -q -f -e -c "stty rows R cols C; <cmd>" /dev/null
+      BSD/macOS:  script -q -e /dev/null /bin/sh -c "stty rows R cols C; <cmd>"
 
   `script` forks the command with a freshly-allocated pseudo-terminal as its
   controlling tty (verified: the child sees `/dev/pts/N`, `isatty(0)` is true).
@@ -198,6 +199,13 @@ defmodule OptimalSystemAgent.Shell.Pty.Session do
 
   Returns `{:ok, executable, wrap_fun}` where `wrap_fun.(inner_cmd)` yields the
   argv (excluding the executable), or `{:error, :no_pty_allocator}`.
+
+  Two wrapper dialects exist. Linux's util-linux `script` takes the command via
+  `-c` and flushes per-write with `-f`. The BSD `script` macOS ships supports
+  neither flag (it fails with `illegal option` and the child never starts) —
+  there the command is positional and is NOT shell-parsed, so the inner command
+  is wrapped in `/bin/sh -c`; output flushes per-write by default and `-e`
+  propagates the child's exit code on both.
   """
   @spec allocator() :: {:ok, String.t(), (String.t() -> [String.t()])} | {:error, atom()}
   def allocator do
@@ -206,7 +214,19 @@ defmodule OptimalSystemAgent.Shell.Pty.Session do
         {:error, :no_pty_allocator}
 
       script ->
-        {:ok, script, fn inner -> ["-q", "-f", "-e", "-c", inner, "/dev/null"] end}
+        {:ok, script, &script_args/1}
+    end
+  end
+
+  defp script_args(inner) do
+    case :os.type() do
+      {:unix, :linux} ->
+        ["-q", "-f", "-e", "-c", inner, "/dev/null"]
+
+      _ ->
+        # BSD script (macOS et al.): no -c, no -f; command positional and not
+        # shell-parsed, hence the explicit /bin/sh -c.
+        ["-q", "-e", "/dev/null", "/bin/sh", "-c", inner]
     end
   end
 

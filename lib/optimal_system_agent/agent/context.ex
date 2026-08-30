@@ -190,7 +190,6 @@ defmodule OptimalSystemAgent.Agent.Context do
           {override, estimate_tokens(override)}
       end
 
-
     # /jailbreak layer: operator text appended AFTER everything above, for every
     # model/provider. `""` when disarmed — the common case — so a fresh node's
     # prompt is byte-identical to before this feature existed.
@@ -202,6 +201,7 @@ defmodule OptimalSystemAgent.Agent.Context do
         block ->
           {static_base <> "\n\n" <> block, static_tokens + estimate_tokens(block)}
       end
+
     # Tier 2: Dynamic context. Essentials fit into the leftover slack; the
     # RECALL group (memory/project/skills) is additionally capped to a fraction
     # of the REAL window so trivial turns can't balloon into the free space.
@@ -253,10 +253,15 @@ defmodule OptimalSystemAgent.Agent.Context do
       OptimalSystemAgent.Providers.Registry.plain_prefix_cache?(provider, model)
 
     {system_msg, volatile_tail} =
-      if plain_prefix? and is_binary(volatile) and volatile != "" do
+      if plain_prefix? and is_binary(volatile) and volatile != "" and conversation != [] do
         {build_system_message(static_base, world_state, "", provider, model),
          volatile_tail_message(volatile)}
       else
+        # No conversation (or no volatile, or a non-plain-prefix provider):
+        # the volatile block stays INLINE in the system message. With zero
+        # messages there is no prefix to protect, so inlining costs nothing
+        # and keeps the runtime identity (session id, channel, model) in the
+        # prompt instead of dropping it on the floor.
         {build_system_message(static_base, world_state, volatile, provider, model), nil}
       end
 
@@ -279,6 +284,9 @@ defmodule OptimalSystemAgent.Agent.Context do
   # the same convention `Providers.Ollama.demote_trailing_system/1` already
   # uses. Role "user" because a trailing "system" role is rejected by strict
   # chat templates (Qwen) and demoted to exactly this shape anyway.
+  # Called only when the conversation is non-empty; the empty-conversation case
+  # keeps the volatile block inline (see the branch above), so no runtime
+  # information is ever dropped.
   defp volatile_tail_message(volatile) do
     %{role: "user", content: "<system-reminder>\n" <> volatile <> "\n</system-reminder>"}
   end
@@ -557,7 +565,10 @@ defmodule OptimalSystemAgent.Agent.Context do
   # state. Everything else (memory, episodic, skills, learned skills) is RECALL
   # and competes within a bounded sub-budget capped to a fraction of the REAL
   # window. Labels owned by `WorldState.managed_labels/0` never reach this split.
-  @essential_labels ~w(task_brief active_skills runtime git_state task_state workflow)
+  # `task_brief` is NOT here: it is world-state managed (see WorldState's
+  # section registry) so it lands in the STABLE system message — the block the
+  # Compactor preserves — not in the volatile per-turn tail.
+  @essential_labels ~w(active_skills runtime git_state task_state workflow)
 
   # `@dynamic_budget_floor` is declared with the other budget constants at the
   # top of the module — a module attribute read before its definition silently

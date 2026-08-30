@@ -84,13 +84,16 @@ defmodule OptimalSystemAgent.Shell.BackgroundServiceLifetimeTest do
        %{session_id: sid, dir: dir, pidfile: pidfile} do
     # The incantation the `shell_execute` prompt now names for the case where
     # the task requires something still listening after the agent finishes.
+    # `setsid` doesn't exist on macOS; `nohup ... &` is the same escape — the
+    # child is reparented out of the session's process tree either way, which
+    # is the property `kill_for_session/1` (a session-registry sweep) relies on.
     log = Path.join(dir, "svc.log")
 
     {:ok, _out} =
       Shell.execute(
         %{
           "command" =>
-            "setsid nohup sh -c 'echo $$ > #{pidfile}; exec sleep 300' " <>
+            "nohup sh -c 'echo $$ > #{pidfile}; exec sleep 300' " <>
               "</dev/null >#{log} 2>&1 &",
           "cwd" => dir
         },

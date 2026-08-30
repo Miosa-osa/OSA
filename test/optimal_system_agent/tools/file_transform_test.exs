@@ -360,7 +360,10 @@ defmodule OptimalSystemAgent.Tools.FileTransformTest do
 
       assert result =~ "balance: 0"
       # The whole point: the answer is bounded, and does not carry the file.
-      assert byte_size(result) < 200
+      # The report is "#{path} — ..." + the balance line, so strip the path and
+      # bound the scaffolding itself — a hard-coded total blew up on macOS,
+      # whose $TMPDIR (/private/var/folders/...) is ~106 bytes on its own.
+      assert result |> String.replace(ctx.path, "") |> byte_size() < 130
       assert byte_size(result) < byte_size(File.read!(ctx.path))
     end
 
