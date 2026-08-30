@@ -14,7 +14,7 @@ defmodule OptimalSystemAgent.Agent.Context.Budget do
   @doc "Maximum memory entries injected into the context (default: 6)."
   @spec memory_recall_max_results() :: pos_integer()
   def memory_recall_max_results,
-    do: Application.get_env(:optimal_system_agent, :memory_recall_max_results, 6)
+    do: Application.get_env(:optimal_system_agent, :memory_recall_max_results, 4)
 
   @doc "Minimum relevance score for an entry to be injected (default: 0.35)."
   @spec memory_recall_min_score() :: float()
@@ -40,6 +40,19 @@ defmodule OptimalSystemAgent.Agent.Context.Budget do
   @spec dynamic_recall_budget_floor() :: pos_integer()
   def dynamic_recall_budget_floor,
     do: Application.get_env(:optimal_system_agent, :dynamic_recall_budget_floor, 512)
+
+  @doc """
+  ABSOLUTE ceiling (tokens) for the recall group, regardless of window size.
+
+  The `dynamic_recall_budget_frac` (20%) was tuned for ~8-32k windows; on a
+  128k+ window it lets recall (memory + project + skills) balloon to ~26k
+  tokens, which every turn must PREFILL — 12s+ on a local model. Capping the
+  absolute size keeps recall useful without turning a chat into a reprefill of
+  a novel. 6k holds ~5 memories + skills comfortably.
+  """
+  @spec recall_budget_max() :: pos_integer()
+  def recall_budget_max,
+    do: Application.get_env(:optimal_system_agent, :recall_budget_max, 6_000)
 
   @doc "Tokens reserved for the model's response, kept out of the input budget (default: 4000)."
   @spec response_reserve() :: pos_integer()
@@ -105,6 +118,7 @@ defmodule OptimalSystemAgent.Agent.Context.Budget do
 
     frac_cap
     |> max(dynamic_recall_budget_floor())
+    |> min(recall_budget_max())
     |> min(leftover)
   end
 end
