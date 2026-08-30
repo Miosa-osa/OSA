@@ -8,7 +8,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileReadDiagnosticsTest do
   so the wording is pinned.
   """
 
-  use ExUnit.Case, async: true
+  # async: false — these tests exercise the process-global FileState read-ledger
+  # (`check_read/*`). Run concurrently with the rest of the async suite, the
+  # ledger's entries race/evict under load, so "a rescued read is recorded"
+  # passed in isolation but flaked in the full suite. Serialising this module
+  # removes the cross-test contention without touching product behaviour.
+  use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Tools.Builtins.FileRead.Handler
   alias OptimalSystemAgent.Tools.Builtins.FileRead.Lines
