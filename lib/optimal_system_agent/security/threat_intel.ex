@@ -288,7 +288,7 @@ defmodule OptimalSystemAgent.Security.ThreatIntel do
   @doc "Compute days between two dates."
   @spec days_between(Date.t(), Date.t()) :: non_neg_integer()
   def days_between(date1, date2) when is_struct(date1, Date) and is_struct(date2, Date) do
-    Date.day_number_diff(date2, date1) |> max(0)
+    Date.day_number_diff(date2, date1) |> int_max(0)
   end
 
   defp int_max(a, b), do: if (a > b, do: a, else: b)
