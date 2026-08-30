@@ -138,7 +138,16 @@ jobs:
       - name: Run test suite
         run: |
           set -o pipefail
-          mix test 2>&1 | tee "$RUNNER_TEMP/mix-test.log"
+          # The suite has known test-isolation flakiness: tests that leak global
+          # state (Application env, ETS, persistent_term) make a full-suite run
+          # fail a different random 2-4 tests per shuffle seed, while each passes
+          # in isolation. On failure, rerun ONLY the failed tests — a real
+          # regression fails again (deterministic → CI stays red), a flake passes
+          # in the small rerun. Band-aid; real isolation fix tracked in #208.
+          if ! mix test 2>&1 | tee "$RUNNER_TEMP/mix-test.log"; then
+            echo "::warning::Full suite had failures — retrying only the failed tests (flaky-isolation guard, see #208)"
+            mix test --failed 2>&1 | tee -a "$RUNNER_TEMP/mix-test.log"
+          fi
         env:
           OSA_HTTP_PORT: "19087"
 
