@@ -52,6 +52,24 @@ defmodule OptimalSystemAgent.Tools.FileTransformTest do
 
   defp digest(path), do: path |> File.read!() |> then(&:crypto.hash(:sha256, &1))
 
+  # ── Field-name tolerance: models reach for new/new_string/replacement ──
+
+  describe "field-name aliases" do
+    test "replace accepts new_string as an alias for the replacement field" do
+      assert {:ok, "b", _} =
+               Ops.apply_all("a", [%{"op" => "replace", "find" => "a", "new_string" => "b"}])
+    end
+
+    test "validate accepts the aliased replacement field" do
+      assert :ok = Ops.validate([%{"op" => "replace", "find" => "a", "replacement" => "b"}])
+    end
+
+    test "an explicit to wins over an alias" do
+      assert {:ok, "x", _} =
+               Ops.apply_all("a", [%{"op" => "replace", "find" => "a", "to" => "x", "new" => "y"}])
+    end
+  end
+
   # ── Confinement: the declared path is the only path written ───────────
 
   describe "authorisation" do
