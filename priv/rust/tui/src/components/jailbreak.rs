@@ -137,6 +137,21 @@ const BADGE_FG: ratatui::prelude::Color = ratatui::prelude::Color::Magenta;
 /// hold rather than vanishing (a black dim phase would be invisible on the
 /// dark theme).
 const BADGE_DIM: ratatui::prelude::Color = ratatui::prelude::Color::Rgb(120, 60, 140);
+/// A gradient step between bright and dim, so the shimmer highlight has a soft
+/// edge instead of a hard on/off boundary.
+const BADGE_MID: ratatui::prelude::Color = ratatui::prelude::Color::Rgb(178, 96, 200);
+
+/// The animated label. A slow highlight sweeps left-to-right across these
+/// letters.
+const LABEL: &str = "LIBERATED";
+
+/// Milliseconds the shimmer highlight dwells on each character. ~140ms/char
+/// makes a full sweep of the word take ~1.3s — a slow glide, not a strobe.
+const SHIMMER_STEP_MS: usize = 140;
+
+/// Characters of dark pause after each sweep before the next begins, so the
+/// shimmer reads as a periodic glint rather than a relentless scan.
+const SHIMMER_GAP: usize = 5;
 
 /// The badge spans rendered next to the model name on status-bar row 0.
 /// Empty when disarmed — the common case must cost zero columns.
@@ -145,34 +160,45 @@ const BADGE_DIM: ratatui::prelude::Color = ratatui::prelude::Color::Rgb(120, 60,
 /// owns the state, so a test that never arms the badge renders none — the
 /// component never reaches out to machine state on its own.
 ///
-/// Animated by wall clock alone: the bolt holds steady while the LIBERATED
-/// text pulses bright→dim, so the badge reads as LIVE while armed without a
-/// single extra tick of plumbing.
+/// Animated by wall clock alone: the bolt flickers gently while a slow
+/// highlight shimmers left-to-right across the LIBERATED text, so the badge
+/// reads as LIVE while armed without a single extra tick of plumbing.
 pub fn badge_spans(armed: bool) -> Vec<ratatui::prelude::Span<'static>> {
     if !armed {
         return Vec::new();
     }
 
-    let phase = bolt_phase();
-    let bright = bolt_bright(phase);
+    use ratatui::prelude::{Modifier, Span, Style};
 
-    let mut spans = Vec::with_capacity(3);
-    spans.push(ratatui::prelude::Span::styled(
-        " ",
-        ratatui::prelude::Style::default(),
+    let mut spans = Vec::with_capacity(LABEL.chars().count() + 4);
+
+    // Leading gap from the model name, then the bolt — a gentle flicker.
+    spans.push(Span::raw(" "));
+    let bolt_fg = if bolt_bright(bolt_phase()) { BADGE_FG } else { BADGE_DIM };
+    spans.push(Span::styled(
+        "\u{26A1} ",
+        Style::default().fg(bolt_fg).add_modifier(Modifier::BOLD),
     ));
-    spans.push(ratatui::prelude::Span::styled(
-        "\u{26A1}",
-        ratatui::prelude::Style::default()
-            .fg(BADGE_FG)
-            .add_modifier(ratatui::prelude::Modifier::BOLD),
-    ));
-    spans.push(ratatui::prelude::Span::styled(
-        " LIBERATED",
-        ratatui::prelude::Style::default()
-            .fg(if bright { BADGE_FG } else { BADGE_DIM })
-            .add_modifier(ratatui::prelude::Modifier::BOLD),
-    ));
+
+    // LIBERATED — a slow highlight shimmers left-to-right across the letters.
+    // The highlight is soft-edged: the peak cell is bright, its neighbours the
+    // mid tone, the rest dim. During the gap phase no cell peaks, so the word
+    // rests dim between sweeps.
+    let hi = shimmer_pos(LABEL.chars().count());
+    for (i, ch) in LABEL.chars().enumerate() {
+        let fg = match (i as isize - hi as isize).unsigned_abs() {
+            0 => BADGE_FG,
+            1 => BADGE_MID,
+            _ => BADGE_DIM,
+        };
+        spans.push(Span::styled(
+            ch.to_string(),
+            Style::default().fg(fg).add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    // Trailing gap so the badge never touches the workspace name beside it.
+    spans.push(Span::raw(" "));
     spans
 }
 
@@ -193,6 +219,28 @@ fn bolt_bright(phase: usize) -> bool {
     phase % 3 != 2
 }
 
+/// Milliseconds since the epoch, saturating to 0 if the clock is before it.
+fn now_ms() -> usize {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as usize)
+        .unwrap_or(0)
+}
+
+/// Which character the shimmer highlight sits on right now, driven by wall
+/// clock. See [`shimmer_pos_at`] for the pure math.
+fn shimmer_pos(len: usize) -> usize {
+    shimmer_pos_at(now_ms(), len)
+}
+
+/// The shimmer highlight position at a given millisecond. Ranges over
+/// `0..len + SHIMMER_GAP`: values `>= len` fall in the dark pause between
+/// sweeps, so no character peaks and the word rests dim before the glint
+/// repeats. Pure, so it can be tested without the clock.
+fn shimmer_pos_at(ms: usize, len: usize) -> usize {
+    (ms / SHIMMER_STEP_MS) % (len + SHIMMER_GAP)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,6 +258,24 @@ mod tests {
         // "animated" badge a static sticker.
         let phases: Vec<bool> = (0..9).map(bolt_bright).collect();
         assert!(phases.iter().any(|&b| b) && phases.iter().any(|&b| !b));
+    }
+
+    #[test]
+    fn shimmer_sweeps_then_pauses() {
+        let len = LABEL.chars().count();
+        let cycle = len + SHIMMER_GAP;
+
+        // Advances one character per step, starting at 0.
+        assert_eq!(shimmer_pos_at(0, len), 0);
+        assert_eq!(shimmer_pos_at(SHIMMER_STEP_MS, len), 1);
+
+        // Over one cycle it visits every position — including the `>= len` gap
+        // positions where the word rests dim — then wraps back to 0.
+        let seen: std::collections::HashSet<usize> =
+            (0..cycle).map(|s| shimmer_pos_at(s * SHIMMER_STEP_MS, len)).collect();
+        assert_eq!(seen.len(), cycle);
+        assert!(seen.iter().any(|&p| p >= len), "no dark gap in the sweep");
+        assert_eq!(shimmer_pos_at(cycle * SHIMMER_STEP_MS, len), 0);
     }
 
     #[test]
@@ -238,7 +304,8 @@ mod tests {
         fn css(c: Color) -> &'static str {
             match c {
                 Color::Magenta => "#e070e0",             // bright bolt / LIBERATED
-                Color::Rgb(120, 60, 140) => "#78388c",   // dim pulse phase
+                Color::Rgb(120, 60, 140) => "#78388c",   // dim base
+                Color::Rgb(178, 96, 200) => "#b360c8",   // shimmer mid-tone
                 Color::Cyan => "#4ec9d0",
                 Color::Yellow => "#d7b45a",
                 Color::Red => "#e05561",
@@ -306,12 +373,12 @@ mod tests {
             "<!doctype html><meta charset=utf-8><title>/jailbreak LIBERATED badge</title>\
 <body style=\"background:#14121a;color:#c8c8c8;font:14px/1.5 'SF Mono',Menlo,monospace;padding:24px\">\
 <h2 style=\"color:#e070e0\">⚡ /jailbreak — LIBERATED badge (real TUI render)</h2>\
-<h3>StatusBar row 0 — badge next to the model name (three consecutive frames; the bolt holds, LIBERATED pulses bright↔dim)</h3>\
+<h3>StatusBar row 0 — badge next to the model name (three consecutive frames; the bolt flickers, a slow highlight shimmers across LIBERATED)</h3>\
 <pre style=\"white-space:pre;overflow-x:auto\">{}\n{}\n{}</pre>\
 <h3>Activity spinner status group — ⚡ LIBERATED chip, placed AFTER the silence notice</h3>\
 <pre style=\"white-space:pre;overflow-x:auto\">{}</pre>\
 <p style=\"color:#888\">Colors are the actual cell foregrounds from a ratatui TestBackend render. \
-Magenta #e070e0 = bright bolt/LIBERATED, #78388c = dim pulse phase.</p></body>",
+Magenta #e070e0 = bright bolt/highlight, #b360c8 = shimmer mid-tone, #78388c = dim base.</p></body>",
             status_frames[0], status_frames[1], status_frames[2], spinner_html
         );
         std::fs::write(&out, html).unwrap();
