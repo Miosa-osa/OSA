@@ -476,6 +476,10 @@ pub struct Activity {
     /// Starting index into SPINNER_VERBS for this request, so each one opens on a
     /// different verb instead of always "Accomplishing".
     verb_offset: usize,
+    /// `/jailbreak` armed — drives the ⚡ LIBERATED chip in the status group.
+    /// Injected via `set_liberated` so the component never reads machine state
+    /// on its own and tests stay hermetic.
+    liberated: bool,
     start_time: Option<std::time::Instant>,
     /// When the CURRENT processing phase began (stamped on every `set_phase`
     /// transition). Drives the phase-elapsed timer in the dual-timer status group
@@ -771,6 +775,7 @@ impl Activity {
             expanded: false,
             phrase_tick: 0,
             verb_offset: 0,
+            liberated: false,
             start_time: None,
             phase_since: None,
             last_output_at: None,
@@ -1076,6 +1081,12 @@ impl Activity {
     /// U-T24 — set the number of messages queued behind the running turn.
     pub fn set_queued(&mut self, n: usize) {
         self.queued = n;
+    }
+
+    /// `/jailbreak` armed state — drives the ⚡ LIBERATED chip in the status
+    /// group. Fed by the app from the `~/.osa/jailbreak.json` poll.
+    pub fn set_liberated(&mut self, armed: bool) {
+        self.liberated = armed;
     }
 
     /// Seconds of AGENT time since the spinner clock started (`start()`), if
@@ -1833,6 +1844,14 @@ impl Component for Activity {
         let silence = self.silent_secs();
         if let Some(secs) = silence {
             parts.push(format!("no response for {}", fmt_compact_tight(secs)));
+        }
+
+        // `/jailbreak` — the LIBERATED chip rides the spinner's status group
+        // while a turn runs, so the override is visible exactly when it is in
+        // force on the request being served. AFTER the silence notice: a
+        // report that something is wrong outranks a decorative state chip.
+        if self.liberated {
+            parts.push("\u{26A1} LIBERATED".to_string());
         }
 
         // Item 1 — live retry countdown (a stall notice), just under the hint.

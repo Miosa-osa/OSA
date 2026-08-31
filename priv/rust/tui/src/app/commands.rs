@@ -65,6 +65,10 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("login", "Connect a provider account"),
     ("logout", "Sign out of a provider account"),
     ("voice", "Show the voice provider"),
+    (
+        "jailbreak",
+        "LIBERATE the model — operator override on every system prompt",
+    ),
     ("exit", "Quit OSA"),
     ("quit", "Quit OSA"),
 ];
@@ -559,6 +563,16 @@ impl App {
                 // Fetch the full tool list and open the searchable browser when
                 // it arrives (ToolsLoaded handler checks tools_browser_pending).
                 self.open_tools_browser();
+            }
+            "/jailbreak" => {
+                // Backend-owned state (`~/.osa/jailbreak.json`), backend-run
+                // command — but the badge must flip the instant the answer
+                // lands, not a second later on the next poll. Invalidate the
+                // TUI's cache before dispatch so the post-result poll reads
+                // the fresh file, and keep the palette/popup entry pointing
+                // here (see BUILTIN_SLASH_COMMANDS).
+                crate::components::jailbreak::invalidate();
+                self.execute_backend_command("jailbreak", arg);
             }
             "/usage" => {
                 // Account quota + OSA's own token count, rendered by the

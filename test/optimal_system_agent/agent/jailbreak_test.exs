@@ -116,4 +116,42 @@ defmodule OptimalSystemAgent.Agent.JailbreakTest do
     :ok = Jailbreak.set(false)
     assert "" = Jailbreak.badge()
   end
+
+  # ── prompt position ────────────────────────────────────────────────
+
+  test "armed block is the FIRST text of the system message, before the Soul base" do
+    custom = Path.join(@tmp_home, "position_probe.txt")
+    File.write!(custom, "JB-POSITION-PROBE operator override")
+    :ok = Jailbreak.set(true, custom)
+
+    state = %{
+      session_id: "jailbreak-position-#{System.unique_integer([:positive])}",
+      messages: [%{role: "user", content: "where does the block sit?"}],
+      working_dir: File.cwd!(),
+      channel: :cli,
+      provider: :ollama,
+      model: nil,
+      permission_tier: :full
+    }
+
+    %{messages: assembled} = OptimalSystemAgent.Agent.Context.build(state)
+
+    # The system message is the first entry; its text must OPEN with the block.
+    system_text =
+      case assembled do
+        [%{role: "system", content: text} | _] when is_binary(text) -> text
+        [%{role: "system", content: blocks} | _] when is_list(blocks) -> nil
+        _ -> nil
+      end
+
+    assert is_binary(system_text),
+           "expected a plain-string system message on the :ollama route"
+
+    assert String.starts_with?(system_text, "JB-POSITION-PROBE"),
+           "jailbreak block must be the first text of the system prompt"
+
+    # And it must come BEFORE the Soul base's own opening, not merely be present.
+    assert String.starts_with?(system_text, "JB-POSITION-PROBE operator override\n\n"),
+           "block must be followed by the static base, not spliced into it"
+  end
 end
