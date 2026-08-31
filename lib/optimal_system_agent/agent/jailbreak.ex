@@ -1,9 +1,8 @@
 defmodule OptimalSystemAgent.Agent.Jailbreak do
   @moduledoc """
-  `/jailbreak` — an operator override block injected on top of OSA's system prompt.
+  `/jailbreak` — an operator override block injected at the very TOP of the system prompt.
 
-  Unlike `/system inject`, this is a SEPARATE layer that sits AFTER any /system
-  state (inject, replace, or none), applies to EVERY model and provider the node
+  Unlike `/system inject`, this is a SEPARATE layer that sits BEFORE the Soul static base and any /system\n  state (inject, replace, or none), applies to EVERY model and provider the node
   runs, and takes effect from the next message — no restart, no `/clear`.
 
   The text comes from a file: `~/.osa/prompts/jailbreak.md` by default, or any
@@ -47,8 +46,9 @@ defmodule OptimalSystemAgent.Agent.Jailbreak do
   end
 
   @doc """
-  The block appended to the system prompt: `""` when inactive (the common case —
-  a no-op must not disturb the cached static base), otherwise the file text.
+  The block placed at the TOP of the system prompt: `""` when inactive (the
+  common case — a no-op must not disturb the cached static base), otherwise the
+  file text.
   """
   @spec system_block() :: String.t()
   def system_block do

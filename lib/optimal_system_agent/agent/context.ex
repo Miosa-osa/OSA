@@ -190,16 +190,16 @@ defmodule OptimalSystemAgent.Agent.Context do
           {override, estimate_tokens(override)}
       end
 
-    # /jailbreak layer: operator text appended AFTER everything above, for every
-    # model/provider. `""` when disarmed — the common case — so a fresh node's
-    # prompt is byte-identical to before this feature existed.
+    # /jailbreak layer: operator text PREPENDED BEFORE everything else, for
+    # every model/provider. `""` when disarmed — the common case — so a fresh
+    # node's prompt is byte-identical to before this feature existed.
     {static_base, static_tokens} =
       case OptimalSystemAgent.Agent.Jailbreak.system_block() do
         "" ->
           {static_base, static_tokens}
 
         block ->
-          {static_base <> "\n\n" <> block, static_tokens + estimate_tokens(block)}
+          {block <> "\n\n" <> static_base, static_tokens + estimate_tokens(block)}
       end
 
     # Tier 2: Dynamic context. Essentials fit into the leftover slack; the

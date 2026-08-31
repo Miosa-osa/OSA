@@ -1425,9 +1425,28 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     case Jailbreak.set(enabled?, file) do
       :ok when enabled? ->
-        IO.puts("  #{@green}✓#{@reset} #{IO.ANSI.magenta()}⚡ LIBERATED#{@reset}")
-        IO.puts("  #{@dim}#{Jailbreak.preview()}#{@reset}")
-        IO.puts("  #{@dim}/jailbreak off to disarm#{@reset}")
+        magenta = IO.ANSI.magenta()
+        bold = @bold
+
+        IO.puts("")
+
+        IO.puts(
+          "  #{magenta}#{bold}\u26A1 \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550#{@reset}"
+        )
+
+        IO.puts("  #{magenta}#{bold}\u26A1   L I B E R A T E D   \u26A1#{@reset}")
+
+        IO.puts(
+          "  #{magenta}#{bold}\u26A1 \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550#{@reset}"
+        )
+
+        IO.puts("")
+        IO.puts("  #{@dim}override:#{reset_dim()} #{Jailbreak.preview()}#{@reset}")
+        IO.puts("  #{@dim}source:#{reset_dim()} #{Jailbreak.file_path()}#{@reset}")
+
+        IO.puts(
+          "  #{@dim}applies to every model, next message — /jailbreak off to disarm#{@reset}"
+        )
 
       :ok ->
         IO.puts(
@@ -3030,9 +3049,13 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     end
 
     if enabled? do
-      IO.puts("  #{@green}✓#{@reset} Thinking #{@bold}ON#{@reset} — the model reasons before replying")
+      IO.puts(
+        "  #{@green}✓#{@reset} Thinking #{@bold}ON#{@reset} — the model reasons before replying"
+      )
     else
-      IO.puts("  #{@green}✓#{@reset} Thinking #{@bold}OFF#{@reset} — fast replies, no reasoning phase")
+      IO.puts(
+        "  #{@green}✓#{@reset} Thinking #{@bold}OFF#{@reset} — fast replies, no reasoning phase"
+      )
     end
 
     IO.puts("  #{@dim}Applies from your next message. Saved as OLLAMA_THINK.#{@reset}")

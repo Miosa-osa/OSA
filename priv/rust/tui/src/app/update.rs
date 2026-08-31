@@ -1567,6 +1567,22 @@ impl App {
         self.agents.tick();
         self.task_checklist.tick();
 
+        // `/jailbreak` — poll the backend's state file (bounded: one read per
+        // second, see components/jailbreak.rs) and feed both surfaces that
+        // render the badge. Cheap enough to run every tick; the poller's own
+        // interval gate does the real bounding.
+        let liberated = crate::components::jailbreak::is_liberated();
+        self.status.set_liberated(liberated);
+        self.activity.set_liberated(liberated);
+
+        // `/jailbreak` — poll the backend's state file (bounded: one read per
+        // second, see components/jailbreak.rs) and feed both surfaces that
+        // render the badge. Cheap enough to run every tick; the poller's own
+        // interval gate does the real bounding.
+        let liberated = crate::components::jailbreak::is_liberated();
+        self.status.set_liberated(liberated);
+        self.activity.set_liberated(liberated);
+
         // NOTE: no plan snapshot is pushed here. The checklist is a LIVE panel
         // with its own band in the inline region (see `checklist_slot`), so
         // scrollback needs exactly ONE frozen copy per turn — pushed by
