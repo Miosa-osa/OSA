@@ -72,6 +72,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   # when delegation is not permitted, but a still-listed / hand-crafted call is
   # denied here too. `:proactive` allows, `:disabled` denies, `:explicit_only`
   # allows only when the user asked to delegate this turn.
+  # When `worktree_by_default` is set, delegated work runs isolated in a git
+  # worktree even when neither the call args nor the agent definition asked for
+  # it. Default off, so shipped behavior is unchanged until the user opts in.
+  defp default_isolation do
+    if OptimalSystemAgent.Settings.get("worktree_by_default", false), do: :worktree, else: nil
+  end
+
   defp check_delegation_policy(input, ctx) do
     policy = DelegationPolicy.resolve(%{delegation_policy: ctx_policy(ctx)})
     messages = ctx_messages(ctx)
@@ -181,7 +188,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
     tier = if raw_tier == :utility, do: Constants.min_subagent_tier(), else: raw_tier
 
     isolation =
-      case Map.get(args, "isolation") || (agent_def && agent_def[:isolation]) do
+      case Map.get(args, "isolation") || (agent_def && agent_def[:isolation]) ||
+             default_isolation() do
         "worktree" -> :worktree
         :worktree -> :worktree
         _ -> nil

@@ -189,7 +189,16 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.FailureSignature do
           |> String.trim()
 
         broad = "#{tc.name}:#{error_prefix}"
-        strict = "#{tc.name}:#{args_digest(tc)}:#{error_prefix}"
+
+        # Validation errors name a STRUCTURAL problem (wrong/missing field), not a
+        # content problem. A model retrying one usually jitters the value while
+        # repeating the same mistake, which would mint a fresh value digest each
+        # time and slip past the strict threshold (3) down to the broad backstop
+        # (6). Key those on argument SHAPE so the repeat collapses and escalates
+        # at 3. Content-mismatch errors (old_string-not-found, etc.) stay
+        # value-sensitive so genuinely different edits never share a signature.
+        digest = if validation_error?(error_prefix), do: args_shape_digest(tc), else: args_digest(tc)
+        strict = "#{tc.name}:#{digest}:#{error_prefix}"
 
         [%{strict: strict, broad: broad, name: tc.name, error: error_prefix}]
       else
@@ -241,6 +250,43 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.FailureSignature do
       m when is_map(m) -> :erlang.phash2(m)
       other -> :erlang.phash2(other)
     end
+  end
+
+  # Digest of only the argument SHAPE (which fields are present), ignoring their
+  # values. Used for validation-class failures so that repeated calls making the
+  # same structural mistake collapse onto one strict signature even as the model
+  # jitters the payload.
+  defp args_shape_digest(tc) do
+    case Map.get(tc, :arguments) do
+      m when is_map(m) ->
+        m |> Map.keys() |> Enum.map(&to_string/1) |> Enum.sort() |> :erlang.phash2()
+
+      other ->
+        :erlang.phash2(other)
+    end
+  end
+
+  # Bad-argument / schema failures describe the call's SHAPE. Kept deliberately
+  # narrow so content-mismatch errors (old_string not found, file missing) do
+  # NOT match and stay value-sensitive.
+  @validation_error_markers [
+    "requires",
+    "required",
+    "invalid",
+    "unknown field",
+    "unknown argument",
+    "unexpected",
+    "missing",
+    "must be",
+    "must provide",
+    "expected",
+    "not permitted",
+    "is not a valid"
+  ]
+
+  defp validation_error?(error_prefix) do
+    down = String.downcase(error_prefix)
+    Enum.any?(@validation_error_markers, &String.contains?(down, &1))
   end
 
   defp tool_for(sig, iteration_signatures) do

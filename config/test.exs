@@ -8,6 +8,12 @@ config :logger, level: :warning
 # Verify.PostEdit directly with an injected exec seam). Prod default stays on.
 config :optimal_system_agent, post_edit_verify: [enabled: false]
 
+# The post-edit FORMAT path (in-place rewrite) ships OFF by default now, but the
+# formatter eval + PostEdit unit suites drive it directly and assert that edited
+# files get reformatted. Keep the write path armed here so those tests still
+# exercise it; prod defaults to off (diagnostics-only).
+config :optimal_system_agent, post_edit_format: true
+
 # Sandbox pool removed — singleton GenServers (Memory, TaskQueue, etc.) call
 # Repo from their own processes and can't do Sandbox.checkout!(), which causes
 # DBConnection.OwnershipError → rest_for_one cascade → flaky "no process" failures.
