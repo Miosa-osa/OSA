@@ -574,16 +574,6 @@ impl App {
                 crate::components::jailbreak::invalidate();
                 self.execute_backend_command("jailbreak", arg);
             }
-            "/jailbreak" => {
-                // Backend-owned state (`~/.osa/jailbreak.json`), backend-run
-                // command — but the badge must flip the instant the answer
-                // lands, not a second later on the next poll. Invalidate the
-                // TUI's cache before dispatch so the post-result poll reads
-                // the fresh file, and keep the palette/popup entry pointing
-                // here (see BUILTIN_SLASH_COMMANDS).
-                crate::components::jailbreak::invalidate();
-                self.execute_backend_command("jailbreak", arg);
-            }
             "/usage" => {
                 // Account quota + OSA's own token count, rendered by the
                 // backend into chat. This used to be a toast showing context
