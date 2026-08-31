@@ -1388,9 +1388,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   #   /jailbreak off | show   disarm / print what would be injected
   #   /jailbreak file <path>  point the block at a custom text file (remembered)
   #
-  # The block is appended to OSA's system prompt for EVERY model/provider, on
-  # top of any `/system` state, from the next message. A LIBERATED badge shows
-  # on the spinner and status line while armed.
+  # The block is prepended to OSA's system prompt for EVERY model/provider,
+  # BEFORE the Soul static base and any `/system` state, from the next message.
+  # A LIBERATED badge shows on the spinner and status line while armed.
   def cmd_jailbreak(args, session_id) do
     alias OptimalSystemAgent.Agent.Jailbreak
     IO.puts("")

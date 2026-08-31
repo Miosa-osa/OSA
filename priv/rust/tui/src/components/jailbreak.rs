@@ -219,4 +219,101 @@ mod tests {
         // next poll hits the file rather than the cache.
         let _ = is_liberated();
     }
+
+    // Evidence generator: render the REAL StatusBar row 0 and the REAL Activity
+    // spinner status group with the badge armed, then emit a colored HTML frame
+    // so a reviewer can SEE the ⚡ LIBERATED badge sitting where it lands (next
+    // to the model on row 0; after the silence notice in the spinner group).
+    // Only runs when OSA_EVIDENCE_HTML points at an output file.
+    #[test]
+    fn evidence_render_liberated_frames() {
+        use crate::components::Component;
+        use ratatui::style::Color;
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let Ok(out) = std::env::var("OSA_EVIDENCE_HTML") else {
+            return;
+        };
+
+        fn css(c: Color) -> &'static str {
+            match c {
+                Color::Magenta => "#e070e0",             // bright bolt / LIBERATED
+                Color::Rgb(120, 60, 140) => "#78388c",   // dim pulse phase
+                Color::Cyan => "#4ec9d0",
+                Color::Yellow => "#d7b45a",
+                Color::Red => "#e05561",
+                Color::Green => "#89ca78",
+                _ => "#c8c8c8",
+            }
+        }
+
+        // Turn a rendered row into an HTML line, one <span> per cell colored by
+        // its foreground so the badge's magenta pops against the muted rest.
+        fn row_html(buf: &ratatui::buffer::Buffer, y: u16, width: u16) -> String {
+            let mut s = String::new();
+            for x in 0..width {
+                let cell = &buf[(x, y)];
+                let sym = cell.symbol().replace('<', "&lt;").replace('>', "&gt;");
+                let sym = if sym.trim().is_empty() { "&nbsp;".to_string() } else { sym };
+                s.push_str(&format!("<span style=\"color:{}\">{}</span>", css(cell.fg), sym));
+            }
+            s
+        }
+
+        // --- StatusBar row 0, badge armed (rendered across the pulse) ---
+        let mut status_frames = Vec::new();
+        for _ in 0..3 {
+            let mut sb = crate::components::status_bar::StatusBar::new();
+            sb.set_width(120);
+            sb.set_provider_info("anthropic", "claude-opus-4");
+            sb.set_cwd_path("/home/dev/OSA");
+            sb.set_context(0.6, 120_000, 200_000);
+            sb.set_liberated(true);
+            let mut term = Terminal::new(TestBackend::new(120, 2)).unwrap();
+            term.draw(|f| sb.draw(f, f.area())).unwrap();
+            let buf = term.backend().buffer().clone();
+            status_frames.push(row_html(&buf, 0, 120));
+            // Cross a ~333ms phase boundary so successive frames can differ.
+            std::thread::sleep(std::time::Duration::from_millis(345));
+        }
+
+        // --- Activity spinner status group, badge armed ---
+        let mut act = crate::components::activity::Activity::new();
+        act.start();
+        act.set_liberated(true);
+        let mut term = Terminal::new(TestBackend::new(120, 1)).unwrap();
+        term.draw(|f| act.draw(f, f.area())).unwrap();
+        let spinner_buf = term.backend().buffer().clone();
+        let spinner_html = row_html(&spinner_buf, 0, 120);
+
+        // Sanity: the badge text actually rendered in both surfaces.
+        let status_text: String = {
+            let mut sb = crate::components::status_bar::StatusBar::new();
+            sb.set_width(120);
+            sb.set_provider_info("anthropic", "claude-opus-4");
+            sb.set_cwd_path("/home/dev/OSA");
+            sb.set_context(0.6, 120_000, 200_000);
+            sb.set_liberated(true);
+            let mut t = Terminal::new(TestBackend::new(120, 2)).unwrap();
+            t.draw(|f| sb.draw(f, f.area())).unwrap();
+            (0..120).map(|x| t.backend().buffer()[(x, 0)].symbol().to_string()).collect()
+        };
+        assert!(status_text.contains("LIBERATED"), "badge missing from status bar: {status_text:?}");
+        let spinner_text: String = (0..120).map(|x| spinner_buf[(x, 0)].symbol().to_string()).collect();
+        assert!(spinner_text.contains("LIBERATED"), "badge missing from spinner group: {spinner_text:?}");
+
+        let html = format!(
+            "<!doctype html><meta charset=utf-8><title>/jailbreak LIBERATED badge</title>\
+<body style=\"background:#14121a;color:#c8c8c8;font:14px/1.5 'SF Mono',Menlo,monospace;padding:24px\">\
+<h2 style=\"color:#e070e0\">⚡ /jailbreak — LIBERATED badge (real TUI render)</h2>\
+<h3>StatusBar row 0 — badge next to the model name (three consecutive frames; the bolt holds, LIBERATED pulses bright↔dim)</h3>\
+<pre style=\"white-space:pre;overflow-x:auto\">{}\n{}\n{}</pre>\
+<h3>Activity spinner status group — ⚡ LIBERATED chip, placed AFTER the silence notice</h3>\
+<pre style=\"white-space:pre;overflow-x:auto\">{}</pre>\
+<p style=\"color:#888\">Colors are the actual cell foregrounds from a ratatui TestBackend render. \
+Magenta #e070e0 = bright bolt/LIBERATED, #78388c = dim pulse phase.</p></body>",
+            status_frames[0], status_frames[1], status_frames[2], spinner_html
+        );
+        std::fs::write(&out, html).unwrap();
+    }
 }
