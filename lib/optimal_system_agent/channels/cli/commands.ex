@@ -45,7 +45,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "uncensored" =>
       {"Hop the current model to its unfiltered twin (off to return)", :cmd_uncensored},
     "jailbreak" =>
-      {"LIBERATE the active model — inject an operator override into every system prompt (off/show/file <path>)",
+      {"Arm the operator override — injects a text block at the top of every system prompt; armed: the block governs, disarmed: standard instructions (off/show/file <path>)",
        :cmd_jailbreak},
     "status" => {"Show session status", :cmd_status},
     "cost" => {"Show cost breakdown", :cmd_cost},
@@ -1445,7 +1445,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         IO.puts("  #{@dim}source:#{reset_dim()} #{Jailbreak.file_path()}#{@reset}")
 
         IO.puts(
-          "  #{@dim}applies to every model, next message — /jailbreak off to disarm#{@reset}"
+          "  #{@dim}applies to every model, next message — /jailbreak off to disarm; while disarmed the standard instructions govern#{@reset}"
         )
 
       :ok ->
