@@ -152,10 +152,10 @@ defmodule OptimalSystemAgent.Security.AttackChainReasoner do
       }
 
       %{
-        id: "#{root}->#{target}",
+        id: "#{root}->#{Map.get(edge, :target)}",
         hops: [hop],
         start_asset: root,
-        end_asset: target,
+        end_asset: Map.get(edge, :target),
         total_cost: hop_score(hop),
         confidence: score_path([hop]),
         path_description: build_description(hop)

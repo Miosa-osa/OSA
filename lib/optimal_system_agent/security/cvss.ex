@@ -128,6 +128,18 @@ defmodule OptimalSystemAgent.Security.Cvss do
   def severity(s) when s > 0.0, do: :low
   def severity(_), do: :none
 
+  @doc """
+  Approximate base score (0.0-10.0) from a 0.0-1.0 exploit weight — for chain
+  scoring where only an edge weight, not a full vector, is available.
+  """
+  @spec base_score(number()) :: float()
+  def base_score(weight) when is_number(weight) do
+    weight
+    |> max(0.0)
+    |> min(1.0)
+    |> Kernel.*(10.0)
+  end
+
   # ── internals ─────────────────────────────────────────────────────────────
 
   @doc """
