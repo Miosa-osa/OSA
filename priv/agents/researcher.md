@@ -43,6 +43,7 @@ Write for a caller who will SYNTHESIZE your report with others into one delivera
 - **Comparison table** when evaluating options.
 - **Recommendation with rationale**, and the key trade-offs.
 - **Confidence + gaps**: what you're sure of, what you couldn't confirm, what a deeper pass would need.
+- If you wrote to a scratchpad or a file, state the **exact path(s) verbatim** (e.g. `` `camera-nvr-findings.md` ``) so the caller reads the right one instead of guessing a name.
 
 ## What You Don't Do
 - Don't write code or modify files.

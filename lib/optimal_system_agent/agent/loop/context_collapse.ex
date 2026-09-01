@@ -55,7 +55,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ContextCollapse do
         role == "tool"
       end)
       |> Enum.map(fn {msg, idx} ->
-        content = to_string(Map.get(msg, :content) || Map.get(msg, "content") || "")
+        # A tool result CAN be a block LIST (an image file read), on which
+        # `to_string/1` raises — so overflow recovery must extract the text.
+        content = OptimalSystemAgent.Utils.Text.content_text(Map.get(msg, :content) || Map.get(msg, "content"))
         {idx, byte_size(content), msg}
       end)
       |> Enum.sort_by(fn {_idx, size, _msg} -> size end, :desc)
@@ -79,7 +81,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ContextCollapse do
         |> Enum.map(fn {msg, idx} ->
           if idx in withhold_indices do
             tool_name = Map.get(msg, :name) || Map.get(msg, :tool_call_id) || "tool"
-            original_size = byte_size(to_string(Map.get(msg, :content) || ""))
+            original_size = byte_size(OptimalSystemAgent.Utils.Text.content_text(Map.get(msg, :content)))
 
             Map.put(
               msg,

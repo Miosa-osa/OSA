@@ -2491,12 +2491,12 @@ impl App {
                 // the agent's context — show why the agent is about to pivot.
                 let note = if summary.trim().is_empty() {
                     format!(
-                        "\u{2699} Reacting to {} completed background task(s)",
+                        "\u{2699} Reading {} completed result(s) and synthesizing\u{2026}",
                         count
                     )
                 } else {
                     format!(
-                        "\u{2699} Reacting to {} completed background task(s) \u{2014} {}",
+                        "\u{2699} Reading {} completed result(s) and synthesizing \u{2014} {}",
                         count, summary
                     )
                 };

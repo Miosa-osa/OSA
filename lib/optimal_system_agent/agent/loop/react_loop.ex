@@ -1720,6 +1720,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         content
       end
 
+    # Strip the `BACKGROUND_INTENTIONAL:` escape AFTER blocked_finish?/finish_receipt
+    # have consumed it (it releases the gate) — otherwise the internal marker leaks
+    # into the user's final answer.
+    content = VerificationGate.strip_background_marker(content)
+
     case run_stop_hooks(content, state) do
       {:continue, inject_msg, state} ->
         state = %{

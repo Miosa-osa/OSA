@@ -254,6 +254,41 @@ defmodule OptimalSystemAgent.Utils.Text do
   def safe_to_string(val), do: inspect(val)
 
   @doc """
+  The human-readable TEXT of a message's `content`, which may be a plain string
+  OR a list of typed content blocks.
+
+  A message gains block-shaped content the moment an image is attached
+  (`[%{type: "text", text: ..}, %{type: "image", source: %{data: ..}}]`), and
+  several message scanners — scaffold-marker detection, file-hint extraction —
+  only ever want the prose. They used `to_string(content)`, which raises
+  `ArgumentError: cannot convert the given list to a string` on a block list, so
+  attaching an image crashed the turn. This joins the `text` parts (dropping
+  image and other non-text blocks) and never raises.
+
+  - binary            → as-is
+  - list of blocks    → the `text`/`"text"` parts joined with `"\\n\\n"`
+  - nil               → `""`
+  - anything else      → `safe_to_string/1`
+  """
+  @spec content_text(any()) :: String.t()
+  def content_text(content) when is_binary(content), do: content
+  def content_text(nil), do: ""
+
+  def content_text(content) when is_list(content) do
+    content
+    |> Enum.map(&block_text/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n\n")
+  end
+
+  def content_text(content), do: safe_to_string(content)
+
+  defp block_text(block) when is_binary(block), do: block
+  defp block_text(%{text: t}) when is_binary(t), do: t
+  defp block_text(%{"text" => t}) when is_binary(t), do: t
+  defp block_text(_), do: ""
+
+  @doc """
   Returns the current UTC time as an ISO 8601 string.
   """
   @spec now_iso() :: String.t()
