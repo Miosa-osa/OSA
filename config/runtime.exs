@@ -400,9 +400,15 @@ config :optimal_system_agent,
     (case System.get_env("OLLAMA_THINK") do
        "true" -> true
        "false" -> false
-       # Baked default OFF: an unrecognised local reasoning model otherwise
-       # thinks on every turn (2s+ to say hi). Explicit OLLAMA_THINK=true re-arms.
-       _ -> false
+       # Default nil (NOT false): let Ollama.reasoning_decision/2 decide by
+       # serving mode + effort, exactly as the comment above promises. A baked
+       # `false` short-circuits that whole decision (it matches the `:config`
+       # branch before serving-mode/effort are ever consulted), silently
+       # disabling cloud reasoning AND per-turn effort steering. Local reasoning
+       # models are still protected from unbounded thinking by the dedicated
+       # `:local_stall_guard` branch, so nil does not re-arm the "thinks on every
+       # turn" problem. Explicit OLLAMA_THINK=true/false still overrides both ways.
+       _ -> nil
      end),
   # OLLAMA_TOOLS: force tool schemas to be sent ("true") or withheld ("false")
   # for ALL Ollama models, overriding `Ollama.tools_decision/2` in both

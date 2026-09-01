@@ -379,8 +379,14 @@ defmodule OptimalSystemAgent.Orchestrator do
     # If fork_messages provided, pass them as initial conversation history
     fork_messages = Map.get(config, :fork_messages, [])
 
-    # Worktree isolation — create an isolated git worktree for this agent
-    isolation = Map.get(config, :isolation)
+    # Worktree isolation — create an isolated git worktree for this agent. When
+    # the caller didn't specify, honor the `worktree_by_default` setting so the
+    # top-level agent can run isolated without asking per task (default off).
+    isolation =
+      Map.get(config, :isolation) ||
+        if OptimalSystemAgent.Settings.get("worktree_by_default", false),
+          do: :worktree,
+          else: nil
 
     worktree_info =
       if isolation == :worktree do

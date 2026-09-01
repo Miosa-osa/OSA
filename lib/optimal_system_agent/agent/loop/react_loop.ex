@@ -166,6 +166,41 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   defp iteration_cap_reached?(iter, max) when is_integer(max), do: iter >= max
   defp iteration_cap_reached?(_iter, _max), do: false
 
+  # Per-turn effort shaping. Planning turns are floored UP so a read-only plan
+  # gets real reasoning even if the session is on :fast; tool-loop continuations
+  # are dropped to :fast so digesting a tool result and firing the next call
+  # stays snappy (the bulk of a coding turn). The first response of a turn keeps
+  # the user's global effort - that is where their intent lives. A session that
+  # deliberately runs :high/:xhigh is never lowered; we only speed up the
+  # default (:medium). Override is process-scoped and auto-restored, so it never
+  # touches the session/global setting or a concurrent session - the same
+  # guarantee Resample relies on.
+  defp with_turn_effort(state, fun) do
+    case turn_effort(state) do
+      nil -> fun.()
+      level -> Effort.with_process_override(level, fun)
+    end
+  end
+
+  @doc false
+  def turn_effort(state) do
+    cond do
+      planning_turn?(state) and not Effort.current_at_least?(:high) -> :high
+      not planning_turn?(state) and continuation_turn?(state) and
+          not Effort.current_at_least?(:high) ->
+        :fast
+
+      true ->
+        nil
+    end
+  end
+
+  defp planning_turn?(state) do
+    Map.get(state, :permission_mode) == :plan or Map.get(state, :plan_mode, false) == true
+  end
+
+  defp continuation_turn?(state), do: (Map.get(state, :iteration) || 0) >= 1
+
   defp max_response_tokens do
     # Check for bumped max_tokens from output token recovery.
     # Default raised from 8K → 32K so OSA can produce longer, more detailed
@@ -497,23 +532,31 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # wrong answer for every stored turn.
     requested_at = DateTime.utc_now()
 
-    thinking_opts = LLMClient.thinking_config(state)
-    tools_for_call = ToolFilter.filter(state.tools, state)
-
-    llm_opts = [
-      tools: tools_for_call,
-      temperature: LLMClient.temperature(),
-      max_tokens: max_response_tokens()
-    ]
-
-    llm_opts =
-      if thinking_opts, do: Keyword.put(llm_opts, :thinking, thinking_opts), else: llm_opts
-
-    # Initialize streaming tool executor — tools can start running mid-stream
+    # Initialize streaming tool executor — tools can start running mid-stream.
+    # Kept in the OUTER scope (not the effort closure below): it does not read
+    # effort, and the drain further down needs `streaming_ctx` in scope.
     streaming_ctx = StreamingToolExecutor.start(state)
     Process.put(:osa_streaming_tool_ctx, streaming_ctx)
 
-    result = LLMClient.llm_chat_stream(state, context.messages, llm_opts)
+    # The effort read by thinking_config, ToolFilter and the provider's
+    # reasoning_decision must all see the same per-turn level, so the override
+    # wraps the whole request-building region, not just the call.
+    result =
+      with_turn_effort(state, fn ->
+        thinking_opts = LLMClient.thinking_config(state)
+        tools_for_call = ToolFilter.filter(state.tools, state)
+
+        llm_opts = [
+          tools: tools_for_call,
+          temperature: LLMClient.temperature(),
+          max_tokens: max_response_tokens()
+        ]
+
+        llm_opts =
+          if thinking_opts, do: Keyword.put(llm_opts, :thinking, thinking_opts), else: llm_opts
+
+        LLMClient.llm_chat_stream(state, context.messages, llm_opts)
+      end)
 
     # Collect any streaming tool blocks that arrived during the LLM call
     streaming_ctx =
