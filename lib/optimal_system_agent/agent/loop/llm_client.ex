@@ -383,6 +383,23 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     messages
     |> Providers.chat(opts)
     |> surface_sync_reasoning(Map.get(state, :session_id, "session"))
+    |> repair_result_text()
+  end
+
+  # A non-streamed reply never passes through the streaming `repair_stream`, so
+  # glm/z.ai CP1252 mojibake in a sync answer — or its reasoning — would reach
+  # the user un-repaired (the streaming :done arm repairs content, this path did
+  # not). Repair both keys here so the two transports are byte-consistent.
+  defp repair_result_text({:ok, %{} = result}),
+    do: {:ok, result |> repair_field(:content) |> repair_field(:reasoning)}
+
+  defp repair_result_text(other), do: other
+
+  defp repair_field(%{} = result, key) do
+    case Map.get(result, key) do
+      v when is_binary(v) -> Map.put(result, key, Mojibake.repair(v))
+      _ -> result
+    end
   end
 
   # A non-streamed turn has no `{:thinking_delta, _}` callback, so a provider
@@ -555,14 +572,9 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         # resume; the deltas above fix the live view, this fixes the copy that
         # outlives the turn. A provider that sends all its content in one final
         # chunk (some cloud models do) is only covered here.
-        result =
-          case result do
-            %{content: content} when is_binary(content) ->
-              %{result | content: Mojibake.repair(content)}
-
-            _ ->
-              result
-          end
+        # Repair the FINAL assembled content AND reasoning (the reasoning string
+        # is persisted/re-rendered too, and was previously left un-repaired).
+        result = result |> repair_field(:content) |> repair_field(:reasoning)
 
         # Broadcast token usage via PubSub for TUI status bar
         # `|| %{}`: a provider that reports `usage: nil` is a present key, so
