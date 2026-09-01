@@ -246,6 +246,7 @@ defmodule OptimalSystemAgent.Agents.Registry do
            tools_allowed: nil,
            tools_blocked: [],
            max_iterations: nil,
+           force_background: false,
            permission_tier: :subagent,
            system_prompt: OptimalSystemAgent.Utils.Bom.strip(content),
            source_path: path,
@@ -308,6 +309,9 @@ defmodule OptimalSystemAgent.Agents.Registry do
       provider: nullable_string(meta["provider"]),
       effort: nullable_string(meta["effort"]),
       background: parse_bool(meta["background"]),
+      # Force background even when the caller foregrounds (research fan-outs that
+      # must never lock the parent's turn). See delegate `background?/2`.
+      force_background: parse_bool(meta["force_background"]) == true,
       isolation: parse_isolation(meta["isolation"]),
       skills: List.wrap(first_present(meta, ["skills"]) || []) |> Enum.map(&to_string/1),
       mcp_servers: first_present(meta, ["mcp_servers", "mcpServers"]),

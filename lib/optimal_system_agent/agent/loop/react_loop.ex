@@ -155,8 +155,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # this is roughly 23 days of continuous work, so nothing real reaches it.
   @unbounded_iterations 1_000_000
 
-  defp max_iterations do
-    Application.get_env(:optimal_system_agent, :max_iterations) || @unbounded_iterations
+  # A PER-RUN cap on `state` wins (a delegated subagent whose agent def or call
+  # set `max_iterations` — e.g. `researcher` at 30 — so it can't crawl 187 pages
+  # in one turn). Absent that, the global config, else the effectively-unbounded
+  # default. The top-level interactive loop sets no per-run cap, so it is
+  # unchanged. Hitting the cap runs `forced_wrapup` (a real handoff), not a
+  # silent halt.
+  defp max_iterations(state) do
+    case Map.get(state, :max_iterations) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> Application.get_env(:optimal_system_agent, :max_iterations) || @unbounded_iterations
+    end
   end
 
   # Explicit rather than leaning on Elixir term ordering, under which
@@ -263,7 +272,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         ArgumentError -> false
       end
 
-    max_iter = max_iterations()
+    max_iter = max_iterations(state)
 
     cond do
       cancelled? ->
@@ -498,7 +507,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     context = inject_pending_agent_messages(context, state)
     context = inject_iteration_budget(context, state)
 
-    max_iter = max_iterations()
+    max_iter = max_iterations(state)
 
     Logger.debug(
       "[loop] About to call LLM for #{state.session_id}, iteration #{state.iteration + 1}/#{max_iter}"
@@ -3203,7 +3212,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   end
 
   defp inject_iteration_budget(context, state) do
-    max_iter = max_iterations()
+    max_iter = max_iterations(state)
     remaining = max_iter - state.iteration
 
     # Only nag when GENUINELY near the ceiling — not every iteration. The old
