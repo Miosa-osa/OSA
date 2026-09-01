@@ -155,8 +155,14 @@ defmodule OptimalSystemAgent.Memory.Synthesis do
       to_string(role) == "user"
     end)
     |> case do
-      nil -> ""
-      msg -> to_string(msg[:content] || msg["content"] || "")
+      nil ->
+        ""
+
+      msg ->
+        # Content is a block LIST when an image is attached; `to_string/1` on a
+        # list raised (caught upstream, but it silently disabled memory prefetch
+        # + injection on every image turn). Extract the prose instead.
+        OptimalSystemAgent.Utils.Text.content_text(msg[:content] || msg["content"])
     end
   end
 

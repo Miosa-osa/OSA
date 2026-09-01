@@ -343,6 +343,14 @@ defmodule OptimalSystemAgent.Providers.Ollama do
           content: "",
           tool_calls: [],
           usage: %{},
+          # Reassembly buffer for NDJSON lines longer than the port's `{:line,
+          # 1_048_576}` limit. The port delivers such a line as one or more
+          # `{:noeol, chunk}` fragments followed by a final `{:eol, tail}`;
+          # holding the fragments here and prepending them to the tail before
+          # `Jason.decode` is what stops a >1 MB line (a big tool-call's
+          # arguments, or a model that returns the whole answer in the done chunk)
+          # from being silently truncated and dropped.
+          partial: "",
           # Terminal `done_reason` from the final NDJSON chunk, when one arrives.
           stop_reason: nil,
           # Split inline <think>…</think> reasoning out of the live stream so
@@ -434,10 +442,16 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   # Final line has "done": true with usage stats.
   defp cloud_stream_loop(port, callback, acc) do
     receive do
-      {^port, {:data, {:eol, line}}} ->
+      {^port, {:data, {:eol, tail}}} ->
         # Raw bytes arrived → reset the idle watchdog BEFORE parsing, so even a
         # keepalive or non-JSON line counts as the pipe being alive (WS1).
         bump_heartbeat(Map.get(acc, :heartbeat))
+
+        # Prepend any held `:noeol` fragments of an oversized line, then clear the
+        # buffer so the next line starts fresh. `acc.partial` is "" for the common
+        # (sub-1-MB) line, so this is a no-op there.
+        line = Map.get(acc, :partial, "") <> tail
+        acc = %{acc | partial: ""}
 
         case Jason.decode(line) do
           {:ok, %{"done" => true} = resp} ->
@@ -571,11 +585,12 @@ defmodule OptimalSystemAgent.Providers.Ollama do
             cloud_stream_loop(port, callback, acc)
         end
 
-      {^port, {:data, {:noeol, _partial}}} ->
-        # Partial line — raw bytes still flowing, so reset the idle watchdog
-        # (WS1), then wait for more.
+      {^port, {:data, {:noeol, fragment}}} ->
+        # A line longer than the port's `{:line, N}` limit arrives as `:noeol`
+        # fragments before its `:eol` tail. Accumulate them (was previously
+        # DISCARDED, truncating the line) and reset the idle watchdog (WS1).
         bump_heartbeat(Map.get(acc, :heartbeat))
-        cloud_stream_loop(port, callback, acc)
+        cloud_stream_loop(port, callback, %{acc | partial: Map.get(acc, :partial, "") <> fragment})
 
       {^port, {:exit_status, 0}} ->
         # curl exited cleanly but we didn't get a done:true — finalize.
