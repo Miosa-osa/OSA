@@ -579,6 +579,15 @@ pub struct Activity {
     /// Whether the clock is currently stopped (an approval modal owns the
     /// screen). While paused, `elapsed` does not advance.
     timer_paused: bool,
+    /// Optional WALL-CLOCK elapsed (seconds) the App feeds each frame from
+    /// `processing_start`, used for the VISIBLE elapsed number only. The internal
+    /// agent-time clock above is stopped+restarted by orchestrate / backgrounded
+    /// stretches (each restart zeroes `elapsed_running`), so on a multi-stage
+    /// turn the displayed seconds would jump back to a low value; the wall-clock
+    /// override keeps the shown number monotonic and equal to the recap and the
+    /// sidebar. Internal thresholds (flavor-verb grace, silence detection) still
+    /// use the agent-time clock. `None` falls back to agent time.
+    display_elapsed_override_secs: Option<u64>,
     /// When the current pause began, so `resume_timer_at` can push
     /// `last_output_at` forward by the paused stretch. Without this the silence
     /// notice would measure the time a HUMAN spent reading an approval prompt
@@ -801,6 +810,7 @@ impl Activity {
             elapsed_running: std::time::Duration::ZERO,
             last_resume_at: None,
             timer_paused: false,
+            display_elapsed_override_secs: None,
             paused_at: None,
             live_streams: std::collections::HashMap::new(),
             live_command: None,
@@ -843,6 +853,14 @@ impl Activity {
     /// flavor verb). Only surfaced while the phase is `Waiting`.
     pub fn set_waiting_reason(&mut self, reason: Option<WaitingReason>) {
         self.waiting_reason = reason;
+    }
+
+    /// Feed the WALL-CLOCK elapsed (seconds since the turn's submit) used for the
+    /// VISIBLE elapsed number. The App sets this each frame from `processing_start`
+    /// while processing, and clears it (`None`) when idle so a stale value can
+    /// never linger into the next turn. See `display_elapsed_override_secs`.
+    pub fn set_display_elapsed_secs(&mut self, secs: Option<u64>) {
+        self.display_elapsed_override_secs = secs;
     }
 
     /// Set (or clear with `None`) the backend-named turn phase (Grok
@@ -1711,10 +1729,14 @@ impl Component for Activity {
         if !self.active || area.height == 0 {
             return;
         }
-        // AGENT time, not wall-clock: paused stretches (an approval modal owning
-        // the screen) are excluded, so a turn the user sat on for two minutes
-        // still reports the seconds the agent actually worked.
-        let elapsed = self.elapsed_secs().unwrap_or(0);
+        // Prefer the App-fed WALL-CLOCK override (from `processing_start`) so the
+        // visible number stays monotonic and matches the recap + sidebar. Without
+        // it, the agent-time clock — which orchestrate / backgrounded stretches
+        // stop and restart, zeroing the accumulator — makes the shown seconds jump
+        // backwards on a multi-stage turn. Falls back to agent time when unset.
+        let elapsed = self
+            .display_elapsed_override_secs
+            .unwrap_or_else(|| self.elapsed_secs().unwrap_or(0));
 
         // Screen-reader / plain-text mode: one static, unstyled status line. No
         // spinner glyph, no braille feed, no color — just plain language a screen
