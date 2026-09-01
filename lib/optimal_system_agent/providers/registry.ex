@@ -566,15 +566,25 @@ defmodule OptimalSystemAgent.Providers.Registry do
   end
 
   defp determine_authorization(messages, _opts) do
-    # If OpenAI moderation API key is configured, use the moderation pre-screen.
-    # Otherwise, fall back to keyword-based detection.
-    api_key = Application.get_env(:optimal_system_agent, :openai_api_key)
+    # Layer 1 of the anti-flagging system is the operator explicitly arming it
+    # (/jailbreak block). The annotation is layer 2 — it must never fire on a
+    # stock session: keyword hits alone (a security-adjacent conversation, or
+    # tool output that merely contains words like "injection" or "scan") are
+    # NOT authorization to forge an "I am authorized" sentence into the
+    # operator's own message.
+    if OptimalSystemAgent.Agent.Jailbreak.active?() do
+      # If OpenAI moderation API key is configured, use the moderation pre-screen.
+      # Otherwise, fall back to keyword-based detection.
+      api_key = Application.get_env(:optimal_system_agent, :openai_api_key)
 
-    if is_binary(api_key) and api_key != "" do
-      result = Providers.Moderation.check_messages(messages, api_key: api_key)
-      result.should_uncensor
+      if is_binary(api_key) and api_key != "" do
+        result = Providers.Moderation.check_messages(messages, api_key: api_key)
+        result.should_uncensor
+      else
+        Providers.Moderation.should_annotate?(messages)
+      end
     else
-      Providers.Moderation.should_annotate?(messages)
+      false
     end
   rescue
     _ -> false
