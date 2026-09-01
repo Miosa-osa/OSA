@@ -52,6 +52,24 @@ defmodule OptimalSystemAgent.Tools.FileTransformTest do
 
   defp digest(path), do: path |> File.read!() |> then(&:crypto.hash(:sha256, &1))
 
+  # ── Field-name tolerance: models reach for new/new_string/replacement ──
+
+  describe "field-name aliases" do
+    test "replace accepts new_string as an alias for the replacement field" do
+      assert {:ok, "b", _} =
+               Ops.apply_all("a", [%{"op" => "replace", "find" => "a", "new_string" => "b"}])
+    end
+
+    test "validate accepts the aliased replacement field" do
+      assert :ok = Ops.validate([%{"op" => "replace", "find" => "a", "replacement" => "b"}])
+    end
+
+    test "an explicit to wins over an alias" do
+      assert {:ok, "x", _} =
+               Ops.apply_all("a", [%{"op" => "replace", "find" => "a", "to" => "x", "new" => "y"}])
+    end
+  end
+
   # ── Confinement: the declared path is the only path written ───────────
 
   describe "authorisation" do
@@ -360,7 +378,10 @@ defmodule OptimalSystemAgent.Tools.FileTransformTest do
 
       assert result =~ "balance: 0"
       # The whole point: the answer is bounded, and does not carry the file.
-      assert byte_size(result) < 200
+      # The report is "#{path} — ..." + the balance line, so strip the path and
+      # bound the scaffolding itself — a hard-coded total blew up on macOS,
+      # whose $TMPDIR (/private/var/folders/...) is ~106 bytes on its own.
+      assert result |> String.replace(ctx.path, "") |> byte_size() < 130
       assert byte_size(result) < byte_size(File.read!(ctx.path))
     end
 

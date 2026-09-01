@@ -697,6 +697,9 @@ impl App {
         if !seeded_mode.is_default() {
             status.set_permission_mode(seeded_mode);
         }
+        // `/jailbreak` — seed the badge from the state file so it renders on
+        // the very first frame, not one tick later.
+        status.set_liberated(crate::components::jailbreak::is_liberated());
         // An overdrive seed implies the bypass flag + sidebar indicator, exactly
         // like --dangerously-skip-permissions.
         let overdrive_seeded = seeded_mode.is_overdrive();

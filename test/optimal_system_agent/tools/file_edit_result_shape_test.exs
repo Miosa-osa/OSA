@@ -39,7 +39,17 @@ defmodule OptimalSystemAgent.Tools.FileEditResultShapeTest do
     FileState.reset()
     sid = "fe-shape-#{System.unique_integer([:positive])}"
     ctx = %UseContext{session_id: sid, permission_tier: :full}
-    path = Path.join(System.tmp_dir!(), "osa_fe_#{System.unique_integer([:positive])}.txt")
+
+    # PathCanon FIRST: file_edit resolves the real path before editing, so
+    # `meta.path` comes back as the PHYSICAL /private/var/... spelling while a
+    # raw System.tmp_dir!() fixture is /var/... — the metadata assertions then
+    # compare two spellings of the same directory. (Same root cause the
+    # file_read_diagnostics and symlink suites fixed.)
+    path =
+      System.tmp_dir!()
+      |> OptimalSystemAgent.Agent.Safety.PathCanon.canonicalize()
+      |> Path.join("osa_fe_#{System.unique_integer([:positive])}.txt")
+
     on_exit(fn -> File.rm(path) end)
     {:ok, ctx: ctx, path: path}
   end

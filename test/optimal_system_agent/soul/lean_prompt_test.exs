@@ -13,16 +13,25 @@ defmodule OptimalSystemAgent.Soul.LeanPromptTest do
 
   alias OptimalSystemAgent.Soul
 
+  # Two flags now: `:lean_prompt` gates skipping unfilled bundled rule templates
+  # (default ON), and `:lean_system_prompt` gates serving SYSTEM_LEAN.md over the
+  # full SYSTEM.md (default OFF — full is the default template). This file's
+  # helper drives BOTH together so its assertions still compare a
+  # lean-everything base against a full-everything base, exactly as before the
+  # split.
   setup do
-    original = Application.get_env(:optimal_system_agent, :lean_prompt)
+    orig_rules = Application.get_env(:optimal_system_agent, :lean_prompt)
+    orig_tpl = Application.get_env(:optimal_system_agent, :lean_system_prompt)
 
     on_exit(fn ->
-      if original == nil do
-        Application.delete_env(:optimal_system_agent, :lean_prompt)
-      else
-        Application.put_env(:optimal_system_agent, :lean_prompt, original)
+      restore = fn key, val ->
+        if val == nil,
+          do: Application.delete_env(:optimal_system_agent, key),
+          else: Application.put_env(:optimal_system_agent, key, val)
       end
 
+      restore.(:lean_prompt, orig_rules)
+      restore.(:lean_system_prompt, orig_tpl)
       Soul.invalidate_static_base()
     end)
 
@@ -31,15 +40,20 @@ defmodule OptimalSystemAgent.Soul.LeanPromptTest do
 
   defp with_flag(value, fun) do
     Application.put_env(:optimal_system_agent, :lean_prompt, value)
+    Application.put_env(:optimal_system_agent, :lean_system_prompt, value)
     Soul.invalidate_static_base()
     result = fun.(Soul.static_base(:native_tools))
     Soul.invalidate_static_base()
     result
   end
 
-  test "the flag is on by default" do
+  test "the rule-skipping flag is on by default, the lean-template flag is off" do
     Application.delete_env(:optimal_system_agent, :lean_prompt)
+    Application.delete_env(:optimal_system_agent, :lean_system_prompt)
+    # Unfilled bundled rule templates are still skipped by default...
     assert Soul.lean_prompt?()
+    # ...but the FULL SYSTEM.md is the default template; lean is opt-in.
+    refute Soul.lean_system_prompt?()
   end
 
   test "turning the flag off restores the long template" do

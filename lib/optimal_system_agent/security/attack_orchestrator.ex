@@ -233,11 +233,13 @@ defmodule OptimalSystemAgent.Security.AttackOrchestrator do
 
   @doc """
   Get the next target to attack based on prioritization.
-  Considers confidence threshold and evidence quality.
+
+  Ranks the session's weapons via AttackPrioritizer and returns the first
+  entry whose confidence meets the state's threshold, or nil.
   """
   @spec next_target(state()) :: map() | nil
   def next_target(%{weapons: weapons, confidence_threshold: threshold})
-      when is_list(weapons) do
+      when is_list(weapons) and weapons != [] do
     weapons
     |> AttackPrioritizer.rank()
     |> Enum.find(&(&1.confidence >= threshold))

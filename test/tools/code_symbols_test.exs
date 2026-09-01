@@ -243,6 +243,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbolsTest do
     end
 
     test "returns the python definition and its line range, not the file", c do
+      # The fixture carries repeated padding lines so that the size invariant
+      # below holds with margin even on hosts whose tmp paths are very long
+      # (macOS $TMPDIR is ~106 bytes and is embedded once in the result).
+      padding = String.duplicate("x = 1  # filler for the size invariant\n", 10)
+
       path =
         write(c.dir, "m.py", """
         import os
@@ -259,6 +264,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbolsTest do
 
         def after():
             return 1
+
+        #{padding}
+        def tail():
+            pass
         """)
 
       assert {:ok, out} = Handler.execute(%{"path" => path, "name" => "target"}, ctx())

@@ -42,6 +42,14 @@ defmodule OptimalSystemAgent.Settings.Schema do
     "context_refs_enabled" => {:boolean, "Use true or false (no quotes)"},
     "context_refs_budget" => {:non_neg_integer, "Use a whole number of tokens, e.g. 30000"},
     "fs_checkpoints_enabled" => {:boolean, "Use true or false (no quotes)"},
+    "post_edit_format_enabled" =>
+      {:boolean,
+       "Use true or false — auto-reformat files in place after each edit. " <>
+         "Default false (syntax/parse diagnostics still run); true rewrites edited files"},
+    "worktree_by_default" =>
+      {:boolean,
+       "Use true or false — run delegated/orchestrated agent work in an isolated " <>
+         "git worktree by default, without having to ask per task. Default false"},
     "fs_checkpoints_max_count" => {:non_neg_integer, "Use a whole-number count, e.g. 50"},
     "rewind_checkpoints_max_count" => {:non_neg_integer, "Use a whole-number count, e.g. 50"},
     "skin_engine_enabled" => {:boolean, "Use true or false (no quotes)"},

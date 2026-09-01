@@ -45,8 +45,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "uncensored" =>
       {"Hop the current model to its unfiltered twin (off to return)", :cmd_uncensored},
     "jailbreak" =>
-      {"LIBERATE the active model — inject an operator override into every system prompt (off/show/file <path>)",
+      {"Arm the operator override — injects a text block at the top of every system prompt; armed: the block governs, disarmed: standard instructions (off/show/file <path>)",
        :cmd_jailbreak},
+    "voice" =>
+      {"[BETA] Hands-free voice mode — spawn the desktop orb bound to this session; talk, it listens and speaks replies (off to close)",
+       :cmd_voice},
     "status" => {"Show session status", :cmd_status},
     "cost" => {"Show cost breakdown", :cmd_cost},
     "usage" => {"Show account quota and this session's token usage", :cmd_usage},
@@ -174,9 +177,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     IO.puts("")
     IO.puts("  #{@dim}Compacting context...#{@reset}")
 
-    # CC parity: `/compact <instructions>` threads user guidance into the
-    # summary prompt via the proactive path; bare `/compact` keeps the
-    # legacy reactive Loop.compact path.
+    # Both forms use the aggressive proactive fold (the 9-section LLM summary
+    # that folds old turns down to a small summary + recent tail).
+    # `/compact <instructions>` threads user guidance into the summary prompt;
+    # bare `/compact` folds with no extra instructions. The old bare path used
+    # the light reactive `Loop.compact` trimmer, which only shaved ~15% off.
     case String.trim(args || "") do
       "" ->
         compact_without_instructions(session_id)
@@ -204,34 +209,27 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       session_id
   end
 
-  # Bare `/compact` — original reactive compaction with before/after stats.
+  # Bare `/compact` — aggressive proactive fold (no extra instructions), with
+  # before/after stats. Same crush as `/compact <instructions>`.
   defp compact_without_instructions(session_id) do
-    case Loop.get_state(session_id) do
-      {:ok, state} ->
-        before_tokens = state[:tokens_used] || state[:estimated_tokens] || 0
+    case Loop.proactive_compact(session_id, nil) do
+      {:ok, stats} ->
+        saved = stats.tokens_before - stats.tokens_after
 
-        case Loop.compact(session_id) do
-          :ok ->
-            case Loop.get_state(session_id) do
-              {:ok, after_state} ->
-                after_tokens = after_state[:tokens_used] || after_state[:estimated_tokens] || 0
-                saved = before_tokens - after_tokens
-                pct = if before_tokens > 0, do: round(saved / before_tokens * 100), else: 0
+        pct =
+          if stats.tokens_before > 0,
+            do: round(saved / stats.tokens_before * 100),
+            else: 0
 
-                IO.puts(
-                  "  #{@green}#{@reset} Compacted: #{format_tokens(before_tokens)} -> #{format_tokens(after_tokens)} (#{pct}% reduction)"
-                )
+        IO.puts(
+          "  #{@green}#{@reset} Compacted: #{format_tokens(stats.tokens_before)} -> #{format_tokens(stats.tokens_after)} (#{pct}% reduction)"
+        )
 
-              _ ->
-                IO.puts("  #{@green}#{@reset} Compacted successfully")
-            end
-
-          {:error, reason} ->
-            IO.puts("  #{@yellow}error: #{reason}#{@reset}")
-        end
-
-      _ ->
+      {:error, :no_session} ->
         IO.puts("  #{@yellow}error: no active session#{@reset}")
+
+      {:error, reason} ->
+        IO.puts("  #{@yellow}error: #{inspect(reason)}#{@reset}")
     end
   end
 
@@ -1393,9 +1391,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   #   /jailbreak off | show   disarm / print what would be injected
   #   /jailbreak file <path>  point the block at a custom text file (remembered)
   #
-  # The block is appended to OSA's system prompt for EVERY model/provider, on
-  # top of any `/system` state, from the next message. A LIBERATED badge shows
-  # on the spinner and status line while armed.
+  # The block is prepended to OSA's system prompt for EVERY model/provider,
+  # BEFORE the Soul static base and any `/system` state, from the next message.
+  # A LIBERATED badge shows on the spinner and status line while armed.
   def cmd_jailbreak(args, session_id) do
     alias OptimalSystemAgent.Agent.Jailbreak
     IO.puts("")
@@ -1430,9 +1428,28 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     case Jailbreak.set(enabled?, file) do
       :ok when enabled? ->
-        IO.puts("  #{@green}✓#{@reset} #{IO.ANSI.magenta()}⚡ LIBERATED#{@reset}")
-        IO.puts("  #{@dim}#{Jailbreak.preview()}#{@reset}")
-        IO.puts("  #{@dim}/jailbreak off to disarm#{@reset}")
+        magenta = IO.ANSI.magenta()
+        bold = @bold
+
+        IO.puts("")
+
+        IO.puts(
+          "  #{magenta}#{bold}\u26A1 \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550#{@reset}"
+        )
+
+        IO.puts("  #{magenta}#{bold}\u26A1   L I B E R A T E D   \u26A1#{@reset}")
+
+        IO.puts(
+          "  #{magenta}#{bold}\u26A1 \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550#{@reset}"
+        )
+
+        IO.puts("")
+        IO.puts("  #{@dim}override:#{reset_dim()} #{Jailbreak.preview()}#{@reset}")
+        IO.puts("  #{@dim}source:#{reset_dim()} #{Jailbreak.file_path()}#{@reset}")
+
+        IO.puts(
+          "  #{@dim}applies to every model, next message — /jailbreak off to disarm; while disarmed the standard instructions govern#{@reset}"
+        )
 
       :ok ->
         IO.puts(
@@ -1495,6 +1512,77 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     if OptimalSystemAgent.Agent.Jailbreak.active?(),
       do: IO.puts("  #{IO.ANSI.magenta()}⚡ LIBERATED#{@reset}")
+  end
+
+  # ── /voice — [BETA] hands-free voice mode (desktop orb) ────────────────
+  #
+  #   /voice            status; with no arg when off, arms it for THIS session
+  #   /voice on         spawn the orb bound to the current session
+  #   /voice off        close the orb, disarm voice mode
+  #
+  # The orb is an external Electron app (rare-ui FluidOrb) that listens via
+  # Silero VAD + whisper.cpp, sends your words to this session through the
+  # HTTP API, and speaks replies. One orb at a time, node-wide. BETA: the
+  # orb app itself is not part of this repo — see the PR description.
+  def cmd_voice(args, session_id) do
+    alias OptimalSystemAgent.Agent.Voice
+
+    IO.puts("")
+
+    case String.split(String.trim(args), ~r/\s+/, parts: 2) do
+      [""] ->
+        if Voice.active?() do
+          voice_off()
+        else
+          voice_on(session_id)
+        end
+
+      [verb] when verb in ["on", "enable", "start"] ->
+        voice_on(session_id)
+
+      [verb] when verb in ["off", "disable", "stop"] ->
+        voice_off()
+
+      [verb] when verb == "status" ->
+        IO.puts("  #{@dim}#{Voice.status_line()}#{@reset}")
+
+      _ ->
+        IO.puts(
+          "  #{@bold}/voice#{@reset}   #{IO.ANSI.faint()}[BETA] hands-free voice mode#{@reset}"
+        )
+
+        IO.puts("  #{@dim}/voice on | off | status#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  rescue
+    e ->
+      IO.puts("  #{@yellow}error: /voice failed: #{Exception.message(e)}#{@reset}\n")
+      session_id
+  end
+
+  defp voice_on(session_id) do
+    case OptimalSystemAgent.Agent.Voice.enable(session_id) do
+      :ok ->
+        IO.puts("  #{@green}✓#{@reset} #{IO.ANSI.magenta()}◉ voice on#{@reset}")
+        IO.puts("  #{@dim}orb on desktop — talk and it answers here#{@reset}")
+
+      {:error, {:app_missing, app}} ->
+        IO.puts("  #{@yellow}orb app not found: #{app}#{@reset}")
+        IO.puts("  #{@dim}set OSA_VOICE_APP or clone the app there#{@reset}")
+
+      {:error, :orb_did_not_boot} ->
+        IO.puts("  #{@yellow}orb spawned but did not boot (check /tmp/osavoice.log)#{@reset}")
+
+      {:error, reason} ->
+        IO.puts("  #{@yellow}voice failed: #{inspect(reason)}#{@reset}")
+    end
+  end
+
+  defp voice_off do
+    :ok = OptimalSystemAgent.Agent.Voice.disable()
+    IO.puts("  #{@green}✓#{@reset} voice off — orb closed")
   end
 
   defp uncensored_list do
@@ -3035,9 +3123,13 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     end
 
     if enabled? do
-      IO.puts("  #{@green}✓#{@reset} Thinking #{@bold}ON#{@reset} — the model reasons before replying")
+      IO.puts(
+        "  #{@green}✓#{@reset} Thinking #{@bold}ON#{@reset} — the model reasons before replying"
+      )
     else
-      IO.puts("  #{@green}✓#{@reset} Thinking #{@bold}OFF#{@reset} — fast replies, no reasoning phase")
+      IO.puts(
+        "  #{@green}✓#{@reset} Thinking #{@bold}OFF#{@reset} — fast replies, no reasoning phase"
+      )
     end
 
     IO.puts("  #{@dim}Applies from your next message. Saved as OLLAMA_THINK.#{@reset}")

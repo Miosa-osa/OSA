@@ -183,6 +183,9 @@ pub enum BackendEvent {
         failure_count: u32,
         delivery_status: String,
         available_controls: Vec<String>,
+        /// Live context-window utilization (percent) for this agent's session,
+        /// or None from an older backend.
+        context_percent: Option<u32>,
     },
     AgentControlResult {
         agent_id: String,

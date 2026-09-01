@@ -187,11 +187,6 @@ defmodule OptimalSystemAgent.Security.AttackChainReasoner do
     }
   end
 
-  @spec get_target(map()) :: String.t()
-  defp get_target(%{target: t}) when is_binary(t), do: t
-  defp get_target(%{"target" => t}) when is_binary(t), do: t
-  defp get_target(edge) when is_map(edge), do: Map.get(edge, :node, "unknown")
-
   @spec build_description(hop()) :: String.t()
   defp build_description(%{vulnerability_class: class, has_kev: kev}) when is_atom(class) do
     base = "#{String.upcase(to_string(class))}"

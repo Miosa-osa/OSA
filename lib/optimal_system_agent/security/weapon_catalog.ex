@@ -193,7 +193,7 @@ defmodule OptimalSystemAgent.Security.WeaponCatalog do
     Map.put(weapon, :maturity, :reliable)
   end
 
-  def promote(weapon), do: Map.put(weapon, :maturity, :poc)
+  def promote(weapon), do: Map.put(weapon, :maturity, Map.get(weapon, :maturity, :poc))
 
   # ── Domain classification ────────────────────────────────────────────────
 

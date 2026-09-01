@@ -50,6 +50,11 @@ pub struct AgentEntry {
     pub recent_actions: Vec<String>,
     pub tool_uses: u32,
     pub tokens_used: u32,
+    /// Live context-window utilization (percent) for this agent's own session,
+    /// mirrored from its telemetry. `None` until the first progress frame that
+    /// carries it (older backends never send it). Shown on the row as `N% ctx`
+    /// so the dashboard reflects real occupancy, not a cumulative token count.
+    pub context_percent: Option<u32>,
     pub batch_id: Option<String>,
     /// When this agent's RUN started — drives the dashboard "elapsed" column.
     ///

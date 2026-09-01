@@ -456,6 +456,11 @@ pub struct StatusBar {
     /// (`available: true`). Drives the understated `⬆ vX` chip. `None` ⇒ up to
     /// date / source build / not yet reported ⇒ chip omitted.
     update_latest: Option<String>,
+    /// `/jailbreak` armed — drives the animated ⚡ LIBERATED badge next to the
+    /// model name. Injected via `set_liberated` (fed by the app's poll of
+    /// `~/.osa/jailbreak.json`) so the component never reaches out to machine
+    /// state on its own and tests stay hermetic.
+    liberated: bool,
 }
 
 impl StatusBar {
@@ -510,7 +515,13 @@ impl StatusBar {
             subagent_cost: None,
             fleet_select: false,
             update_latest: None,
+            liberated: false,
         }
+    }
+
+    /// `/jailbreak` armed state — drives the ⚡ LIBERATED badge on row 0.
+    pub fn set_liberated(&mut self, armed: bool) {
+        self.liberated = armed;
     }
 
     /// Set the folder label from the session's real working directory (the same
@@ -1182,6 +1193,10 @@ impl Component for StatusBar {
             spans.push(Span::styled(model_label.to_string(), theme.header_model()));
             spans.push(Span::raw("  "));
         }
+        // `/jailbreak` badge — animated ⚡ LIBERATED next to the model it is
+        // liberating. Empty (zero columns) when disarmed; wall-clock pulsed
+        // so it needs no tick plumbing. See `components/jailbreak.rs`.
+        spans.extend(super::jailbreak::badge_spans(self.liberated));
         spans.push(Span::styled(self.cwd_basename.clone(), theme.header_provider()));
 
         // Session title — what this conversation is ABOUT, next to where it is.

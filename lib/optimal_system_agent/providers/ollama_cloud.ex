@@ -143,8 +143,28 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       requires_subscription: nil,
       note: "Z.ai flagship — long-horizon agentic + coding"
     },
-    # GLM-5.3-Flash — Ollama tag `glm-5.3-flash:cloud` (the bare `glm-5.3` is
-    # still a 404; only the Flash line shipped). The FIRST natively-multimodal
+    # GLM-5.3 - the bare flagship, now live on Ollama. Probed 2026-08-30 via a
+    # signed-in local daemon: 1,048,576 ctx, tools + thinking, NO vision (the
+    # Flash sibling below is the multimodal one); 753B glm_dsa_moe. The
+    # 2026-08-01 pass recorded only a 404 here. Pricing left nil - Z.ai's
+    # first-party list rate for the bare 5.3 is unconfirmed, and a guessed price
+    # is worse than an honest $0.00 + a log.
+    %{
+      id: "glm-5.3:cloud",
+      name: "GLM-5.3",
+      ctx: 1_048_576,
+      ctx_source: :probe,
+      tools: true,
+      thinking: true,
+      vision: false,
+      audio: false,
+      pricing: nil,
+      recommended: false,
+      requires_subscription: nil,
+      note: "1M ctx, 753B MoE - Z.ai flagship, long-horizon agentic coding"
+    },
+    # GLM-5.3-Flash - Ollama tag `glm-5.3-flash:cloud` (the bare `glm-5.3` now
+    # ships too; see the entry above). The FIRST natively-multimodal
     # GLM text tag: image + video inline, unlike every glm-N text model before
     # it. 320B/18B MoE, 1M window, 131K output. ctx :static (from Ollama's
     # library page + Z.ai spec, not a live /api/show probe).
@@ -251,6 +271,24 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       recommended: false,
       requires_subscription: nil,
       note: "512K ctx, native multimodal + agentic"
+    },
+    # MiniMax M2.7 - the M2-series predecessor to M3. Probed 2026-08-30 via a
+    # signed-in local daemon: 196,608 ctx, tools + thinking, no vision (M3 is the
+    # multimodal one); 229B, family minimax-m2. Pricing left nil - MiniMax's
+    # first-party rate for this tag is unconfirmed (do NOT copy M3's).
+    %{
+      id: "minimax-m2.7:cloud",
+      name: "MiniMax M2.7",
+      ctx: 196_608,
+      ctx_source: :probe,
+      tools: true,
+      thinking: true,
+      vision: false,
+      audio: false,
+      pricing: nil,
+      recommended: false,
+      requires_subscription: nil,
+      note: "192K ctx, 229B - M2-series coding + agentic"
     },
     %{
       id: "deepseek-v4-pro:cloud",

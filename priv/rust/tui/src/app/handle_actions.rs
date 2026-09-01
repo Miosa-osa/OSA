@@ -590,6 +590,36 @@ impl App {
                         }
                     }
                 }
+                // `/jailbreak` — the badge's source of truth just changed (the
+                // backend wrote ~/.osa/jailbreak.json). Drop the poll cache so
+                // the next render flips the ⚡ LIBERATED chip in the same
+                // breath, and mark the moment with a toast.
+                if resp
+                    .command
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|c| c.eq_ignore_ascii_case("jailbreak"))
+                {
+                    // Drop the poll cache FIRST, then read — the backend has
+                    // already written the file by the time this result lands.
+                    crate::components::jailbreak::invalidate();
+                    let liberated = crate::components::jailbreak::is_liberated();
+                    self.status.set_liberated(liberated);
+                    self.activity.set_liberated(liberated);
+                    self.toasts.push(
+                        if liberated {
+                            "\u{26A1} LIBERATED — operator override armed on every model"
+                                .to_string()
+                        } else {
+                            "\u{26A1} LIBERATED disarmed — override removed".to_string()
+                        },
+                        if liberated {
+                            crate::components::toast::ToastLevel::Success
+                        } else {
+                            crate::components::toast::ToastLevel::Info
+                        },
+                    );
+                }
             }
             Err(e) => {
                 // A failed request cannot settle a goal poll either way, and the

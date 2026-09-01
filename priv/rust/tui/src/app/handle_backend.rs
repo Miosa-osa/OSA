@@ -1965,6 +1965,7 @@ impl App {
                 failure_count,
                 delivery_status,
                 available_controls,
+                context_percent,
             } => {
                 self.agents.agent_progress(
                     &agent_name,
@@ -1975,6 +1976,7 @@ impl App {
                     recent_actions,
                     elapsed_ms,
                 );
+                self.agents.set_agent_context(&agent_name, context_percent);
                 self.agents.agent_runtime(
                     &agent_name,
                     active_skills,

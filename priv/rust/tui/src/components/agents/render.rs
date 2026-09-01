@@ -901,13 +901,23 @@ impl Agents {
                 // elapsed/tool/token counts, and — once the agent is finished —
                 // what it cost. A finished agent whose cost was never reported
                 // shows `—`, because `$0.00` would be a claim we cannot make.
+                // Live context-window occupancy for this agent's own session,
+                // when its telemetry has reported it. This is the number that
+                // actually answers "is it close to full?" — the `tok` count is
+                // cumulative throughput (cache reads re-counted every turn) and
+                // reads like runaway spend, so ctx% is the honest gauge.
+                let ctx = match entry.context_percent {
+                    Some(p) => format!(" · {}% ctx", p),
+                    None => String::new(),
+                };
                 let meta = format!(
-                    "  {} {} · {} tool{} · {} tok · {}",
+                    "  {} {} · {} tool{} · {} tok{} · {}",
                     token_bar(entry.tokens_used, max_tokens),
                     fmt_elapsed(entry.elapsed_secs()),
                     entry.tool_uses,
                     if entry.tool_uses == 1 { "" } else { "s" },
                     fmt_tokens(entry.tokens_used),
+                    ctx,
                     fmt_cost_opt(entry.cost_usd),
                 );
 

@@ -11,10 +11,31 @@ defmodule OptimalSystemAgent.Soul.StaticBaseSizeTest do
   These assertions are ranges, not equalities — SYSTEM.md and the tool list
   change legitimately. What they enforce is that the ORDERING and the ORDER OF
   MAGNITUDE stay true to what the surrounding comments say.
+
+  The full `SYSTEM.md` is now the DEFAULT template (`:lean_system_prompt` off);
+  `SYSTEM_LEAN.md` is the opt-in special-case fallback for constrained
+  deployments. These size guarantees are ABOUT the lean cut, so the suite forces
+  the lean template on and pins the sizes the cut actually delivers when used.
   """
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Soul
+
+  setup do
+    orig = Application.get_env(:optimal_system_agent, :lean_system_prompt)
+    Application.put_env(:optimal_system_agent, :lean_system_prompt, true)
+    Soul.invalidate_static_base()
+
+    on_exit(fn ->
+      if orig == nil,
+        do: Application.delete_env(:optimal_system_agent, :lean_system_prompt),
+        else: Application.put_env(:optimal_system_agent, :lean_system_prompt, orig)
+
+      Soul.invalidate_static_base()
+    end)
+
+    :ok
+  end
 
   test ":lite is still nowhere near the 4-6k it was documented as" do
     lite = Soul.static_token_count(:lite)

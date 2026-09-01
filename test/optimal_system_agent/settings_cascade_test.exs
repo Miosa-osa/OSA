@@ -6,7 +6,16 @@ defmodule OptimalSystemAgent.SettingsCascadeTest do
   alias OptimalSystemAgent.Settings
 
   setup do
-    tmp = Path.join(System.tmp_dir!(), "osa_settings_t#{System.unique_integer([:positive])}")
+    # PathCanon FIRST: the BEAM resolves `/var/folders/...` to the physical
+    # `/private/var/...`, so a trust grant pinned to the raw `System.tmp_dir!()`
+    # spelling never matches the cwd the settings layer resolves — the gate
+    # then withholds the fixture's own hooks. (Same root cause the
+    # file_read_diagnostics and symlink suites fixed.)
+    tmp =
+      System.tmp_dir!()
+      |> OptimalSystemAgent.Agent.Safety.PathCanon.canonicalize()
+      |> Path.join("osa_settings_t#{System.unique_integer([:positive])}")
+
     File.mkdir_p!(Path.join(tmp, ".osa"))
     old_cwd = File.cwd!()
     File.cd!(tmp)

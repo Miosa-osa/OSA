@@ -142,6 +142,18 @@ defmodule OptimalSystemAgent.Security.Cvss do
 
   # ── internals ─────────────────────────────────────────────────────────────
 
+  @doc """
+  Approximate base score (0.0-10.0) from a 0.0-1.0 exploit weight — for chain
+  scoring where only an edge weight, not a full vector, is available.
+  """
+  @spec base_score(number()) :: float()
+  def base_score(weight) when is_number(weight) do
+    weight
+    |> max(0.0)
+    |> min(1.0)
+    |> Kernel.*(10.0)
+  end
+
   defp validate(metrics) do
     missing = Enum.reject(@metric_order, &Map.has_key?(metrics, &1))
 

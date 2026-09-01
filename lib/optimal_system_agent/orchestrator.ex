@@ -379,8 +379,14 @@ defmodule OptimalSystemAgent.Orchestrator do
     # If fork_messages provided, pass them as initial conversation history
     fork_messages = Map.get(config, :fork_messages, [])
 
-    # Worktree isolation — create an isolated git worktree for this agent
-    isolation = Map.get(config, :isolation)
+    # Worktree isolation — create an isolated git worktree for this agent. When
+    # the caller didn't specify, honor the `worktree_by_default` setting so the
+    # top-level agent can run isolated without asking per task (default off).
+    isolation =
+      Map.get(config, :isolation) ||
+        if OptimalSystemAgent.Settings.get("worktree_by_default", false),
+          do: :worktree,
+          else: nil
 
     worktree_info =
       if isolation == :worktree do
@@ -519,6 +525,10 @@ defmodule OptimalSystemAgent.Orchestrator do
           execute_and_collect(subagent_id, task, parent_id, role, max_iter, worktree_info,
             display_name: display_name,
             batch_id: batch_id,
+            # EXPLICIT per-agent iteration cap only (agent def / delegate call),
+            # not the tier fallback — so a bounded worker like `researcher` (30)
+            # is enforced while un-capped subagents keep the default.
+            max_iterations: Map.get(config, :max_iterations),
             resumed_from: Map.get(config, :resumed_from),
             # Per-call override (delegate `timeout_ms` arg) wins; otherwise
             # execute_and_collect falls back to the global config /
@@ -840,6 +850,7 @@ defmodule OptimalSystemAgent.Orchestrator do
             display_name: display_name,
             batch_id: batch_id,
             resumed_from: agent_id,
+            max_iterations: Map.get(config, :max_iterations),
             timeout_ms: Map.get(config, :timeout_ms)
           )
 
@@ -1871,7 +1882,10 @@ defmodule OptimalSystemAgent.Orchestrator do
 
     result =
       try do
-        Loop.process_message(subagent_id, task, timeout: timeout_ms)
+        Loop.process_message(subagent_id, task,
+          timeout: timeout_ms,
+          max_iterations: Keyword.get(opts, :max_iterations)
+        )
       rescue
         e ->
           Logger.error("[Orchestrator] Subagent #{subagent_id} crashed: #{Exception.message(e)}")
@@ -3171,7 +3185,11 @@ defmodule OptimalSystemAgent.Orchestrator do
           :skill_reason,
           :retry_count,
           :failure_count,
-          :delivery_status
+          :delivery_status,
+          # Live context-window utilization (percent) mirrored from this
+          # subagent's own telemetry, so the dashboard row can show real
+          # occupancy instead of a cumulative token count.
+          :context_percent
         ])
         |> Map.put(
           :available_controls,

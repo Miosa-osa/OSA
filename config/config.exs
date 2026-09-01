@@ -407,7 +407,12 @@ config :optimal_system_agent, ecto_repos: [OptimalSystemAgent.Store.Repo]
 # Disable with `post_edit_verify: [enabled: false]`.
 config :optimal_system_agent,
   diagnostics_provider: {OptimalSystemAgent.Verify.PostEdit, :run},
-  post_edit_verify: [enabled: true, timeout_ms: 8_000]
+  post_edit_verify: [enabled: true, timeout_ms: 8_000],
+  # Diagnostics (syntax/parse errors) stay on; the in-place REFORMAT of edited
+  # files is OFF by default because it churns the bytes under the agent between
+  # its own edits. Opt in via `post_edit_format_enabled: true` in settings.json
+  # or this app env. See Verify.PostEdit.format_enabled?/0.
+  post_edit_format: false
 
 # Auto-mode safety Guardian. In :auto permission tier, the classifier blocks
 # dangerous tool calls and the Guardian pauses unattended execution after

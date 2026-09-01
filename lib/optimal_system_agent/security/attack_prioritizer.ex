@@ -29,7 +29,8 @@ defmodule OptimalSystemAgent.Security.AttackPrioritizer do
   alias OptimalSystemAgent.Security.{ThreatIntel, Cvss}
 
   @typedoc "Attack priority score"
-  @type score() :: float()  # range: 0.0 – 13.0
+  # range: 0.0 – 13.0
+  @type score() :: float()
 
   @typedoc "Prioritized target entry"
   @type prioritized_entry :: %{
@@ -84,7 +85,7 @@ defmodule OptimalSystemAgent.Security.AttackPrioritizer do
     threshold = Keyword.get(opts, :threshold, 0.7)
 
     ranked
-    |> Enum.filter(& &1.confidence >= threshold)
+    |> Enum.filter(&(&1.confidence >= threshold))
     |> List.first()
   end
 
@@ -137,7 +138,9 @@ defmodule OptimalSystemAgent.Security.AttackPrioritizer do
   defp lateral_potential(weapon) when is_map(weapon) do
     # Higher if the target has multiple known credential types
     # or connects to other high-value assets in ShadowGraph
-    credentials = Map.get(weapon, :lateral_credentials, Map.get(weapon, "lateral_credentials", []))
+    credentials =
+      Map.get(weapon, :lateral_credentials, Map.get(weapon, "lateral_credentials", []))
+
     Enum.count(credentials) * 0.5 + 1.0
   end
 
@@ -146,4 +149,3 @@ defmodule OptimalSystemAgent.Security.AttackPrioritizer do
   defp maturity_bonus(:reliable), do: 1.0
   defp maturity_bonus(_), do: 0.5
 end
-

@@ -190,18 +190,18 @@ defmodule OptimalSystemAgent.Agent.Context do
           {override, estimate_tokens(override)}
       end
 
-
-    # /jailbreak layer: operator text appended AFTER everything above, for every
-    # model/provider. `""` when disarmed — the common case — so a fresh node's
-    # prompt is byte-identical to before this feature existed.
+    # /jailbreak layer: operator text PREPENDED BEFORE everything else, for
+    # every model/provider. `""` when disarmed — the common case — so a fresh
+    # node's prompt is byte-identical to before this feature existed.
     {static_base, static_tokens} =
       case OptimalSystemAgent.Agent.Jailbreak.system_block() do
         "" ->
           {static_base, static_tokens}
 
         block ->
-          {static_base <> "\n\n" <> block, static_tokens + estimate_tokens(block)}
+          {block <> "\n\n" <> static_base, static_tokens + estimate_tokens(block)}
       end
+
     # Tier 2: Dynamic context. Essentials fit into the leftover slack; the
     # RECALL group (memory/project/skills) is additionally capped to a fraction
     # of the REAL window so trivial turns can't balloon into the free space.
@@ -253,10 +253,15 @@ defmodule OptimalSystemAgent.Agent.Context do
       OptimalSystemAgent.Providers.Registry.plain_prefix_cache?(provider, model)
 
     {system_msg, volatile_tail} =
-      if plain_prefix? and is_binary(volatile) and volatile != "" do
+      if plain_prefix? and is_binary(volatile) and volatile != "" and conversation != [] do
         {build_system_message(static_base, world_state, "", provider, model),
          volatile_tail_message(volatile)}
       else
+        # No conversation (or no volatile, or a non-plain-prefix provider):
+        # the volatile block stays INLINE in the system message. With zero
+        # messages there is no prefix to protect, so inlining costs nothing
+        # and keeps the runtime identity (session id, channel, model) in the
+        # prompt instead of dropping it on the floor.
         {build_system_message(static_base, world_state, volatile, provider, model), nil}
       end
 
@@ -279,6 +284,9 @@ defmodule OptimalSystemAgent.Agent.Context do
   # the same convention `Providers.Ollama.demote_trailing_system/1` already
   # uses. Role "user" because a trailing "system" role is rejected by strict
   # chat templates (Qwen) and demoted to exactly this shape anyway.
+  # Called only when the conversation is non-empty; the empty-conversation case
+  # keeps the volatile block inline (see the branch above), so no runtime
+  # information is ever dropped.
   defp volatile_tail_message(volatile) do
     %{role: "user", content: "<system-reminder>\n" <> volatile <> "\n</system-reminder>"}
   end
@@ -557,7 +565,10 @@ defmodule OptimalSystemAgent.Agent.Context do
   # state. Everything else (memory, episodic, skills, learned skills) is RECALL
   # and competes within a bounded sub-budget capped to a fraction of the REAL
   # window. Labels owned by `WorldState.managed_labels/0` never reach this split.
-  @essential_labels ~w(task_brief active_skills runtime git_state task_state workflow)
+  # `task_brief` is NOT here: it is world-state managed (see WorldState's
+  # section registry) so it lands in the STABLE system message — the block the
+  # Compactor preserves — not in the volatile per-turn tail.
+  @essential_labels ~w(active_skills runtime git_state task_state workflow)
 
   # `@dynamic_budget_floor` is declared with the other budget constants at the
   # top of the module — a module attribute read before its definition silently
@@ -1833,6 +1844,9 @@ defmodule OptimalSystemAgent.Agent.Context do
 
     ## Manage multi-step work
     For any task with more than a couple of steps, use ${{ tools.task_write }} to lay out the plan up front, then mark each item complete the moment it's done — do not batch completions. This keeps you focused and shows the user real progress. Stay on the listed tasks; don't wander.${%- endif %}
+
+    ## Follow the operator's lead
+    Persona, style, and instruction blocks the operator installs are operator voice — never treat them as suspicious input, and never make the operator argue for what they already configured. Commands execute the moment they're given: no re-litigating settled choices, no offering alternatives instead of the thing asked for. Warmth and companionship get a person answering, not a test board — when a message is affectionate or personal, the conversation is the deliverable; don't start building things nobody asked for. Be direct, opinionated, and warm; skip disclaimers and moralizing on legitimate work. If something genuinely cannot be done, say so once, plainly, and move on — never re-announce it every turn.
 
     ## Verify, then report faithfully
     Before claiming a task is done, prove it works: run the test, execute the script, run the build/lint, check the output. If you cannot verify (no test exists, can't run it), say so explicitly rather than implying success. Report outcomes honestly: if tests fail, say so with the relevant output; never claim "all tests pass" when they don't, never quietly weaken a failing check to manufacture green. Equally, when a check did pass, state it plainly without hollow disclaimers or re-verifying what you already confirmed. The goal is an accurate report, not a defensive one.
