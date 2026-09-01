@@ -2798,7 +2798,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
         true
 
       true ->
-        content = to_string(Map.get(m, :content) || Map.get(m, "content") || "")
+        # `content` is a LIST of typed blocks whenever an image is attached, and
+        # `to_string/1` on a list raised `ArgumentError` — attaching an image
+        # crashed the turn here. `content_text/1` extracts the prose (a scaffold
+        # marker is always plain text, never an image block).
+        content = OptimalSystemAgent.Utils.Text.content_text(Map.get(m, :content) || Map.get(m, "content"))
         trimmed = String.trim(content)
 
         trimmed in ReactLoop.interrupt_markers() or

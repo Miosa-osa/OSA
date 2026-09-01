@@ -600,6 +600,29 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
 
   defp background_escaped?(_), do: false
 
+  @doc """
+  Removes the `BACKGROUND_INTENTIONAL: <reason>` escape line from user-visible
+  content.
+
+  The marker is an INTERNAL control signal: the model emits it to tell the gate
+  it backgrounded work on purpose, which releases the finish (`background_escaped?/1`).
+  Once the gate has consumed it, it must NOT reach the user — a stray
+  "BACKGROUND_INTENTIONAL: ..." line in the answer is leaked machinery.
+
+  Call this at the terminal-finish chokepoint AFTER `blocked_finish?/2` has read
+  the marker, so it still releases the gate but is gone from the persisted
+  transcript and the final render on every finish path.
+  """
+  @spec strip_background_marker(String.t() | nil) :: String.t() | nil
+  def strip_background_marker(content) when is_binary(content) do
+    content
+    |> String.replace(~r/^[ \t]*BACKGROUND[_\s-]?INTENTIONAL\s*:.*$/im, "")
+    |> String.replace(~r/\n{3,}/, "\n\n")
+    |> String.trim()
+  end
+
+  def strip_background_marker(content), do: content
+
   # Injection seam. Production resolves to the real manager; tests substitute a
   # stub so the clause can be exercised without spawning real processes.
   defp background_module do

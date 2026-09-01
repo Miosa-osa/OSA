@@ -158,7 +158,11 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: false,
       audio: false,
-      pricing: nil,
+      # CONFIRMED 2026-09-01 from Ollama's published pricing: glm-5.3 is
+      # $1.40 in / $4.40 out per M tokens (cached input $0.26), matching the
+      # {1.40, 4.40} Z.ai lists for the bare id. Was `nil` while the rate was
+      # unconfirmed; the default model must no longer account at $0.00.
+      pricing: {1.40, 4.40},
       recommended: false,
       requires_subscription: nil,
       note: "1M ctx, 753B MoE - Z.ai flagship, long-horizon agentic coding"
@@ -267,15 +271,17 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: true,
       audio: false,
-      pricing: {0.30, 1.20},
+      # CORRECTED 2026-09-01 from Ollama's published pricing: minimax-m3 is
+      # $0.60 in / $2.40 out per M tokens (cached input $0.12). It was mistakenly
+      # carrying m2.7's $0.30/$1.20 — half the true output cost, under-reported.
+      pricing: {0.60, 2.40},
       recommended: false,
       requires_subscription: nil,
       note: "512K ctx, native multimodal + agentic"
     },
     # MiniMax M2.7 - the M2-series predecessor to M3. Probed 2026-08-30 via a
     # signed-in local daemon: 196,608 ctx, tools + thinking, no vision (M3 is the
-    # multimodal one); 229B, family minimax-m2. Pricing left nil - MiniMax's
-    # first-party rate for this tag is unconfirmed (do NOT copy M3's).
+    # multimodal one); 229B, family minimax-m2.
     %{
       id: "minimax-m2.7:cloud",
       name: "MiniMax M2.7",
@@ -285,7 +291,9 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: false,
       audio: false,
-      pricing: nil,
+      # CONFIRMED 2026-09-01 from Ollama's published pricing: minimax-m2.7 is
+      # $0.30 in / $1.20 out per M tokens (cached input $0.06).
+      pricing: {0.30, 1.20},
       recommended: false,
       requires_subscription: nil,
       note: "192K ctx, 229B - M2-series coding + agentic"
@@ -329,7 +337,9 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: false,
       audio: false,
-      pricing: nil,
+      # CONFIRMED 2026-09-01 from Ollama's published pricing: gpt-oss:120b is
+      # $0.15 in / $0.60 out per M tokens (cached input $0.014).
+      pricing: {0.15, 0.60},
       recommended: false,
       requires_subscription: nil,
       note: "OpenAI open-weight, strong reasoning"
@@ -343,7 +353,9 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: true,
       audio: false,
-      pricing: nil,
+      # CONFIRMED 2026-09-01 from Ollama's published pricing: qwen3.5 (397b) is
+      # $0.60 in / $3.60 out per M tokens (cached input $0.60 — no cache discount).
+      pricing: {0.60, 3.60},
       recommended: false,
       requires_subscription: nil,
       note: "multimodal, vision + tools"
@@ -357,7 +369,9 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: false,
       audio: false,
-      pricing: nil,
+      # CONFIRMED 2026-09-01 from Ollama's published pricing: nemotron-3-super is
+      # $0.015 in / $0.60 out per M tokens (cached input $0.015).
+      pricing: {0.015, 0.60},
       recommended: false,
       requires_subscription: nil,
       note: "262K ctx, 120B MoE — efficient agentic"
@@ -373,7 +387,9 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       # Ollama's own /api/show reports no "audio" capability for this tag even
       # though the model card lists audio input — trust the daemon, not the card.
       audio: false,
-      pricing: nil,
+      # CONFIRMED 2026-09-01 from Ollama's published pricing: gemma4 is
+      # $0.14 in / $0.40 out per M tokens (cached input $0.05).
+      pricing: {0.14, 0.40},
       recommended: false,
       requires_subscription: nil,
       note: "262K ctx, frontier reasoning + vision"
@@ -387,7 +403,10 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: true,
       audio: false,
-      pricing: nil,
+      # Inherits gemma4's published rate (2026-09-01): Ollama lists one price for
+      # the gemma4 family, so the pinned 31B size tag bills at the same
+      # $0.14 in / $0.40 out per M tokens (cached input $0.05).
+      pricing: {0.14, 0.40},
       recommended: false,
       requires_subscription: nil,
       note: "262K ctx, pinned 31B tag of Gemma 4"
@@ -401,7 +420,9 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: false,
       audio: false,
-      pricing: nil,
+      # CONFIRMED 2026-09-01 from Ollama's published pricing: gpt-oss:20b is
+      # $0.07 in / $0.30 out per M tokens (cached input $0.035).
+      pricing: {0.07, 0.30},
       recommended: false,
       requires_subscription: nil,
       note: "OpenAI open-weight, fast — light utility tier"

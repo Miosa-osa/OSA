@@ -297,7 +297,9 @@ defmodule OptimalSystemAgent.Agent.FastPath do
     |> Enum.find(fn msg -> to_string(msg[:role] || msg["role"]) == "user" end)
     |> case do
       nil -> ""
-      msg -> to_string(msg[:content] || msg["content"] || "")
+      # Content is a block LIST when an image is attached; `to_string/1` on a
+      # list raises. Take the prose (file hints key off the text, not the image).
+      msg -> OptimalSystemAgent.Utils.Text.content_text(msg[:content] || msg["content"])
     end
   end
 
