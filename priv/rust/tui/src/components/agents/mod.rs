@@ -796,6 +796,7 @@ impl Agents {
                     recent_actions: Vec::new(),
                     tool_uses: 0,
                     tokens_used: 0,
+                    context_percent: None,
                     batch_id: None,
                     started_at: std::time::Instant::now(),
                     finished_at: None,
@@ -873,6 +874,7 @@ impl Agents {
                 recent_actions: Vec::new(),
                 tool_uses: 0,
                 tokens_used: 0,
+                context_percent: None,
                 batch_id,
                 started_at: std::time::Instant::now(),
                 finished_at: None,
@@ -934,6 +936,17 @@ impl Agents {
             }
             if !subject.is_empty() && entry.subject.is_empty() {
                 entry.subject = subject;
+            }
+        }
+    }
+
+    /// Update an agent's live context-window utilization from its own telemetry.
+    /// `None` leaves the last reading untouched, so a progress frame from an
+    /// older backend that omits the field never wipes a good value.
+    pub fn set_agent_context(&mut self, name: &str, context_percent: Option<u32>) {
+        if let Some(pct) = context_percent {
+            if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
+                entry.context_percent = Some(pct);
             }
         }
     }
@@ -1099,6 +1112,7 @@ impl Agents {
                 recent_actions: Vec::new(),
                 tool_uses: 0,
                 tokens_used: 0,
+                context_percent: None,
                 batch_id: Some("background".to_string()),
                 started_at: now,
                 finished_at: None,
