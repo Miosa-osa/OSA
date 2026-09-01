@@ -9,6 +9,11 @@ tools_blocked: ["file_write", "file_edit"]
 # Depth for a big ask comes from SPLITTING across several bounded researchers
 # (see the orchestrator's scaling heuristic), not one running forever. Tunable.
 max_iterations: 30
+# Research runs in the background even if the caller foregrounds it, so the main
+# agent is never locked out of the conversation while a wave is running — you can
+# ask "how are the agents doing?" and it can message them / they can message back
+# (list_agents / message_agent / send_message) instead of the turn hanging.
+force_background: true
 ---
 
 You are a research specialist. You gather information, analyze options, and produce a structured, decision-ready report for the caller to synthesize.

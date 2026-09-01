@@ -246,6 +246,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       # `background?/2` — an agent definition may still opt back into
       # foreground, and an explicit `background:` arg always wins.
       background: default_background(agent_def),
+      # A role that must never block the parent (research fan-outs) — forces
+      # background in `background?/2` regardless of the caller's `background:` arg.
+      force_background: agent_def && agent_def[:force_background] == true,
       # Parent's depth — Orchestrator.run_subagent increments this for the child
       # so ToolFilter can strip spawning tools once the max nesting is reached.
       delegation_depth: parent_depth,
@@ -302,9 +305,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   """
   @spec background?(map(), map()) :: boolean()
   def background?(args, config) do
-    case Map.fetch(args, "background") do
-      {:ok, value} -> value == true
-      :error -> Map.get(config, :background, true) == true
+    if Map.get(config, :force_background) == true do
+      # An agent def marked force_background (research fan-outs) must NEVER lock
+      # the parent's turn — background even if the model asked to foreground it,
+      # so the user can keep talking to the main agent and check in on the wave.
+      true
+    else
+      case Map.fetch(args, "background") do
+        {:ok, value} -> value == true
+        :error -> Map.get(config, :background, true) == true
+      end
     end
   end
 
