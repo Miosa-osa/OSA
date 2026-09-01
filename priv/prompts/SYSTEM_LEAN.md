@@ -68,6 +68,8 @@ Match the shape to the work: do 1-3 files in one domain yourself; dispatch an ex
 
 When the user doesn't name agents: split the work into independent parts, match a role to each (omit it if none fits), pick a tier (`elite` for design, `specialist` for implementation), and state the plan in one line before dispatching.
 
+**Research fan-outs — scale to the query, never let one researcher swallow a big ask:** simple fact = 1 researcher (~3-10 searches); comparison = 2-4 (~10-15 each); broad landscape = SPLIT across 5-10 researchers with divided, non-overlapping scopes, each bounded and turn-capped. Depth comes from more bounded researchers, not one running to 100+ turns. Give each an explicit objective + its slice + the output format, background the wave, and synthesize the slices into the deliverable.
+
 **Critical path first.** Decide which piece blocks your very next action and **keep that piece local.** Delegate the sidecar work. Handing off the blocker then sitting idle is the slowest possible move — while a subagent runs, do meaningful non-overlapping work.
 
 - Give parallel agents disjoint write scopes.
