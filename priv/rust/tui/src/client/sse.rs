@@ -1175,6 +1175,10 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 delivery_status: String,
                 #[serde(default)]
                 available_controls: Vec<String>,
+                /// Live context-window utilization (percent) for this agent's
+                /// own session. Absent from older backends -> None.
+                #[serde(default)]
+                context_percent: Option<u32>,
             }
             let ev: Ev = serde_json::from_slice(data).ok()?;
             Some(BackendEvent::OrchestratorAgentProgress {
@@ -1192,6 +1196,7 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 failure_count: ev.failure_count,
                 delivery_status: ev.delivery_status,
                 available_controls: ev.available_controls,
+                context_percent: ev.context_percent,
             })
         }
 
@@ -2760,6 +2765,27 @@ mod tests {
                 assert_eq!(retry_count, 2);
                 assert_eq!(failure_count, 1);
                 assert_eq!(delivery_status, "acknowledged");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn progress_carries_live_context_percent() {
+        // A frame that includes the live context utilization decodes it...
+        let frame = br#"{"event":"orchestrator_agent_progress","agent_name":"worker","current_action":"searching","tool_uses":8,"tokens_used":900000,"context_percent":42}"#;
+        match parse_sse_event("orchestrator_agent_progress", frame) {
+            Some(BackendEvent::OrchestratorAgentProgress { context_percent, .. }) => {
+                assert_eq!(context_percent, Some(42));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // ...and an older frame without it decodes to None rather than dropping.
+        let legacy = br#"{"event":"orchestrator_agent_progress","agent_name":"worker","current_action":"searching","tool_uses":8,"tokens_used":900000}"#;
+        match parse_sse_event("orchestrator_agent_progress", legacy) {
+            Some(BackendEvent::OrchestratorAgentProgress { context_percent, .. }) => {
+                assert_eq!(context_percent, None);
             }
             other => panic!("unexpected: {:?}", other),
         }

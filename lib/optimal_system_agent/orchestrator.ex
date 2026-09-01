@@ -3177,7 +3177,11 @@ defmodule OptimalSystemAgent.Orchestrator do
           :skill_reason,
           :retry_count,
           :failure_count,
-          :delivery_status
+          :delivery_status,
+          # Live context-window utilization (percent) mirrored from this
+          # subagent's own telemetry, so the dashboard row can show real
+          # occupancy instead of a cumulative token count.
+          :context_percent
         ])
         |> Map.put(
           :available_controls,

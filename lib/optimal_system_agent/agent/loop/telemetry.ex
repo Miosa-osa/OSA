@@ -103,6 +103,26 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
         "above_warning=#{warning.above_warning} above_compact=#{warning.above_compact}"
     )
 
+    # Mirror this session's LIVE context utilization into the per-agent control
+    # store. A subagent's session_id IS its agent_id (Orchestrator), so the
+    # progress forwarder can read it back and surface a real "N% ctx" on the
+    # agent-dashboard row instead of a cumulative, cache-inclusive token count
+    # that reads like runaway spend. Best-effort — a telemetry write must never
+    # break the turn.
+    _ =
+      try do
+        OptimalSystemAgent.Agent.ExecutionControl.progress(
+          state.session_id,
+          # Integer percent 0..100. The TUI decodes this as Option<u32>; a float
+          # would fail that decode and drop the whole progress frame, so round.
+          %{context_percent: round(utilization * 1.0)}
+        )
+      rescue
+        _ -> :ok
+      catch
+        _, _ -> :ok
+      end
+
     Bus.emit(:system_event, %{
       event: :context_pressure,
       session_id: state.session_id,
