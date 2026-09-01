@@ -459,14 +459,26 @@ impl App {
             );
         }
 
-        // Snapshot the spinner's clock at the turn-end edge, BEFORE stopping it
-        // (and before /goal auto-continue or a queued auto-submit can restart
-        // it for the NEXT turn). The turn_recap SSE event arrives after this
-        // agent_response and consumes the snapshot, so "✻ Worked for Ns"
-        // equals the last value the spinner showed instead of a server-side
-        // clock that starts later (after the request round-trip) and can
-        // visibly jump backwards.
-        self.last_turn_client_elapsed_secs = self.activity.elapsed_secs();
+        // Snapshot elapsed at the turn-end edge, BEFORE stopping the clock (and
+        // before /goal auto-continue or a queued auto-submit can restart it for
+        // the NEXT turn). The turn_recap SSE event arrives after this
+        // agent_response and consumes the snapshot, so "✻ Worked for Ns" shows a
+        // client-side number that can never jump backwards (the server clock
+        // starts later, after the request round-trip).
+        //
+        // Prefer WALL-CLOCK since this turn's submit (`processing_start`) over
+        // the `activity` spinner clock. The spinner clock banks AGENT time and is
+        // stopped + restarted by orchestrate and backgrounded-agent stretches
+        // (each `start()` zeroes `elapsed_running`), so on a multi-stage task it
+        // reports only the final leg and UNDERCOUNTS the real duration — the bug
+        // where a task that ran for minutes recapped as "Worked for 1m".
+        // `processing_start` is set once at submit and survives those restarts,
+        // so it is the true total. Fall back to the spinner clock, then to the
+        // server's elapsed_ms, if it is somehow absent.
+        self.last_turn_client_elapsed_secs = self
+            .processing_start
+            .map(|s| s.elapsed().as_secs())
+            .or_else(|| self.activity.elapsed_secs());
 
         // Clear streaming state. `clear_buf`, NOT `reset`: this turn's
         // finalization must stay on record so a duplicate agent_response
