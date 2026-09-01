@@ -204,7 +204,7 @@ defmodule OptimalSystemAgent.Agent.Reminders do
 
   defp format_subagent_completion(run) do
     role = to_string(run.role || "agent")
-    dur = if is_integer(run.duration_ms), do: " after #{run.duration_ms}ms", else: ""
+    dur = if is_integer(run.duration_ms), do: " after #{OptimalSystemAgent.Utils.Duration.humanize(run.duration_ms)}", else: ""
 
     status_word =
       case run.status do

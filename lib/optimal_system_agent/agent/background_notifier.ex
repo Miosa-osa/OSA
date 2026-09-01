@@ -161,7 +161,7 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
     # (agent_id is still the routing id used for task_id below, just not shown.)
     name = Map.get(ev, :display_name) || role
     dur = Map.get(ev, :duration_ms)
-    dur_str = if is_integer(dur), do: " after #{dur}ms", else: ""
+    dur_str = if is_integer(dur), do: " after #{OptimalSystemAgent.Utils.Duration.humanize(dur)}", else: ""
 
     summary =
       case outcome do
