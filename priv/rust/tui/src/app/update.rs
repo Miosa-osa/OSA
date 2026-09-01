@@ -1620,7 +1620,15 @@ impl App {
             if let Some(start) = self.processing_start {
                 let ms = start.elapsed().as_millis() as u64;
                 self.sidebar.set_elapsed_ms(ms);
+                // Keep the live spinner's visible elapsed on the same wall clock
+                // as the sidebar and the end-of-turn recap, instead of the
+                // agent-time clock that orchestrate/backgrounded stretches zero.
+                self.activity.set_display_elapsed_secs(Some(ms / 1000));
             }
+        } else {
+            // Idle: drop the override so the next turn starts clean and the
+            // agent-time fallback governs until processing_start is set again.
+            self.activity.set_display_elapsed_secs(None);
         }
 
         if self.state.is_processing() {
