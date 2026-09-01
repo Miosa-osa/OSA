@@ -47,6 +47,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "jailbreak" =>
       {"LIBERATE the active model — inject an operator override into every system prompt (off/show/file <path>)",
        :cmd_jailbreak},
+    "voice" =>
+      {"[BETA] Hands-free voice mode — spawn the desktop orb bound to this session; talk, it listens and speaks replies (off to close)",
+       :cmd_voice},
     "status" => {"Show session status", :cmd_status},
     "cost" => {"Show cost breakdown", :cmd_cost},
     "usage" => {"Show account quota and this session's token usage", :cmd_usage},
@@ -1509,6 +1512,77 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     if OptimalSystemAgent.Agent.Jailbreak.active?(),
       do: IO.puts("  #{IO.ANSI.magenta()}⚡ LIBERATED#{@reset}")
+  end
+
+  # ── /voice — [BETA] hands-free voice mode (desktop orb) ────────────────
+  #
+  #   /voice            status; with no arg when off, arms it for THIS session
+  #   /voice on         spawn the orb bound to the current session
+  #   /voice off        close the orb, disarm voice mode
+  #
+  # The orb is an external Electron app (rare-ui FluidOrb) that listens via
+  # Silero VAD + whisper.cpp, sends your words to this session through the
+  # HTTP API, and speaks replies. One orb at a time, node-wide. BETA: the
+  # orb app itself is not part of this repo — see the PR description.
+  def cmd_voice(args, session_id) do
+    alias OptimalSystemAgent.Agent.Voice
+
+    IO.puts("")
+
+    case String.split(String.trim(args), ~r/\s+/, parts: 2) do
+      [""] ->
+        if Voice.active?() do
+          voice_off()
+        else
+          voice_on(session_id)
+        end
+
+      [verb] when verb in ["on", "enable", "start"] ->
+        voice_on(session_id)
+
+      [verb] when verb in ["off", "disable", "stop"] ->
+        voice_off()
+
+      [verb] when verb == "status" ->
+        IO.puts("  #{@dim}#{Voice.status_line()}#{@reset}")
+
+      _ ->
+        IO.puts(
+          "  #{@bold}/voice#{@reset}   #{IO.ANSI.faint()}[BETA] hands-free voice mode#{@reset}"
+        )
+
+        IO.puts("  #{@dim}/voice on | off | status#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  rescue
+    e ->
+      IO.puts("  #{@yellow}error: /voice failed: #{Exception.message(e)}#{@reset}\n")
+      session_id
+  end
+
+  defp voice_on(session_id) do
+    case OptimalSystemAgent.Agent.Voice.enable(session_id) do
+      :ok ->
+        IO.puts("  #{@green}✓#{@reset} #{IO.ANSI.magenta()}◉ voice on#{@reset}")
+        IO.puts("  #{@dim}orb on desktop — talk and it answers here#{@reset}")
+
+      {:error, {:app_missing, app}} ->
+        IO.puts("  #{@yellow}orb app not found: #{app}#{@reset}")
+        IO.puts("  #{@dim}set OSA_VOICE_APP or clone the app there#{@reset}")
+
+      {:error, :orb_did_not_boot} ->
+        IO.puts("  #{@yellow}orb spawned but did not boot (check /tmp/osavoice.log)#{@reset}")
+
+      {:error, reason} ->
+        IO.puts("  #{@yellow}voice failed: #{inspect(reason)}#{@reset}")
+    end
+  end
+
+  defp voice_off do
+    :ok = OptimalSystemAgent.Agent.Voice.disable()
+    IO.puts("  #{@green}✓#{@reset} voice off — orb closed")
   end
 
   defp uncensored_list do
