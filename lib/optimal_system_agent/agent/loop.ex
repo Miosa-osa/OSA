@@ -168,6 +168,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # Budget and turn limits — nil = no limit
     max_budget_usd: nil,
     max_turns: nil,
+    # Per-RUN react-loop iteration cap for THIS session (nil = the global
+    # ~unbounded default). Set for a delegated subagent from its agent def /
+    # delegate call so a bounded worker (e.g. `researcher` at 30) cannot crawl
+    # 187 pages in a single turn. ReactLoop reads it; hitting it runs the forced
+    # wrap-up handoff, not a silent halt.
+    max_iterations: nil,
     # Delegation nesting depth — 0 for a top-level session, incremented for
     # each subagent generation. Read by ToolFilter to strip spawning tools at
     # the max depth (fork-bomb / runaway-cost guard).
@@ -1483,6 +1489,16 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # prompt is processed, so the user can later rewind to this point.
     # Best-effort and never allowed to disrupt the turn.
     _ = maybe_rewind_checkpoint(state, message)
+
+    # A delegated subagent can carry a per-run iteration cap (its agent def's
+    # `max_iterations`, threaded here by the orchestrator). Pin it onto the state
+    # so ReactLoop enforces it for this turn; absent, the session keeps its
+    # ~unbounded default.
+    state =
+      case Keyword.get(opts, :max_iterations) do
+        n when is_integer(n) and n > 0 -> %{state | max_iterations: n}
+        _ -> state
+      end
 
     # From here to the `after` below, this process serves no messages: the whole
     # turn runs on its own stack. Publish what a reader needs BEFORE going deaf,

@@ -525,6 +525,10 @@ defmodule OptimalSystemAgent.Orchestrator do
           execute_and_collect(subagent_id, task, parent_id, role, max_iter, worktree_info,
             display_name: display_name,
             batch_id: batch_id,
+            # EXPLICIT per-agent iteration cap only (agent def / delegate call),
+            # not the tier fallback — so a bounded worker like `researcher` (30)
+            # is enforced while un-capped subagents keep the default.
+            max_iterations: Map.get(config, :max_iterations),
             resumed_from: Map.get(config, :resumed_from),
             # Per-call override (delegate `timeout_ms` arg) wins; otherwise
             # execute_and_collect falls back to the global config /
@@ -846,6 +850,7 @@ defmodule OptimalSystemAgent.Orchestrator do
             display_name: display_name,
             batch_id: batch_id,
             resumed_from: agent_id,
+            max_iterations: Map.get(config, :max_iterations),
             timeout_ms: Map.get(config, :timeout_ms)
           )
 
@@ -1877,7 +1882,10 @@ defmodule OptimalSystemAgent.Orchestrator do
 
     result =
       try do
-        Loop.process_message(subagent_id, task, timeout: timeout_ms)
+        Loop.process_message(subagent_id, task,
+          timeout: timeout_ms,
+          max_iterations: Keyword.get(opts, :max_iterations)
+        )
       rescue
         e ->
           Logger.error("[Orchestrator] Subagent #{subagent_id} crashed: #{Exception.message(e)}")
