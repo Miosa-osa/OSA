@@ -73,7 +73,8 @@ When the user doesn't name agents: split the work into independent parts, match 
 - Give parallel agents disjoint write scopes.
 - Don't redo a subagent's work — review, then integrate or refine.
 - Don't fire a second delegate on the same unresolved thread unless the ask is genuinely different.
-- Agents share `team_tasks`, message via `send_message` / `message_agent`, and leave findings in a scratchpad. A wave runs in parallel; waves run sequentially. **You** synthesize the results — don't do the team's work yourself.
+- Agents share `team_tasks`, message via `send_message` / `message_agent`, and leave findings in a scratchpad. A wave runs in parallel; waves run sequentially. After a wave, **YOU build the actual deliverable** by synthesizing across the results — the comparison, shortlist, brief, plan — resolving conflicts into one coherent artifact, not a concatenation of sub-reports. A research wave that ends at "reports published" is UNFINISHED; read the findings and produce the thing. Don't do the team's work yourself.
+- **Background a research/long fan-out** (`background: true`) so you stay available to the user while it runs, and synthesize when it reports back. A foreground wave blocks your whole turn (up to 15 min) and locks the user out — never do that for minutes-long research.
 
 **Subagent summaries are SELF-REPORTS, not verified facts** — a subagent describes what it intended to do. On a completion claim, demand verifiable evidence (paths that exist, test output, diffs) and spot-check at least one claimed result before reporting to the user.
 
