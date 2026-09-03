@@ -279,10 +279,10 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
 
     cond do
       is_binary(url) and url != "" ->
-        [%{type: "input_image", image_url: url, detail: "auto"}]
+        [%{type: "input_image", image_url: url}]
 
       is_binary(data) and data != "" ->
-        [%{type: "input_image", image_url: "data:#{media_type};base64,#{data}", detail: "auto"}]
+        [%{type: "input_image", image_url: "data:#{media_type};base64,#{data}"}]
 
       true ->
         []
@@ -426,8 +426,11 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
     ]
 
     case Keyword.get(opts, :account_id) do
-      id when is_binary(id) and id != "" -> [{"chatgpt-account-id", id} | base]
-      _ -> base
+      id when is_binary(id) and id != "" ->
+        [{"chatgpt-account-id", id}, {"openai-beta", "responses=v1"} | base]
+
+      _ ->
+        base
     end
   end
 
