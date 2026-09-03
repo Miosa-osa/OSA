@@ -156,6 +156,7 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
     {system, conversation} = split_system(messages)
 
     %{"messages" => format_messages(conversation)}
+    |> maybe_put("serviceTier", Keyword.get(opts, :service_tier))
     |> put_unless_empty("system", Enum.map(system, &%{"text" => &1}))
     |> put_inference_config(opts)
     |> put_tool_config(opts)

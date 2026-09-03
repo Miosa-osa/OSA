@@ -101,9 +101,8 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
   def capped_retry_delay_ms(_), do: 0
 
-  # Map the session's speed priority to an OpenAI processing tier. Only OpenAI
-  # honours `service_tier`; openai_compat gates it to that provider, so setting
-  # it for any provider is safe (ignored elsewhere). :loose → "flex" (~50%
+  # Map the session's speed priority to a provider processing tier. Adapters
+  # gate and translate this option, so unsupported providers ignore it. :loose → "flex" (~50%
   # cheaper, slower — right for long-horizon background work); :immediate →
   # "priority" (faster). The interactive `/fast` toggle also opts ordinary
   # foreground turns into OpenAI Fast processing; provider adapters that do
@@ -116,6 +115,8 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   end
 
   defp service_tier_for(state) when is_map(state) do
+    provider = Map.get(state, :provider)
+
     case Map.get(state, :priority) do
       :loose ->
         "flex"
@@ -124,13 +125,21 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         "priority"
 
       _ ->
-        if fast_service_tier?(), do: "priority", else: nil
+        if fast_service_tier?(), do: fast_tier_for(provider), else: nil
     end
   end
 
   defp service_tier_for(_), do: nil
 
-  @doc "Whether OpenAI Fast processing is enabled independently of reasoning effort."
+  defp fast_tier_for(:groq), do: "auto"
+
+  defp fast_tier_for(provider)
+       when provider in [:openai, :openai_codex, :xai, :google, :openrouter, :bedrock],
+       do: "priority"
+
+  defp fast_tier_for(_), do: nil
+
+  @doc "Whether provider Fast processing is enabled independently of reasoning effort."
   def fast_service_tier? do
     OptimalSystemAgent.Settings.get(:openai_fast_service_tier) == true
   end

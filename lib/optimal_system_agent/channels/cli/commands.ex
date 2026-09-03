@@ -76,7 +76,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "coordinator" => {"Toggle coordinator mode (delegation only)", :cmd_coordinator},
     "ask-user" => {"Let the agent ask you questions mid-task (off by default)", :cmd_ask_user},
     "effort" => {"Set thinking effort level (low/medium/high/max)", :cmd_effort},
-    "fast" => {"Toggle OpenAI Fast processing (reasoning and tools unchanged)", :cmd_fast},
+    "fast" => {"Toggle provider Fast processing (reasoning and tools unchanged)", :cmd_fast},
     "think" => {"Toggle model reasoning on/off (off = faster replies)", :cmd_think},
     "permissions" => {"View and manage permission rules", :cmd_permissions},
     "hooks" => {"View registered hooks", :cmd_hooks},
@@ -3142,8 +3142,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     enabled = LLMClient.toggle_fast_service_tier(session_id)
     mode = if enabled, do: "enabled", else: "disabled"
 
-    IO.puts("  #{@green}✓#{@reset} OpenAI Fast processing #{@bold}#{mode}#{@reset}")
-    IO.puts("  #{@dim}Service tier:#{@reset} #{if enabled, do: "priority", else: "default"}")
+    IO.puts("  #{@green}✓#{@reset} Provider Fast processing #{@bold}#{mode}#{@reset}")
+    IO.puts("  #{@dim}Uses the selected provider's supported acceleration tier.#{@reset}")
     IO.puts("  #{@dim}Reasoning effort and tool budgets are unchanged.#{@reset}")
 
     IO.puts("")
