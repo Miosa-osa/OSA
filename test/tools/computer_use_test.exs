@@ -3,6 +3,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
 
   alias OptimalSystemAgent.Tools.Builtins.ComputerUse
   alias OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.MacOS, as: MacOSAdapter
+  alias OptimalSystemAgent.Tools.UseContext
 
   # ---------------------------------------------------------------------------
   # Tool metadata
@@ -145,22 +146,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
 
   describe "screenshot validation" do
     test "screenshot with no region is valid (passes validation)" do
-      # Will attempt to run screencapture — we test the command generation
-      # not the execution here, so we accept either ok or error from screencapture
-      result = ComputerUse.execute(%{"action" => "screenshot"})
-      # Should not fail on validation
-      refute match?({:error, "Missing required" <> _}, result)
-      refute match?({:error, "Invalid action" <> _}, result)
+      assert {:ok, _} =
+               ComputerUse.validate_input(%{"action" => "screenshot"}, UseContext.empty())
     end
 
     test "screenshot with valid region passes validation" do
-      result =
-        ComputerUse.execute(%{
-          "action" => "screenshot",
-          "region" => %{"x" => 0, "y" => 0, "width" => 100, "height" => 100}
-        })
-
-      refute match?({:error, "Region must" <> _}, result)
+      assert {:ok, _} =
+               ComputerUse.validate_input(
+                 %{
+                   "action" => "screenshot",
+                   "region" => %{"x" => 0, "y" => 0, "width" => 100, "height" => 100}
+                 },
+                 UseContext.empty()
+               )
     end
 
     test "screenshot with invalid region returns error" do
@@ -298,13 +296,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
     end
 
     test "valid key combos pass validation" do
-      # These should pass validation (may fail on execution if osascript not available)
-      for combo <- ~w(enter tab space cmd+c cmd+shift+v ctrl+alt+delete f1 up down) do
-        result = ComputerUse.execute(%{"action" => "key", "text" => combo})
-
-        refute match?({:error, "Key combo" <> _}, result),
-               "Expected #{combo} to pass validation, got: #{inspect(result)}"
+      for combo <- ~w(enter tab space cmd+c cmd+shift+v f1 up down) do
+        assert {:ok, _} =
+                 ComputerUse.validate_input(
+                   %{"action" => "key", "text" => combo},
+                   UseContext.empty()
+                 )
       end
+    end
+
+    test "destructive system key combos are refused" do
+      assert {:error, message, -32_602} =
+               ComputerUse.validate_input(
+                 %{"action" => "key", "text" => "ctrl+alt+delete"},
+                 UseContext.empty()
+               )
+
+      assert message =~ "Refusing destructive key combo"
     end
   end
 
@@ -327,9 +335,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
 
     test "valid scroll directions pass validation" do
       for dir <- ~w(up down left right) do
-        result = ComputerUse.execute(%{"action" => "scroll", "direction" => dir})
-        refute match?({:error, "Missing required" <> _}, result)
-        refute match?({:error, "Invalid direction" <> _}, result)
+        assert {:ok, _} =
+                 ComputerUse.validate_input(
+                   %{"action" => "scroll", "direction" => dir},
+                   UseContext.empty()
+                 )
       end
     end
   end

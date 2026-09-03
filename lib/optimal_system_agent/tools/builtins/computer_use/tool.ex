@@ -34,7 +34,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Tool do
   # ── Schema & description ───────────────────────────────────────────────
 
   @impl true
-  def description, do: Prompt.render([])
+  def description do
+    "Control the desktop with semantic accessibility refs first; use screenshots and " <>
+      "coordinates only when the UI has no usable accessibility tree."
+  end
 
   @impl true
   def prompt(opts), do: Prompt.render(opts)

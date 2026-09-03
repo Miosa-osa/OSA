@@ -288,7 +288,7 @@ This progression happens automatically through the SICA learning cycle — no ma
 | Mouse | `xdotool mousemove`, `click`, `mousedown/mouseup` |
 | Keyboard | `xdotool type`, `xdotool key` |
 | Scroll | `xdotool click` with buttons 4/5/6/7 |
-| Accessibility | Stubbed — planned AT-SPI2 integration |
+| Accessibility | AT-SPI2 recursive tree via the bundled `atspi_tree.py` helper |
 
 **Requirements:**
 - Linux with X11
