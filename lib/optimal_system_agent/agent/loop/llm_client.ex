@@ -418,8 +418,10 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       iteration: Map.get(state, :iteration)
     )
 
-    messages
-    |> Providers.chat(opts)
+    result = Providers.chat(messages, opts)
+    result = maybe_retry_without_service_tier(result, messages, opts, &Providers.chat/2)
+
+    result
     |> surface_sync_reasoning(Map.get(state, :session_id, "session"))
     |> repair_result_text()
   end
@@ -432,6 +434,25 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     do: {:ok, result |> repair_field(:content) |> repair_field(:reasoning)}
 
   defp repair_result_text(other), do: other
+
+  defp maybe_retry_without_service_tier({:error, reason}, messages, opts, request)
+       when is_function(request, 2) do
+    if Keyword.has_key?(opts, :service_tier) and tier_rejection?(reason) do
+      Logger.warning("[llm] Fast tier unavailable; retrying at the provider's default tier")
+      request.(messages, Keyword.delete(opts, :service_tier))
+    else
+      {:error, reason}
+    end
+  end
+
+  defp maybe_retry_without_service_tier(result, _messages, _opts, _request), do: result
+
+  defp tier_rejection?(reason) do
+    text = reason |> inspect() |> String.downcase()
+
+    String.contains?(text, ["service_tier", "service tier", "priority tier"]) or
+      Regex.match?(~r/\b(400|403|422)\b/, text)
+  end
 
   defp repair_field(%{} = result, key) do
     case Map.get(result, key) do
@@ -731,62 +752,70 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     stream_task =
       Task.async(fn ->
         res =
-          case Providers.chat_stream(messages, callback, opts) do
-            :ok ->
-              # Callback-based streaming providers report the response through
-              # `callback` and return `:ok` when the stream closes normally.
-              # `Providers.chat_stream/3` documents exactly that contract.
-              :ok
+          initial = Providers.chat_stream(messages, callback, opts)
 
-            {:error, reason} = error ->
-              # Try fallback chain on retryable errors
-              if OptimalSystemAgent.Providers.FallbackChain.retryable_error?(reason) do
-                # Header-aware: honor a server-supplied Retry-After (parsed by
-                # RetryClassifier off the original reason) before switching
-                # providers, and surface it via the SAME {:provider_retry} UI
-                # event the same-provider retry loop uses, so "Retrying in
-                # Ns…" reflects the real server-requested wait instead of
-                # silently switching providers with no delay at all.
-                delay_ms =
-                  capped_retry_delay_ms(
-                    OptimalSystemAgent.Providers.FallbackChain.retry_delay_ms(reason)
-                  )
+        result =
+          maybe_retry_without_service_tier(initial, messages, opts, fn retry_messages,
+                                                                       retry_opts ->
+            Providers.chat_stream(retry_messages, callback, retry_opts)
+          end)
 
-                Logger.warning(
-                  "[llm] Primary provider failed: #{inspect(reason)}, trying fallback chain" <>
-                    if(delay_ms > 0, do: " (honoring #{delay_ms}ms retry-after)", else: "")
+        case result do
+          :ok ->
+            # Callback-based streaming providers report the response through
+            # `callback` and return `:ok` when the stream closes normally.
+            # `Providers.chat_stream/3` documents exactly that contract.
+            :ok
+
+          {:error, reason} = error ->
+            # Try fallback chain on retryable errors
+            if OptimalSystemAgent.Providers.FallbackChain.retryable_error?(reason) do
+              # Header-aware: honor a server-supplied Retry-After (parsed by
+              # RetryClassifier off the original reason) before switching
+              # providers, and surface it via the SAME {:provider_retry} UI
+              # event the same-provider retry loop uses, so "Retrying in
+              # Ns…" reflects the real server-requested wait instead of
+              # silently switching providers with no delay at all.
+              delay_ms =
+                capped_retry_delay_ms(
+                  OptimalSystemAgent.Providers.FallbackChain.retry_delay_ms(reason)
                 )
 
-                if delay_ms > 0 do
-                  Phoenix.PubSub.broadcast(
-                    OptimalSystemAgent.PubSub,
-                    "osa:session:#{session_id}",
-                    {:osa_event,
-                     %{
-                       type: :provider_retry,
-                       session_id: session_id,
-                       attempt: 1,
-                       max_attempts: 1,
-                       delay_ms: delay_ms,
-                       reason: OptimalSystemAgent.Providers.Resilience.reason_to_string(reason)
-                     }}
-                  )
+              Logger.warning(
+                "[llm] Primary provider failed: #{inspect(reason)}, trying fallback chain" <>
+                  if(delay_ms > 0, do: " (honoring #{delay_ms}ms retry-after)", else: "")
+              )
 
-                  Process.sleep(delay_ms)
-                end
+              if delay_ms > 0 do
+                Phoenix.PubSub.broadcast(
+                  OptimalSystemAgent.PubSub,
+                  "osa:session:#{session_id}",
+                  {:osa_event,
+                   %{
+                     type: :provider_retry,
+                     session_id: session_id,
+                     attempt: 1,
+                     max_attempts: 1,
+                     delay_ms: delay_ms,
+                     reason: OptimalSystemAgent.Providers.Resilience.reason_to_string(reason)
+                   }}
+                )
 
-                case OptimalSystemAgent.Providers.FallbackChain.chat_stream_with_fallback(
-                       messages,
-                       callback,
-                       opts
-                     ) do
-                  {:ok, result, _provider} -> {:ok, result}
-                  fallback_error -> fallback_error
-                end
-              else
-                error
+                Process.sleep(delay_ms)
               end
-          end
+
+              case OptimalSystemAgent.Providers.FallbackChain.chat_stream_with_fallback(
+                     messages,
+                     callback,
+                     opts
+                   ) do
+                {:ok, result, _provider} -> {:ok, result}
+                fallback_error -> fallback_error
+              end
+            else
+              error
+            end
+        end
 
         # Always notify the caller of the task's terminal result. On the success
         # path the {:llm_stream_done} message has already been enqueued by the
