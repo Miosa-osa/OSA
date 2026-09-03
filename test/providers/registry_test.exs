@@ -101,6 +101,26 @@ defmodule OptimalSystemAgent.Providers.RegistryTest do
   # ---------------------------------------------------------------------------
 
   describe "provider_configured?/1" do
+    test "account sign-in configures every subscription-backed provider" do
+      home = Path.join(System.tmp_dir!(), "osa-registry-account-#{System.unique_integer([:positive])}")
+      previous_home = System.get_env("OSA_HOME")
+      System.put_env("OSA_HOME", home)
+
+      on_exit(fn ->
+        if previous_home, do: System.put_env("OSA_HOME", previous_home), else: System.delete_env("OSA_HOME")
+        File.rm_rf(home)
+      end)
+
+      refute Registry.provider_configured?(:openai_codex)
+
+      assert :ok =
+               OptimalSystemAgent.Auth.SubscriptionStore.put("openai_codex", %{
+                 "access_token" => "test-token"
+               })
+
+      assert Registry.provider_configured?(:openai_codex)
+    end
+
     test "ollama configured? returns a boolean (no API key required)" do
       # Ollama checks TCP reachability rather than an API key.
       # In CI or test environments Ollama may not be running, so we only

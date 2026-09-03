@@ -2444,10 +2444,22 @@ defmodule OptimalSystemAgent.Providers.Registry do
     key = :"#{provider}_api_key"
 
     case Application.get_env(:optimal_system_agent, key) do
-      nil -> live_cloud_key_present?(provider)
-      "" -> live_cloud_key_present?(provider)
+      nil -> live_cloud_key_present?(provider) or connected_account?(provider)
+      "" -> live_cloud_key_present?(provider) or connected_account?(provider)
       _ -> true
     end
+  end
+
+  # Account sign-in is a provider-wide credential source, just like an API
+  # key. Keep this in the generic path so every current and future provider
+  # registered with Auth.Subscription is reflected consistently by /model,
+  # doctor, routing, and the TUI instead of requiring another provider-specific
+  # clause each time account auth is added.
+  defp connected_account?(provider) do
+    OptimalSystemAgent.Auth.Subscription.supported?(provider) and
+      OptimalSystemAgent.Auth.SubscriptionStore.connected?(provider)
+  rescue
+    _ -> false
   end
 
   # Local/keyless providers are excluded from live key checks and from the
