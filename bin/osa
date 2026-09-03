@@ -1411,8 +1411,8 @@ case "${1:-}" in
     ;;
 
   stop)
-    stop_daemon
-    exit 0
+    _stop_backend_confirmed
+    exit $?
     ;;
 
   update)
@@ -1782,7 +1782,7 @@ if ! env_has_provider "$OSA_HOME/.env"; then
   if (cd "$ROOT" && mix osa.setup.wizard); then
     if env_has_provider "$OSA_HOME/.env"; then
       echo -e "${CYAN}→${RESET} Restarting backend to load your new configuration…"
-      stop_daemon
+      _stop_backend_confirmed
       clear_stale_pid
       start_daemon
       rc=0
