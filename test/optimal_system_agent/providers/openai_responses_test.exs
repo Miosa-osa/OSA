@@ -115,6 +115,12 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponsesTest do
       assert body.max_output_tokens == 100
       refute Map.has_key?(body, :max_tokens)
     end
+
+    test "Codex requests explicitly disable server-side storage" do
+      body = OpenAIResponses.build_body("m", [%{role: "user", content: "x"}], [], true)
+
+      assert body.store == false
+    end
   end
 
   describe "headers" do

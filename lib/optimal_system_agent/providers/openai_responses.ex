@@ -176,7 +176,10 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
   def build_body(model, messages, opts, stream?) do
     {instructions, input} = split_instructions(messages)
 
-    %{model: model, input: input, stream: stream?}
+    # The ChatGPT Codex endpoint rejects persisted Responses requests. Codex
+    # clients must explicitly opt out of server-side storage; omitting this
+    # field currently produces an unhelpful empty HTTP 400 response.
+    %{model: model, input: input, stream: stream?, store: false}
     |> put_unless_nil(:instructions, instructions)
     |> maybe_put_tools(opts)
     |> maybe_put_reasoning(model, opts)
