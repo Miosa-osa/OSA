@@ -444,7 +444,8 @@ then fill in the matching `:computer_use_docker` / `:computer_use_remote` /
 
 - Safety level: `:write_destructive`
 - Every action except `screenshot` and `get_tree` requires user confirmation through OSA's permission system
-- Tool disabled by default (`computer_use_enabled: false`)
+- Tool enabled by default on supported desktops. Set `OSA_COMPUTER_USE=false`
+  to disable it for a managed or headless deployment.
 
 ### Keyframe Security
 
