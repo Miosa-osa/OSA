@@ -106,10 +106,11 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponsesTest do
       ]
 
       body = OpenAIResponses.build_body("gpt-5.6-sol", messages, [], true)
-      assert [%{type: "function_call_output", call_id: "call_vision"}, image_message] = body.input
 
-      assert [%{type: "input_image", image_url: "data:image/png;base64,aGVsbG8="}] =
-               image_message.content
+      assert [%{type: "function_call_output", call_id: "call_vision", output: output}] =
+               body.input
+
+      assert Enum.any?(output, &(&1.type == "input_image"))
     end
 
     test "user image content is encoded for Responses rather than flattened" do

@@ -219,17 +219,15 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
 
     case role do
       "tool" ->
-        output =
+        parts = input_parts(get(message, :content))
+
+        [
           %{
             type: "function_call_output",
             call_id: get(message, :tool_call_id) || get(message, :id),
-            output: to_string(content || "")
+            output: if(Enum.any?(parts, &(&1.type == "input_image")), do: parts, else: content)
           }
-
-        case input_parts(get(message, :content)) |> Enum.reject(&(&1.type == "input_text")) do
-          [] -> [output]
-          images -> [output, %{type: "message", role: "user", content: images}]
-        end
+        ]
 
       "assistant" ->
         text_item =
@@ -281,10 +279,10 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
 
     cond do
       is_binary(url) and url != "" ->
-        [%{type: "input_image", image_url: url}]
+        [%{type: "input_image", image_url: url, detail: "auto"}]
 
       is_binary(data) and data != "" ->
-        [%{type: "input_image", image_url: "data:#{media_type};base64,#{data}"}]
+        [%{type: "input_image", image_url: "data:#{media_type};base64,#{data}", detail: "auto"}]
 
       true ->
         []
