@@ -76,7 +76,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "coordinator" => {"Toggle coordinator mode (delegation only)", :cmd_coordinator},
     "ask-user" => {"Let the agent ask you questions mid-task (off by default)", :cmd_ask_user},
     "effort" => {"Set thinking effort level (low/medium/high/max)", :cmd_effort},
-    "fast" => {"Toggle fast mode (low effort)", :cmd_fast},
+    "fast" => {"Toggle OpenAI Fast processing (reasoning and tools unchanged)", :cmd_fast},
     "think" => {"Toggle model reasoning on/off (off = faster replies)", :cmd_think},
     "permissions" => {"View and manage permission rules", :cmd_permissions},
     "hooks" => {"View registered hooks", :cmd_hooks},
@@ -3136,22 +3136,15 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   end
 
   def cmd_fast(_args, session_id) do
-    alias OptimalSystemAgent.Agent.Effort
+    alias OptimalSystemAgent.Agent.Loop.LLMClient
     IO.puts("")
 
-    Effort.toggle_fast()
-    config = Effort.get(Effort.current())
+    enabled = LLMClient.toggle_fast_service_tier()
+    mode = if enabled, do: "enabled", else: "disabled"
 
-    mode =
-      if Effort.fast_mode?(),
-        do: "enabled",
-        else: "disabled"
-
-    IO.puts("  #{@green}✓#{@reset} Fast mode #{@bold}#{mode}#{@reset}")
-    IO.puts("  #{@dim}Effort:#{@reset}     #{Effort.current()}")
-    IO.puts("  #{@dim}Iterations:#{@reset} #{effort_iteration_display()}")
-    IO.puts("  #{@dim}Output cap:#{@reset} #{config.max_response_tokens} tokens")
-    IO.puts("  #{@dim}Tool cap:#{@reset}   #{config.tool_budget}")
+    IO.puts("  #{@green}✓#{@reset} OpenAI Fast processing #{@bold}#{mode}#{@reset}")
+    IO.puts("  #{@dim}Service tier:#{@reset} #{if enabled, do: "priority", else: "default"}")
+    IO.puts("  #{@dim}Reasoning effort and tool budgets are unchanged.#{@reset}")
 
     IO.puts("")
     session_id

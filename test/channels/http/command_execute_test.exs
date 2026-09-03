@@ -78,15 +78,25 @@ defmodule OptimalSystemAgent.Channels.HTTP.CommandExecuteTest do
     assert is_binary(Jason.decode!(conn.resp_body)["output"])
   end
 
-  test "/fast returns the authoritative post-command effort for persistent UI" do
+  test "/fast enables OpenAI priority processing without changing effort" do
     previous = OptimalSystemAgent.Agent.Effort.current()
+    previous_fast = OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?()
     :ok = OptimalSystemAgent.Agent.Effort.set(:medium)
 
-    on_exit(fn -> OptimalSystemAgent.Agent.Effort.set(previous) end)
+    on_exit(fn ->
+      OptimalSystemAgent.Agent.Effort.set(previous)
+
+      if OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?() != previous_fast do
+        OptimalSystemAgent.Agent.Loop.LLMClient.toggle_fast_service_tier()
+      end
+    end)
+
+    if previous_fast, do: OptimalSystemAgent.Agent.Loop.LLMClient.toggle_fast_service_tier()
 
     body = execute("fast").resp_body |> Jason.decode!()
 
-    assert body["effort"] == "fast"
-    assert OptimalSystemAgent.Agent.Effort.current() == :fast
+    assert body["effort"] == "medium"
+    assert OptimalSystemAgent.Agent.Effort.current() == :medium
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?()
   end
 end

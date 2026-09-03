@@ -181,6 +181,7 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
     # field currently produces an unhelpful empty HTTP 400 response.
     %{model: model, input: input, stream: stream?, store: false}
     |> put_unless_nil(:instructions, instructions)
+    |> put_unless_nil(:service_tier, Keyword.get(opts, :service_tier))
     |> maybe_put_tools(opts)
     |> maybe_put_reasoning(model, opts)
     |> maybe_put_max_tokens(opts)

@@ -121,6 +121,18 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponsesTest do
 
       assert body.store == false
     end
+
+    test "passes OpenAI Fast processing through as a service tier" do
+      body =
+        OpenAIResponses.build_body(
+          "gpt-5.6-sol",
+          [%{role: "user", content: "x"}],
+          [service_tier: "fast"],
+          true
+        )
+
+      assert body.service_tier == "fast"
+    end
   end
 
   describe "headers" do
