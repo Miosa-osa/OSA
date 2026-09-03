@@ -317,6 +317,115 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.MacOS do
     end
   end
 
+  def close_window(window_id) when is_binary(window_id) do
+    with {:ok, app, index} <- parse_window_id(window_id) do
+      case close_window_semantically(app, index) do
+        :ok -> :ok
+        {:error, _} -> close_window_via_system_events(app, index)
+      end
+    end
+  end
+
+  def list_tabs(%{"app" => app}) when is_binary(app) and app != "" do
+    script = """
+    set rows to {}
+    set fieldSeparator to ASCII character 9
+    tell application "#{sanitize_for_applescript(app)}"
+      set windowIndex to 0
+      repeat with windowRef in every window
+        set windowIndex to windowIndex + 1
+        set tabIndex to 0
+        repeat with tabRef in every tab of windowRef
+          set tabIndex to tabIndex + 1
+          set tabID to ""
+          set tabTitle to ""
+          set tabURL to ""
+          try
+            set tabID to id of tabRef as text
+          end try
+          try
+            set tabTitle to title of tabRef as text
+          end try
+          try
+            set tabURL to URL of tabRef as text
+          end try
+          set end of rows to (windowIndex as text) & fieldSeparator & (tabIndex as text) & fieldSeparator & tabID & fieldSeparator & tabTitle & fieldSeparator & tabURL
+        end repeat
+      end repeat
+    end tell
+    set AppleScript's text item delimiters to linefeed
+    return rows as text
+    """
+
+    with {:ok, output} <- osascript_output(script, "List browser tabs") do
+      {:ok, parse_browser_tabs(output, app)}
+    end
+  end
+
+  def list_tabs(_), do: {:error, "list_tabs requires an app name"}
+
+  def close_tabs(%{"app" => app} = params) when is_binary(app) and app != "" do
+    url_needle = String.trim(Map.get(params, "url_contains", ""))
+    title_needle = String.trim(Map.get(params, "title_contains", ""))
+
+    if url_needle == "" and title_needle == "" do
+      {:error, "close_tabs requires url_contains or title_contains"}
+    else
+      script = """
+      set urlNeedle to "#{sanitize_for_applescript(url_needle)}"
+      set titleNeedle to "#{sanitize_for_applescript(title_needle)}"
+      set closedCount to 0
+      tell application "#{sanitize_for_applescript(app)}"
+        repeat with windowRef in every window
+          set matchedTabs to {}
+          repeat with tabRef in every tab of windowRef
+            set tabTitle to ""
+            set tabURL to ""
+            try
+              set tabTitle to title of tabRef as text
+            end try
+            try
+              set tabURL to URL of tabRef as text
+            end try
+            ignoring case
+              set urlMatches to (urlNeedle is not "" and tabURL contains urlNeedle)
+              set titleMatches to (titleNeedle is not "" and tabTitle contains titleNeedle)
+            end ignoring
+            if urlMatches or titleMatches then
+              set end of matchedTabs to tabRef
+            end if
+          end repeat
+          repeat with tabRef in matchedTabs
+            close tabRef
+            set closedCount to closedCount + 1
+          end repeat
+        end repeat
+      end tell
+      return closedCount as text
+      """
+
+      with {:ok, output} <- osascript_output(script, "Close matching browser tabs"),
+           {closed, ""} <- Integer.parse(String.trim(output)),
+           {:ok, remaining_tabs} <- list_tabs(%{"app" => app}) do
+        remaining = Enum.filter(remaining_tabs, &tab_matches?(&1, url_needle, title_needle))
+
+        {:ok,
+         %{
+           "app" => app,
+           "closed" => closed,
+           "remaining_matches" => length(remaining),
+           "verified" => remaining == [],
+           "remaining" => remaining
+         }}
+      else
+        {:error, _} = error -> error
+        _ -> {:error, "Close matching browser tabs returned an invalid result"}
+      end
+    end
+  end
+
+  def close_tabs(_), do: {:error, "close_tabs requires an app name and a URL/title matcher"}
+
   def launch(app) when is_binary(app), do: run_cmd("open", ["-a", app], "Launch")
 
   def cursor, do: native_pointer_result(["--event", "cursor"], "Cursor")
@@ -459,7 +568,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.MacOS do
   end
 
   defp native_accessibility_snapshot(params) do
-    args =
+    base_args =
       [
         "snapshot",
         "--max-depth",
@@ -468,13 +577,46 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.MacOS do
         to_string(Map.get(params, "max_elements", 800))
       ] ++ if(Map.get(params, "interactive_only") == true, do: ["--interactive-only"], else: [])
 
-    with {:ok, helper} <- accessibility_helper(),
-         {:ok, decoded} <- run_json_helper(helper, args, "Accessibility snapshot"),
+    with {:ok, target_args} <- snapshot_target_args(params),
+         {:ok, helper} <- accessibility_helper(),
+         {:ok, decoded} <-
+           run_json_helper(helper, base_args ++ target_args, "Accessibility snapshot"),
          true <- is_list(decoded) do
       {:ok, decoded}
     else
       false -> {:error, "Accessibility helper returned invalid snapshot data"}
       {:error, _} = error -> error
+    end
+  end
+
+  defp snapshot_target_args(params) do
+    app =
+      cond do
+        is_binary(params["window_id"]) and params["window_id"] != "" ->
+          case parse_window_id(params["window_id"]) do
+            {:ok, name, _index} -> name
+            _ -> nil
+          end
+
+        is_binary(params["app"]) and params["app"] != "" ->
+          params["app"]
+
+        true ->
+          nil
+      end
+
+    if app do
+      script =
+        ~s(tell application "System Events" to get unix id of first application process whose name is "#{sanitize_for_applescript(app)}")
+
+      with {:ok, output} <- osascript_output(script, "Resolve application"),
+           {pid, ""} <- Integer.parse(String.trim(output)) do
+        {:ok, ["--pid", to_string(pid)]}
+      else
+        _ -> {:error, "Could not resolve running application #{inspect(app)}"}
+      end
+    else
+      {:ok, []}
     end
   end
 
@@ -635,6 +777,80 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.MacOS do
       _ ->
         {:error, "Invalid window id: #{id}"}
     end
+  end
+
+  defp close_window_semantically(app, index) do
+    with {:ok, elements} <-
+           native_accessibility_snapshot(%{"app" => app, "max_elements" => 1_500}),
+         windows <- Enum.filter(elements, &(&1["role"] == "window")),
+         %{"path" => window_path} <- Enum.at(windows, index - 1),
+         %{} = close_button <-
+           Enum.find(elements, fn element ->
+             element["subrole"] == "AXCloseButton" and
+               path_descendant?(element["path"], window_path)
+           end) do
+      perform_element(close_button, :press, nil)
+    else
+      _ -> {:error, "No semantic close button found"}
+    end
+  end
+
+  defp close_window_via_system_events(app, index) do
+    script = """
+    tell application "System Events"
+      tell application process "#{sanitize_for_applescript(app)}"
+        click button 1 of window #{index}
+      end tell
+    end tell
+    """
+
+    osascript(script, "Close window")
+  end
+
+  defp path_descendant?(path, prefix) when is_list(path) and is_list(prefix) do
+    Enum.take(path, length(prefix)) == prefix
+  end
+
+  defp path_descendant?(_, _), do: false
+
+  defp parse_browser_tabs(output, app) do
+    output
+    |> String.split("\n", trim: true)
+    |> Enum.flat_map(fn row ->
+      case String.split(row, "\t", parts: 5) do
+        [window_index, tab_index, id, title, url] ->
+          [
+            %{
+              "app" => app,
+              "window_index" => parse_positive_integer(window_index),
+              "tab_index" => parse_positive_integer(tab_index),
+              "id" => id,
+              "title" => title,
+              "url" => url
+            }
+          ]
+
+        _ ->
+          []
+      end
+    end)
+  end
+
+  defp parse_positive_integer(value) do
+    case Integer.parse(value) do
+      {integer, ""} when integer > 0 -> integer
+      _ -> nil
+    end
+  end
+
+  defp tab_matches?(tab, url_needle, title_needle) do
+    contains_ci?(tab["url"], url_needle) or contains_ci?(tab["title"], title_needle)
+  end
+
+  defp contains_ci?(_value, ""), do: false
+
+  defp contains_ci?(value, needle) do
+    String.contains?(String.downcase(value || ""), String.downcase(needle))
   end
 
   defp window_index(id) do

@@ -15,6 +15,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
       {:list_apps, 0},
       {:list_windows, 0},
       {:focus_window, 1},
+      {:close_window, 1},
+      {:list_tabs, 1},
+      {:close_tabs, 1},
       {:launch, 1},
       {:cursor, 0},
       {:right_click, 1},
@@ -75,6 +78,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
       assert "scroll" in action_enum
       assert "move_mouse" in action_enum
       assert "drag" in action_enum
+      assert "list_tabs" in action_enum
+      assert "close_tabs" in action_enum
+    end
+
+    test "perception actions are read-only but closing tabs is not" do
+      assert ComputerUse.read_only?(%{"action" => "list_tabs"}, UseContext.empty())
+      assert ComputerUse.read_only?(%{"action" => "get_tree"}, UseContext.empty())
+      refute ComputerUse.read_only?(%{"action" => "close_tabs"}, UseContext.empty())
     end
   end
 
@@ -190,6 +201,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
 
       assert msg =~ "Region"
     end
+
+    test "provider-generated empty 0x0 region is treated as omitted" do
+      assert {:ok, normalized} =
+               ComputerUse.validate_input(
+                 %{
+                   "action" => "screenshot",
+                   "region" => %{"x" => 0, "y" => 0, "width" => 0, "height" => 0}
+                 },
+                 UseContext.empty()
+               )
+
+      refute Map.has_key?(normalized, "region")
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -222,6 +246,48 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
     test "double_click without coordinates returns error" do
       assert {:error, msg} = ComputerUse.execute(%{"action" => "double_click"})
       assert msg =~ "Missing required parameter: x"
+    end
+
+    test "blank target does not override valid coordinates" do
+      assert {:ok, normalized} =
+               ComputerUse.validate_input(
+                 %{"action" => "click", "target" => "", "x" => 65, "y" => 195},
+                 UseContext.empty()
+               )
+
+      refute Map.has_key?(normalized, "target")
+      assert normalized["x"] == 65
+      assert normalized["y"] == 195
+    end
+
+    test "blank target without coordinates is rejected" do
+      assert {:error, message, _code} =
+               ComputerUse.validate_input(
+                 %{"action" => "left_click", "target" => ""},
+                 UseContext.empty()
+               )
+
+      assert message =~ "coordinates"
+    end
+  end
+
+  describe "browser tab validation" do
+    test "close_tabs requires a narrow matcher" do
+      assert {:error, message, _code} =
+               ComputerUse.validate_input(
+                 %{"action" => "close_tabs", "app" => "Arc"},
+                 UseContext.empty()
+               )
+
+      assert message =~ "url_contains or title_contains"
+    end
+
+    test "close_tabs accepts an app and URL matcher" do
+      assert {:ok, _} =
+               ComputerUse.validate_input(
+                 %{"action" => "close_tabs", "app" => "Arc", "url_contains" => "auth.openai.com"},
+                 UseContext.empty()
+               )
     end
   end
 

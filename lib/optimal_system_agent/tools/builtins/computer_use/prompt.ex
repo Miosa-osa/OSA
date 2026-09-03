@@ -25,6 +25,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Prompt do
       4. Use `screenshot` only when the accessibility tree is missing, sparse, or the app uses a
          canvas/custom-rendered surface. Never claim to see a screenshot that was not delivered.
 
+    CROSS-APPLICATION SAFETY:
+      - Identify the target with `list_windows` or `list_tabs` before acting. Never substitute the
+        frontmost application merely because its controls are easier to inspect.
+      - For browser-tab requests, use `list_tabs`, then one `close_tabs` call with the narrow URL or
+        title substring the user named, then inspect `verified`/`remaining_matches`. Do not click tab
+        bar coordinates and do not use a generic close shortcut.
+      - Preserve every non-matching tab/window. Never report success from an action result alone;
+        report it only after the verification response shows zero remaining matches.
+
     Supported actions: #{actions}
 
     ## Actions
@@ -57,8 +66,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Prompt do
       - `x`, `y` required. Use `region` to specify the drag target area if needed.
 
     **get_tree** — Return a compact accessibility tree for the active application.
+      - To inspect an application behind the active window, pass its `app` or a `window_id`
+        returned by `list_windows`. Do not act on the foreground application as a substitute.
+
+    **close_window** — Close exactly one window identified by `list_windows`.
+      - Re-run `list_windows` afterward and only report success when the target is absent.
       - Interactive controls receive refs such as `[e3] button "Close"`.
       - On macOS, target clicks use direct AX actions rather than coordinate clicks when possible.
+
+    **list_tabs** — List browser tabs semantically by title and URL. Requires `app`.
+
+    **close_tabs** — Close only browser tabs matching `url_contains` or `title_contains`.
+      - Requires `app` and at least one non-empty matcher.
+      - Returns `closed`, `remaining_matches`, and `verified`; trust only `verified: true`.
 
     **wait** — Pause server-side for `seconds` (0–30).
 

@@ -12,7 +12,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Constants do
 
   @valid_actions ~w(
     screenshot click double_click type key scroll move_mouse drag get_tree
-    wait list_windows focus_window launch cursor snapshot right_click triple_click
+    wait list_windows focus_window close_window list_tabs close_tabs launch cursor snapshot
+    right_click triple_click
     set_value clipboard_get clipboard_set clipboard_clear list_apps list_surfaces
     resize_window move_window scroll_to
     left_click mouse_move middle_click left_mouse_down left_mouse_up hold_key
@@ -167,4 +168,26 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Constants do
   # ETS table used by the lazy-server registry.
   @server_table :computer_use_servers
   def server_table, do: @server_table
+
+  @doc "Create the computer-use session registry under the calling long-lived owner."
+  def init_server_table do
+    case :ets.whereis(@server_table) do
+      :undefined ->
+        options = [:named_table, :public, :set, read_concurrency: true]
+
+        options =
+          case Process.whereis(OptimalSystemAgent.Supervisor) do
+            pid when is_pid(pid) -> [{:heir, pid, :computer_use_servers} | options]
+            _ -> options
+          end
+
+        :ets.new(@server_table, options)
+        :ok
+
+      _ ->
+        :ok
+    end
+  rescue
+    ArgumentError -> :ok
+  end
 end

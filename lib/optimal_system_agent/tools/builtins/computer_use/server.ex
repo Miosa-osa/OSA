@@ -32,6 +32,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
     GenServer.start_link(__MODULE__, opts)
   end
 
+  @doc "Start a session server without linking it to the short-lived tool execution task."
+  def start(opts) do
+    GenServer.start(__MODULE__, opts)
+  end
+
   @doc "Execute an action through the server. Returns :ok | {:ok, result} | {:error, reason}."
   def execute(pid, action, params) do
     GenServer.call(pid, {:execute, action, params}, 30_000)
@@ -116,7 +121,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
     end
   end
 
-  defp dispatch("click", %{"target" => ref}, state) do
+  defp dispatch("click", %{"target" => ref}, state) when is_binary(ref) and ref != "" do
     click_resolved_ref(ref, state)
   end
 
@@ -176,7 +181,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
     if not force and state.last_tree != nil and now - state.tree_fetched_at < @tree_ttl_ms do
       {{:ok, state.last_tree}, state}
     else
-      case state.adapter.get_tree() do
+      tree_result =
+        if targeted_snapshot?(params) and function_exported?(state.adapter, :snapshot, 1) do
+          state.adapter.snapshot(params)
+        else
+          state.adapter.get_tree()
+        end
+
+      case tree_result do
         {:ok, raw_elements} ->
           parsed = Accessibility.parse_tree(raw_elements)
           {tree_text, refs} = Accessibility.assign_refs(parsed)
@@ -215,6 +227,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
     else
       {{:error, "focus_window is not supported by #{inspect(state.adapter)}"}, state}
     end
+  end
+
+  defp dispatch("close_window", %{"window_id" => window_id}, state) do
+    if function_exported?(state.adapter, :close_window, 1) do
+      result = state.adapter.close_window(window_id)
+      {format_result(result, "Closed window #{window_id}"), bump_step(state)}
+    else
+      {{:error, "close_window is not supported by #{inspect(state.adapter)}"}, state}
+    end
+  end
+
+  defp dispatch("list_tabs", params, state) do
+    adapter_result(state, :list_tabs, [params])
+  end
+
+  defp dispatch("close_tabs", params, state) do
+    adapter_result(state, :close_tabs, [params])
   end
 
   defp dispatch("launch", %{"app" => app}, state) do
@@ -395,7 +424,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
     {format_result(result, "Click on #{ref} at (#{cx}, #{cy})"), bump_step(state)}
   end
 
-  defp with_target(%{"target" => ref} = params, state, fun) do
+  defp with_target(%{"target" => ref} = params, state, fun)
+       when is_binary(ref) and ref != "" do
     case resolve_ref(ref, state) do
       {:ok, %{x: x, y: y, width: w, height: h}} ->
         fun.(
@@ -423,6 +453,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
     now = System.monotonic_time(:millisecond)
     state = %{state | last_tree: tree_text, tree_fetched_at: now, element_refs: refs}
     {{:ok, tree_text}, state}
+  end
+
+  defp targeted_snapshot?(params) do
+    Enum.any?([params["window_id"], params["app"]], &(is_binary(&1) and &1 != ""))
   end
 
   # ── Helpers ─────────────────────────────────────────────────────────
