@@ -180,6 +180,11 @@ jobs:
           mix local.rebar --force
           mix deps.get --only prod
 
+      - name: Build bundled macOS desktop helpers
+        run: |
+          native/macos/ScreenShare/build.sh
+          native/macos/AccessibilityHelper/build.sh
+
       # Stamp the tag version — see the linux job for the rationale.
       - name: Stamp version from tag
         shell: bash

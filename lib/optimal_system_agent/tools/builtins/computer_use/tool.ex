@@ -27,7 +27,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Tool do
   def aliases, do: ["computer", "desktop_control"]
 
   @impl true
-  def search_hint, do: "control the desktop: screenshot, click, type, scroll, key press"
+  def search_hint,
+    do:
+      "control the desktop semantically: inspect accessibility tree, press controls, type, scroll"
 
   # ── Schema & description ───────────────────────────────────────────────
 

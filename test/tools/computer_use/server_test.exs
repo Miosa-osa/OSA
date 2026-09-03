@@ -20,10 +20,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
     def get_tree do
       {:ok,
        [
-         %{role: "button", name: "Save", x: 500, y: 300, width: 80, height: 30},
+         %{
+           role: "button",
+           name: "Save",
+           x: 500,
+           y: 300,
+           width: 80,
+           height: 30,
+           pid: 42,
+           path: [0, 1],
+           actions: ["AXPress"]
+         },
          %{role: "textfield", name: "Email", x: 200, y: 150, width: 200, height: 25},
          %{role: "link", name: "Help", x: 100, y: 50, width: 40, height: 20}
        ]}
+    end
+
+    def perform_element(element, :press, nil) do
+      send(Process.whereis(:computer_use_semantic_test), {:semantic_press, element})
+      :ok
     end
   end
 
@@ -174,6 +189,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
 
   describe "element ref resolution" do
     setup do
+      Process.register(self(), :computer_use_semantic_test)
+
       {:ok, pid} =
         Server.start_link(adapter: MockAdapter, platform: :linux_x11, session_id: "test_refs")
 
@@ -187,7 +204,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
     test "click with target resolves element ref", %{pid: pid} do
       # "e0" should be the first element (Save button at 500,300)
       assert {:ok, msg} = Server.execute(pid, "click", %{"target" => "e0"})
-      assert msg =~ "Click on e0"
+      assert msg =~ "Pressed semantic element e0"
+      assert_receive {:semantic_press, %{pid: 42, path: [0, 1]}}
+    end
+
+    test "mutating action invalidates the cached tree", %{pid: pid} do
+      assert :sys.get_state(pid).last_tree != nil
+      assert {:ok, _} = Server.execute(pid, "click", %{"target" => "e0"})
+      assert :sys.get_state(pid).last_tree == nil
     end
 
     test "click with unknown target returns error", %{pid: pid} do

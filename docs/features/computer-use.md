@@ -271,10 +271,10 @@ This progression happens automatically through the SICA learning cycle — no ma
 | Capability | Implementation |
 |-----------|---------------|
 | Screenshots | `screencapture` (ships with macOS) |
-| Mouse | Python/Quartz via `osascript do shell script` — `CGEventCreateMouseEvent` |
+| Mouse/scroll | Bundled native helper using Quartz `CGEvent` (`cliclick` compatibility fallback) |
 | Keyboard | AppleScript `tell app "System Events" to keystroke/key code` |
 | Key codes | 27 named keys (enter, tab, escape, F1-F12, arrows, etc.) |
-| Accessibility | Stubbed — planned AXorcist integration |
+| Accessibility | Bundled native `AXUIElement` helper: recursive tree, identity metadata, supported actions, direct `AXPress`/`AXSetValue` |
 
 **Requirements:**
 - macOS (auto-detected)
@@ -520,8 +520,8 @@ mix test test/tools/computer_use_test.exs
 
 ## Future Work
 
-- **AXorcist integration** (macOS): Wire native Accessibility API for real tree data
-- **AT-SPI2 integration** (Linux): D-Bus accessibility tree on X11 and Wayland
+- **AX notification streaming** (macOS): replace short verification polling with focused/value/layout-change notifications
+- **AT-SPI2 hardening** (Linux): broader toolkit coverage and notification-driven verification
 - **Windows adapter**: AutoHotkey or UI Automation API
 - **Browser tab awareness**: Integrate with `browser` tool for coordinated web + desktop control
 - **Vision fallback**: Auto-switch to screenshot mode when AX tree is unavailable or sparse

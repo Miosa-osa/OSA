@@ -8,6 +8,38 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
   # Tool metadata
   # ---------------------------------------------------------------------------
 
+  test "macOS adapter implements the universal desktop action surface" do
+    callbacks = [
+      {:get_tree, 0},
+      {:list_apps, 0},
+      {:list_windows, 0},
+      {:focus_window, 1},
+      {:launch, 1},
+      {:cursor, 0},
+      {:right_click, 1},
+      {:triple_click, 1},
+      {:middle_click, 2},
+      {:left_mouse_down, 2},
+      {:left_mouse_up, 2},
+      {:perform_element, 3},
+      {:clipboard_get, 0},
+      {:clipboard_set, 1},
+      {:clipboard_clear, 0},
+      {:snapshot, 1},
+      {:list_surfaces, 1},
+      {:set_value, 1},
+      {:scroll_to, 1},
+      {:resize_window, 1},
+      {:move_window, 1},
+      {:hold_key, 2},
+      {:wait, 1}
+    ]
+
+    Enum.each(callbacks, fn {name, arity} ->
+      assert function_exported?(MacOSAdapter, name, arity), "missing #{name}/#{arity}"
+    end)
+  end
+
   describe "tool metadata" do
     test "name returns computer_use" do
       assert ComputerUse.name() == "computer_use"
