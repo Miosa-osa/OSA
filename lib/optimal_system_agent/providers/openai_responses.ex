@@ -219,13 +219,17 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
 
     case role do
       "tool" ->
-        [
+        output =
           %{
             type: "function_call_output",
             call_id: get(message, :tool_call_id) || get(message, :id),
             output: to_string(content || "")
           }
-        ]
+
+        case input_parts(get(message, :content)) |> Enum.reject(&(&1.type == "input_text")) do
+          [] -> [output]
+          images -> [output, %{type: "message", role: "user", content: images}]
+        end
 
       "assistant" ->
         text_item =
@@ -248,9 +252,42 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
           %{
             type: "message",
             role: "user",
-            content: [%{type: "input_text", text: to_string(content || "")}]
+            content: input_parts(get(message, :content))
           }
         ]
+    end
+  end
+
+  defp input_parts(content) when is_binary(content), do: [%{type: "input_text", text: content}]
+
+  defp input_parts(content) when is_list(content) do
+    parts = Enum.flat_map(content, &input_part/1)
+    if parts == [], do: [%{type: "input_text", text: ""}], else: parts
+  end
+
+  defp input_parts(content), do: [%{type: "input_text", text: to_string(content || "")}]
+
+  defp input_part(text) when is_binary(text), do: [%{type: "input_text", text: text}]
+  defp input_part(%{type: "text", text: text}), do: [%{type: "input_text", text: text}]
+  defp input_part(%{"type" => "text", "text" => text}), do: [%{type: "input_text", text: text}]
+  defp input_part(%{type: "image", source: source}), do: image_input_part(source)
+  defp input_part(%{"type" => "image", "source" => source}), do: image_input_part(source)
+  defp input_part(_), do: []
+
+  defp image_input_part(source) do
+    media_type = get(source, :media_type) || "image/png"
+    data = get(source, :data)
+    url = get(source, :url)
+
+    cond do
+      is_binary(url) and url != "" ->
+        [%{type: "input_image", image_url: url}]
+
+      is_binary(data) and data != "" ->
+        [%{type: "input_image", image_url: "data:#{media_type};base64,#{data}"}]
+
+      true ->
+        []
     end
   end
 

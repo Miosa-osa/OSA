@@ -93,6 +93,42 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponsesTest do
                body.input
     end
 
+    test "a screenshot tool result preserves the call output and sends an input_image" do
+      messages = [
+        %{
+          role: "tool",
+          tool_call_id: "call_vision",
+          content: [
+            %{type: "text", text: "Image"},
+            %{type: "image", source: %{media_type: "image/png", data: "aGVsbG8="}}
+          ]
+        }
+      ]
+
+      body = OpenAIResponses.build_body("gpt-5.6-sol", messages, [], true)
+      assert [%{type: "function_call_output", call_id: "call_vision"}, image_message] = body.input
+
+      assert [%{type: "input_image", image_url: "data:image/png;base64,aGVsbG8="}] =
+               image_message.content
+    end
+
+    test "user image content is encoded for Responses rather than flattened" do
+      messages = [
+        %{
+          role: "user",
+          content: [
+            %{type: "text", text: "look"},
+            %{type: "image", source: %{media_type: "image/jpeg", data: "YWJj"}}
+          ]
+        }
+      ]
+
+      body = OpenAIResponses.build_body("gpt-5.6-sol", messages, [], false)
+
+      assert [%{content: [%{type: "input_text", text: "look"}, %{type: "input_image"}]}] =
+               body.input
+    end
+
     test "an assistant turn with both text and calls emits both, in order" do
       messages = [
         %{

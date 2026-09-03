@@ -65,6 +65,9 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
   # system-prompt text. See Providers.Behaviour.native_tool_schemas?/0.
   def native_tool_schemas?, do: true
 
+  @spec supports_image_content?() :: boolean()
+  def supports_image_content?, do: true
+
   @spec default_model() :: String.t()
   def default_model,
     do: Application.get_env(:optimal_system_agent, :openai_codex_model, @default_model)
