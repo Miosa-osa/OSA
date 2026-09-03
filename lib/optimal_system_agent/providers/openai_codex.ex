@@ -193,6 +193,11 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
     |> Keyword.put(:account_id, cred.account_id)
     |> Keyword.put(:originator, Auth.originator())
     |> Keyword.delete(:model)
+    # The ChatGPT Codex endpoint rejects `max_output_tokens` outright (with an
+    # empty HTTP 400), even though the public Responses API accepts it. The
+    # agent loop supplies `max_tokens` for every provider, so strip it at this
+    # provider boundary and let Codex enforce its own output ceiling.
+    |> Keyword.delete(:max_tokens)
   end
 
   defp auth_error(reason) do
