@@ -3139,7 +3139,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     alias OptimalSystemAgent.Agent.Loop.LLMClient
     IO.puts("")
 
-    enabled = LLMClient.toggle_fast_service_tier()
+    enabled = LLMClient.toggle_fast_service_tier(session_id)
     mode = if enabled, do: "enabled", else: "disabled"
 
     IO.puts("  #{@green}✓#{@reset} OpenAI Fast processing #{@bold}#{mode}#{@reset}")

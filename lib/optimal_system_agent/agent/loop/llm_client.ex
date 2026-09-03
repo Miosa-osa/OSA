@@ -135,10 +135,20 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     OptimalSystemAgent.Settings.get(:openai_fast_service_tier) == true
   end
 
+  def fast_service_tier?(session_id) do
+    OptimalSystemAgent.Settings.get_session_for(session_id, :openai_fast_service_tier) == true
+  end
+
   @doc "Toggle OpenAI Fast processing without changing reasoning or tool budgets."
   def toggle_fast_service_tier do
     enabled = not fast_service_tier?()
     OptimalSystemAgent.Settings.set_session(:openai_fast_service_tier, enabled)
+    enabled
+  end
+
+  def toggle_fast_service_tier(session_id) do
+    enabled = not fast_service_tier?(session_id)
+    OptimalSystemAgent.Settings.set_session_for(session_id, :openai_fast_service_tier, enabled)
     enabled
   end
 

@@ -40,8 +40,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.CommandExecuteTest do
     :ok
   end
 
-  defp execute(command) do
-    conn(:post, "/execute", Jason.encode!(%{command: command}))
+  defp execute(command, session_id \\ nil) do
+    params =
+      %{command: command}
+      |> then(&if(session_id, do: Map.put(&1, :session_id, session_id), else: &1))
+
+    conn(:post, "/execute", Jason.encode!(params))
     |> put_req_header("content-type", "application/json")
     |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
     |> ToolRoutes.call(@opts)
@@ -79,24 +83,25 @@ defmodule OptimalSystemAgent.Channels.HTTP.CommandExecuteTest do
   end
 
   test "/fast enables OpenAI priority processing without changing effort" do
+    session_id = "fast-test-#{System.unique_integer([:positive])}"
+    other_session_id = "fast-other-#{System.unique_integer([:positive])}"
     previous = OptimalSystemAgent.Agent.Effort.current()
-    previous_fast = OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?()
     :ok = OptimalSystemAgent.Agent.Effort.set(:medium)
 
     on_exit(fn ->
       OptimalSystemAgent.Agent.Effort.set(previous)
-
-      if OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?() != previous_fast do
-        OptimalSystemAgent.Agent.Loop.LLMClient.toggle_fast_service_tier()
-      end
+      OptimalSystemAgent.Settings.clear_session(session_id)
+      OptimalSystemAgent.Settings.clear_session(other_session_id)
     end)
 
-    if previous_fast, do: OptimalSystemAgent.Agent.Loop.LLMClient.toggle_fast_service_tier()
-
-    body = execute("fast").resp_body |> Jason.decode!()
+    body = execute("fast", session_id).resp_body |> Jason.decode!()
 
     assert body["effort"] == "medium"
     assert OptimalSystemAgent.Agent.Effort.current() == :medium
-    assert OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?()
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?(session_id)
+    refute OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?(other_session_id)
+
+    execute("fast", session_id)
+    refute OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?(session_id)
   end
 end
