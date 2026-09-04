@@ -112,6 +112,15 @@ defmodule OptimalSystemAgent.Providers.MultimodalRequestAssemblyTest do
   # ── Bedrock Converse ──────────────────────────────────────────────────────
 
   describe "Bedrock.build_request_body/3" do
+    test "priority service tier is placed at the Converse top level" do
+      body =
+        Bedrock.build_request_body([%{role: "user", content: "hello"}], "amazon.nova-pro-v1:0",
+          service_tier: "priority"
+        )
+
+      assert body["serviceTier"] == %{"type" => "priority"}
+    end
+
     test "the image is carried as a Converse image block, not dropped" do
       body =
         Bedrock.build_request_body([user_turn()], "anthropic.claude-3-5-sonnet-20241022-v2:0")

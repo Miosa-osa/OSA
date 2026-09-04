@@ -845,9 +845,33 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatTest do
       assert body.service_tier == "flex"
     end
 
-    test "NEVER sends service_tier to other OpenAI-compatible backends (422 guard)" do
+    test "sends service_tier to documented compatible providers" do
       body =
-        OpenAICompat.build_stream_body("grok-4.6", @msgs, provider: :xai, service_tier: "flex")
+        OpenAICompat.build_stream_body("grok-4.6", @msgs,
+          provider: :xai,
+          service_tier: "priority"
+        )
+
+      assert body.service_tier == "priority"
+
+      groq = OpenAICompat.build_stream_body("llama", @msgs, provider: :groq, service_tier: "auto")
+      assert groq.service_tier == "auto"
+
+      openrouter =
+        OpenAICompat.build_stream_body("openai/gpt-5", @msgs,
+          provider: :openrouter,
+          service_tier: "priority"
+        )
+
+      assert openrouter.service_tier == "priority"
+    end
+
+    test "never sends service_tier to unsupported compatible backends" do
+      body =
+        OpenAICompat.build_stream_body("local-model", @msgs,
+          provider: :lmstudio,
+          service_tier: "priority"
+        )
 
       refute Map.has_key?(body, :service_tier)
     end

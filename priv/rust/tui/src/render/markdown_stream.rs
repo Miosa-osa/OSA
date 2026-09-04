@@ -45,8 +45,7 @@ use ratatui::text::{Line, Text};
 
 use super::markdown::render_markdown;
 
-/// Block cursor appended to the live tail while streaming (matches the legacy
-/// `format!("{}\u{2588}", content)` path in the chat widget).
+/// Presentation-only cursor, added after parsing when the final row has room.
 const CURSOR: char = '\u{2588}';
 
 /// Incremental markdown renderer that freezes completed depth-0 blocks and
@@ -72,14 +71,32 @@ pub struct StreamingRenderer {
 }
 
 /// Where the incremental freeze scan got to, and what it knew there.
-#[derive(Clone, Copy, Default)]
-struct ScanState {
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ScanState {
+    examined: usize,
     /// Byte offset of the first line not yet examined (always a line start).
     pos: usize,
     /// Whether `pos` sits inside a ``` fenced code block.
-    in_code: bool,
+    in_code: Option<(char, usize)>,
     /// Best freeze boundary found so far.
     boundary: usize,
+}
+
+impl ScanState {
+    pub(crate) fn scan(&mut self, source: &str) -> usize {
+        for (offset, byte) in source.as_bytes()[self.examined..].iter().enumerate() {
+            if *byte != b'\n' { continue; }
+            let end = self.examined + offset;
+            let line = &source[self.pos..end];
+            if !super::markdown::fence_boundary(line, &mut self.in_code)
+                && self.in_code.is_none() && line.trim().is_empty() {
+                self.boundary = end + 1;
+            }
+            self.pos = end + 1;
+        }
+        self.examined = source.len();
+        self.boundary
+    }
 }
 
 impl StreamingRenderer {
@@ -161,35 +178,7 @@ impl StreamingRenderer {
     /// COMPLETE lines are consumed: a trailing partial line is left for the next
     /// delta, since its verdict can still change as more bytes arrive.
     fn scan_forward(&mut self) -> usize {
-        let bytes = self.source.as_bytes();
-        let mut line_start = self.scan.pos;
-        let mut i = self.scan.pos;
-
-        while i < bytes.len() {
-            if bytes[i] != b'\n' {
-                i += 1;
-                continue;
-            }
-
-            let line = &self.source[line_start..i];
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("```") {
-                // A fence line toggles the code-block state. Its own line is
-                // never a freeze point.
-                self.scan.in_code = !self.scan.in_code;
-            } else if !self.scan.in_code && line.trim().is_empty() {
-                // Blank line at depth 0, outside code: everything up to and
-                // including this line's terminating newline is safe to freeze.
-                self.scan.boundary = i + 1;
-            }
-
-            i += 1;
-            line_start = i;
-        }
-
-        // Stop at the last complete line. The remainder is re-examined next time.
-        self.scan.pos = line_start;
-        self.scan.boundary
+        self.scan.scan(&self.source)
     }
 
     /// Reset the incremental scan. Called whenever `frozen_bytes` is rolled back
@@ -202,22 +191,22 @@ impl StreamingRenderer {
     /// streaming block cursor appended. O(tail) — one in-progress block.
     fn render_tail(&self, with_cursor: bool) -> Vec<Line<'static>> {
         let tail = &self.source[self.frozen_bytes..];
+        let mut lines = if tail.is_empty() { Vec::new() } else {
+            let preview = if with_cursor { inline_preview(tail) } else {
+                std::borrow::Cow::Borrowed(tail)
+            };
+            render_markdown(&preview, self.width).lines
+        };
         if with_cursor {
-            let mut buf = String::with_capacity(tail.len() + CURSOR.len_utf8());
-            buf.push_str(tail);
-            buf.push(CURSOR);
-            render_markdown(&buf, self.width).lines
-        } else if tail.is_empty() {
-            Vec::new()
-        } else {
-            render_markdown(tail, self.width).lines
+            paint_cursor(&mut lines, self.width);
         }
+        lines
     }
 
     /// The live view: frozen prefix + re-rendered tail + block cursor.
     ///
-    /// Byte-identical to `render_markdown(&format!("{full}\u{2588}"), width)` — the
-    /// legacy per-token full-buffer path — but the prefix is never re-parsed.
+    /// The cursor is presentation only: it must never change Markdown parsing
+    /// or add a row that disappears when the response finishes.
     pub fn body_with_cursor(&self) -> Text<'static> {
         let mut lines = self.frozen_lines.clone();
         lines.extend(self.render_tail(true));
@@ -261,6 +250,123 @@ impl StreamingRenderer {
     }
 }
 
+fn paint_cursor(lines: &mut [Line<'static>], width: u16) {
+    if let Some(last) = lines.last_mut() {
+        let columns: usize = last.spans.iter().map(|s| crate::util::cols(&s.content)).sum();
+        if columns < usize::from(width) {
+            last.spans.push(ratatui::text::Span::raw(CURSOR.to_string()));
+        }
+    }
+}
+
+/// Complete only the *presentation* of an unfinished inline construct. Source
+/// and final rendering remain untouched. Fenced code is always literal.
+fn inline_preview(src: &str) -> std::borrow::Cow<'_, str> {
+    let mut fence = None;
+    for line in src.lines() {
+        if super::markdown::fence_boundary(line, &mut fence) {
+            return std::borrow::Cow::Borrowed(src);
+        }
+    }
+    // A partial table row is not a paragraph. Keep completed rows on screen
+    // while its final delimiter arrives instead of flashing raw pipes and
+    // moving the preceding table into a different block.
+    if let Some((head, last)) = src.rsplit_once('\n') {
+        if last.trim_start().starts_with('|') && (last.trim() == "|" || !last.trim_end().ends_with('|'))
+            && head.lines().any(super::markdown::table_separator) {
+            return std::borrow::Cow::Borrowed(head);
+        }
+    }
+    let mut stack: Vec<&str> = Vec::new();
+    let mut i = 0;
+    let bytes = src.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 1;
+            if i < bytes.len() { i += src[i..].chars().next().unwrap().len_utf8(); }
+            continue;
+        }
+        if stack.last() == Some(&"`") {
+            if bytes[i] == b'`' { stack.pop(); }
+            i += src[i..].chars().next().unwrap().len_utf8();
+            continue;
+        }
+        if bytes[i] == b'[' {
+            let rest = &src[i + 1..];
+            let label_end = super::markdown::closing_delimiter(rest, '[', ']');
+            let unfinished = match label_end {
+                None => false,
+                Some(end) => {
+                    let after = &rest[end + 1..];
+                    after.starts_with('(') && super::markdown::closing_delimiter(&after[1..], '(', ')').is_none()
+                }
+            };
+            if unfinished {
+                let label = label_end.map_or(rest, |end| &rest[..end]);
+                let mut out = src[..i].to_owned();
+                out.push_str(label);
+                for closing in stack.iter().rev() { out.push_str(closing); }
+                return std::borrow::Cow::Owned(out);
+            }
+        }
+        let token = if src[i..].starts_with("***") { Some("***") }
+            else if src[i..].starts_with("**") { Some("**") }
+            else if src[i..].starts_with("___") { Some("___") }
+            else if src[i..].starts_with("__") { Some("__") }
+            else if src[i..].starts_with("~~") { Some("~~") }
+            else if bytes[i] == b'`' { Some("`") }
+            else if bytes[i] == b'*' { Some("*") }
+            else if bytes[i] == b'_' { Some("_") }
+            else { None };
+        if let Some(token) = token {
+            // Intraword underscores belong to identifiers, not emphasis.
+            if token.starts_with('_') && stack.last() != Some(&token)
+                && src[..i].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                i += token.len();
+                continue;
+            }
+            if stack.last() == Some(&token) {
+                stack.pop();
+            } else if src[i + token.len()..].chars().next().is_some_and(|c| !c.is_whitespace()) {
+                stack.push(token);
+            } else if i + token.len() == src.len() {
+                // A delimiter arriving on its own must not flash as raw markup.
+                let mut out = src[..i].to_owned();
+                for closing in stack.iter().rev() { out.push_str(closing); }
+                return std::borrow::Cow::Owned(out);
+            }
+            i += token.len();
+        } else {
+            i += src[i..].chars().next().unwrap().len_utf8();
+        }
+    }
+    if stack.is_empty() { return std::borrow::Cow::Borrowed(src); }
+    let mut out = src.to_owned();
+    for closing in stack.iter().rev() { out.push_str(closing); }
+    std::borrow::Cow::Owned(out)
+}
+
+#[cfg(test)]
+mod edge_cases {
+    use super::*;
+    #[test]
+    fn literal_brackets_and_identifiers_are_not_links_or_emphasis() {
+        for src in ["Read array[0]", "Read array[", "Keep [note]", "Keep [", "file_name", "__init__", r"escaped \[x\]"] {
+            assert_eq!(inline_preview(src), src, "{src}");
+        }
+    }
+    #[test]
+    fn underscore_preview_has_no_raw_markers() {
+        for source in ["Hello __world", "Hello _world", "Hello ___world"] {
+            let mut r = StreamingRenderer::new(60);
+            r.update(source);
+            let text: String = r.body_with_cursor().lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.as_ref())).collect();
+            assert_eq!(text, "Hello world█");
+            assert_eq!(r.source(), source);
+        }
+    }
+}
+
 /// Byte offset just past the last **safe freeze point** in `src`: the start of
 /// the line following the most recent blank line that sits at depth 0 outside an
 /// open fenced code block. Returns `0` when no such separator exists yet (nothing
@@ -271,7 +377,7 @@ impl StreamingRenderer {
 /// separator) stays in the tail.
 pub(crate) fn find_frozen_boundary(src: &str) -> usize {
     let bytes = src.as_bytes();
-    let mut in_code = false;
+    let mut in_code = None;
     let mut boundary = 0usize;
     let mut line_start = 0usize;
     let mut i = 0usize;
@@ -281,11 +387,10 @@ pub(crate) fn find_frozen_boundary(src: &str) -> usize {
         if at_eof || bytes[i] == b'\n' {
             let line = &src[line_start..i];
             let trimmed = line.trim_start();
-            if trimmed.starts_with("```") {
+            if super::markdown::fence_boundary(trimmed, &mut in_code) {
                 // A fence line toggles the code-block state. Its own line is
                 // never a freeze point.
-                in_code = !in_code;
-            } else if !in_code && line.trim().is_empty() {
+            } else if in_code.is_none() && line.trim().is_empty() {
                 // Blank line at depth 0, outside code: everything up to and
                 // including this line's terminating newline is safe to freeze.
                 // At EOF (no terminating newline) we cannot freeze past it while
@@ -321,8 +426,15 @@ mod tests {
     }
 
     fn full_with_cursor(src: &str) -> Vec<String> {
-        let s = format!("{src}\u{2588}");
-        flat(&render_markdown(&s, W))
+        let boundary = find_frozen_boundary(src);
+        let preview = format!("{}{}", &src[..boundary], inline_preview(&src[boundary..]));
+        let mut rendered = render_markdown(&preview, W);
+        // A settled blank separator belongs to the immutable prefix, not the
+        // live tail; do not paint a cursor into it.
+        if !render_markdown(&inline_preview(&src[boundary..]), W).lines.is_empty() {
+            paint_cursor(&mut rendered.lines, W);
+        }
+        flat(&rendered)
     }
 
     fn full_plain(src: &str) -> Vec<String> {
@@ -330,6 +442,49 @@ mod tests {
     }
 
     // ── find_frozen_boundary ────────────────────────────────────────────────
+
+    #[test]
+    fn incomplete_inline_markup_is_presentation_only() {
+        for (src, want) in [("hello **bold words", "hello bold words"),
+                            ("hello *italic", "hello italic"),
+                            ("hello ~~old", "hello old")] {
+            let mut r = StreamingRenderer::new(W);
+            r.update(src);
+            assert_eq!(flat(&r.body_with_cursor()).join("\n").trim_end_matches(CURSOR), want);
+            assert_eq!(r.source(), src);
+            assert_eq!(flat(&r.finish()), full_plain(src));
+        }
+        assert_eq!(inline_preview("```text\n**literal"), "```text\n**literal");
+        assert_eq!(inline_preview(r"literal \*"), r"literal \*");
+    }
+
+    #[test]
+    fn cursor_never_changes_table_layout_or_adds_a_row() {
+        let src = "| A | B |\n| --- | --- |\n| one | two |";
+        let mut renderer = StreamingRenderer::new(W);
+        renderer.update(src);
+        let live = renderer.body_with_cursor();
+        let finished = renderer.finish();
+        assert_eq!(live.lines.len(), finished.lines.len());
+        let live_rows = flat(&live);
+        let final_rows = flat(&finished);
+        for (a, b) in live_rows.iter().zip(&final_rows) {
+            assert_eq!(a.trim_end_matches(CURSOR), b);
+        }
+    }
+
+    #[test]
+    fn tilde_and_long_fences_keep_blank_lines_inside_the_block() {
+        for src in ["~~~text\na\n\nb\n", "````text\n```\n\nb\n"] {
+            assert_eq!(find_frozen_boundary(src), 0);
+            let mut renderer = StreamingRenderer::new(W);
+            renderer.update(src);
+            assert_eq!(renderer.frozen_bytes(), 0);
+            assert_eq!(flat(&renderer.body()), full_plain(src));
+        }
+        let closed = "~~~\na\n~~~\n\n";
+        assert_eq!(find_frozen_boundary(closed), closed.len());
+    }
 
     #[test]
     fn boundary_none_without_blank_line() {

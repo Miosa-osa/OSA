@@ -884,11 +884,8 @@ impl App {
                 // a 0-100 percentage. If it's absent/zero but the token counts are
                 // present, derive the ratio from estimated/max so the meter still
                 // reflects real usage instead of sticking at 0%.
-                let mut ratio = if utilization > 1.0 {
-                    utilization / 100.0
-                } else {
-                    utilization
-                };
+                // The wire unit is percent, including values below 1%.
+                let mut ratio = utilization / 100.0;
                 if ratio <= 0.0 && max_tokens > 0 && estimated_tokens > 0 {
                     ratio = estimated_tokens as f64 / max_tokens as f64;
                 }
@@ -1442,6 +1439,7 @@ impl App {
             },
             BackendEvent::CommandResult(result) => {
                 self.handle_command_result(result);
+                self.maybe_dequeue_message();
             }
             BackendEvent::SelfUpdate(ev) => {
                 self.handle_self_update(ev);
@@ -1503,6 +1501,7 @@ impl App {
 
             BackendEvent::SessionCreated(result) => match result {
                 Ok(resp) => {
+                    self.session_creation_pending = false;
                     let resumed = resp.status.as_deref() == Some("resumed");
                     self.session_id = resp.id.clone();
                     // A resumed session already has a title; a brand-new one does
@@ -2804,6 +2803,10 @@ impl App {
                 }
                 Err(e) => {
                     debug!("Onboarding check failed: {}", e);
+                    self.toasts.push(
+                        format!("Startup check failed: {e}. Input is queued; use /new to retry."),
+                        crate::components::toast::ToastLevel::Error,
+                    );
                 }
             },
 

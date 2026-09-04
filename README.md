@@ -546,9 +546,9 @@ Anything already exported in your shell wins over this file, so
 
 **Settings cascade:** user (`~/.osa/settings.json`) < project (`.osa/settings.json`) < local (`.osa/settings.local.json`) < session. The two project layers only apply once you have granted the directory trust — see [Workspace trust](#workspace-trust).
 
-**Port.** The default is 9089. To move it, set **both** `OSA_PORT` (which the
-`osa` launcher uses to find and health-check the backend) and `OSA_HTTP_PORT`
-(which the backend binds to) to the same value.
+**Port.** The default is 9089. To move it, set either `OSA_PORT` or
+`OSA_HTTP_PORT`; the launcher normalizes both names so the TUI and backend use
+the same port.
 
 ---
 

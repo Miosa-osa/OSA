@@ -32,6 +32,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
     GenServer.start_link(__MODULE__, opts)
   end
 
+  @doc "Start a session server without linking it to the short-lived tool execution task."
+  def start(opts) do
+    GenServer.start(__MODULE__, opts)
+  end
+
   @doc "Execute an action through the server. Returns :ok | {:ok, result} | {:error, reason}."
   def execute(pid, action, params) do
     GenServer.call(pid, {:execute, action, params}, 30_000)
@@ -116,7 +121,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
     end
   end
 
-  defp dispatch("click", %{"target" => ref}, state) do
+  defp dispatch("click", %{"target" => ref}, state) when is_binary(ref) and ref != "" do
     click_resolved_ref(ref, state)
   end
 
@@ -176,7 +181,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
     if not force and state.last_tree != nil and now - state.tree_fetched_at < @tree_ttl_ms do
       {{:ok, state.last_tree}, state}
     else
-      case state.adapter.get_tree() do
+      tree_result =
+        if targeted_snapshot?(params) and function_exported?(state.adapter, :snapshot, 1) do
+          state.adapter.snapshot(params)
+        else
+          state.adapter.get_tree()
+        end
+
+      case tree_result do
         {:ok, raw_elements} ->
           parsed = Accessibility.parse_tree(raw_elements)
           {tree_text, refs} = Accessibility.assign_refs(parsed)
@@ -217,6 +229,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
     end
   end
 
+  defp dispatch("close_window", %{"window_id" => window_id}, state) do
+    if function_exported?(state.adapter, :close_window, 1) do
+      result = state.adapter.close_window(window_id)
+      {format_result(result, "Closed window #{window_id}"), bump_step(state)}
+    else
+      {{:error, "close_window is not supported by #{inspect(state.adapter)}"}, state}
+    end
+  end
+
+  defp dispatch("list_tabs", params, state) do
+    adapter_result(state, :list_tabs, [params])
+  end
+
+  defp dispatch("close_tabs", params, state) do
+    adapter_result(state, :close_tabs, [params])
+  end
+
   defp dispatch("launch", %{"app" => app}, state) do
     if function_exported?(state.adapter, :launch, 1) do
       result = state.adapter.launch(app)
@@ -235,19 +264,42 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
   end
 
   defp dispatch("snapshot", params, state) do
-    adapter_result(state, :snapshot, [params])
+    if function_exported?(state.adapter, :snapshot, 1) do
+      case state.adapter.snapshot(params) do
+        {:ok, elements} when is_list(elements) -> store_accessibility_tree(elements, state)
+        other -> {other, state}
+      end
+    else
+      {{:error, "snapshot is not supported by #{inspect(state.adapter)}"}, state}
+    end
   end
 
   defp dispatch("right_click", params, state) do
-    adapter_ok(state, :right_click, [params], "Right click")
+    with_target(params, state, fn resolved ->
+      adapter_ok(state, :right_click, [resolved], "Right click")
+    end)
   end
 
   defp dispatch("triple_click", params, state) do
-    adapter_ok(state, :triple_click, [params], "Triple click")
+    with_target(params, state, fn resolved ->
+      adapter_ok(state, :triple_click, [resolved], "Triple click")
+    end)
   end
 
   defp dispatch("set_value", params, state) do
-    adapter_ok(state, :set_value, [params], "Set value")
+    case params do
+      %{"target" => ref, "text" => text} ->
+        case resolve_ref(ref, state) do
+          {:ok, element} ->
+            adapter_ok(state, :set_value, [%{"element" => element, "text" => text}], "Set value")
+
+          {:error, _} = error ->
+            {error, state}
+        end
+
+      _ ->
+        adapter_ok(state, :set_value, [params], "Set value")
+    end
   end
 
   defp dispatch("clipboard_get", _params, state) do
@@ -279,7 +331,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
   end
 
   defp dispatch("scroll_to", params, state) do
-    adapter_ok(state, :scroll_to, [params], "Scrolled to target")
+    with_target(params, state, fn resolved ->
+      adapter_ok(state, :scroll_to, [resolved], "Scrolled to target")
+    end)
   end
 
   # ── Standard Anthropic contract aliases + new primitives ────────────
@@ -341,12 +395,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
 
   defp click_resolved_ref(ref, state) do
     case resolve_ref(ref, state) do
+      {:ok, %{pid: pid, actions: actions} = element}
+      when is_integer(pid) and is_list(actions) ->
+        if "AXPress" in actions and function_exported?(state.adapter, :perform_element, 3) do
+          result = state.adapter.perform_element(element, :press, nil)
+          {format_result(result, "Pressed semantic element #{ref}"), bump_step(state)}
+        else
+          click_element_center(ref, element, state)
+        end
+
       {:ok, %{x: x, y: y, width: w, height: h}}
       when is_integer(w) and is_integer(h) and w > 0 and h > 0 ->
-        cx = x + div(w, 2)
-        cy = y + div(h, 2)
-        result = state.adapter.click(cx, cy)
-        {format_result(result, "Click on #{ref} at (#{cx}, #{cy})"), bump_step(state)}
+        click_element_center(ref, %{x: x, y: y, width: w, height: h}, state)
 
       {:ok, %{x: x, y: y}} ->
         result = state.adapter.click(x, y)
@@ -357,9 +417,55 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
     end
   end
 
+  defp click_element_center(ref, %{x: x, y: y, width: w, height: h}, state) do
+    cx = x + div(w, 2)
+    cy = y + div(h, 2)
+    result = state.adapter.click(cx, cy)
+    {format_result(result, "Click on #{ref} at (#{cx}, #{cy})"), bump_step(state)}
+  end
+
+  defp with_target(%{"target" => ref} = params, state, fun)
+       when is_binary(ref) and ref != "" do
+    case resolve_ref(ref, state) do
+      {:ok, %{x: x, y: y, width: w, height: h}} ->
+        fun.(
+          params
+          |> Map.delete("target")
+          |> Map.put("x", x + div(w, 2))
+          |> Map.put("y", y + div(h, 2))
+        )
+
+      {:ok, %{x: x, y: y}} ->
+        fun.(params |> Map.delete("target") |> Map.put("x", x) |> Map.put("y", y))
+
+      {:error, _} = error ->
+        {error, state}
+    end
+  end
+
+  defp with_target(params, _state, fun), do: fun.(params)
+
+  defp store_accessibility_tree(raw_elements, state) do
+    alias OptimalSystemAgent.Tools.Builtins.ComputerUse.Accessibility
+
+    parsed = Accessibility.parse_tree(raw_elements)
+    {tree_text, refs} = Accessibility.assign_refs(parsed)
+    now = System.monotonic_time(:millisecond)
+    state = %{state | last_tree: tree_text, tree_fetched_at: now, element_refs: refs}
+    {{:ok, tree_text}, state}
+  end
+
+  defp targeted_snapshot?(params) do
+    Enum.any?([params["window_id"], params["app"]], &(is_binary(&1) and &1 != ""))
+  end
+
   # ── Helpers ─────────────────────────────────────────────────────────
 
-  defp bump_step(state), do: %{state | step_counter: state.step_counter + 1}
+  # Any mutating action invalidates the cached rendering. Keep refs so a plan
+  # can execute more than one referenced action, but force the next perception
+  # call to observe the actual post-action state.
+  defp bump_step(state),
+    do: %{state | step_counter: state.step_counter + 1, last_tree: nil, tree_fetched_at: 0}
 
   defp reset_idle_timer(state) do
     if state.idle_timer, do: Process.cancel_timer(state.idle_timer)

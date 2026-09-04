@@ -101,11 +101,12 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
   def capped_retry_delay_ms(_), do: 0
 
-  # Map the session's speed priority to an OpenAI processing tier. Only OpenAI
-  # honours `service_tier`; openai_compat gates it to that provider, so setting
-  # it for any provider is safe (ignored elsewhere). :loose → "flex" (~50%
+  # Map the session's speed priority to a provider processing tier. Adapters
+  # gate and translate this option, so unsupported providers ignore it. :loose → "flex" (~50%
   # cheaper, slower — right for long-horizon background work); :immediate →
-  # "priority" (faster); :standard / unknown → unset (provider default).
+  # "priority" (faster). The interactive `/fast` toggle also opts ordinary
+  # foreground turns into OpenAI Fast processing; provider adapters that do
+  # not support service tiers simply ignore the option.
   defp maybe_put_service_tier(opts, state) do
     case service_tier_for(state) do
       nil -> opts
@@ -113,15 +114,58 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     end
   end
 
-  defp service_tier_for(state) when is_map(state) do
+  @doc false
+  def service_tier_for(state) when is_map(state) do
+    provider = Map.get(state, :provider)
+
     case Map.get(state, :priority) do
-      :loose -> "flex"
-      :immediate -> "priority"
-      _ -> nil
+      :loose ->
+        "flex"
+
+      :immediate ->
+        "priority"
+
+      _ ->
+        if fast_service_tier?(Map.get(state, :session_id)),
+          do: fast_tier_for(provider),
+          else: nil
     end
   end
 
-  defp service_tier_for(_), do: nil
+  def service_tier_for(_), do: nil
+
+  # Groq's portable choice is `auto`: it selects the highest tier the account
+  # can actually use. `performance` is enterprise-only. The remaining listed
+  # providers expose a literal priority tier; adapters omit this for all others.
+  defp fast_tier_for(provider) when provider in [:anthropic, :groq], do: "auto"
+
+  defp fast_tier_for(provider)
+       when provider in [:openai, :openai_codex, :xai, :google, :openrouter, :bedrock],
+       do: "priority"
+
+  defp fast_tier_for(_), do: nil
+
+  @doc "Whether provider Fast processing is enabled independently of reasoning effort."
+  def fast_service_tier? do
+    OptimalSystemAgent.Settings.get(:openai_fast_service_tier) == true
+  end
+
+  def fast_service_tier?(session_id) do
+    OptimalSystemAgent.Settings.get_session_for(session_id, :openai_fast_service_tier) == true
+  end
+
+  @doc "Toggle OpenAI Fast processing without changing reasoning or tool budgets."
+  def toggle_fast_service_tier do
+    enabled = not fast_service_tier?()
+    OptimalSystemAgent.Settings.set_session(:openai_fast_service_tier, enabled)
+    enabled
+  end
+
+  def toggle_fast_service_tier(session_id) do
+    enabled = not fast_service_tier?(session_id)
+    OptimalSystemAgent.Settings.set_session_for(session_id, :openai_fast_service_tier, enabled)
+    enabled
+  end
 
   defp retry_after_cap_ms do
     case Application.get_env(:optimal_system_agent, :retry_after_cap_ms, @retry_after_cap_ms) do
@@ -380,8 +424,10 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       iteration: Map.get(state, :iteration)
     )
 
-    messages
-    |> Providers.chat(opts)
+    result = Providers.chat(messages, opts)
+    result = maybe_retry_without_service_tier(result, messages, opts, &Providers.chat/2)
+
+    result
     |> surface_sync_reasoning(Map.get(state, :session_id, "session"))
     |> repair_result_text()
   end
@@ -394,6 +440,35 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     do: {:ok, result |> repair_field(:content) |> repair_field(:reasoning)}
 
   defp repair_result_text(other), do: other
+
+  # Priority tiers are entitlement- and model-dependent. A provider may reject
+  # the tier even though it supports the field generally. Fall back once to the
+  # identical request at its normal tier; never alter reasoning, tools, or model.
+  defp maybe_retry_without_service_tier({:error, reason}, messages, opts, request)
+       when is_function(request, 2) do
+    if Keyword.has_key?(opts, :service_tier) and tier_rejection?(reason) do
+      Logger.warning("[llm] Fast tier unavailable; retrying at the provider's default tier")
+      request.(messages, Keyword.delete(opts, :service_tier))
+    else
+      {:error, reason}
+    end
+  end
+
+  defp maybe_retry_without_service_tier(result, _messages, _opts, _request), do: result
+
+  @doc false
+  def tier_rejection?(reason) do
+    text = reason |> inspect() |> String.downcase()
+
+    String.contains?(text, [
+      "service_tier",
+      "service tier",
+      "servicetier",
+      "priority tier",
+      "priority processing",
+      "fast mode"
+    ])
+  end
 
   defp repair_field(%{} = result, key) do
     case Map.get(result, key) do
@@ -693,62 +768,70 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     stream_task =
       Task.async(fn ->
         res =
-          case Providers.chat_stream(messages, callback, opts) do
-            :ok ->
-              # Callback-based streaming providers report the response through
-              # `callback` and return `:ok` when the stream closes normally.
-              # `Providers.chat_stream/3` documents exactly that contract.
-              :ok
+          initial = Providers.chat_stream(messages, callback, opts)
 
-            {:error, reason} = error ->
-              # Try fallback chain on retryable errors
-              if OptimalSystemAgent.Providers.FallbackChain.retryable_error?(reason) do
-                # Header-aware: honor a server-supplied Retry-After (parsed by
-                # RetryClassifier off the original reason) before switching
-                # providers, and surface it via the SAME {:provider_retry} UI
-                # event the same-provider retry loop uses, so "Retrying in
-                # Ns…" reflects the real server-requested wait instead of
-                # silently switching providers with no delay at all.
-                delay_ms =
-                  capped_retry_delay_ms(
-                    OptimalSystemAgent.Providers.FallbackChain.retry_delay_ms(reason)
-                  )
+        result =
+          maybe_retry_without_service_tier(initial, messages, opts, fn retry_messages,
+                                                                       retry_opts ->
+            Providers.chat_stream(retry_messages, callback, retry_opts)
+          end)
 
-                Logger.warning(
-                  "[llm] Primary provider failed: #{inspect(reason)}, trying fallback chain" <>
-                    if(delay_ms > 0, do: " (honoring #{delay_ms}ms retry-after)", else: "")
+        case result do
+          :ok ->
+            # Callback-based streaming providers report the response through
+            # `callback` and return `:ok` when the stream closes normally.
+            # `Providers.chat_stream/3` documents exactly that contract.
+            :ok
+
+          {:error, reason} = error ->
+            # Try fallback chain on retryable errors
+            if OptimalSystemAgent.Providers.FallbackChain.retryable_error?(reason) do
+              # Header-aware: honor a server-supplied Retry-After (parsed by
+              # RetryClassifier off the original reason) before switching
+              # providers, and surface it via the SAME {:provider_retry} UI
+              # event the same-provider retry loop uses, so "Retrying in
+              # Ns…" reflects the real server-requested wait instead of
+              # silently switching providers with no delay at all.
+              delay_ms =
+                capped_retry_delay_ms(
+                  OptimalSystemAgent.Providers.FallbackChain.retry_delay_ms(reason)
                 )
 
-                if delay_ms > 0 do
-                  Phoenix.PubSub.broadcast(
-                    OptimalSystemAgent.PubSub,
-                    "osa:session:#{session_id}",
-                    {:osa_event,
-                     %{
-                       type: :provider_retry,
-                       session_id: session_id,
-                       attempt: 1,
-                       max_attempts: 1,
-                       delay_ms: delay_ms,
-                       reason: OptimalSystemAgent.Providers.Resilience.reason_to_string(reason)
-                     }}
-                  )
+              Logger.warning(
+                "[llm] Primary provider failed: #{inspect(reason)}, trying fallback chain" <>
+                  if(delay_ms > 0, do: " (honoring #{delay_ms}ms retry-after)", else: "")
+              )
 
-                  Process.sleep(delay_ms)
-                end
+              if delay_ms > 0 do
+                Phoenix.PubSub.broadcast(
+                  OptimalSystemAgent.PubSub,
+                  "osa:session:#{session_id}",
+                  {:osa_event,
+                   %{
+                     type: :provider_retry,
+                     session_id: session_id,
+                     attempt: 1,
+                     max_attempts: 1,
+                     delay_ms: delay_ms,
+                     reason: OptimalSystemAgent.Providers.Resilience.reason_to_string(reason)
+                   }}
+                )
 
-                case OptimalSystemAgent.Providers.FallbackChain.chat_stream_with_fallback(
-                       messages,
-                       callback,
-                       opts
-                     ) do
-                  {:ok, result, _provider} -> {:ok, result}
-                  fallback_error -> fallback_error
-                end
-              else
-                error
+                Process.sleep(delay_ms)
               end
-          end
+
+              case OptimalSystemAgent.Providers.FallbackChain.chat_stream_with_fallback(
+                     messages,
+                     callback,
+                     opts
+                   ) do
+                {:ok, result, _provider} -> {:ok, result}
+                fallback_error -> fallback_error
+              end
+            else
+              error
+            end
+        end
 
         # Always notify the caller of the task's terminal result. On the success
         # path the {:llm_stream_done} message has already been enqueued by the

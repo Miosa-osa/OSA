@@ -136,6 +136,18 @@ _http_ok() {
   fi
 }
 
+# True when any TCP listener owns a local port, whether it is OSA or another
+# process. Auto-isolation must skip foreign listeners too; probing only OSA's
+# /health endpoint mistakes them for free ports and selects a guaranteed bind
+# failure. Bash's /dev/tcp keeps this dependency-free when lsof is unavailable.
+_port_in_use() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -ti ":$1" -sTCP:LISTEN >/dev/null 2>&1
+  else
+    (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+  fi
+}
+
 # Elixir version check (>= 1.17)
 check_elixir_version() {
   local ver major minor
@@ -197,9 +209,13 @@ TUI_DIR="$ROOT/priv/rust/tui"
 TUI_BIN="$TUI_DIR/target/release/osagent"
 
 # ── Resolve backend port (honor --dev anywhere in args) ──────────
-PORT="${OSA_PORT:-9089}"
+# OSA_PORT is the launcher's historical knob; OSA_HTTP_PORT is the backend's.
+# Accept either one, then export both below so the launcher, TUI, and BEAM can
+# never observe different ports.
+_EXPLICIT_PORT="${OSA_PORT:-${OSA_HTTP_PORT:-}}"
+PORT="${_EXPLICIT_PORT:-9089}"
 for _a in "$@"; do
-  [ "$_a" = "--dev" ] && PORT="${OSA_PORT:-19001}"
+  [ "$_a" = "--dev" ] && PORT="${_EXPLICIT_PORT:-19001}"
 done
 
 # ── Auto-isolation by working directory ──────────────────────────
@@ -208,10 +224,10 @@ done
 # the existing daemon. Different cwd = spin up a new daemon on the next free
 # port with its own state dir. Zero extra commands.
 #
-# Skip entirely when the user explicitly sets OSA_PORT or OSA_HOME (the power-
+# Skip entirely when the user explicitly sets either port name or OSA_HOME (the power-
 # user escape hatch). `--dev` also bypasses: the dev profile is a single
 # fixed instance on 19001.
-if [ -z "${OSA_PORT:-}" ] && [ "${OSA_HOME:-${HOME}/.osa}" = "${HOME}/.osa" ]; then
+if [ -z "$_EXPLICIT_PORT" ] && [ "${OSA_HOME:-${HOME}/.osa}" = "${HOME}/.osa" ]; then
   _dev_flag=0
   for _a in "$@"; do [ "$_a" = "--dev" ] && _dev_flag=1; done
   if [ "$_dev_flag" -eq 0 ]; then
@@ -233,9 +249,9 @@ if [ -z "${OSA_PORT:-}" ] && [ "${OSA_HOME:-${HOME}/.osa}" = "${HOME}/.osa" ]; t
     if [ "${OSA_HOME:-${HOME}/.osa}" = "${HOME}/.osa" ]; then
       mkdir -p "$_ws_home/run" "$_ws_home/logs"
       _candidate=9089
-      if _http_ok "http://localhost:${_candidate}/health" 2>/dev/null; then
+      if _port_in_use "${_candidate}"; then
         _candidate=9090
-        while _http_ok "http://localhost:${_candidate}/health" 2>/dev/null; do
+        while _port_in_use "${_candidate}"; do
           _candidate=$((_candidate + 1))
         done
       fi
@@ -246,6 +262,19 @@ if [ -z "${OSA_PORT:-}" ] && [ "${OSA_HOME:-${HOME}/.osa}" = "${HOME}/.osa" ]; t
 fi
 export OSA_HOME
 export OSA_PORT="$PORT"
+export OSA_HTTP_PORT="$PORT"
+
+# ── Inherit global credentials into fresh workspaces ─────────────
+# When isolation routes us into a per-cwd workspace dir, that dir is empty on
+# first launch. The setup-complete gate (env_has_provider "$OSA_HOME/.env")
+# would then fire the wizard every time you launch osa in a new directory —
+# even though the operator already set up ~/.osa/.env once, globally.
+# Seed a symlink so the workspace inherits global credentials automatically.
+# Users who want per-workspace credentials just replace the symlink with a
+# real file.
+if [ "$OSA_HOME" != "${HOME}/.osa" ] && [ -f "${HOME}/.osa/.env" ] && [ ! -e "$OSA_HOME/.env" ]; then
+  ln -s "${HOME}/.osa/.env" "$OSA_HOME/.env" 2>/dev/null || true
+fi
 
 # ── Derived paths (computed AFTER isolation may reassign OSA_HOME) ─
 # PID_FILE / PORT_FILE / LOG_FILE must live under the finalized OSA_HOME
@@ -1471,8 +1500,8 @@ case "${1:-}" in
     ;;
 
   stop)
-    stop_daemon
-    exit 0
+    _stop_backend_confirmed
+    exit $?
     ;;
 
   update)
@@ -1842,7 +1871,7 @@ if ! env_has_provider "$OSA_HOME/.env"; then
   if (cd "$ROOT" && mix osa.setup.wizard); then
     if env_has_provider "$OSA_HOME/.env"; then
       echo -e "${CYAN}→${RESET} Restarting backend to load your new configuration…"
-      stop_daemon
+      _stop_backend_confirmed
       clear_stale_pid
       start_daemon
       rc=0

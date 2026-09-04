@@ -169,6 +169,13 @@ defmodule OptimalSystemAgent.CLI.Auth do
   @doc "Run a provider's sign-in flow from the terminal."
   @spec login(String.t()) :: :ok | {:error, term()}
   def login(provider) do
+    # `bin/osa` dispatches auth commands through `mix run --no-start` so the
+    # read-only status/logout paths stay fast. Login is the exception: its
+    # device flow uses Req's Finch pool and must start Req before dialing the
+    # provider. Without this, every terminal login fails with
+    # `unknown registry: Req.Finch`.
+    _ = Application.ensure_all_started(:req)
+
     cond do
       # Checked BEFORE `supported?/1`. Anthropic is not in the implementation
       # map, so without this clause `osa auth login anthropic` printed the

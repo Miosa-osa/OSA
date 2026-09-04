@@ -1315,17 +1315,15 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   # field and require `max_completion_tokens`. Every other OpenAI-compatible
   # provider uses `max_tokens`. Route the value to the right key so o-series
   # calls don't 400 ("max_tokens is not supported with this model").
-  # OpenAI processing tier ("flex" ~50% cheaper + slower for non-urgent work,
-  # "priority" faster, "default"/"auto" standard). Added ONLY for the real
-  # OpenAI provider — other OpenAI-compatible backends (xAI/grok, OpenRouter,
-  # local) reject an unknown `service_tier` with a 422, so we never send it
-  # there. Off unless a caller (llm_client, from the task's speed priority) set
-  # :service_tier.
+  # Processing tiers are not universally OpenAI-compatible. Send the field only
+  # to providers whose native API documents it; local and unknown compatibility
+  # endpoints continue to receive no extra field.
   defp maybe_add_service_tier(body, opts) do
     tier = Keyword.get(opts, :service_tier)
     provider = Keyword.get(opts, :provider, image_provider(opts))
 
-    if is_binary(tier) and tier != "" and provider == :openai do
+    if is_binary(tier) and tier != "" and
+         provider in [:openai, :xai, :openrouter, :groq] do
       Map.put(body, :service_tier, tier)
     else
       body

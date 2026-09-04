@@ -1349,7 +1349,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         "Blocked: security pipeline unavailable"
 
       {:ok, %{arguments: modified_args} = _modified_payload} ->
-        # Hook modified the tool arguments — use the modified version
+        warn_if_session_id_missing(state, tool_call)
+
         enriched_args =
           modified_args
           |> Map.put("__session_id__", state.session_id)
@@ -1360,7 +1361,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         execute_tool(tool_call.name, enriched_args)
 
       _ ->
-        # Inject session_id so tools like ask_user can register pending state
+        warn_if_session_id_missing(state, tool_call)
+
         enriched_args =
           tool_call.arguments
           |> Map.put("__session_id__", state.session_id)
@@ -1370,6 +1372,23 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
         execute_tool(tool_call.name, enriched_args)
     end
+  end
+
+  # Diagnostic: tools depend on `__session_id__` reaching UseContext (things
+  # like ask_user, enter_plan_mode, exit_plan_mode, and the plan-approval
+  # round-trip all key off it). If the Loop state's session_id is nil at
+  # injection time, those tools silently misbehave downstream — plans get
+  # stashed under a nil key, ask_user never wires up, etc. Log loudly so the
+  # next repro pinpoints the calling context.
+  defp warn_if_session_id_missing(%{session_id: sid}, _tool_call) when is_binary(sid), do: :ok
+
+  defp warn_if_session_id_missing(state, tool_call) do
+    Logger.error(
+      "[tool_executor] state.session_id is #{inspect(Map.get(state, :session_id))} at " <>
+        "injection time for tool=#{tool_call.name}. Downstream tools depending on " <>
+        "session_id (enter/exit_plan_mode, ask_user, plan approval) will misbehave. " <>
+        "state keys=#{inspect(Map.keys(state))}"
+    )
   end
 
   defp authority_surface(%{channel: channel}) when channel in [:scheduler, :heartbeat],

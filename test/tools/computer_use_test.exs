@@ -3,10 +3,46 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
 
   alias OptimalSystemAgent.Tools.Builtins.ComputerUse
   alias OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.MacOS, as: MacOSAdapter
+  alias OptimalSystemAgent.Tools.UseContext
 
   # ---------------------------------------------------------------------------
   # Tool metadata
   # ---------------------------------------------------------------------------
+
+  test "macOS adapter implements the universal desktop action surface" do
+    callbacks = [
+      {:get_tree, 0},
+      {:list_apps, 0},
+      {:list_windows, 0},
+      {:focus_window, 1},
+      {:close_window, 1},
+      {:list_tabs, 1},
+      {:close_tabs, 1},
+      {:launch, 1},
+      {:cursor, 0},
+      {:right_click, 1},
+      {:triple_click, 1},
+      {:middle_click, 2},
+      {:left_mouse_down, 2},
+      {:left_mouse_up, 2},
+      {:perform_element, 3},
+      {:clipboard_get, 0},
+      {:clipboard_set, 1},
+      {:clipboard_clear, 0},
+      {:snapshot, 1},
+      {:list_surfaces, 1},
+      {:set_value, 1},
+      {:scroll_to, 1},
+      {:resize_window, 1},
+      {:move_window, 1},
+      {:hold_key, 2},
+      {:wait, 1}
+    ]
+
+    Enum.each(callbacks, fn {name, arity} ->
+      assert function_exported?(MacOSAdapter, name, arity), "missing #{name}/#{arity}"
+    end)
+  end
 
   describe "tool metadata" do
     test "name returns computer_use" do
@@ -42,6 +78,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
       assert "scroll" in action_enum
       assert "move_mouse" in action_enum
       assert "drag" in action_enum
+      assert "list_tabs" in action_enum
+      assert "close_tabs" in action_enum
+    end
+
+    test "perception actions are read-only but closing tabs is not" do
+      assert ComputerUse.read_only?(%{"action" => "list_tabs"}, UseContext.empty())
+      assert ComputerUse.read_only?(%{"action" => "get_tree"}, UseContext.empty())
+      refute ComputerUse.read_only?(%{"action" => "close_tabs"}, UseContext.empty())
     end
   end
 
@@ -113,22 +157,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
 
   describe "screenshot validation" do
     test "screenshot with no region is valid (passes validation)" do
-      # Will attempt to run screencapture — we test the command generation
-      # not the execution here, so we accept either ok or error from screencapture
-      result = ComputerUse.execute(%{"action" => "screenshot"})
-      # Should not fail on validation
-      refute match?({:error, "Missing required" <> _}, result)
-      refute match?({:error, "Invalid action" <> _}, result)
+      assert {:ok, _} =
+               ComputerUse.validate_input(%{"action" => "screenshot"}, UseContext.empty())
     end
 
     test "screenshot with valid region passes validation" do
-      result =
-        ComputerUse.execute(%{
-          "action" => "screenshot",
-          "region" => %{"x" => 0, "y" => 0, "width" => 100, "height" => 100}
-        })
-
-      refute match?({:error, "Region must" <> _}, result)
+      assert {:ok, _} =
+               ComputerUse.validate_input(
+                 %{
+                   "action" => "screenshot",
+                   "region" => %{"x" => 0, "y" => 0, "width" => 100, "height" => 100}
+                 },
+                 UseContext.empty()
+               )
     end
 
     test "screenshot with invalid region returns error" do
@@ -159,6 +200,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
                })
 
       assert msg =~ "Region"
+    end
+
+    test "provider-generated empty 0x0 region is treated as omitted" do
+      assert {:ok, normalized} =
+               ComputerUse.validate_input(
+                 %{
+                   "action" => "screenshot",
+                   "region" => %{"x" => 0, "y" => 0, "width" => 0, "height" => 0}
+                 },
+                 UseContext.empty()
+               )
+
+      refute Map.has_key?(normalized, "region")
     end
   end
 
@@ -192,6 +246,48 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
     test "double_click without coordinates returns error" do
       assert {:error, msg} = ComputerUse.execute(%{"action" => "double_click"})
       assert msg =~ "Missing required parameter: x"
+    end
+
+    test "blank target does not override valid coordinates" do
+      assert {:ok, normalized} =
+               ComputerUse.validate_input(
+                 %{"action" => "click", "target" => "", "x" => 65, "y" => 195},
+                 UseContext.empty()
+               )
+
+      refute Map.has_key?(normalized, "target")
+      assert normalized["x"] == 65
+      assert normalized["y"] == 195
+    end
+
+    test "blank target without coordinates is rejected" do
+      assert {:error, message, _code} =
+               ComputerUse.validate_input(
+                 %{"action" => "left_click", "target" => ""},
+                 UseContext.empty()
+               )
+
+      assert message =~ "coordinates"
+    end
+  end
+
+  describe "browser tab validation" do
+    test "close_tabs requires a narrow matcher" do
+      assert {:error, message, _code} =
+               ComputerUse.validate_input(
+                 %{"action" => "close_tabs", "app" => "Arc"},
+                 UseContext.empty()
+               )
+
+      assert message =~ "url_contains or title_contains"
+    end
+
+    test "close_tabs accepts an app and URL matcher" do
+      assert {:ok, _} =
+               ComputerUse.validate_input(
+                 %{"action" => "close_tabs", "app" => "Arc", "url_contains" => "auth.openai.com"},
+                 UseContext.empty()
+               )
     end
   end
 
@@ -266,13 +362,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
     end
 
     test "valid key combos pass validation" do
-      # These should pass validation (may fail on execution if osascript not available)
-      for combo <- ~w(enter tab space cmd+c cmd+shift+v ctrl+alt+delete f1 up down) do
-        result = ComputerUse.execute(%{"action" => "key", "text" => combo})
-
-        refute match?({:error, "Key combo" <> _}, result),
-               "Expected #{combo} to pass validation, got: #{inspect(result)}"
+      for combo <- ~w(enter tab space cmd+c cmd+shift+v f1 up down) do
+        assert {:ok, _} =
+                 ComputerUse.validate_input(
+                   %{"action" => "key", "text" => combo},
+                   UseContext.empty()
+                 )
       end
+    end
+
+    test "destructive system key combos are refused" do
+      assert {:error, message, -32_602} =
+               ComputerUse.validate_input(
+                 %{"action" => "key", "text" => "ctrl+alt+delete"},
+                 UseContext.empty()
+               )
+
+      assert message =~ "Refusing destructive key combo"
     end
   end
 
@@ -295,9 +401,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
 
     test "valid scroll directions pass validation" do
       for dir <- ~w(up down left right) do
-        result = ComputerUse.execute(%{"action" => "scroll", "direction" => dir})
-        refute match?({:error, "Missing required" <> _}, result)
-        refute match?({:error, "Invalid direction" <> _}, result)
+        assert {:ok, _} =
+                 ComputerUse.validate_input(
+                   %{"action" => "scroll", "direction" => dir},
+                   UseContext.empty()
+                 )
       end
     end
   end

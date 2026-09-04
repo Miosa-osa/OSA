@@ -19,9 +19,11 @@ use crossterm::event::{
 use ratatui::prelude::*;
 use ratatui::widgets::{Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::components::chat::message::{Message, MessageType};
 use crate::style;
+use std::{cell::RefCell, rc::Rc};
 
 /// Speaker role for a captured transcript entry (drives colour + header label).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +167,10 @@ impl Selection {
 
 /// Full-screen transcript reader state.
 pub struct TranscriptViewer {
+    layout_cache: RefCell<Option<(u16, bool, usize, usize, Rc<Vec<FlatLine>>)>>,
+    /// Source mode preserves table/diagram columns instead of word wrapping.
+    unwrapped: bool,
+    horizontal: u16,
     /// Index (into the flattened line list) of the top visible row.
     scroll: usize,
     /// Selected line — the copy-of-selection target and search anchor.
@@ -187,6 +193,9 @@ impl TranscriptViewer {
         let total = flat.len();
         let view_h = view_height(h);
         let mut v = Self {
+            layout_cache: RefCell::new(None),
+            unwrapped: false,
+            horizontal: 0,
             scroll: 0,
             cursor: total.saturating_sub(1),
             searching: false,
@@ -200,7 +209,8 @@ impl TranscriptViewer {
 
     pub fn handle_key(&mut self, key: KeyEvent, entries: &[TranscriptEntry]) -> TranscriptAction {
         let (w, h) = viewport();
-        let flat = flatten(entries, body_width(w));
+        let flat = self.layout(entries, body_width(w));
+        self.horizontal = self.effective_pan(&flat, w);
         let total = flat.len();
         let view_h = view_height(h);
 
@@ -234,6 +244,23 @@ impl TranscriptViewer {
         self.selection = None;
 
         match (key.code, key.modifiers) {
+            (KeyCode::Char('w'), KeyModifiers::NONE) => {
+                let entry = flat.get(self.cursor).map(|line| line.entry).unwrap_or(0);
+                self.unwrapped = !self.unwrapped;
+                self.horizontal = 0;
+                let next = flatten_view(entries, body_width(w), self.unwrapped);
+                self.cursor = next.iter().position(|line| line.entry == entry).unwrap_or(0);
+                self.recompute_matches(&next);
+                self.ensure_visible(view_h, next.len());
+                return TranscriptAction::None;
+            }
+            (KeyCode::Left, _) if self.unwrapped => {
+                self.horizontal = self.horizontal.saturating_sub(8);
+            }
+            (KeyCode::Right, _) if self.unwrapped => {
+                let limit = self.pan_limit(&flat, w);
+                self.horizontal = self.horizontal.saturating_add(8).min(limit);
+            }
             // Ctrl+O toggles the overlay closed (matches the open binding).
             (KeyCode::Char('o'), KeyModifiers::CONTROL) => return TranscriptAction::Close,
             (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => {
@@ -293,7 +320,7 @@ impl TranscriptViewer {
     /// as "scrolled off the bottom" and dismisses the overlay cleanly.
     pub fn scroll_by(&mut self, delta: isize, entries: &[TranscriptEntry]) -> bool {
         let (w, h) = viewport();
-        let flat = flatten(entries, body_width(w));
+        let flat = self.layout(entries, body_width(w));
         let total = flat.len();
         let view_h = view_height(h);
         let at_bottom = self.cursor + 1 >= total;
@@ -311,7 +338,8 @@ impl TranscriptViewer {
     /// always fills the alternate screen), matching every other method here.
     pub fn handle_mouse(&mut self, me: MouseEvent, entries: &[TranscriptEntry]) -> TranscriptAction {
         let (w, h) = viewport();
-        let flat = flatten(entries, body_width(w));
+        let flat = self.layout(entries, body_width(w));
+        self.horizontal = self.effective_pan(&flat, w);
         let total = flat.len();
         let view_h = view_height(h);
         if total == 0 {
@@ -332,7 +360,7 @@ impl TranscriptViewer {
                 self.ensure_visible(view_h, total);
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(pos) = mouse_to_pos(me.column, me.row, scroll, view_h, &flat) {
+                if let Some(pos) = mouse_to_pos(me.column.saturating_add(self.horizontal), me.row, scroll, view_h, &flat) {
                     self.cursor = pos.0;
                     self.selection = Some(Selection {
                         anchor: pos,
@@ -341,7 +369,7 @@ impl TranscriptViewer {
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if let Some(pos) = mouse_to_pos(me.column, me.row, scroll, view_h, &flat) {
+                if let Some(pos) = mouse_to_pos(me.column.saturating_add(self.horizontal), me.row, scroll, view_h, &flat) {
                     if let Some(ref mut sel) = self.selection {
                         sel.head = pos;
                         self.cursor = pos.0;
@@ -383,7 +411,7 @@ impl TranscriptViewer {
         // ── Header ────────────────────────────────────────────────────
         let header = Line::from(vec![
             Span::styled(
-                " \u{27D0} Transcript ",
+                " \u{27D0} Transcript snapshot ",
                 Style::default()
                     .fg(theme.colors.primary)
                     .add_modifier(Modifier::BOLD),
@@ -394,7 +422,7 @@ impl TranscriptViewer {
 
         // ── Body ──────────────────────────────────────────────────────
         let body = rows[1];
-        let flat = flatten(entries, body_width(body.width));
+        let flat = self.layout(entries, body_width(body.width));
         let total = flat.len();
         let view_h = body.height as usize;
         let max_scroll = total.saturating_sub(view_h);
@@ -418,7 +446,7 @@ impl TranscriptViewer {
                 ));
             }
         }
-        frame.render_widget(Paragraph::new(lines), body);
+        frame.render_widget(Paragraph::new(lines).scroll((0, self.effective_pan(&flat, body.width))), body);
 
         // ── Footer ────────────────────────────────────────────────────
         let footer = if self.searching {
@@ -433,8 +461,12 @@ impl TranscriptViewer {
             ])
         } else if self.matches.is_empty() {
             Line::from(Span::styled(
-                " \u{2191}\u{2193}/jk scroll \u{00B7} drag select \u{00B7} / search \u{00B7} y copy \u{00B7} Y all \u{00B7} Esc/Ctrl+O close"
-                    .to_string(),
+                if area.width < 80 {
+                    " ↑↓ scroll · w layout · ←→ pan · Esc close".to_owned()
+                } else {
+                    format!(" ↑↓ scroll · w {} · ←→ pan · / search · y copy · Y all · Esc close",
+                        if self.unwrapped { "wrap" } else { "preserve layout" })
+                },
                 theme.faint(),
             ))
         } else {
@@ -447,6 +479,36 @@ impl TranscriptViewer {
             ))
         };
         frame.render_widget(Paragraph::new(footer), rows[2]);
+    }
+
+    fn effective_pan(&self, flat: &[FlatLine], width: u16) -> u16 {
+        if !self.unwrapped { return 0; }
+        self.horizontal.min(self.pan_limit(flat, width))
+    }
+
+    fn pan_limit(&self, flat: &[FlatLine], width: u16) -> u16 {
+        // Unrelated long messages must not keep a short selected diagram
+        // scrolled off-screen. Pan within the selected message's geometry.
+        let selected = flat.get(self.cursor).map(|line| line.entry);
+        let widest = flat.iter().filter(|line| Some(line.entry) == selected)
+            .map(|line| UnicodeWidthStr::width(line.text.as_str())
+            + line_prefix_width(line.is_header)).max().unwrap_or(0);
+        widest.saturating_sub(usize::from(width)).min(usize::from(u16::MAX)) as u16
+    }
+
+    // The reader receives immutable snapshots. Cache their layout so a long
+    // response is not rewrapped on every spinner frame or arrow key.
+    fn layout(&self, entries: &[TranscriptEntry], width: u16) -> Rc<Vec<FlatLine>> {
+        let bytes = entries.iter().map(|entry| entry.text.len()).sum::<usize>();
+        let mut cache = self.layout_cache.borrow_mut();
+        if let Some((w, mode, count, len, lines)) = cache.as_ref() {
+            if (*w, *mode, *count, *len) == (width, self.unwrapped, entries.len(), bytes) {
+                return Rc::clone(lines);
+            }
+        }
+        let lines = Rc::new(flatten_view(entries, width, self.unwrapped));
+        *cache = Some((width, self.unwrapped, entries.len(), bytes, Rc::clone(&lines)));
+        lines
     }
 
     // ── Internal helpers ──────────────────────────────────────────────
@@ -554,6 +616,74 @@ fn view_height(height: u16) -> usize {
 /// Flatten entries into wrapped visual lines: one header line per entry, its
 /// wrapped body, then a blank spacer.
 fn flatten(entries: &[TranscriptEntry], body_w: u16) -> Vec<FlatLine> {
+    flatten_view(entries, body_w, false)
+}
+
+#[cfg(test)]
+mod wide_layout_tests {
+    use super::*;
+
+    #[test]
+    fn unicode_search_does_not_drop_or_duplicate_text() {
+        for (text, query, expected) in [("İabc xyz", "xyz", "xyz"), ("İabc", "i", "İ"), ("İİ", "i", "İİ"), ("ΟΣ", "ος", "ΟΣ")] {
+            let theme = style::theme();
+            let spans = highlight(text, query, Style::default(), &theme);
+            let all: String = spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(all, text);
+            let matched: String = spans.iter().filter(|s| s.style.bg == Some(theme.colors.warning)).map(|s| s.content.as_ref()).collect();
+            assert_eq!(matched, expected);
+        }
+    }
+
+    #[test]
+    fn emoji_and_combining_marks_are_selected_as_clusters() {
+        for emoji in ["👩‍💻", "🇺🇸", "e\u{301}"] {
+            let text = format!("{emoji}x");
+            assert_eq!(display_to_char_idx(&text, UnicodeWidthStr::width(emoji)), emoji.chars().count());
+            assert_eq!(display_to_char_idx(&text, 0), 0);
+            assert_eq!(wrap_plain(&format!("{emoji}{emoji}"), UnicodeWidthStr::width(emoji)), vec![emoji.to_owned(), emoji.to_owned()]);
+        }
+    }
+
+    #[test]
+    fn widening_reader_reveals_left_edge_again() {
+        let entries = vec![
+            TranscriptEntry { role: TranscriptRole::System, text: "unrelated ".repeat(100) },
+            TranscriptEntry { role: TranscriptRole::Agent, text: "LEFT".to_owned() + &"-".repeat(100) + "RIGHT" },
+        ];
+        let mut viewer = TranscriptViewer::open(&entries);
+        viewer.unwrapped = true;
+        viewer.horizontal = 80;
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(200, 20)).unwrap();
+        terminal.draw(|f| viewer.draw(f, f.area(), &entries)).unwrap();
+        let screen: String = terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect();
+        assert!(screen.contains("LEFT"));
+    }
+
+    #[test]
+    fn source_view_keeps_diagram_spaces_and_long_rows() {
+        let source = "+---------------------->\n|  A        B          |";
+        let entries = vec![TranscriptEntry { role: TranscriptRole::Agent, text: source.into() }];
+        let lines = flatten_view(&entries, 8, true);
+        assert_eq!(lines[1].text, source.lines().next().unwrap());
+        assert_eq!(lines[2].text, source.lines().nth(1).unwrap());
+        assert_eq!(lines.len(), 4);
+        assert!(flatten_view(&entries, 8, false).len() > lines.len());
+    }
+
+    #[test]
+    fn long_reader_reuses_layout_until_width_or_mode_changes() {
+        let entries = vec![TranscriptEntry { role: TranscriptRole::Agent, text: "long reply ".repeat(10_000) }];
+        let mut viewer = TranscriptViewer::open(&entries);
+        let a = viewer.layout(&entries, 80);
+        assert!(Rc::ptr_eq(&a, &viewer.layout(&entries, 80)));
+        assert!(!Rc::ptr_eq(&a, &viewer.layout(&entries, 40)));
+        viewer.unwrapped = true;
+        assert_eq!(viewer.layout(&entries, 40).len(), 3);
+    }
+}
+
+fn flatten_view(entries: &[TranscriptEntry], body_w: u16, unwrapped: bool) -> Vec<FlatLine> {
     let w = body_w.max(1) as usize;
     let mut out = Vec::new();
     for (ei, e) in entries.iter().enumerate() {
@@ -563,7 +693,10 @@ fn flatten(entries: &[TranscriptEntry], body_w: u16) -> Vec<FlatLine> {
             is_header: true,
             text: e.role.label().to_string(),
         });
-        for body in wrap_plain(&e.text, w) {
+        let body = if unwrapped {
+            e.text.split('\n').map(|line| crate::render::markdown::expand_tabs(line, 4)).collect()
+        } else { wrap_plain(&e.text, w) };
+        for body in body {
             out.push(FlatLine {
                 entry: ei,
                 role: e.role,
@@ -602,13 +735,13 @@ fn wrap_plain(text: &str, width: usize) -> Vec<String> {
                 }
                 let mut chunk = String::new();
                 let mut chunk_w = 0usize;
-                for ch in word.chars() {
-                    let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                for grapheme in word.graphemes(true) {
+                    let cw = UnicodeWidthStr::width(grapheme);
                     if chunk_w + cw > width && !chunk.is_empty() {
                         out.push(std::mem::take(&mut chunk));
                         chunk_w = 0;
                     }
-                    chunk.push(ch);
+                    chunk.push_str(grapheme);
                     chunk_w += cw;
                 }
                 cur = chunk;
@@ -665,12 +798,14 @@ fn slice_chars(text: &str, lo: usize, hi: usize) -> String {
 /// glyph under the cursor rather than drifting.
 fn display_to_char_idx(text: &str, target_col: usize) -> usize {
     let mut w = 0usize;
-    for (i, ch) in text.chars().enumerate() {
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+    let mut i = 0usize;
+    for grapheme in text.graphemes(true) {
+        let cw = UnicodeWidthStr::width(grapheme);
         if w + cw > target_col {
             return i;
         }
         w += cw;
+        i += grapheme.chars().count();
     }
     char_len(text)
 }
@@ -820,31 +955,42 @@ fn render_line(
 }
 
 /// Split `text` into spans, highlighting case-insensitive matches of `q`
-/// (already lowercased). Uses `.get()` guards so exotic-unicode offset drift can
-/// never panic — at worst a highlight is skipped.
+/// (already lowercased). Map normalized offsets back to original characters:
+/// lowercasing can expand a character and must never change displayed text.
 fn highlight(text: &str, q: &str, base: Style, theme: &style::Theme) -> Vec<Span<'static>> {
     if q.is_empty() {
         return vec![Span::styled(text.to_string(), base)];
     }
     let hay = text.to_lowercase();
+    let mut starts = Vec::new();
+    let mut ends = Vec::new();
+    for (offset, ch) in text.char_indices() {
+        for lower in ch.to_lowercase() {
+            for _ in 0..lower.len_utf8() {
+                starts.push(offset);
+                ends.push(offset + ch.len_utf8());
+            }
+        }
+    }
     let hl = Style::default().fg(Color::Black).bg(theme.colors.warning);
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut idx = 0usize;
+    let mut original_end = 0usize;
     while let Some(rel) = hay.get(idx..).and_then(|s| s.find(q)) {
         let start = idx + rel;
         let end = start + q.len();
-        if let Some(pre) = text.get(idx..start) {
-            if !pre.is_empty() {
-                spans.push(Span::styled(pre.to_string(), base));
-            }
+        let original_start = starts[start];
+        let matched_end = ends[end - 1];
+        if original_start > original_end {
+            spans.push(Span::styled(text[original_end..original_start].to_owned(), base));
         }
-        match text.get(start..end) {
-            Some(m) => spans.push(Span::styled(m.to_string(), hl)),
-            None => break, // offset drift on non-ASCII — stop highlighting
+        if matched_end > original_end {
+            spans.push(Span::styled(text[original_start.max(original_end)..matched_end].to_owned(), hl));
+            original_end = matched_end;
         }
         idx = end;
     }
-    match text.get(idx..) {
+    match text.get(original_end..) {
         Some(rest) if !rest.is_empty() => spans.push(Span::styled(rest.to_string(), base)),
         _ => {}
     }

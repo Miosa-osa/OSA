@@ -9,8 +9,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Accessibility do
 
   @interactive_roles ~w(
     button link textfield textarea checkbox radio menuitem
-    tab slider combobox switch toggle searchfield toolbar
+    menubaritem tab slider combobox popupbutton switch toggle searchfield
+    incrementor decrementor disclosure
   )
+  @interactive_actions ~w(AXPress AXConfirm AXIncrement AXDecrement AXShowMenu)
 
   # ── Parse ───────────────────────────────────────────────────────────
 
@@ -23,10 +25,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Accessibility do
     %{
       role: get_field(elem, :role, "unknown"),
       name: get_field(elem, :name, ""),
+      value: get_field(elem, :value, ""),
       x: get_field(elem, :x, 0),
       y: get_field(elem, :y, 0),
       width: get_field(elem, :width, 0),
-      height: get_field(elem, :height, 0)
+      height: get_field(elem, :height, 0),
+      pid: get_field(elem, :pid, nil),
+      path: get_field(elem, :path, []),
+      identifier: get_field(elem, :identifier, ""),
+      actions: get_field(elem, :actions, []),
+      enabled: get_field(elem, :enabled, nil),
+      focused: get_field(elem, :focused, nil),
+      selected: get_field(elem, :selected, nil)
     }
   end
 
@@ -43,22 +53,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Accessibility do
   def assign_refs(parsed_elements) do
     {lines, refs, _counter} =
       Enum.reduce(parsed_elements, {[], %{}, 0}, fn elem, {lines, refs, counter} ->
-        if interactive?(elem.role) do
+        if interactive?(elem) do
           ref = "e#{counter}"
-          line = "[#{ref}] #{elem.role} \"#{elem.name}\" (#{elem.x},#{elem.y})"
+          line = format_element(ref, elem)
 
-          ref_data = %{
-            x: elem.x,
-            y: elem.y,
-            width: elem.width,
-            height: elem.height,
-            role: elem.role,
-            name: elem.name
-          }
+          # Keep the native locator metadata behind the short ref.  Models see
+          # `e12`; adapters receive enough identity to re-resolve the element
+          # and reject a stale path instead of clicking whatever moved there.
+          ref_data = elem
 
           {[line | lines], Map.put(refs, ref, ref_data), counter + 1}
         else
-          line = "  #{elem.role} \"#{elem.name}\" (#{elem.x},#{elem.y})"
+          line = format_element(nil, elem)
           {[line | lines], refs, counter}
         end
       end)
@@ -67,7 +73,30 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Accessibility do
     {text, refs}
   end
 
-  defp interactive?(role), do: role in @interactive_roles
+  defp interactive?(elem) do
+    elem.role in @interactive_roles or Enum.any?(elem.actions, &(&1 in @interactive_actions))
+  end
+
+  defp format_element(ref, elem) do
+    prefix = if ref, do: "[#{ref}]", else: "  "
+    value = if elem.value in [nil, ""], do: "", else: " value=\"#{truncate(elem.value, 80)}\""
+
+    state =
+      [
+        if(elem.enabled == false, do: "disabled"),
+        if(elem.focused == true, do: "focused"),
+        if(elem.selected == true, do: "selected")
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join(",")
+
+    state = if state == "", do: "", else: " #{state}"
+
+    "#{prefix} #{elem.role} \"#{truncate(elem.name, 120)}\"#{value}#{state} (#{elem.x},#{elem.y}) size=#{elem.width}x#{elem.height}"
+  end
+
+  defp truncate(value, max) when is_binary(value), do: String.slice(value, 0, max)
+  defp truncate(value, _max), do: to_string(value || "")
 
   # ── Diff Trees (Temporal Token Pruning) ─────────────────────────────
 

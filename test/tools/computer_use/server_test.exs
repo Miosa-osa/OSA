@@ -20,11 +20,35 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
     def get_tree do
       {:ok,
        [
-         %{role: "button", name: "Save", x: 500, y: 300, width: 80, height: 30},
+         %{
+           role: "button",
+           name: "Save",
+           x: 500,
+           y: 300,
+           width: 80,
+           height: 30,
+           pid: 42,
+           path: [0, 1],
+           actions: ["AXPress"]
+         },
          %{role: "textfield", name: "Email", x: 200, y: 150, width: 200, height: 25},
          %{role: "link", name: "Help", x: 100, y: 50, width: 40, height: 20}
        ]}
     end
+
+    def perform_element(element, :press, nil) do
+      send(Process.whereis(:computer_use_semantic_test), {:semantic_press, element})
+      :ok
+    end
+
+    def snapshot(params) do
+      send(Process.whereis(:computer_use_snapshot_test), {:snapshot_params, params})
+      get_tree()
+    end
+
+    def close_window(_window_id), do: :ok
+    def list_tabs(_params), do: {:ok, []}
+    def close_tabs(_params), do: {:ok, %{"closed" => 0, "verified" => true}}
   end
 
   # `Server.start_link/1` LINKS the server to the test process, so when the test
@@ -63,6 +87,28 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
       assert state.element_refs == %{}
       assert state.step_counter == 0
       GenServer.stop(pid)
+    end
+  end
+
+  describe "start/1" do
+    test "unlinked server survives the short-lived process that starts it" do
+      caller = self()
+      Process.register(self(), :computer_use_semantic_test)
+
+      spawn(fn ->
+        {:ok, server} =
+          Server.start(adapter: MockAdapter, platform: :macos, session_id: "durable")
+
+        send(caller, {:server, server})
+      end)
+
+      assert_receive {:server, server}
+      Process.sleep(20)
+      assert Process.alive?(server)
+      assert {:ok, _} = Server.execute(server, "get_tree", %{})
+      assert {:ok, _} = Server.execute(server, "click", %{"target" => "e0"})
+      stop_server(server)
+      Process.unregister(:computer_use_semantic_test)
     end
   end
 
@@ -130,6 +176,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
       assert msg =~ "Click"
     end
 
+    test "blank target falls through to coordinates", %{pid: pid} do
+      assert {:ok, msg} =
+               Server.execute(pid, "click", %{"target" => "", "x" => 65, "y" => 195})
+
+      assert msg =~ "(65, 195)"
+    end
+
+    test "targeted get_tree forwards the requested app to snapshot", %{pid: pid} do
+      Process.register(self(), :computer_use_snapshot_test)
+      assert {:ok, _} = Server.execute(pid, "get_tree", %{"app" => "Arc"})
+      assert_receive {:snapshot_params, %{"app" => "Arc"}}
+      Process.unregister(:computer_use_snapshot_test)
+    end
+
     test "double_click dispatches to adapter", %{pid: pid} do
       assert {:ok, msg} = Server.execute(pid, "double_click", %{"x" => 100, "y" => 200})
       assert msg =~ "Double click"
@@ -174,6 +234,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
 
   describe "element ref resolution" do
     setup do
+      Process.register(self(), :computer_use_semantic_test)
+
       {:ok, pid} =
         Server.start_link(adapter: MockAdapter, platform: :linux_x11, session_id: "test_refs")
 
@@ -187,7 +249,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
     test "click with target resolves element ref", %{pid: pid} do
       # "e0" should be the first element (Save button at 500,300)
       assert {:ok, msg} = Server.execute(pid, "click", %{"target" => "e0"})
-      assert msg =~ "Click on e0"
+      assert msg =~ "Pressed semantic element e0"
+      assert_receive {:semantic_press, %{pid: 42, path: [0, 1]}}
+    end
+
+    test "mutating action invalidates the cached tree", %{pid: pid} do
+      assert :sys.get_state(pid).last_tree != nil
+      assert {:ok, _} = Server.execute(pid, "click", %{"target" => "e0"})
+      assert :sys.get_state(pid).last_tree == nil
     end
 
     test "click with unknown target returns error", %{pid: pid} do

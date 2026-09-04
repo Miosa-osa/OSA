@@ -40,8 +40,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.CommandExecuteTest do
     :ok
   end
 
-  defp execute(command) do
-    conn(:post, "/execute", Jason.encode!(%{command: command}))
+  defp execute(command, session_id \\ nil) do
+    params =
+      %{command: command}
+      |> then(&if(session_id, do: Map.put(&1, :session_id, session_id), else: &1))
+
+    conn(:post, "/execute", Jason.encode!(params))
     |> put_req_header("content-type", "application/json")
     |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
     |> ToolRoutes.call(@opts)
@@ -78,15 +82,63 @@ defmodule OptimalSystemAgent.Channels.HTTP.CommandExecuteTest do
     assert is_binary(Jason.decode!(conn.resp_body)["output"])
   end
 
-  test "/fast returns the authoritative post-command effort for persistent UI" do
+  test "/fast enables OpenAI priority processing without changing effort" do
+    session_id = "fast-test-#{System.unique_integer([:positive])}"
+    other_session_id = "fast-other-#{System.unique_integer([:positive])}"
     previous = OptimalSystemAgent.Agent.Effort.current()
     :ok = OptimalSystemAgent.Agent.Effort.set(:medium)
 
-    on_exit(fn -> OptimalSystemAgent.Agent.Effort.set(previous) end)
+    on_exit(fn ->
+      OptimalSystemAgent.Agent.Effort.set(previous)
+      OptimalSystemAgent.Settings.clear_session(session_id)
+      OptimalSystemAgent.Settings.clear_session(other_session_id)
+    end)
 
-    body = execute("fast").resp_body |> Jason.decode!()
+    body = execute("fast", session_id).resp_body |> Jason.decode!()
 
-    assert body["effort"] == "fast"
-    assert OptimalSystemAgent.Agent.Effort.current() == :fast
+    assert body["effort"] == "medium"
+    assert OptimalSystemAgent.Agent.Effort.current() == :medium
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?(session_id)
+    refute OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?(other_session_id)
+
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
+             provider: :openai_codex,
+             session_id: session_id
+           }) == "priority"
+
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
+             provider: :groq,
+             session_id: session_id
+           }) == "auto"
+
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
+             provider: :anthropic,
+             session_id: session_id
+           }) == "auto"
+
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
+             provider: :ollama,
+             session_id: session_id
+           }) == nil
+
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
+             provider: :openai_codex,
+             session_id: other_session_id
+           }) == nil
+
+    execute("fast", session_id)
+    refute OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?(session_id)
+  end
+
+  test "fast-tier fallback only recognizes acceleration-specific errors" do
+    refute OptimalSystemAgent.Agent.Loop.LLMClient.tier_rejection?(
+             "HTTP 400: invalid tool schema"
+           )
+
+    refute OptimalSystemAgent.Agent.Loop.LLMClient.tier_rejection?("HTTP 403: account suspended")
+
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.tier_rejection?(
+             "HTTP 400: service_tier priority is unavailable for this project"
+           )
   end
 end

@@ -49,6 +49,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
 
     // Code-block accumulator state.
     let mut in_code_block = false;
+    let mut fence = None;
     let mut code_lang = String::new();
     let mut code_lines: Vec<String> = Vec::new();
 
@@ -73,7 +74,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
 
     for raw_line in input.lines() {
         // ── Fenced code block boundary ──────────────────────────────────────
-        if raw_line.trim_start().starts_with("```") {
+        if fence_boundary(raw_line, &mut fence) {
             if !in_code_block {
                 flush_para!(); // a fence right after prose closes the paragraph
                 // …and so does a fence right after a table. Without this the
@@ -90,7 +91,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
                 in_code_block = false;
                 let code = code_lines.join("\n");
                 let highlighted = crate::render::syntax::highlight(&code, &code_lang);
-                push_code_lines(&mut lines, highlighted, width);
+                push_fenced_lines(&mut lines, highlighted, width, &code_lang);
                 code_lang.clear();
                 code_lines.clear();
             } else {
@@ -102,7 +103,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
                 // string by token finds no syntax at all, silently dropping the
                 // highlighting for the entire block.
                 in_code_block = true;
-                let rest = raw_line.trim_start().trim_start_matches('`').trim();
+                let rest = raw_line.trim_start().trim_start_matches(['`', '~']).trim();
                 code_lang = rest.split_whitespace().next().unwrap_or("").to_owned();
 
                 // NO synthetic blank row here. §A.5's rule is uniform — k
@@ -187,7 +188,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
                         .fg(theme.colors.primary)
                         .add_modifier(Modifier::BOLD)
                 };
-                lines.push(Line::from(Span::styled(text, style)));
+                push_heading_inline(&mut lines, &text, width, style, &theme);
                 continue;
             }
         }
@@ -224,6 +225,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
             continue;
         }
         if raw_line.starts_with("## ") {
+            flush_para!();
             let text = &raw_line[3..];
             let style = Style::default()
                 .fg(theme.colors.primary)
@@ -232,6 +234,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
             continue;
         }
         if raw_line.starts_with("# ") {
+            flush_para!();
             let text = &raw_line[2..];
             let style = Style::default()
                 .fg(theme.colors.primary)
@@ -262,13 +265,13 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
                 .fg(theme.colors.muted)
                 .add_modifier(Modifier::ITALIC);
             let gutter = depth.saturating_mul(2);
-            let wrapped = wrap_text(&content, (width as usize).saturating_sub(gutter + 2));
+            let wrapped = parse_and_wrap(&content, (width as usize).saturating_sub(gutter), &theme);
             for wline in wrapped {
                 let mut spans: Vec<Span<'static>> = Vec::with_capacity(depth + 1);
                 for _ in 0..depth {
                     spans.push(Span::styled("│ ".to_owned(), Style::default().fg(theme.colors.dim)));
                 }
-                spans.push(Span::styled(wline, style));
+                spans.extend(wline.into_iter().map(|s| Span::styled(s.content, style.patch(s.style))));
                 lines.push(Line::from(spans));
             }
             continue;
@@ -311,7 +314,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
                     spans.push(Span::styled(" ".repeat(prefix_width), Style::default()));
                 }
                 for s in row {
-                    spans.push(Span::styled(s.content, text_style));
+                    spans.push(Span::styled(s.content, text_style.patch(s.style)));
                 }
                 lines.push(Line::from(spans));
             }
@@ -428,7 +431,7 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
     if in_code_block && !code_lines.is_empty() {
         let code = code_lines.join("\n");
         let highlighted = crate::render::syntax::highlight(&code, &code_lang);
-        push_code_lines(&mut lines, highlighted, width);
+        push_fenced_lines(&mut lines, highlighted, width, &code_lang);
     }
 
     // If we hit EOF still inside a table, flush what we have.
@@ -452,6 +455,28 @@ pub fn render_markdown(input: &str, width: u16) -> Text<'static> {
 /// newline-less row of an unterminated fence, are padded the same way — which
 /// is why membership is decided by "this row came out of `push_code_lines`"
 /// rather than by re-testing a byte range.
+fn push_fenced_lines(out: &mut Vec<Line<'static>>, highlighted: Vec<Line<'static>>, width: u16, language: &str) {
+    let diagram = matches!(language, "text" | "plaintext" | "ascii" | "diagram" | "mermaid")
+        || (language.is_empty() && highlighted.iter().any(|line| line.spans.iter().any(|span|
+            span.content.contains("──") || span.content.contains("+--"))));
+    if !diagram {
+        push_code_lines(out, highlighted, width);
+        return;
+    }
+    // Spatial text cannot be reflowed like prose. Keep one source row per
+    // display row and offer the complete, horizontally pannable source view.
+    let wide = highlighted.iter().any(|line| line.width() > usize::from(width));
+    for mut line in pad_lines_to_width(highlighted, usize::from(width)) {
+        line.style = crate::style::theme().code_block();
+        out.push(line);
+    }
+    if wide {
+        for row in wrap_text("Wide block: Ctrl+O, then w and ←/→ to view full layout", usize::from(width).max(1)) {
+            out.push(Line::from(Span::styled(row, crate::style::theme().faint())));
+        }
+    }
+}
+
 fn push_code_lines(out: &mut Vec<Line<'static>>, highlighted: Vec<Line<'static>>, width: u16) {
     let max_w = (width as usize).max(1);
     let bg = crate::style::theme().code_block();
@@ -530,13 +555,9 @@ fn flush_paragraph(
     para.clear();
 }
 
-/// Emit a heading as word-wrapped styled lines (raw text, no inline parsing —
-/// matches the h1/h2/h3 behaviour where markup stays literal). Without this a
-/// heading wider than the pane clips and its tail is silently lost.
+/// Emit an h1/h2/h3 using the same inline-aware wrapping as other headings.
 fn push_heading_raw(out: &mut Vec<Line<'static>>, text: &str, width: u16, style: Style) {
-    for wline in wrap_text(text, (width as usize).max(1)) {
-        out.push(Line::from(Span::styled(wline, style)));
-    }
+    push_heading_inline(out, text, width, style, &crate::style::theme());
 }
 
 /// Emit a heading as word-wrapped lines, re-parsing each wrapped segment for
@@ -551,7 +572,7 @@ fn push_heading_inline(
     for row in parse_and_wrap(text, (width as usize).max(1), theme) {
         let spans: Vec<Span<'static>> = row
             .into_iter()
-            .map(|s| Span::styled(s.content, style))
+            .map(|s| Span::styled(s.content, style.patch(s.style)))
             .collect();
         out.push(Line::from(spans));
     }
@@ -559,7 +580,7 @@ fn push_heading_inline(
 
 /// Expand tab characters to spaces on `tabstop`-column stops (display-width
 /// aware, so CJK/emoji before a tab still align).
-fn expand_tabs(line: &str, tabstop: usize) -> String {
+pub(crate) fn expand_tabs(line: &str, tabstop: usize) -> String {
     if !line.contains('\t') {
         return line.to_string();
     }
@@ -640,6 +661,138 @@ fn is_setext_underline(line: &str) -> Option<u8> {
 // ─── GFM pipe table renderer ─────────────────────────────────────────────────
 
 /// Render a GFM pipe table as styled [`Line`]s with box-drawing borders.
+#[cfg(test)]
+mod layout_regressions {
+    use super::*;
+
+    fn plain(src: &str) -> String {
+        render_markdown(src, 80).lines.iter().map(|line| {
+            line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+        }).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn headings_do_not_jump_before_pending_prose() {
+        for heading in ["# Heading", "## Heading"] {
+            let rendered = plain(&format!("Before\n{heading}\nAfter"));
+            assert!(rendered.find("Before") < rendered.find("Heading"));
+            assert!(rendered.find("Heading") < rendered.find("After"));
+        }
+    }
+
+    #[test]
+    fn table_dashes_are_content_unless_every_cell_is_a_separator() {
+        assert!(table_separator("| :--- | ---: |"));
+        assert!(!table_separator("| option | ---verbose |"));
+        assert!(plain("| Name | Value |\n| --- | --- |\n| flag | ---verbose |").contains("---verbose"));
+    }
+
+    #[test]
+    fn escaped_pipe_does_not_create_a_column() {
+        assert_eq!(table_cells(r"| a\|b | c |"), vec!["a|b", "c"]);
+    }
+
+    #[test]
+    fn late_wide_cells_are_never_dropped() {
+        for glyph in ["界", "👩‍💻", "e\u{301}"] {
+            for width in 9..40 {
+                let out = render_markdown(&format!("| A | B |\n| --- | --- |\n| a | b |\n| {glyph} | c |"), width);
+                let text: String = out.lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.as_ref())).collect();
+                assert!(text.contains(glyph), "width {width}, lost {glyph}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn escaped_punctuation_and_literal_identifiers_survive() {
+        assert_eq!(plain(r"use \*literal\* and \[note\]"), "use *literal* and [note]");
+        assert_eq!(plain("file_name and snake_case_identifier"), "file_name and snake_case_identifier");
+        assert_eq!(plain("__bold__ and _italic_"), "bold and italic");
+    }
+
+    #[test]
+    fn links_keep_nested_and_escaped_delimiters() {
+        assert_eq!(closing_delimiter(r"label\]](url)", '[', ']'), Some(7));
+        assert_eq!(closing_delimiter("https://example.com/a_(b))", '(', ')'), Some(25));
+        let rendered = plain(r"[a\]](https://example.com/a_(b))");
+        let visible = strip_escapes(&rendered);
+        assert!(visible.contains("a]"), "{visible}");
+        assert!(visible.contains("https://example.com/a_(b)"), "{visible}");
+        assert!(!visible.contains("\\]"));
+    }
+
+    #[test]
+    fn arriving_cells_do_not_resize_previous_table_rows() {
+        let a = render_markdown("| Name | Value |\n| --- | --- |\n| a | b |", 60);
+        let b = render_markdown("| Name | Value |\n| --- | --- |\n| a | b |\n| much longer name | considerably longer value |", 60);
+        assert_eq!(a.lines[..3], b.lines[..3]);
+    }
+
+    #[test]
+    fn wide_diagram_keeps_rows_and_explains_how_to_read_hidden_columns() {
+        let rendered = render_markdown("```ascii\n+-------------------->\n|  A        B        |\n```", 12);
+        let rows: Vec<String> = rendered.lines.iter().map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect()).collect();
+        assert!(rows[0].starts_with("+---"));
+        assert!(rows[1].starts_with("|  A"));
+        assert!(rows.join(" ").contains("Ctrl+O"));
+        assert!(rendered.lines.iter().all(|line| line.width() <= 12));
+    }
+}
+
+/// Shared by the renderer and both streaming boundary scanners.
+/// Shorter fences, mismatched markers and trailing text cannot close a block.
+pub(crate) fn fence_boundary(line: &str, open: &mut Option<(char, usize)>) -> bool {
+    let line = line.trim_start();
+    let Some(marker @ ('`' | '~')) = line.chars().next() else { return false; };
+    let count = line.chars().take_while(|c| *c == marker).count();
+    if count < 3 { return false; }
+    let rest = &line[count..];
+    if let Some((existing, length)) = *open {
+        if marker != existing || count < length || !rest.trim().is_empty() {
+            return false;
+        }
+        *open = None;
+    } else {
+        if marker == '`' && rest.contains('`') { return false; }
+        *open = Some((marker, count));
+    }
+    true
+}
+
+fn table_cells(row: &str) -> Vec<String> {
+    let mut cells = vec![String::new()];
+    let row = row.trim();
+    let row = row.strip_prefix('|').unwrap_or(row);
+    let row = row.strip_suffix('|').unwrap_or(row);
+    let mut chars = row.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('|') => cells.last_mut().unwrap().push('|'),
+                Some(next) => {
+                    cells.last_mut().unwrap().push('\\');
+                    cells.last_mut().unwrap().push(next);
+                }
+                None => cells.last_mut().unwrap().push('\\'),
+            }
+        } else if c == '|' {
+            cells.push(String::new());
+        } else {
+            cells.last_mut().unwrap().push(c);
+        }
+    }
+    cells.into_iter().map(|c| c.trim().to_owned()).collect()
+}
+
+pub(crate) fn table_separator(row: &str) -> bool {
+    let cells = table_cells(row);
+    !cells.is_empty() && cells.iter().all(|c| {
+        let dashes = c.strip_prefix(':').unwrap_or(c);
+        let dashes = dashes.strip_suffix(':').unwrap_or(dashes);
+        dashes.len() >= 3 && dashes.chars().all(|c| c == '-')
+    })
+}
+
 fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec<Line<'static>> {
     if rows.is_empty() {
         return vec![];
@@ -651,10 +804,10 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
     // `---:` right (GFM).
     let alignments: Vec<ColAlign> = rows
         .iter()
-        .find(|r| r.contains("---"))
+        .find(|r| table_separator(r))
         .map(|r| {
-            r.trim_matches('|')
-                .split('|')
+            table_cells(r)
+                .into_iter()
                 .map(|cell| {
                     let c = cell.trim();
                     match (c.starts_with(':'), c.ends_with(':')) {
@@ -667,16 +820,11 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
         })
         .unwrap_or_default();
 
-    // Parse cells from each row, skipping separator rows (contain ---)
+    // Skip only actual delimiter rows; dashes in data cells are ordinary text.
     let parsed: Vec<Vec<String>> = rows
         .iter()
-        .filter(|r| !r.contains("---"))
-        .map(|r| {
-            r.trim_matches('|')
-                .split('|')
-                .map(|cell| cell.trim().to_string())
-                .collect()
-        })
+        .filter(|r| !table_separator(r))
+        .map(|r| table_cells(r))
         .collect();
 
     if parsed.is_empty() {
@@ -715,7 +863,9 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
     let mut natural: Vec<usize> = vec![MIN_COL_W; num_cols];
     let mut word_floor: Vec<usize> = vec![1; num_cols];
     let mut hard_floor: Vec<usize> = vec![0; num_cols];
-    for row in &parsed {
+    // Establish proportions from the header and first complete data row.
+    // Subsequent data wraps within that schema instead of resizing old rows.
+    for row in parsed.iter().take(2) {
         for (i, cell) in row.iter().enumerate() {
             if i < num_cols {
                 let plain = inline_plain(cell, theme);
@@ -723,6 +873,16 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
                 word_floor[i] = word_floor[i].max(widest_unbreakable_word(&plain));
                 hard_floor[i] = hard_floor[i].max(widest_grapheme(&plain));
             }
+        }
+    }
+
+    // Proportions may use a sample, but glyph safety must cover EVERY cell.
+    // A later CJK/emoji value can require more columns than the ASCII sample.
+    for row in &parsed {
+        for (i, cell) in row.iter().enumerate() {
+            hard_floor[i] = hard_floor[i].max(widest_grapheme(&inline_plain(cell, theme)));
+            natural[i] = natural[i].max(hard_floor[i]);
+            word_floor[i] = word_floor[i].max(hard_floor[i]);
         }
     }
 
@@ -762,7 +922,14 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
         return result;
     }
 
-    let col_widths = allocate_col_widths(&natural, &word_floor, &hard_floor, content_budget);
+    let mut col_widths = allocate_col_widths(&natural, &word_floor, &hard_floor, content_budget);
+    let extra = content_budget.saturating_sub(col_widths.iter().sum());
+    let weight: usize = natural.iter().sum::<usize>().max(1);
+    for (column, sample) in col_widths.iter_mut().zip(&natural) {
+        *column += extra * sample / weight;
+    }
+    let remainder = content_budget.saturating_sub(col_widths.iter().sum());
+    if let Some(last) = col_widths.last_mut() { *last += remainder; }
 
     // `true` as soon as any cell's tail had to be dropped, which is the ONLY
     // condition under which the `▼` continues-below marker is drawn.
@@ -830,6 +997,9 @@ fn render_table(rows: &[String], width: u16, theme: &crate::style::Theme) -> Vec
             format!("{}\u{25bc}", " ".repeat(pad)),
             theme.table_overflow(),
         )));
+        for row in wrap_text("Ctrl+O: read full cells · w: preserve layout", usize::from(width).max(1)) {
+            result.push(Line::from(Span::styled(row, theme.faint())));
+        }
     }
 
     // ── Every row OWNS every column of the region ────────────────────────────
@@ -1699,6 +1869,32 @@ pub(crate) fn wrap_text(input: &str, max_width: usize) -> Vec<String> {
 /// Walk `input` character-by-character, emitting styled [`Span`]s for inline
 /// Markdown constructs: `` `code` ``, `**bold**`, `*italic*`, `[text](url)`.
 /// Everything else is emitted as unstyled text.
+pub(crate) fn closing_delimiter(input: &str, open: char, close: char) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut escaped = false;
+    for (offset, ch) in input.char_indices() {
+        if escaped { escaped = false; continue; }
+        if ch == '\\' { escaped = true; continue; }
+        if ch == open { depth += 1; }
+        if ch == close {
+            if depth == 0 { return Some(offset); }
+            depth -= 1;
+        }
+    }
+    None
+}
+
+fn unescape_inline(input: &str) -> String {
+    let mut chars = input.chars().peekable();
+    let mut out = String::new();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && chars.peek().is_some_and(|c| c.is_ascii_punctuation()) {
+            out.push(chars.next().unwrap());
+        } else { out.push(ch); }
+    }
+    out
+}
+
 fn parse_inline(input: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut chars = input.chars().peekable();
@@ -1718,6 +1914,44 @@ fn parse_inline(input: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> 
 
     while let Some(&ch) = chars.peek() {
         match ch {
+            '\\' => {
+                chars.next();
+                if chars.peek().is_some_and(|c| c.is_ascii_punctuation()) {
+                    plain.push(chars.next().unwrap());
+                } else {
+                    plain.push('\\');
+                }
+            }
+            '_' => {
+                let previous = plain.chars().next_back()
+                    .or_else(|| spans.last().and_then(|s| s.content.chars().next_back()));
+                let mut count = 0;
+                while chars.peek() == Some(&'_') { chars.next(); count += 1; }
+                let marker = "_".repeat(count);
+                if count > 3 || previous.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                    || !chars.peek().is_some_and(|c| !c.is_whitespace()) {
+                    plain.push_str(&marker);
+                    continue;
+                }
+                let remaining: String = chars.clone().collect();
+                let close = remaining.match_indices(&marker).find(|(at, _)| {
+                    let before = &remaining[..*at];
+                    !before.is_empty()
+                        && !before.chars().next_back().is_some_and(char::is_whitespace)
+                        && before.chars().rev().take_while(|c| *c == '\\').count() % 2 == 0
+                        && !remaining[*at + count..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_')
+                }).map(|(at, _)| at);
+                if let Some(end) = close {
+                    flush_plain!();
+                    let modifier = match count { 1 => Modifier::ITALIC, 2 => Modifier::BOLD, _ => Modifier::BOLD | Modifier::ITALIC };
+                    for span in parse_inline(&remaining[..end], theme) {
+                        spans.push(Span::styled(span.content, span.style.add_modifier(modifier)));
+                    }
+                    for _ in 0..remaining[..end + count].chars().count() { chars.next(); }
+                } else {
+                    plain.push_str(&marker);
+                }
+            }
             // ── Inline code: `...` ────────────────────────────────────────
             '`' => {
                 chars.next(); // consume opening backtick
@@ -1940,27 +2174,19 @@ fn parse_inline(input: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> 
             // ── Links: [text](url) ────────────────────────────────────────
             '[' => {
                 chars.next(); // consume `[`
-                let mut link_text = String::new();
-                let mut found_bracket = false;
-                for c in chars.by_ref() {
-                    if c == ']' {
-                        found_bracket = true;
-                        break;
-                    }
-                    link_text.push(c);
-                }
+                let rest: String = chars.clone().collect();
+                let end = closing_delimiter(&rest, '[', ']');
+                let found_bracket = end.is_some();
+                let link_text = rest[..end.unwrap_or(rest.len())].to_owned();
+                for _ in 0..link_text.chars().count() + usize::from(found_bracket) { chars.next(); }
                 // Check for `(url)` following the `]`.
                 if found_bracket && chars.peek() == Some(&'(') {
                     chars.next(); // consume `(`
-                    let mut url = String::new();
-                    let mut closed = false;
-                    for c in chars.by_ref() {
-                        if c == ')' {
-                            closed = true;
-                            break;
-                        }
-                        url.push(c);
-                    }
+                    let rest: String = chars.clone().collect();
+                    let end = closing_delimiter(&rest, '(', ')');
+                    let closed = end.is_some();
+                    let url = rest[..end.unwrap_or(rest.len())].to_owned();
+                    for _ in 0..url.chars().count() + usize::from(closed) { chars.next(); }
                     if !closed {
                         // ── Unterminated `[text](url` — emit the source literally.
                         //
@@ -1982,6 +2208,8 @@ fn parse_inline(input: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> 
                         spans.push(Span::raw(format!("[{link_text}]({url}")));
                         continue;
                     }
+                    let link_text = unescape_inline(&link_text);
+                    let url = unescape_inline(&url);
                     // Emit the link text in cyan+underline, then the target in
                     // dim parens so the user can see (and copy) it.
                     // `mailto:` is stripped to the bare address (CC parity).

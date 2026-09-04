@@ -23,6 +23,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Handler do
   @spec validate(map(), UseContext.t()) ::
           {:ok, map()} | {:error, String.t(), integer()}
   def validate(%{"action" => action} = input, _ctx) when is_binary(action) do
+    input = normalize_optional_fields(input)
     valid_strings = Constants.valid_actions() |> Enum.map(&to_string/1)
 
     if action in valid_strings do
@@ -119,6 +120,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Handler do
   defp validate_action_params("wait", params), do: validate_wait(params)
   defp validate_action_params("list_windows", _params), do: :ok
   defp validate_action_params("focus_window", params), do: validate_window_id(params)
+  defp validate_action_params("close_window", params), do: validate_window_id(params)
+  defp validate_action_params("list_tabs", params), do: validate_app(params)
+  defp validate_action_params("close_tabs", params), do: validate_tab_match(params)
   defp validate_action_params("launch", params), do: validate_app(params)
   defp validate_action_params("cursor", _params), do: :ok
   defp validate_action_params("snapshot", _params), do: :ok
@@ -269,11 +273,56 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Handler do
   defp validate_app(%{"app" => app}) when is_binary(app) and app != "", do: :ok
   defp validate_app(_), do: {:error, "Missing required parameter: app"}
 
+  defp validate_tab_match(params) do
+    with :ok <- validate_app(params) do
+      matchers = [params["url_contains"], params["title_contains"]]
+
+      if Enum.any?(matchers, &(is_binary(&1) and String.trim(&1) != "")),
+        do: :ok,
+        else: {:error, "close_tabs requires url_contains or title_contains"}
+    end
+  end
+
   defp validate_target_or_coords(params) do
     cond do
-      params["target"] != nil -> :ok
+      is_binary(params["target"]) and params["target"] != "" -> :ok
       has_coords?(params) -> validate_coords(params)
       true -> {:error, "action requires either coordinates (x, y) or a target element ref"}
+    end
+  end
+
+  # Strict provider schemas can materialize every optional field as an empty
+  # string or a zero-valued object. Those placeholders are absence, not an
+  # instruction to resolve ref "" or capture a 0x0 region.
+  defp normalize_optional_fields(input) do
+    input =
+      Enum.reduce(
+        [
+          "target",
+          "window",
+          "window_id",
+          "app",
+          "surface",
+          "root",
+          "url_contains",
+          "title_contains"
+        ],
+        input,
+        fn key, acc ->
+          case Map.get(acc, key) do
+            value when is_binary(value) ->
+              if String.trim(value) == "", do: Map.delete(acc, key), else: acc
+
+            _ ->
+              acc
+          end
+        end
+      )
+
+    case Map.get(input, "region") do
+      %{"x" => 0, "y" => 0, "width" => 0, "height" => 0} -> Map.delete(input, "region")
+      %{} = region when map_size(region) == 0 -> Map.delete(input, "region")
+      _ -> input
     end
   end
 
@@ -307,7 +356,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Handler do
 
   defp ensure_server(session_id) do
     table = Constants.server_table()
-    ensure_server_table(table)
+    Constants.init_server_table()
 
     case :ets.lookup(table, session_id) do
       [{^session_id, pid}] ->
@@ -329,7 +378,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Handler do
     case Adapter.adapter_for(platform) do
       {:ok, adapter} ->
         {:ok, pid} =
-          Server.start_link(
+          Server.start(
             adapter: adapter,
             platform: platform,
             session_id: session_id
@@ -342,14 +391,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Handler do
 
       {:error, reason} ->
         raise "Cannot start computer_use: #{reason}"
-    end
-  end
-
-  defp ensure_server_table(table) do
-    try do
-      :ets.new(table, [:set, :public, :named_table])
-    rescue
-      ArgumentError -> table
     end
   end
 

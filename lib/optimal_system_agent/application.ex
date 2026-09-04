@@ -55,6 +55,11 @@ defmodule OptimalSystemAgent.Application do
     # and must not depend on boot ordering.
     OptimalSystemAgent.Workspace.Cwd.init_session_table()
 
+    # Like the workspace table above, this must be owned by the application
+    # master. Tool calls run in short-lived tasks; a table lazily created there
+    # disappears at turn end and makes every accessibility ref look stale.
+    OptimalSystemAgent.Tools.Builtins.ComputerUse.Constants.init_server_table()
+
     warn_if_root()
 
     # ── Phase 0: Environment & Configuration ──────────────────────────
