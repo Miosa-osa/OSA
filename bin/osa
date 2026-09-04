@@ -264,8 +264,14 @@ export OSA_HOME
 export OSA_PORT="$PORT"
 export OSA_HTTP_PORT="$PORT"
 
-# Fresh per-workspace homes inherit the operator's existing credentials. A
-# real workspace .env still wins, so per-project credentials remain possible.
+# ── Inherit global credentials into fresh workspaces ─────────────
+# When isolation routes us into a per-cwd workspace dir, that dir is empty on
+# first launch. The setup-complete gate (env_has_provider "$OSA_HOME/.env")
+# would then fire the wizard every time you launch osa in a new directory —
+# even though the operator already set up ~/.osa/.env once, globally.
+# Seed a symlink so the workspace inherits global credentials automatically.
+# Users who want per-workspace credentials just replace the symlink with a
+# real file.
 if [ "$OSA_HOME" != "${HOME}/.osa" ] && [ -f "${HOME}/.osa/.env" ] && [ ! -e "$OSA_HOME/.env" ]; then
   ln -s "${HOME}/.osa/.env" "$OSA_HOME/.env" 2>/dev/null || true
 fi

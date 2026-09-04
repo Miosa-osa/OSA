@@ -629,6 +629,10 @@ impl Chat {
         !self.scrollback.is_empty()
     }
 
+    pub(crate) fn pending_scrollback(&self) -> &[Message] {
+        &self.scrollback
+    }
+
     pub fn drain_scrollback(&mut self) -> Vec<Message> {
         std::mem::take(&mut self.scrollback)
     }

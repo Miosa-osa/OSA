@@ -99,8 +99,8 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponsesTest do
           role: "tool",
           tool_call_id: "call_vision",
           content: [
-            %{type: "text", text: "Image"},
-            %{type: "image", source: %{media_type: "image/png", data: "aGVsbG8="}}
+            %{type: "text", text: "Image: /tmp/screen.png"},
+            %{type: "image", source: %{type: "base64", media_type: "image/png", data: "aGVsbG8="}}
           ]
         }
       ]

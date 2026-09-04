@@ -142,6 +142,24 @@ pub fn scrub_untrusted_document(text: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Terminal output needs whole escape sequences removed *before* word wrapping
+/// or URL detection. Keeping an OSC URI after dropping just ESC duplicates links.
+pub fn scrub_terminal_output(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('\u{1b}') { return scrub_untrusted_document(text); }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while !rest.is_empty() {
+        if let Some(len) = crate::util::escape_len_at(rest, 0) {
+            rest = &rest[len..];
+        } else {
+            let ch = rest.chars().next().unwrap();
+            out.push(ch);
+            rest = &rest[ch.len_utf8()..];
+        }
+    }
+    std::borrow::Cow::Owned(scrub_untrusted_document(&out).into_owned())
+}
+
 // ─── Rendered-span scrubbing (the tool-output backstop) ──────────────────────
 //
 // Markdown, syntax and diff each have a single text entry to scrub. The ~15
@@ -508,4 +526,3 @@ mod tests {
         );
     }
 }
-

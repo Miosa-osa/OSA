@@ -441,6 +441,9 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
   defp repair_result_text(other), do: other
 
+  # Priority tiers are entitlement- and model-dependent. A provider may reject
+  # the tier even though it supports the field generally. Fall back once to the
+  # identical request at its normal tier; never alter reasoning, tools, or model.
   defp maybe_retry_without_service_tier({:error, reason}, messages, opts, request)
        when is_function(request, 2) do
     if Keyword.has_key?(opts, :service_tier) and tier_rejection?(reason) do

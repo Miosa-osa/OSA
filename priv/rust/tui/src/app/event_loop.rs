@@ -1682,7 +1682,8 @@ impl App {
             // the backend emits one StreamingToken per token; draining the backlog
             // collapses a burst into a single redraw (the main lever for smooth,
             // fast streaming). FIFO order is preserved.
-            while !should_quit {
+            let batch_started = std::time::Instant::now();
+            while !should_quit && batch_started.elapsed() < Duration::from_millis(4) {
                 match self.event_rx.try_recv() {
                     Ok(event) => {
                         batch_cadence_only &= is_cadence_event(&event);
@@ -1839,10 +1840,27 @@ impl App {
                 }
                 // Ctrl+O opens the reader from the normal chat surface only.
                 if is_ctrl_o(key) && self.transcript_can_open() {
+                    // Snapshot unfinished text too: long code/table blocks may
+                    // not have a safe scrollback boundary yet. Reading must not
+                    // interrupt generation or force premature finalization.
+                    let mut entries = self.transcript_log.clone();
+                    for msg in self.chat.pending_scrollback() {
+                        if let Some(entry) = crate::dialogs::transcript_viewer::entry_from_message(msg) {
+                            entries.push(entry);
+                        }
+                    }
+                    let tail = self.assistant_stream.tail();
+                    if !tail.is_empty() {
+                        entries.push(crate::dialogs::transcript_viewer::TranscriptEntry {
+                            role: crate::dialogs::transcript_viewer::TranscriptRole::Agent,
+                            text: tail.to_owned(),
+                        });
+                    }
                     self.transcript =
                         Some(crate::dialogs::transcript_viewer::TranscriptViewer::open(
-                            &self.transcript_log,
+                            &entries,
                         ));
+                    self.transcript_override = Some(entries);
                     return false;
                 }
             }
@@ -1864,7 +1882,7 @@ impl App {
     /// selector, dialogs) or there is nothing to show, so existing bindings and
     /// the update-layer Ctrl+O handling are left intact.
     pub(crate) fn transcript_can_open(&self) -> bool {
-        !self.transcript_log.is_empty()
+        (!self.transcript_log.is_empty() || !self.assistant_stream.tail().is_empty())
             && !self.agents.is_active()
             && self.file_picker.is_none()
             && self.reasoning_selector.is_none()
@@ -2328,7 +2346,9 @@ impl App {
         // converging on reserved == drawn once the reply settles.
         let mut slot = self.stream_preview_slot.get();
         let preview_rows = stream_preview_rows(
-            content_h,
+            // Continuations draw no OSA header. Reserving that invisible row
+            // leaves a blank gap between the committed paragraph and live list.
+            content_h.saturating_sub(u16::from(self.agent_header_sent)),
             &mut slot,
             stream_preview_ceiling(term_rows),
             self.frame_now.get(),

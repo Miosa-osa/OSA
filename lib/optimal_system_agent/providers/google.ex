@@ -128,6 +128,8 @@ defmodule OptimalSystemAgent.Providers.Google do
     |> maybe_add_generation_config(model, opts)
     |> maybe_add_tools(opts)
     |> maybe_put(:serviceTier, Keyword.get(opts, :service_tier))
+    # Gemini's 20 MB request ceiling — the budget knows the `contents`/`parts`
+    # envelope now, so this is a real gate rather than a no-op.
     |> OptimalSystemAgent.Providers.ImageBudget.gate_unsupported(:google, model)
     |> OptimalSystemAgent.Providers.ImageBudget.apply(provider: :google)
   end

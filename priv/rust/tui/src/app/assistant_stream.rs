@@ -108,6 +108,8 @@ pub(crate) struct AssistantStream {
     /// Once cleared it stays cleared until the message ends (see the module
     /// docs and `settle_guard`).
     settle_ok: bool,
+    boundary_scan: crate::render::markdown_stream::ScanState,
+    guard_checked: usize,
     /// Identity of the message currently accumulating, when the backend sends one.
     msg_id: Option<String>,
     /// Identity of the last message finalized this turn (`None` for an id-less backend).
@@ -134,6 +136,8 @@ impl Default for AssistantStream {
             buf: String::new(),
             settled: 0,
             settle_ok: true,
+            boundary_scan: Default::default(),
+            guard_checked: 0,
             msg_id: None,
             finalized_id: None,
             finalized_ids: VecDeque::new(),
@@ -195,11 +199,20 @@ impl AssistantStream {
         // candidate region: both guardrails are triggered by text anywhere in
         // the response, so a phrase already visible in the unsettled tail must
         // stop the blocks in front of it from going out.
-        if !crate::app::settle_guard::may_settle(&self.buf) {
+        // Scan only appended text plus the longest possible phrase overlap.
+        // The guard is sticky; already checked text cannot become unsafe except
+        // where the new delta completes a phrase at its boundary.
+        let overlap = crate::app::settle_guard::LEAK_FINGERPRINTS.iter()
+            .chain(crate::app::settle_guard::DEAD_PHRASES.iter())
+            .map(|s| s.len()).max().unwrap_or(0);
+        let mut start = self.guard_checked.saturating_sub(overlap);
+        while !self.buf.is_char_boundary(start) { start -= 1; }
+        if !crate::app::settle_guard::may_settle(&self.buf[start..]) {
             self.settle_ok = false;
             return None;
         }
-        let end = crate::render::markdown_stream::find_frozen_boundary(&self.buf);
+        self.guard_checked = self.buf.len();
+        let end = self.boundary_scan.scan(&self.buf);
         if end <= self.settled {
             return None;
         }
@@ -241,6 +254,8 @@ impl AssistantStream {
             // A fresh generation is a fresh message: the previous one's gate
             // decision says nothing about this one.
             self.settle_ok = true;
+            self.boundary_scan = Default::default();
+            self.guard_checked = 0;
             if rest.is_empty() {
                 None
             } else {
@@ -266,6 +281,8 @@ impl AssistantStream {
         let out = self.buf[self.settled..].to_string();
         self.buf.clear();
         self.settled = 0;
+        self.boundary_scan = Default::default();
+        self.guard_checked = 0;
         out
     }
 
@@ -288,6 +305,8 @@ impl AssistantStream {
 
         let settled = std::mem::replace(&mut self.settled, 0);
         self.settle_ok = true;
+        self.boundary_scan = Default::default();
+        self.guard_checked = 0;
         let streamed = std::mem::take(&mut self.buf);
         let out = if final_text.trim().is_empty() {
             // No authoritative text: the accumulation stands in for it, and the
@@ -330,6 +349,8 @@ impl AssistantStream {
         self.buf.clear();
         self.settled = 0;
         self.settle_ok = true;
+        self.boundary_scan = Default::default();
+        self.guard_checked = 0;
         self.msg_id = None;
     }
 
@@ -339,6 +360,8 @@ impl AssistantStream {
         self.buf.clear();
         self.settled = 0;
         self.settle_ok = true;
+        self.boundary_scan = Default::default();
+        self.guard_checked = 0;
         self.msg_id = None;
         self.finalized_id = None;
         self.finalized_ids.clear();
