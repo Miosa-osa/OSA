@@ -182,7 +182,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
       {{:ok, state.last_tree}, state}
     else
       tree_result =
-        if targeted_snapshot?(params) and function_exported?(state.adapter, :snapshot, 1) do
+        if targeted_snapshot?(params) and Code.ensure_loaded?(state.adapter) and
+             function_exported?(state.adapter, :snapshot, 1) do
           state.adapter.snapshot(params)
         else
           state.adapter.get_tree()
@@ -397,7 +398,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
     case resolve_ref(ref, state) do
       {:ok, %{pid: pid, actions: actions} = element}
       when is_integer(pid) and is_list(actions) ->
-        if "AXPress" in actions and function_exported?(state.adapter, :perform_element, 3) do
+        if "AXPress" in actions and Code.ensure_loaded?(state.adapter) and
+             function_exported?(state.adapter, :perform_element, 3) do
           result = state.adapter.perform_element(element, :press, nil)
           {format_result(result, "Pressed semantic element #{ref}"), bump_step(state)}
         else

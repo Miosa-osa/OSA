@@ -51,8 +51,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ExitPlanModeTest do
   # ── execute/2 — no live session ─────────────────────────────────────────
 
   describe "execute/2 without a live session" do
-    test "returns ok when session is not running", %{ctx: ctx} do
-      assert {:ok, _msg} = Handler.execute(%{}, ctx)
+    test "returns error when session is not running", %{ctx: ctx} do
+      assert {:error, _msg} = Handler.execute(%{}, ctx)
     end
 
     test "echoes plan summary in response when plan provided", %{ctx: ctx} do
@@ -61,13 +61,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.ExitPlanModeTest do
       assert msg =~ plan
     end
 
-    test "response without plan mentions exit confirmation", %{ctx: ctx} do
-      assert {:ok, msg} = Handler.execute(%{}, ctx)
-      assert msg =~ ~r/exited|not active|offline/i
+    test "response without plan does not claim mode changed", %{ctx: ctx} do
+      assert {:error, msg} = Handler.execute(%{}, ctx)
+      assert msg =~ "Cannot exit plan mode"
     end
 
     test "response is always a binary string", %{ctx: ctx} do
-      assert {:ok, msg} = Handler.execute(%{}, ctx)
+      assert {:error, msg} = Handler.execute(%{}, ctx)
       assert is_binary(msg)
     end
   end

@@ -45,17 +45,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.EnterPlanModeTest do
   # ── execute/2 — no live session ─────────────────────────────────────────
 
   describe "execute/2 without a live session" do
-    test "returns confirmation message when session is not running", %{ctx: ctx} do
+    test "fails closed when session is not running", %{ctx: ctx} do
       # UseContext.empty() has session_id="test" — no running Loop process.
-      assert {:ok, msg} = Handler.execute(%{}, ctx)
+      assert {:error, msg} = Handler.execute(%{}, ctx)
       assert is_binary(msg)
-      assert msg =~ "Plan mode"
+      assert msg =~ "Cannot enter plan mode"
     end
 
-    test "confirmation mentions offline when no session present", %{ctx: ctx} do
-      assert {:ok, msg} = Handler.execute(%{}, ctx)
-      # Either "entered" (live) or "offline" — both are valid success paths.
-      assert msg =~ ~r/entered|offline/i
+    test "warns that read-only enforcement is unavailable", %{ctx: ctx} do
+      assert {:error, msg} = Handler.execute(%{}, ctx)
+      assert msg =~ "Read-only enforcement will NOT be active"
     end
   end
 

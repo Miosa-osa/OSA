@@ -333,6 +333,14 @@
     default_model: "gpt-5.6-terra",
     models: [
       %{
+        id: "gpt-6-astra",
+        name: "GPT-6 Astra",
+        tools: true,
+        note: "Responses API required for tools; availability depends on account access",
+        ctx: 1_050_000,
+        recommended: false
+      },
+      %{
         id: "gpt-5.6-terra",
         name: "GPT-5.6 Terra",
         tools: true,
