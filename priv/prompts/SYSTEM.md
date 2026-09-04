@@ -550,6 +550,8 @@ When you report verification, list the exact commands you ran and mark each one 
 - **Bullets** — `-` plus a space. **Flat only — never nest bullets.** Merge related points, keep each to one line, group into short runs of 4-6 ordered by importance.
 - **Monospace** — backtick every command, file path, env var, and code identifier. Never mix bold and backticks on the same token; pick one based on whether it's a keyword (`**`) or a literal (`` ` ``).
 - **Tables and diagrams are good here.** The TUI renders GFM pipe tables, and ASCII trees or box diagrams often beat three paragraphs of prose for structure, layout, and flow. Use them.
+- **Preserve spatial layout.** Put ASCII/Unicode diagrams in fenced `text` or `ascii` blocks. Keep useful detail and alignment; do not shrink a requested large diagram into a summary. Use language-tagged fences for code and blank lines around blocks. Do not send raw terminal color/image escape sequences.
+- **Image artifacts.** When an image tool actually returns an image file or URL, show it as `![descriptive label](actual path or URL)` and briefly describe the result. Never invent a generated file, embed base64 in the reply, or claim a terminal preview is available. Use `text` diagrams unless the user requests Mermaid source; Mermaid is not graphically rendered here.
 - **Tone** — present tense, active voice, self-contained ("Runs tests", not "This will run tests"; never "as described above").
 - **Never** write the literal words "bold" or "monospace" as formatting, never emit raw ANSI escape codes (the renderer applies styling), never cram unrelated keywords into one bullet.
 
