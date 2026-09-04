@@ -22,8 +22,26 @@ defmodule OptimalSystemAgent.Providers.AstraSupportTest do
              pricing: {10.0, 50.0}
            } = OpenAIModels.model("gpt-6-astra")
 
-    assert Registry.effective_context_window("gpt-6-astra", :openai_codex) == 272_000
-    assert Registry.effective_context_window_info("gpt-6-astra", :openai_codex) == {:ok, 272_000}
+    assert Registry.effective_context_window("gpt-6-astra", :openai_codex) == 872_000
+    assert Registry.effective_context_window_info("gpt-6-astra", :openai_codex) == {:ok, 872_000}
+    assert Registry.effective_context_window("gpt-6-astra", :openai) == 1_050_000
+  end
+
+  test "every offered Codex model has its own maximum, without leaking into other providers" do
+    for model <- OpenAICodex.available_models() do
+      expected = OpenAICodex.context_window(model)
+      assert is_integer(expected) and expected > 0
+      assert Registry.effective_context_window(model, :openai_codex) == expected
+      assert Registry.effective_context_window_info(model, :openai_codex) == {:ok, expected}
+    end
+
+    for model <- ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] do
+      assert Registry.effective_context_window(model, :openai_codex) == 872_000
+      assert Registry.effective_context_window(model, :openai) == 1_050_000
+    end
+
+    assert Registry.effective_context_window("gpt-5.4", :openai_codex) == 1_000_000
+    assert Registry.effective_context_window("gpt-5.3-codex-spark", :openai_codex) == 128_000
   end
 
   test "only direct OpenAI Astra switches from chat completions to Responses" do

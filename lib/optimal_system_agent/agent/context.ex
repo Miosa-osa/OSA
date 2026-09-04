@@ -313,12 +313,13 @@ defmodule OptimalSystemAgent.Agent.Context do
     model = Map.get(state, :model) || get_active_model(provider)
 
     max_tok =
-      case Map.get(state, :effective_context_window) do
-        n when is_integer(n) and n > 0 ->
+      case OptimalSystemAgent.Agent.Loop.ContextWindow.resolve(state) do
+        {:ok, n} ->
           n
 
         _ ->
-          OptimalSystemAgent.Providers.Registry.effective_context_window(model, provider)
+          Map.get(state, :effective_context_window) ||
+            OptimalSystemAgent.Providers.Registry.effective_context_window(model, provider)
       end
 
     lite? = small_window?(model, provider)

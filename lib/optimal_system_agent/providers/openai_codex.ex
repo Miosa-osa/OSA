@@ -66,6 +66,9 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
   # system-prompt text. See Providers.Behaviour.native_tool_schemas?/0.
   def native_tool_schemas?, do: true
 
+  # OpenAI Responses accepts `input_image` content parts. Keep this declaration
+  # beside the adapter so Registry does not flatten screenshots before the
+  # serializer can encode them.
   @spec supports_image_content?() :: boolean()
   def supports_image_content?, do: true
 
@@ -75,6 +78,23 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
 
   @spec available_models() :: [String.t()]
   def available_models, do: @models
+
+  # Codex CLI 0.153.3 model catalog, checked 2026-09-04. Use the
+  # advertised max_context_window, not the smaller client default.
+  # These are Codex transport limits, not public API model-card limits.
+  @context_windows %{
+    "gpt-6-astra" => 872_000,
+    "gpt-5.6-sol" => 872_000,
+    "gpt-5.6-terra" => 872_000,
+    "gpt-5.6-luna" => 872_000,
+    "gpt-5.5" => 272_000,
+    "gpt-5.4" => 1_000_000,
+    "gpt-5.4-mini" => 272_000,
+    "gpt-5.3-codex-spark" => 128_000
+  }
+
+  @doc "Maximum context advertised by the Codex catalog; nil for unknown models."
+  def context_window(model), do: Map.get(@context_windows, model)
 
   @doc "True when a ChatGPT plan is connected. Pure read — never refreshes."
   @spec configured?() :: boolean()

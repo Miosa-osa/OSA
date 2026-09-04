@@ -1876,8 +1876,8 @@ defmodule OptimalSystemAgent.Providers.Registry do
   config default (128k), preserving prior behavior for cloud providers.
   """
   @spec effective_context_window(String.t() | nil, atom()) :: pos_integer()
-  # Codex's published client catalog uses a smaller default than the API.
-  def effective_context_window("gpt-6-astra", :openai_codex), do: 272_000
+  def effective_context_window(model, :openai_codex),
+    do: Providers.OpenAICodex.context_window(model) || context_window(model)
 
   def effective_context_window(model, provider) do
     model
@@ -1894,7 +1894,12 @@ defmodule OptimalSystemAgent.Providers.Registry do
   """
   @spec effective_context_window_info(String.t() | nil, atom() | nil) ::
           {:ok, pos_integer()} | :unknown
-  def effective_context_window_info("gpt-6-astra", :openai_codex), do: {:ok, 272_000}
+  def effective_context_window_info(model, :openai_codex) do
+    case Providers.OpenAICodex.context_window(model) do
+      n when is_integer(n) and n > 0 -> {:ok, n}
+      _ -> context_window_info(model)
+    end
+  end
 
   def effective_context_window_info(model, provider) do
     case context_window_info(model) do
