@@ -2281,6 +2281,8 @@ impl App {
             // different next steps, and the `DONE` sentinel could not tell them
             // apart because it never asked anything that knew.
             let msg = match (status.status.as_deref(), status.pause_reason.as_deref()) {
+                (Some("awaiting_user"), _) => "Goal is waiting for your decision, not complete. Use /goal to review the request or /goal clear to cancel it.".to_string(),
+                (Some("cleared"), _) => "Goal cleared by you. It was not marked complete; auto-continue stopped.".to_string(),
                 (Some("completed"), _) => format!(
                     "Goal verified complete by the skeptic panel after {} backend turn(s). \
                      Auto-continue stopped.",
@@ -2383,9 +2385,10 @@ fn goal_intent_for(arg: &str) -> GoalIntent {
     // "clear"/"off"/"reset" forget it. Anything else anchors a new goal, with
     // `::` separating optional acceptance criteria.
     let inspecting = verb.is_empty()
-        || ["status", "pause", "stop", "resume", "clear", "off", "reset"]
+        || ["status", "pause", "stop", "resume", "clear", "off", "reset", "cancel", "end", "approve", "reject"]
             .iter()
-            .any(|v| verb.eq_ignore_ascii_case(v));
+            .any(|v| verb.eq_ignore_ascii_case(v))
+        || verb.starts_with("approve ") || verb.starts_with("reject ");
     if inspecting {
         GoalIntent::Inspect
     } else {
@@ -3059,7 +3062,7 @@ mod goal_routing_tests {
         assert_eq!(goal_intent_for("stop the flaky test"), GoalIntent::Anchor);
 
         // The backend's own subcommands.
-        for verb in ["", "  ", "status", "pause", "stop", "resume", "clear", "off", "reset"] {
+        for verb in ["", "  ", "status", "pause", "stop", "resume", "clear", "off", "reset", "cancel", "approve decision-123", "reject decision-123 fix draft"] {
             assert_eq!(
                 goal_intent_for(verb),
                 GoalIntent::Inspect,

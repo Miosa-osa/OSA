@@ -2634,7 +2634,14 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     IO.puts("")
 
-    case String.trim(args) do
+    trimmed = String.trim(args)
+
+    normalized =
+      if String.downcase(trimmed) in ~w(status pause stop resume clear off reset cancel end approve reject),
+        do: String.downcase(trimmed),
+        else: trimmed
+
+    case normalized do
       "" ->
         print_goal_status(session_id)
 
@@ -2643,18 +2650,51 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         IO.puts("  #{@green}✓#{@reset} Goal paused. #{@dim}/goal resume to continue.#{@reset}")
 
       "resume" ->
-        GoalTracker.resume(session_id)
-        IO.puts("  #{@green}✓#{@reset} Goal resumed — stall bookkeeping reset.")
+        snap = GoalTracker.resume(session_id)
 
-      verb when verb in ["clear", "off", "reset"] ->
-        GoalTracker.reset(session_id)
-        IO.puts("  #{@green}✓#{@reset} Goal cleared. Auto-continue toward it stops.")
+        if snap.status == :active and is_binary(snap.goal) and snap.goal != "" do
+          IO.puts("  #{@green}✓#{@reset} Goal resumed — stall bookkeeping reset.")
+        else
+          IO.puts("  Goal was not resumed. " <> GoalTracker.waiting_message(session_id))
+        end
+
+      verb when verb in ["clear", "off", "reset", "cancel"] ->
+        case GoalTracker.clear(session_id) do
+          {:ok, _} ->
+            Loop.cancel(session_id)
+
+            IO.puts(
+              "  #{@green}✓#{@reset} Goal cleared, not completed. Auto-continue toward it stops."
+            )
+
+          {:error, reason} ->
+            IO.puts("  Could not durably clear goal: #{inspect(reason)}")
+        end
 
       "status" ->
         print_goal_status(session_id)
 
+      verb when verb in ["end", "approve", "reject"] ->
+        IO.puts(
+          "  Use /goal clear to stop, or /goal approve|reject <request_id> to answer a pending decision."
+        )
+
       text ->
-        anchor_goal_command(text, session_id)
+        case String.split(text, " ", parts: 3, trim: true) do
+          [decision, id | notes] when decision in ["approve", "reject"] ->
+            case GoalTracker.resolve_decision(session_id, id, decision, Enum.join(notes, " ")) do
+              {:ok, _} ->
+                IO.puts(
+                  "  Decision recorded. Send a message to continue; completion still requires verification."
+                )
+
+              {:error, reason} ->
+                IO.puts("  Decision not accepted: #{inspect(reason)}")
+            end
+
+          _ ->
+            anchor_goal_command(text, session_id)
+        end
     end
 
     IO.puts("")
@@ -2730,6 +2770,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         IO.puts("")
 
         reason = if snap.pause_reason, do: " (#{snap.pause_reason})", else: ""
+
+        if snap.pending_decision != nil, do: IO.puts(GoalTracker.waiting_message(session_id))
 
         IO.puts(
           "  #{@dim}status:#{@reset} #{snap.status}#{reason}  #{@dim}phase:#{@reset} #{snap.phase}"

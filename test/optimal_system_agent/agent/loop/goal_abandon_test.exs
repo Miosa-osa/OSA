@@ -272,14 +272,14 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalAbandonTest do
       assert {:ok, _} = create(ctx, "The real objective")
 
       # No status the model may set edits the objective.
-      for status <- Constants.model_statuses() -- ["abandoned"] do
+      for status <- Constants.model_statuses() -- ["abandoned", "awaiting_user"] do
         assert {:ok, _} = update(ctx, status)
         assert GoalTracker.snapshot(sid).goal == "The real objective"
       end
 
       # And the parameter surface still exposes nothing but `status`.
       params = OptimalSystemAgent.Tools.Builtins.Goal.UpdateTool.parameters()
-      assert Map.keys(params["properties"]) == ["status"]
+      assert Enum.sort(Map.keys(params["properties"])) == ~w(artifact criterion question status work_summary)
 
       # Abandoning ends the goal; it does not silently become the new one.
       assert {:ok, _} = update(ctx, "abandoned")

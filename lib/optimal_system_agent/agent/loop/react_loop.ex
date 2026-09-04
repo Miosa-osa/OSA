@@ -194,7 +194,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   @doc false
   def turn_effort(state) do
     cond do
-      planning_turn?(state) and not Effort.current_at_least?(:high) -> :high
+      planning_turn?(state) and not Effort.current_at_least?(:high) ->
+        :high
+
       not planning_turn?(state) and continuation_turn?(state) and
           not Effort.current_at_least?(:high) ->
         :fast
@@ -291,6 +293,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         })
 
         finalize_interrupt(state, nil)
+
+      GoalTracker.awaiting_user?(sid) ->
+        TerminalSource.halt(GoalTracker.waiting_message(sid), state, :control)
 
       paused?(sid) ->
         Logger.info("[loop] Paused at iteration #{iter} — soft-stopping until resumed")
@@ -1100,6 +1105,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     announcement = Guardrails.announcement_continue(content, state.messages)
     announcement_spent = Map.get(state, :announcement_continues, 0)
 
+    state =
+      if not Cancellation.cancelled?(state.session_id) do
+        GoalVerifier.maybe_wait_for_user(state, content)
+      else
+        state
+      end
+
     # An exhausted cap must be LOUD. One nudge is the whole budget, so this
     # backstop is done — and "the model announced again after being told" and
     # "the model reported a result" are different endings that used to look
@@ -1144,6 +1156,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         )
 
         finish_turn(content, state)
+
+      GoalTracker.awaiting_user?(state.session_id) ->
+        TerminalSource.halt(GoalTracker.waiting_message(state.session_id), state, :control)
 
       prose_continue?(state) and state.auto_continues < 2 and
           Guardrails.wants_to_continue?(content) ->

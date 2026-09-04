@@ -33,6 +33,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.Goal.Constants do
   # consecutive top-level turns, and pause/resume/clear are the user's. Under an
   # unattended `overdrive` run that is a deadlock. See `GoalTracker.abandon/1`
   # for what it costs, which is what keeps it from being the easy-goal loophole.
-  @model_statuses ~w(complete blocked abandoned)
+  @model_statuses ~w(complete blocked abandoned awaiting_user)
   def model_statuses, do: @model_statuses
 end

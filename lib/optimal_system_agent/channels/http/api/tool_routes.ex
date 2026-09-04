@@ -516,6 +516,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
       # THE field clients gate on. Deliberately not derived here: it is exactly
       # what the loop asks before it continues.
       active: GoalTracker.goal_loop?(session_id) and GoalTracker.continue?(session_id),
+      pending_decision: snap && snap.pending_decision,
       status: snap && snap.status && to_string(snap.status),
       phase: snap && snap.phase && to_string(snap.phase),
       goal: snap && snap.goal,
