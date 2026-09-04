@@ -884,11 +884,8 @@ impl App {
                 // a 0-100 percentage. If it's absent/zero but the token counts are
                 // present, derive the ratio from estimated/max so the meter still
                 // reflects real usage instead of sticking at 0%.
-                let mut ratio = if utilization > 1.0 {
-                    utilization / 100.0
-                } else {
-                    utilization
-                };
+                // The wire unit is percent, including values below 1%.
+                let mut ratio = utilization / 100.0;
                 if ratio <= 0.0 && max_tokens > 0 && estimated_tokens > 0 {
                     ratio = estimated_tokens as f64 / max_tokens as f64;
                 }

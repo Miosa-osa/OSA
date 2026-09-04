@@ -325,6 +325,9 @@ defmodule OptimalSystemAgent.Agent.Context do
     variant = static_base_variant(provider, lite?)
     static_tokens = Soul.static_token_count(variant)
 
+    # Match telemetry when an operator configures a smaller operating window.
+    max_tok = OptimalSystemAgent.Agent.Loop.CompactionThresholds.operative_window(max_tok)
+
     # Gather dynamic blocks for individual cost breakdown
     blocks = gather_dynamic_blocks(state)
 
@@ -1302,33 +1305,10 @@ defmodule OptimalSystemAgent.Agent.Context do
   @spec estimate_tokens_messages([map()]) :: non_neg_integer()
   def estimate_tokens_messages([]), do: 0
 
-  def estimate_tokens_messages(messages) when is_list(messages) do
-    Enum.reduce(messages, 0, fn msg, acc ->
-      content_tokens = estimate_tokens(safe_to_string(Map.get(msg, :content)))
-
-      tool_call_tokens =
-        case Map.get(msg, :tool_calls) do
-          nil ->
-            0
-
-          [] ->
-            0
-
-          calls when is_list(calls) ->
-            Enum.reduce(calls, 0, fn
-              tc, tc_acc when is_map(tc) ->
-                name_tokens = estimate_tokens(safe_to_string(Map.get(tc, :name, "")))
-                arg_tokens = estimate_tokens(safe_to_string(Map.get(tc, :arguments, "")))
-                tc_acc + name_tokens + arg_tokens + 4
-
-              _, tc_acc ->
-                tc_acc
-            end)
-        end
-
-      acc + content_tokens + tool_call_tokens + 4
-    end)
-  end
+  # One multimodal estimator for prompt construction, /context, and compaction.
+  # Never serialize image payloads into text before counting them.
+  def estimate_tokens_messages(messages) when is_list(messages),
+    do: OptimalSystemAgent.Agent.Compactor.estimate_tokens(messages)
 
   defp safe_to_string(val),
     do: OptimalSystemAgent.Utils.Text.safe_to_string(val)

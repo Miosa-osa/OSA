@@ -359,10 +359,10 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   @impl OptimalSystemAgent.Agent.ContextEngine
   def estimate_tokens(messages) when is_list(messages) do
     Enum.reduce(messages, 0, fn msg, acc ->
-      content_tokens = estimate_content_tokens(Map.get(msg, :content))
+      content_tokens = estimate_content_tokens(Map.get(msg, :content) || Map.get(msg, "content"))
 
       tool_call_tokens =
-        case Map.get(msg, :tool_calls) do
+        case Map.get(msg, :tool_calls) || Map.get(msg, "tool_calls") do
           nil ->
             0
 
@@ -370,10 +370,20 @@ defmodule OptimalSystemAgent.Agent.Compactor do
             0
 
           calls when is_list(calls) ->
-            Enum.reduce(calls, 0, fn tc, tc_acc ->
-              name_tokens = estimate_tokens(safe_to_string(Map.get(tc, :name, "")))
-              arg_tokens = estimate_tokens(safe_to_string(Map.get(tc, :arguments, "")))
-              tc_acc + name_tokens + arg_tokens + 4
+            Enum.reduce(calls, 0, fn
+              tc, tc_acc when is_map(tc) ->
+                name_tokens =
+                  estimate_tokens(safe_to_string(Map.get(tc, :name) || Map.get(tc, "name", "")))
+
+                arg_tokens =
+                  estimate_tokens(
+                    safe_to_string(Map.get(tc, :arguments) || Map.get(tc, "arguments", ""))
+                  )
+
+                tc_acc + name_tokens + arg_tokens + 4
+
+              _, tc_acc ->
+                tc_acc
             end)
 
           _ ->
@@ -413,6 +423,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   def estimate_content_tokens(blocks) when is_list(blocks),
     do: Enum.reduce(blocks, 0, fn block, acc -> acc + estimate_block_tokens(block) end)
 
+  def estimate_content_tokens(block) when is_map(block), do: estimate_block_tokens(block)
   def estimate_content_tokens(other), do: estimate_tokens(safe_to_string(other))
 
   # One content block. Images are charged flat; text blocks are measured on

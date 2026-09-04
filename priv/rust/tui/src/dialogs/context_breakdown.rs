@@ -234,7 +234,7 @@ pub fn draw(frame: &mut Frame, area: Rect, stats: &ContextStats) {
         };
         put(frame, Paragraph::new(Line::from(vec![
             Span::styled("\u{25CF} ", Style::default().fg(total_color)),
-            Span::styled("Total used", Style::default().fg(c.muted).add_modifier(Modifier::BOLD)),
+            Span::styled("Estimated total", Style::default().fg(c.muted).add_modifier(Modifier::BOLD)),
         ])), Rect::new(inner.x, cy, label_w as u16, 1));
         put(frame, Paragraph::new(Line::from(vec![
             Span::styled(
