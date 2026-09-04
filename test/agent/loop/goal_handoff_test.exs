@@ -78,6 +78,48 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalHandoffTest do
     }
   end
 
+  test "approved read-only goal completes only after a successful panel", %{sid: sid, request: r} do
+    keys = [:goal_verifier_triage_runner, :goal_verifier_panel_runner]
+    previous = Map.new(keys, &{&1, Application.fetch_env(:optimal_system_agent, &1)})
+
+    on_exit(fn ->
+      for {key, value} <- previous do
+        case value do
+          {:ok, v} -> Application.put_env(:optimal_system_agent, key, v)
+          :error -> Application.delete_env(:optimal_system_agent, key)
+        end
+      end
+    end)
+
+    {:ok, waiting} = GoalTracker.request_decision(sid, r)
+
+    {:ok, _} =
+      GoalTracker.resolve_decision(sid, waiting.pending_decision["request_id"], "approve")
+
+    assert GoalTracker.status(sid) == :active
+
+    Application.put_env(:optimal_system_agent, :goal_verifier_triage_runner, fn _ ->
+      {:ok, ~s({"status":"candidate_complete"})}
+    end)
+
+    parent = self()
+
+    Application.put_env(:optimal_system_agent, :goal_verifier_panel_runner, fn _, configs ->
+      send(parent, {:reviewed, configs})
+
+      Enum.map(configs, fn _ ->
+        {:ok, ~s({"refuted":false,"off_track":false,"reason":"Reviewed draft and approval"})}
+      end)
+    end)
+
+    state = %{session_id: sid, goal_mode: true, messages: [], working_dir: File.cwd!()}
+    GoalVerifier.maybe_wait_for_user(state, "THE ACTUAL THESIS DELIVERABLE")
+    assert_receive {:reviewed, configs}
+    assert Enum.all?(configs, &String.contains?(&1.task, "THE ACTUAL THESIS DELIVERABLE"))
+    assert Enum.all?(configs, &String.contains?(&1.task, "approve"))
+    assert GoalTracker.status(sid) == :completed
+  end
+
   test "waiting stops continuation and verification without completing or replacing goal", %{
     sid: sid,
     request: r
@@ -130,6 +172,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalHandoffTest do
              GoalTracker.resolve_decision(sid, waiting.pending_decision["request_id"], "approve")
 
     assert {:ok, _} = GoalTracker.anchor_new(sid, "A genuinely new task")
+    assert OptimalSystemAgent.Agent.TaskBrief.context_block(sid) =~ "A genuinely new task"
+    refute OptimalSystemAgent.Agent.TaskBrief.context_block(sid) =~ "Draft thesis"
     assert {:error, :stale_verification} = GoalTracker.advance_if_current(sid, token, result, 20)
   end
 

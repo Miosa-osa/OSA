@@ -35,6 +35,12 @@ text-only goal continuation boundaries. Optional polishing or tool-call activity
 is not a substitute for a human decision. Failed classification never grants
 completion. The model cannot approve or reject its own request through this tool.
 
+Text-only goals classified as candidate-complete are reviewed even when no file
+writes occurred. The panel receives the latest assistant deliverable (bounded to
+16,000 characters) and the explicit decision record; it does not have to infer
+conversational work from a source-code diff. Truncated or insufficient evidence
+must still be treated as insufficient, not as automatic success.
+
 ## Durability and races
 
 Pending requests, decisions, and budget accounting persist in the goal sidecar.
