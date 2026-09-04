@@ -49,6 +49,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
   # authoritative source is the Codex CLI's own picker for a signed-in plan;
   # `codex -m <name>` still reaches older ids that the picker has dropped.
   @models [
+    "gpt-6-astra",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",

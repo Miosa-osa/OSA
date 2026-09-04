@@ -911,7 +911,10 @@ defmodule OptimalSystemAgent.Providers.Registry do
   @spec plain_prefix_cache?(atom() | {:compat, atom()}, String.t() | nil) :: boolean()
   def plain_prefix_cache?(provider, model \\ nil)
   def plain_prefix_cache?(p, _model) when p in [:ollama, :lmstudio, :llamacpp], do: true
-  def plain_prefix_cache?({:compat, p}, _model) when p in [:ollama, :lmstudio, :llamacpp], do: true
+
+  def plain_prefix_cache?({:compat, p}, _model) when p in [:ollama, :lmstudio, :llamacpp],
+    do: true
+
   def plain_prefix_cache?(_target, _model), do: false
 
   @doc """
@@ -1873,6 +1876,9 @@ defmodule OptimalSystemAgent.Providers.Registry do
   config default (128k), preserving prior behavior for cloud providers.
   """
   @spec effective_context_window(String.t() | nil, atom()) :: pos_integer()
+  # Codex's published client catalog uses a smaller default than the API.
+  def effective_context_window("gpt-6-astra", :openai_codex), do: 272_000
+
   def effective_context_window(model, provider) do
     model
     |> context_window()
@@ -1888,6 +1894,8 @@ defmodule OptimalSystemAgent.Providers.Registry do
   """
   @spec effective_context_window_info(String.t() | nil, atom() | nil) ::
           {:ok, pos_integer()} | :unknown
+  def effective_context_window_info("gpt-6-astra", :openai_codex), do: {:ok, 272_000}
+
   def effective_context_window_info(model, provider) do
     case context_window_info(model) do
       {:ok, trained} -> {:ok, apply_local_ceiling(trained, model, provider)}

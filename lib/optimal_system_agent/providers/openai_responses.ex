@@ -366,12 +366,24 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
         current_effort()
 
     with true <- reasoning_model?(model),
-         level when is_binary(level) <- normalize_effort(effort) do
+         level when is_binary(level) <- normalize_model_effort(model, effort) do
       Map.put(body, :reasoning, %{effort: level})
     else
       _ -> body
     end
   end
+
+  # Ultra includes Codex-specific orchestration. On the API, use the
+  # documented maximum effort rather than silently reducing it to high.
+  defp normalize_model_effort("gpt-6-astra", effort) do
+    case effort |> to_string() |> String.trim() |> String.downcase() do
+      "xhigh" -> "xhigh"
+      value when value in ["max", "ultra"] -> "max"
+      other -> normalize_effort(other)
+    end
+  end
+
+  defp normalize_model_effort(_model, effort), do: normalize_effort(effort)
 
   defp reasoning_model?(model) do
     OptimalSystemAgent.Providers.OpenAIModels.reasoning?(String.downcase(to_string(model)))
