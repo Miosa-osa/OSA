@@ -1439,6 +1439,7 @@ impl App {
             },
             BackendEvent::CommandResult(result) => {
                 self.handle_command_result(result);
+                self.maybe_dequeue_message();
             }
             BackendEvent::SelfUpdate(ev) => {
                 self.handle_self_update(ev);
@@ -1500,6 +1501,7 @@ impl App {
 
             BackendEvent::SessionCreated(result) => match result {
                 Ok(resp) => {
+                    self.session_creation_pending = false;
                     let resumed = resp.status.as_deref() == Some("resumed");
                     self.session_id = resp.id.clone();
                     // A resumed session already has a title; a brand-new one does
@@ -2801,6 +2803,10 @@ impl App {
                 }
                 Err(e) => {
                     debug!("Onboarding check failed: {}", e);
+                    self.toasts.push(
+                        format!("Startup check failed: {e}. Input is queued; use /new to retry."),
+                        crate::components::toast::ToastLevel::Error,
+                    );
                 }
             },
 
