@@ -126,6 +126,9 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalHandoffTest do
   } do
     {:ok, snap} = GoalTracker.request_decision(sid, r)
     assert snap.status == :awaiting_user
+    {reply, _state} = ReactLoop.run(%{session_id: sid, iteration: 0, messages: []})
+    assert reply =~ "Waiting for your decision"
+    assert reply =~ snap.pending_decision["request_id"]
     refute GoalTracker.continue?(sid)
     refute GoalTracker.reverify_due?(sid)
     refute ReactLoop.goal_continue_due?(%{session_id: sid})
