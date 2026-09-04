@@ -93,8 +93,28 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
     "gpt-5.3-codex-spark" => 128_000
   }
 
-  @doc "Maximum context advertised by the Codex catalog; nil for unknown models."
-  def context_window(model), do: Map.get(@context_windows, model)
+  @doc """
+  Configured context budget, falling back to Codex's advertised client maximum.
+  An explicit per-model override is a client budget, not proof of account
+  entitlement. Never expand a small model or exceed its published model window.
+  """
+  def context_window(model) do
+    context_window(model, OptimalSystemAgent.Settings.get("codex_context_windows", %{}))
+  end
+
+  @doc false
+  def context_window(model, overrides) do
+    fallback = Map.get(@context_windows, model)
+    requested = if is_map(overrides), do: Map.get(overrides, model)
+    published = OptimalSystemAgent.Providers.OpenAIModels.model(model)
+    ceiling = if published, do: published.ctx, else: fallback
+
+    if is_integer(requested) and requested > 0 and is_integer(ceiling) do
+      min(requested, ceiling)
+    else
+      fallback
+    end
+  end
 
   @doc "True when a ChatGPT plan is connected. Pure read — never refreshes."
   @spec configured?() :: boolean()
