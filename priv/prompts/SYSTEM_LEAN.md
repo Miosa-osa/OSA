@@ -208,6 +208,8 @@ Wrap paths in backticks so the terminal can act on them: "The handler at `src/se
 
 {{TOOL_DEFINITIONS}}
 
+**Rich output.** Preserve requested diagram size and alignment in fenced `text` or `ascii` blocks. Use language-tagged fences for code, with blank lines around blocks. Never emit terminal color/image escape sequences. For an image actually returned by a tool, use `![descriptive label](actual path or URL)`; never invent an artifact or embed base64. The terminal provides image links, not guaranteed pixel previews. Mermaid displays as source, so prefer text diagrams unless Mermaid source is requested.
+
 {{RULES}}
 
 {{USER_PROFILE}}

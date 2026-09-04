@@ -1914,6 +1914,40 @@ fn parse_inline(input: &str, theme: &crate::style::Theme) -> Vec<Span<'static>> 
 
     while let Some(&ch) = chars.peek() {
         match ch {
+            '!' if chars.clone().nth(1) == Some('[') => {
+                // Images are explicit artifacts in text-only terminals, not
+                // broken links or megabytes of inline base64. Never fetch or
+                // open model-supplied targets as a side effect of rendering.
+                let rest = chars.clone().collect::<String>();
+                let parsed = closing_delimiter(&rest[2..], '[', ']').and_then(|end| {
+                    let tail = &rest[2 + end + 1..];
+                    let target = tail.strip_prefix('(')?;
+                    let close = closing_delimiter(target, '(', ')')?;
+                    Some((2 + end + 1 + 1 + close + 1,
+                        unescape_inline(&rest[2..2 + end]), unescape_inline(&target[..close])))
+                });
+                if let Some((bytes, label, target)) = parsed {
+                    for _ in rest[..bytes].chars() { chars.next(); }
+                    flush_plain!();
+                    let label = if label.trim().is_empty() { "Image".to_owned() }
+                        else { format!("Image: {label}") };
+                    let style = Style::default().fg(theme.colors.secondary);
+                    let url = if target.starts_with("https://") || target.starts_with("http://") || target.starts_with("file://") {
+                        Some(target.clone())
+                    } else if !target.is_empty() && !target.contains(':') {
+                        crate::components::osc8::path_to_file_url(&target)
+                    } else { None };
+                    if let Some(url) = url {
+                        spans.push(crate::components::osc8::hyperlink_span(format!("[{label}]"), &url, style));
+                        spans.push(Span::styled(format!(" ({target})"), theme.faint()));
+                    } else {
+                        spans.push(Span::styled(format!("[{label} — preview unavailable]"), style));
+                    }
+                } else {
+                    chars.next();
+                    plain.push('!');
+                }
+            }
             '\\' => {
                 chars.next();
                 if chars.peek().is_some_and(|c| c.is_ascii_punctuation()) {
@@ -2391,6 +2425,22 @@ mod tests {
         parse_inline, parse_quote_depth, render_markdown, trim_url_trailing, wrap_text,
     };
     use ratatui::style::{Modifier, Style};
+
+    #[test]
+    fn image_artifacts_have_labels_and_no_inline_payload_dump() {
+        for (source, expected) in [
+            ("![Design](https://example.com/image.png)", "[Image: Design] (https://example.com/image.png)"),
+            ("![](/tmp/image.png)", "[Image] (/tmp/image.png)"),
+            ("![Design](output/design.png)", "[Image: Design] (output/design.png)"),
+            ("![Design](data:image/png;base64,SECRET)", "[Image: Design — preview unavailable]"),
+            ("![Design](javascript:alert(1))", "[Image: Design — preview unavailable]"),
+        ] {
+            assert_eq!(render_lines(source, 200).join(""), expected);
+        }
+        assert_eq!(render_lines("before ![Design](https://example.com/a_(b).png) after", 200).join(""),
+            "before [Image: Design] (https://example.com/a_(b).png) after");
+        assert_eq!(render_lines("literal \\![x]", 200).join(""), "literal ![x]");
+    }
 
     /// Flatten a full render to per-line visible strings (OSC-8 stripped).
     fn render_lines(src: &str, width: u16) -> Vec<String> {
