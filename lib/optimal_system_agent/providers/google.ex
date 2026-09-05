@@ -127,7 +127,16 @@ defmodule OptimalSystemAgent.Providers.Google do
     |> maybe_add_system_instruction(system_instruction)
     |> maybe_add_generation_config(model, opts)
     |> maybe_add_tools(opts)
-    |> maybe_put(:serviceTier, Keyword.get(opts, :service_tier))
+    # No `serviceTier` here, deliberately. What used to be forwarded is
+    # whatever tier the loop resolved for the session, and for Gemini that is
+    # "priority", which is OpenAI's word: OSA has verified neither the field
+    # name nor any accepted value against this API. The request came back
+    # rejected rather than ignored, so a `/fast` turn on Gemini paid for a
+    # wasted round-trip plus the tier-less retry behind it, every turn, for
+    # acceleration the account never received. Re-add only with a field AND a
+    # value confirmed against the live API, the way
+    # `Anthropic.apply_service_tier/2` allowlists Anthropic's own vocabulary.
+
     # Gemini's 20 MB request ceiling — the budget knows the `contents`/`parts`
     # envelope now, so this is a real gate rather than a no-op.
     |> OptimalSystemAgent.Providers.ImageBudget.gate_unsupported(:google, model)

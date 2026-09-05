@@ -3182,14 +3182,50 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     IO.puts("")
 
     enabled = LLMClient.toggle_fast_service_tier(session_id)
+    provider = OptimalSystemAgent.Runtime.Identity.provider()
+    tier = LLMClient.fast_tier_for(provider)
     mode = if enabled, do: "enabled", else: "disabled"
 
     IO.puts("  #{@green}✓#{@reset} Provider Fast processing #{@bold}#{mode}#{@reset}")
-    IO.puts("  #{@dim}Uses the selected provider's supported acceleration tier.#{@reset}")
+
+    # The toggle is a session setting, but whether it DOES anything is a
+    # property of the provider serving the turn. Most providers have no
+    # acceleration tier OSA can request, so the old blanket line ("uses the
+    # selected provider's supported acceleration tier") reported success for a
+    # switch that changed nothing about the request. Say which one this is.
+    cond do
+      not enabled ->
+        IO.puts("  #{@dim}Turns run at #{provider_label(provider)}'s default tier.#{@reset}")
+
+      tier ->
+        IO.puts(
+          "  #{@dim}Asking #{provider_label(provider)} for its \"#{tier}\" tier on every turn.#{@reset}"
+        )
+
+      true ->
+        IO.puts(
+          "  #{@yellow}!#{@reset} #{provider_label(provider)} has no acceleration tier OSA can " <>
+            "request, so this changes nothing here."
+        )
+
+        IO.puts(
+          "  #{@dim}It takes effect on: #{fast_tier_provider_list()}. " <>
+            "The setting stays on for when you switch.#{@reset}"
+        )
+    end
+
     IO.puts("  #{@dim}Reasoning effort and tool budgets are unchanged.#{@reset}")
 
     IO.puts("")
     session_id
+  end
+
+  defp provider_label(nil), do: "the current provider"
+  defp provider_label(provider), do: to_string(provider)
+
+  defp fast_tier_provider_list do
+    OptimalSystemAgent.Agent.Loop.LLMClient.fast_tier_providers()
+    |> Enum.map_join(", ", &to_string/1)
   end
 
   # What the iteration ceiling ACTUALLY is, not what the effort ladder says.

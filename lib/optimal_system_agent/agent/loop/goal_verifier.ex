@@ -381,47 +381,98 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   # Text-only/research goals may have no writes and therefore skip the normal
   # panel cost gate. Before another automatic turn, classify whether the next
   # useful action belongs to the human instead. Completion still needs a panel.
+  #
+  # Gated like `maybe_gate/1`, and for the same reason: this spends a real
+  # triage round-trip on the same provider that just drove the turn, so it must
+  # answer to the same operator switch and the same per-turn spend counters.
+  # Ungated it fired on EVERY tool-call-free generation inside a goal turn — one
+  # extra provider call per synthetic continuation, which doubled what a goal
+  # turn costs in money and latency (a budget of 3 continuations bought 8
+  # round-trips, not 4) — and it kept spending them under an explicit
+  # `goal_verifier_enabled: false`, the one setting whose entire job is to buy
+  # silence from this module.
+  #
+  # Two of `skip_reason/1`'s conditions are deliberately NOT applied here.
+  # `:no_work` and `:trivial` are SIZE heuristics — "did this turn move enough
+  # of the workspace to be worth an adversarial panel" — and a research or
+  # authoring goal ("draft the thesis for Steven's approval") satisfies neither
+  # while being precisely the case whose next useful action belongs to a human.
+  # Skipping on size here would delete this path's whole reason to exist; that
+  # is what the paragraph above this function has always said. The remaining
+  # guards are about budget and operator control, not size, and apply verbatim.
+  @spec maybe_wait_for_user(map(), String.t()) :: map()
   def maybe_wait_for_user(state, content) do
     sid = Map.get(state, :session_id)
 
-    if is_binary(sid) and GoalTracker.enabled?(state) and GoalTracker.goal_loop?(sid) and
-         GoalTracker.continue?(sid) do
-      expected = GoalTracker.verification_token(sid)
+    cond do
+      not (is_binary(sid) and GoalTracker.enabled?(state) and GoalTracker.goal_loop?(sid) and
+               GoalTracker.continue?(sid)) ->
+        state
 
-      probe =
-        Map.put(
-          state,
-          :messages,
-          Map.get(state, :messages, []) ++ [%{role: "assistant", content: content}]
-        )
+      not activated?(state) ->
+        state
 
-      case triage(probe) do
-        {:awaiting_user, meta} ->
-          GoalTracker.request_decision(sid, meta.request, expected)
-          state
+      Map.get(state, :goal_verifier_paused, false) ->
+        state
 
-        {:candidate_complete, _} ->
-          if Map.get(state, :goal_verifier_runs, 0) < max_runs() do
-            {result, verified} = verify(probe)
+      (reason = wait_skip_reason(state)) != nil ->
+        log_skip(state, reason)
+        state
 
-            case GoalTracker.advance_if_current(
-                   sid,
-                   expected,
-                   result,
-                   Map.get(state, :total_tool_calls)
-                 ) do
-              {:ok, _} -> Map.put(verified, :messages, Map.get(state, :messages, []))
-              _ -> state
-            end
-          else
-            state
+      not GoalTracker.reverify_due?(sid) ->
+        state
+
+      true ->
+        wait_triage(state, content, sid)
+    end
+  end
+
+  # `skip_reason/1` minus the two size heuristics. `:no_session`,
+  # `:goal_inactive` and `:no_goal` are already decided by the tracker guard in
+  # `maybe_wait_for_user/2`, so what is left is the pair of spend guards: the
+  # per-turn verification run cap and the stall early-exit.
+  defp wait_skip_reason(state) do
+    cond do
+      Map.get(state, :goal_verifier_runs, 0) >= max_runs() -> :run_cap
+      stalled?(state) -> :stalled
+      true -> nil
+    end
+  end
+
+  defp wait_triage(state, content, sid) do
+    expected = GoalTracker.verification_token(sid)
+
+    probe =
+      Map.put(
+        state,
+        :messages,
+        Map.get(state, :messages, []) ++ [%{role: "assistant", content: content}]
+      )
+
+    case triage(probe) do
+      {:awaiting_user, meta} ->
+        GoalTracker.request_decision(sid, meta.request, expected)
+        state
+
+      {:candidate_complete, _} ->
+        if Map.get(state, :goal_verifier_runs, 0) < max_runs() do
+          {result, verified} = verify(probe)
+
+          case GoalTracker.advance_if_current(
+                 sid,
+                 expected,
+                 result,
+                 Map.get(state, :total_tool_calls)
+               ) do
+            {:ok, _} -> Map.put(verified, :messages, Map.get(state, :messages, []))
+            _ -> state
           end
-
-        _ ->
+        else
           state
-      end
-    else
-      state
+        end
+
+      _ ->
+        state
     end
   end
 

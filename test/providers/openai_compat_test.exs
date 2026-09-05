@@ -845,17 +845,43 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatTest do
       assert body.service_tier == "flex"
     end
 
-    test "sends service_tier to documented compatible providers" do
-      body =
+    test "sends each provider only a tier from its OWN vocabulary" do
+      groq = OpenAICompat.build_stream_body("llama", @msgs, provider: :groq, service_tier: "auto")
+      assert groq.service_tier == "auto"
+
+      flex = OpenAICompat.build_stream_body("llama", @msgs, provider: :groq, service_tier: "flex")
+      assert flex.service_tier == "flex"
+    end
+
+    test "drops a tier the provider does not define rather than forwarding it" do
+      # "priority" is OpenAI's word. Groq's vocabulary is
+      # on_demand/flex/auto/performance, so sending it there bought a rejected
+      # request plus the tier-less retry behind it on every turn.
+      groq =
+        OpenAICompat.build_stream_body("llama", @msgs, provider: :groq, service_tier: "priority")
+
+      refute Map.has_key?(groq, :service_tier)
+
+      # Anthropic's word, on an OpenAI-compatible route.
+      openai =
+        OpenAICompat.build_stream_body("gpt-5", @msgs,
+          provider: :openai,
+          service_tier: "standard_only"
+        )
+
+      refute Map.has_key?(openai, :service_tier)
+    end
+
+    test "sends no tier to providers with no verified vocabulary" do
+      # Both were observed rejecting an unknown service_tier with HTTP 422, and
+      # neither documents a value OSA has checked against the live API.
+      xai =
         OpenAICompat.build_stream_body("grok-4.6", @msgs,
           provider: :xai,
           service_tier: "priority"
         )
 
-      assert body.service_tier == "priority"
-
-      groq = OpenAICompat.build_stream_body("llama", @msgs, provider: :groq, service_tier: "auto")
-      assert groq.service_tier == "auto"
+      refute Map.has_key?(xai, :service_tier)
 
       openrouter =
         OpenAICompat.build_stream_body("openai/gpt-5", @msgs,
@@ -863,7 +889,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatTest do
           service_tier: "priority"
         )
 
-      assert openrouter.service_tier == "priority"
+      refute Map.has_key?(openrouter, :service_tier)
     end
 
     test "never sends service_tier to unsupported compatible backends" do

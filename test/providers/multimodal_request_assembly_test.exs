@@ -112,13 +112,17 @@ defmodule OptimalSystemAgent.Providers.MultimodalRequestAssemblyTest do
   # ── Bedrock Converse ──────────────────────────────────────────────────────
 
   describe "Bedrock.build_request_body/3" do
-    test "priority service tier is placed at the Converse top level" do
+    test "no service tier is placed on a Converse request" do
+      # `"serviceTier" => %{"type" => tier}` was a guessed shape carrying a
+      # guessed value: Converse's documented latency knob is `performanceConfig`,
+      # and "priority" is OpenAI's word rather than anything AWS defines. Until
+      # a live call confirms both, no tier goes on this body at all.
       body =
         Bedrock.build_request_body([%{role: "user", content: "hello"}], "amazon.nova-pro-v1:0",
           service_tier: "priority"
         )
 
-      assert body["serviceTier"] == %{"type" => "priority"}
+      refute Map.has_key?(body, "serviceTier")
     end
 
     test "the image is carried as a Converse image block, not dropped" do

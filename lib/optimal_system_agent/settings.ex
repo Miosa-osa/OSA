@@ -102,10 +102,7 @@ defmodule OptimalSystemAgent.Settings do
   user → project → local → flag file → session.
   """
   def merged do
-    [layer(:user), layer(:project), layer(:local), layer(:flag)]
-    |> Enum.reduce(%{}, &deep_merge(&2, &1))
-    |> deep_merge(get_all_session())
-    |> harden_if_unparseable()
+    cascade([layer(:user), layer(:project), layer(:local), layer(:flag)], get_all_session())
   end
 
   @doc "Deep-merge two settings maps: maps merge recursively, lists concat + dedupe, scalars override."
@@ -183,20 +180,24 @@ defmodule OptimalSystemAgent.Settings do
 
   def set_session_for(_session_id, key, value), do: put_session(:global, key, value)
 
-  @doc "Get a setting using the session layer for a SPECIFIC session id."
+  @doc """
+  Get a setting using the session layer for a SPECIFIC session id.
+
+  Resolved through the SAME cascade as `get/2`, with the session layer scoped
+  to `session_id` instead of to the calling process. Reading only the ETS
+  session rows, which is what this used to do, made the two arities disagree
+  about the same key: a value set in `~/.osa/settings.json` or in the
+  `OSA_SETTINGS` flag file was honored by `get/2` and invisible here, so a
+  setting like `openai_fast_service_tier` was on or off depending on which
+  reader a call site happened to reach for.
+
+  Mirrors `get/2` exactly, trust posture included: the project layer is NOT
+  gated here. A security-relevant key needs `get_trusted/2` (which has no
+  session-scoped arity yet) rather than this one.
+  """
   @spec get_session_for(String.t() | nil, atom() | String.t(), term()) :: term()
   def get_session_for(session_id, key, default \\ nil) do
-    session =
-      case session_id do
-        sid when is_binary(sid) and sid != "" ->
-          global = session_rows({{:session, :"$1"}, :"$2"})
-          Map.merge(global, session_rows({{:session, sid, :"$1"}, :"$2"}))
-
-        _ ->
-          session_rows({{:session, :"$1"}, :"$2"})
-      end
-
-    case Map.fetch(session, to_string(key)) do
+    case Map.fetch(merged_for(session_id), to_string(key)) do
       {:ok, value} -> value
       :error -> default
     end
@@ -408,10 +409,10 @@ defmodule OptimalSystemAgent.Settings do
   Use for any security-relevant setting; `merged/0` stays as-is for display.
   """
   def merged_trusted do
-    [layer(:user), trusted_layer(:project), trusted_layer(:local), layer(:flag)]
-    |> Enum.reduce(%{}, &deep_merge(&2, &1))
-    |> deep_merge(get_all_session())
-    |> harden_if_unparseable()
+    cascade(
+      [layer(:user), trusted_layer(:project), trusted_layer(:local), layer(:flag)],
+      get_all_session()
+    )
   end
 
   @doc "`get/2` resolved through `merged_trusted/0`."
@@ -504,15 +505,40 @@ defmodule OptimalSystemAgent.Settings do
   # per-session tool policy expressible at all.
   defp get_all_session do
     try do
-      global = session_rows({{:session, :"$1"}, :"$2"})
-
-      case current_session() do
-        :global -> global
-        sid -> Map.merge(global, session_rows({{:session, sid, :"$1"}, :"$2"}))
-      end
+      session_layer(current_session())
     rescue
       _ -> %{}
     end
+  end
+
+  # The session layer as seen from ONE scope: the daemon-wide `:global` rows,
+  # then the rows written for that session id, which shadow them.
+  defp session_layer(:global), do: session_rows({{:session, :"$1"}, :"$2"})
+
+  defp session_layer(session_id) do
+    Map.merge(
+      session_rows({{:session, :"$1"}, :"$2"}),
+      session_rows({{:session, session_id, :"$1"}, :"$2"})
+    )
+  end
+
+  # `merged/0` with the session layer resolved for an EXPLICIT session id
+  # instead of for the calling process, so a caller can read a setting on
+  # behalf of a session it is not running inside.
+  defp merged_for(session_id) do
+    scope = if is_binary(session_id) and session_id != "", do: session_id, else: :global
+
+    cascade([layer(:user), layer(:project), layer(:local), layer(:flag)], session_layer(scope))
+  end
+
+  # The file layers deep-merged lowest to highest, then the session layer on
+  # top, then the fail-closed hardening. Every resolved view of the settings
+  # goes through here so none of them can drift apart from the others.
+  defp cascade(file_layers, session_layer) do
+    file_layers
+    |> Enum.reduce(%{}, &deep_merge(&2, &1))
+    |> deep_merge(session_layer)
+    |> harden_if_unparseable()
   end
 
   defp session_rows(pattern) do

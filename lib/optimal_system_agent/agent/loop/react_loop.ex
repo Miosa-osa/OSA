@@ -1157,7 +1157,23 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
         finish_turn(content, state)
 
+      # The triage above (`maybe_wait_for_user/2`) decided the next useful action
+      # belongs to the human, so the turn stops here and returns the waiting
+      # notice instead of the answer.
+      #
+      # `content` is appended FIRST, because the answer has already streamed to
+      # the user and `Loop.run_and_reply/1` records only the RETURNED string as
+      # this turn's assistant message. Halting on the bare state wrote
+      # "Waiting for your decision - not complete." into the transcript in the
+      # place of the answer the user had just read: it was absent from
+      # `state.messages`, absent from the persisted session, and absent from
+      # context after `/goal approve` — the model resumed with no record of what
+      # it had proposed, asked to act on an approval of something it could no
+      # longer see. Every sibling clause in this `cond` appends the answer before
+      # it continues; a clause that stops must do the same before it stops.
       GoalTracker.awaiting_user?(state.session_id) ->
+        state = %{state | messages: state.messages ++ [%{role: "assistant", content: content}]}
+
         TerminalSource.halt(GoalTracker.waiting_message(state.session_id), state, :control)
 
       prose_continue?(state) and state.auto_continues < 2 and

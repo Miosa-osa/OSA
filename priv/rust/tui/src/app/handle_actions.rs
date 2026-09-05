@@ -1943,6 +1943,33 @@ impl App {
         });
     }
 
+    /// Resolve this folder's session once the onboarding wizard is out of the
+    /// way — the first-run counterpart of the `OnboardingStatus` onboarded
+    /// branch.
+    ///
+    /// **This is what made a brand-new install swallow every message.** Session
+    /// resolution happens in exactly two places: that onboarded branch and
+    /// [`Self::create_session`]. When `needs_onboarding` is true the wizard
+    /// branch runs instead, so neither fires and `dir_session_resolved` stays
+    /// false — and `startup_session_pending` is a `!resolved ||` gate. Finishing
+    /// setup did not clear it (`OnboardingComplete` set the identity and sent
+    /// the bootstrap greeting straight through `submit_prompt`, which bypasses
+    /// the gate entirely), and neither did cancelling out of the wizard. So
+    /// every message the new user typed after setup was enqueued and never
+    /// drained. That is the entire first-run experience, for every new user.
+    ///
+    /// Called from all three ways the wizard can exit — completed, failed, and
+    /// cancelled — because a user left at an Idle prompt with no session is
+    /// wedged the same way whichever door they came through.
+    ///
+    /// Idempotent, matching the onboarded branch's own `!dir_session_resolved`
+    /// guard: it must never replace a session the user already has.
+    pub(crate) fn resolve_session_after_onboarding(&mut self) {
+        if !self.dir_session_resolved {
+            self.create_session();
+        }
+    }
+
     /// Apply a `--model` / `--provider` launch flag to the session that just
     /// became current.
     ///

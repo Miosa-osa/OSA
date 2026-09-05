@@ -47,13 +47,17 @@ defmodule OptimalSystemAgent.Providers.GoogleSystemHoistTest do
   defp text_of(content), do: Enum.map_join(content["parts"], "", &(&1["text"] || ""))
 
   describe "extract_system — leading vs mid-conversation system messages" do
-    test "priority service tier is placed at the GenerateContent top level" do
+    test "no service tier is placed on a GenerateContent request" do
+      # "priority" is OpenAI's tier vocabulary, and neither that value nor the
+      # `serviceTier` field itself was ever verified against this API. Sending
+      # it bought a rejected request plus the tier-less retry behind it on
+      # every `/fast` turn, for acceleration the account never received.
       body =
         Google.build_request_body([%{role: "user", content: "hi"}], @model,
           service_tier: "priority"
         )
 
-      assert body.serviceTier == "priority"
+      refute Map.has_key?(body, :serviceTier)
       refute Map.has_key?(body.generationConfig, :serviceTier)
     end
 
