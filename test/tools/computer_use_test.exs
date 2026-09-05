@@ -510,9 +510,22 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
 
   describe "screenshot command generation" do
     test "full screenshot creates file in screenshots dir" do
-      # Run the actual screenshot — on macOS CI this will work,
-      # on non-macOS it will fail gracefully
-      result = ComputerUse.execute(%{"action" => "screenshot"})
+      # Run the actual screenshot — on macOS CI (and any host with a display)
+      # this produces a real image. On a headless CI runner with no DISPLAY /
+      # WAYLAND_DISPLAY, computer_use fails FAST with a RuntimeError by design
+      # ("requires a desktop environment"); that raise is the intended no-display
+      # behavior, so treat it as the same acceptable outcome the {:error, _}
+      # branch below already documents. Without this the test passed or failed on
+      # whether the runner happened to have a display — a #208-class flake (it was
+      # green on the v1.0.178 CI runner and red on the next one, same code).
+      result =
+        try do
+          ComputerUse.execute(%{"action" => "screenshot"})
+        rescue
+          e in RuntimeError ->
+            assert e.message =~ "display server" or e.message =~ "computer_use"
+            {:error, :no_display_server}
+        end
 
       case result do
         {:ok, {:image, %{media_type: "image/png", data: b64, path: path}}} ->
