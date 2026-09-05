@@ -10,7 +10,12 @@ defmodule OptimalSystemAgent.Providers.FullContextWindowsTest do
           {:google, Providers.GoogleModels},
           {:xai, Providers.XAIModels},
           {:deepseek, Providers.DeepSeekModels},
-          {:mistral, Providers.MistralModels}
+          {:mistral, Providers.MistralModels},
+          # z.ai / GLM was ABSENT from this list, so its catalog silently drifted
+          # from the Registry: GLM models were never merged in and resolved to
+          # stale hardcoded rows / prefix guesses (the default glm-5.3-flash, a
+          # real 1M window, read as 200K). Every hosted catalog belongs here.
+          {:zai, Providers.ZaiModels}
         ],
         {model, expected} <- catalog.context_windows() do
       assert Providers.Registry.effective_context_window(model, provider) == expected,

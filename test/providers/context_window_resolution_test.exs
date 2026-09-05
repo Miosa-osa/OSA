@@ -97,9 +97,13 @@ defmodule OptimalSystemAgent.Providers.ContextWindowResolutionTest do
     end
 
     test "a failed cloud probe falls back to the static table, never crashes" do
-      # No cache entry + unreachable URL => probe fails, static prefix match wins.
+      # No cache entry + unreachable URL => probe fails, and the ZaiModels
+      # catalog (the SSoT for GLM) resolves the bare "glm-5.2" tag. 1_048_576 is
+      # the catalog's real window; the old 1_000_000 here was the stale
+      # hardcoded @static_context_windows row that predated wiring the z.ai
+      # catalog into the Registry.
       assert {:ok, window} = Registry.context_window_info("glm-5.2:cloud")
-      assert window == 1_000_000
+      assert window == 1_048_576
     end
   end
 
