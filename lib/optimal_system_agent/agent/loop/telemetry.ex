@@ -25,7 +25,8 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
     model_window = provider_context_window(state)
 
     # ONE denominator. `used_percent/2` and `warning_state/2` both clamp the
-    # window internally (`operative_window/1`, min(window, 200k)), but the raw
+    # window internally (`operative_window/1`, which is `min(window,
+    # model_ceiling)` — a per-model share, not a flat 200k), but the raw
     # window was ALSO emitted as `max_tokens` — which the TUI both displays and
     # uses as its own ratio fallback (`estimated_tokens / max_tokens`). On a
     # 500K model that is a 2.8x disagreement inside a single status line.

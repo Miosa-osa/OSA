@@ -1667,14 +1667,19 @@ defmodule OptimalSystemAgent.Providers.Registry do
     "command-a-03-2025" => 256_000,
     "command-r-plus-08-2024" => 128_000,
     "command-r-08-2024" => 128_000,
-    # Zhipu / z.ai GLM (OpenAI-compatible; the ollama_cloud route appends a
-    # ":cloud" suffix to the model id, which the prefix match below strips —
-    # e.g. "glm-5.2:cloud" starts_with "glm-5.2"). Windows are the vendor's
-    # published maximums. GLM-5.2 ships a real 1M-token window (Ollama shows
-    # "976K" only because it displays the count ÷1024); GLM-4.6 is 200K.
-    "glm-5.2" => 1_000_000,
-    "glm-5.1" => 202_752,
-    "glm-5" => 200_000,
+    # Zhipu / z.ai GLM. The maintained SSoT is `Providers.ZaiModels` — its
+    # catalog is consulted first in `ssot_context_window/1` and merged into
+    # `@fallback_context_windows`, so for any tag ZaiModels knows (glm-5,
+    # glm-5.1, glm-5.2, glm-5.3-flash, glm-4.6v, glm-4.7, …) the catalog window
+    # wins and these rows never decide. The rows below are LEGACY fallbacks kept
+    # only for tags the catalog does not enumerate (e.g. bare glm-4.6, the 4.5
+    # family); their values are held in step with ZaiModels so a fallback can
+    # never hand back a window that contradicts the catalog. GLM-5.2 ships a
+    # real 1M window (1024², which Ollama shows as "976K" because it displays
+    # the count ÷1024).
+    "glm-5.2" => 1_048_576,
+    "glm-5.1" => 204_800,
+    "glm-5" => 204_800,
     "glm-4.6" => 200_000,
     "glm-4.5-air" => 128_000,
     "glm-4.5" => 128_000,
@@ -1730,6 +1735,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
                             |> Map.merge(
                               OptimalSystemAgent.Providers.MistralModels.context_windows()
                             )
+                            |> Map.merge(OptimalSystemAgent.Providers.ZaiModels.context_windows())
 
   @spec context_window(String.t()) :: pos_integer()
   def context_window(model) when is_binary(model) do
@@ -1819,8 +1825,20 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
       nil ->
         case OptimalSystemAgent.Providers.OpenAIModels.resolve(model) do
-          %{ctx: ctx} -> ctx
-          nil -> nil
+          %{ctx: ctx} ->
+            ctx
+
+          nil ->
+            # z.ai / GLM is catalog-authoritative too (dated vendor windows,
+            # with `resolve/1` handling gateway prefixes, `:cloud` tags and
+            # family variants). Without this, GLM models fell through to the
+            # stale hardcoded rows / prefix guesses in @static_context_windows —
+            # e.g. the default `glm-5.3-flash` (a real 1M window) resolved to
+            # 200K via the "glm-5" prefix.
+            case OptimalSystemAgent.Providers.ZaiModels.resolve(model) do
+              %{ctx: ctx} -> ctx
+              _ -> nil
+            end
         end
     end
   end
