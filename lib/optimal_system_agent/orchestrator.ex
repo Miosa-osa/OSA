@@ -743,8 +743,22 @@ defmodule OptimalSystemAgent.Orchestrator do
   end
 
   defp start_linger(pid, subagent_id, worktree_info, config, result, ttl) do
+    # The linger owner must be the process that OWNS the Registry entry, because
+    # Registry drops a key when its registering process dies — so the entry
+    # cannot be registered by this (short-lived join) process. But the key must
+    # be observable BEFORE we report `:lingering` up the stack: otherwise a fast
+    # follow-up resume runs `lingering?/1` against a not-yet-registered key,
+    # misses it, falls to run_fresh_subagent, and that path terminates this very
+    # resident (the "Cleaning up stale subagent" branch) and replays it under a
+    # new pid. That is the #179 flake — load-dependent because the register
+    # normally lands within microseconds of the spawn starting. Fix: the owner
+    # registers, then hands back a token; we wait for it (bounded, since linger
+    # is a pure optimization and a completion path must never block on it).
+    caller = self()
+
     spawn(fn ->
       Registry.register(OptimalSystemAgent.SessionRegistry, linger_key(subagent_id), pid)
+      send(caller, {:linger_registered, subagent_id})
       ref = Process.monitor(pid)
 
       receive do
@@ -769,7 +783,15 @@ defmodule OptimalSystemAgent.Orchestrator do
       end
     end)
 
-    :ok
+    # Block only until the linger key is visible (typically microseconds). The
+    # bound guarantees a completion path is never stuck if the owner dies before
+    # registering — a missed linger just means the next resume replays, which is
+    # the pre-linger behavior, never a hang.
+    receive do
+      {:linger_registered, ^subagent_id} -> :ok
+    after
+      1_000 -> :ok
+    end
   end
 
   # True only for an id whose linger owner is registered AND whose resident Loop

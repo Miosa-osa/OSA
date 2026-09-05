@@ -189,6 +189,64 @@ defmodule OptimalSystemAgent.Tools.FileStateEnforcementTest do
     end
   end
 
+  describe "unicode-normalised filenames (#212)" do
+    # A filename's accented character can be stored composed (NFC, é = U+00E9)
+    # or decomposed (NFD, e + U+0301) and both render identically. Linux
+    # filesystems preserve the exact bytes handed to them, so file_read's
+    # Unicode rescue records the read under the on-disk NFD name while the model
+    # later edits under the NFC name it typed. The ledger must key both to one
+    # canonical form, and — the part #212 got wrong — must stat the real
+    # on-disk path, not the normalised key, or the read is never recorded.
+    #
+    # macOS (APFS) collapses NFC/NFD at the FS layer, so these pass there with
+    # or without the fix; on Linux they fail without it (record_read stats the
+    # NFC path, which does not exist, and drops the read).
+    setup do
+      base = "cafe" <> <<0x65, 0xCC, 0x81>>
+      nfd = :unicode.characters_to_nfd_binary(base)
+      nfc = :unicode.characters_to_nfc_binary(base)
+      # Guard the fixture itself: the two forms must actually differ, or the
+      # test proves nothing.
+      assert nfd != nfc
+
+      dir = Path.join(System.tmp_dir!(), "osa_nfd_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      nfd_path = Path.join(dir, nfd <> ".txt")
+      nfc_path = Path.join(dir, nfc <> ".txt")
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      {:ok, nfd_path: nfd_path, nfc_path: nfc_path}
+    end
+
+    test "a read recorded under the NFD name is found under the NFC name", ctx do
+      %{sid: sid, nfd_path: nfd_path, nfc_path: nfc_path} = ctx
+      File.write!(nfd_path, "alpha\nbeta\n")
+
+      # file_read rescues the caller's path to the on-disk (NFD) form and
+      # records the read against it.
+      FileState.record_read(sid, nfd_path)
+
+      # The subsequent edit names the file in its NFC form; enforcement must
+      # recognise it as already read.
+      assert FileState.read?(sid, nfc_path)
+      assert :ok == FileState.check_read(sid, nfc_path)
+    end
+
+    test "the rescued read is actually recorded (stat hits the real path, not the key)", ctx do
+      %{sid: sid, nfd_path: nfd_path} = ctx
+      File.write!(nfd_path, "alpha\nbeta\n")
+
+      # The read is recorded against the real on-disk (NFD) path. Without the
+      # fix, record_read stats the NFC-normalised key instead — a path that does
+      # not exist on Linux — so nothing is inserted and even the same-form
+      # lookup misses.
+      FileState.record_read(sid, nfd_path)
+
+      assert FileState.read?(sid, nfd_path)
+      assert :ok == FileState.check_read(sid, nfd_path)
+    end
+  end
+
   describe "legacy/exempt sessions" do
     test "the \"test\" sentinel session is not enforced (flat-shim compat)", %{path: path} do
       File.write!(path, "alpha\nbeta\n")

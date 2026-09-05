@@ -22,13 +22,9 @@ defmodule OptimalSystemAgent.Security.AttackOrchestrator do
   use GenServer
 
   alias OptimalSystemAgent.Security.{
-    ShadowGraph,
-    AttackTree,
     ClassQueue,
     AnomalyQueue,
-    ThreatIntel,
     WeaponCatalog,
-    ExploitGenerator,
     LiveExploitRunner,
     AttackChainReasoner,
     AttackPrioritizer
@@ -141,8 +137,8 @@ defmodule OptimalSystemAgent.Security.AttackOrchestrator do
   @doc """
   Execute the full attack sequence.
 
-  Traverses ShadowGraph for paths, feeds ClassQueue with prioritized candidates,
-  runs exploits via LiveExploitRunner, and collects results into completed/failed.
+  Feeds ClassQueue with prioritized candidates and runs exploits via
+  LiveExploitRunner, then extends the weapon set with chain-derived hops.
   """
   @spec execute_sequence(state()) :: {:results, state()} | {:blocked, String.t()}
   def execute_sequence(%{phase: :complete} = state) do
@@ -157,57 +153,40 @@ defmodule OptimalSystemAgent.Security.AttackOrchestrator do
   end
 
   def execute_sequence(state) do
-    # Step 1: Use ShadowGraph to find attack paths from current recon data
-    graph_paths = ShadowGraph.attack_paths(state.session_id) || []
-
-    # Step 2: Feed AttackTree with prioritized classes (basics first)
-    class_priorities = AttackTree.next_classes(state.session_id, max: length(graph_paths))
-
-    # Step 3: Classify all findings as weapons
+    # Step 1: Classify all findings as weapons
     weaponized = WeaponCatalog.classify_batch(state.findings)
 
-    # Step 4: Prioritize targets by exploitability × impact
+    # Step 2: Prioritize targets by exploitability × impact. Each entry wraps
+    # the weapon in a ranked struct (%{weapon: ..., rank_score: ..., ...}).
     prioritized = AttackPrioritizer.rank(weaponized)
 
-    # Step 5: Feed into ClassQueue in priority order
-    Enum.each(prioritized, fn weapon ->
-      entry = %{
-        class: weapon.class,
+    # Step 3: Feed into ClassQueue in priority order, keyed by vuln class.
+    Enum.each(prioritized, fn %{weapon: weapon} ->
+      ClassQueue.put(state.session_id, weapon.domain, %{
         target: weapon.target,
-        confidence: weapon.score,
-        evidence: weapon.evidence
-      }
-
-      ClassQueue.enqueue(state.session_id, entry)
+        note: "score=#{weapon.score}"
+      })
     end)
 
-    # Step 6: Deploy exploits via LiveExploitRunner
-    results =
-      Enum.map(prioritized, fn weapon ->
-        case LiveExploitRunner.deploy(weapon) do
-          {:ok, result}
-          when is_map(result) and is_map_key(result, :confirmed) and
-                 :erlang.map_get(:confirmed, result) == true ->
-            %{state.completed | end: [weapon.target]}
-            {:depleted, result}
+    # Step 4: Deploy exploits via LiveExploitRunner (fail-closed without RoE).
+    Enum.each(prioritized, fn %{weapon: weapon} ->
+      case LiveExploitRunner.deploy(weapon) do
+        {:ok, %{confirmed: true}} ->
+          :ok
 
-          {:ok, result} ->
-            # Not confirmed yet — feed into AnomalyQueue for follow-one-hop
-            AnomalyQueue.record(state.session_id, %{
-              target: weapon.target,
-              class: weapon.class,
-              anomaly_type: :unconfirmed_exploit,
-              evidence: result
-            })
+        {:ok, _result} ->
+          # Not confirmed yet — feed into AnomalyQueue for follow-one-hop.
+          AnomalyQueue.record(state.session_id, %{
+            target: weapon.target,
+            note: "unconfirmed exploit for #{weapon.domain}"
+          })
 
-            {:potential, result}
+        {:error, _reason} ->
+          :ok
+      end
+    end)
 
-          :error ->
-            {:failed, weapon.target}
-        end
-      end)
-
-    # Step 7: Check for post-exploitation opportunities via ChainReasoner
+    # Step 5: Check for post-exploitation opportunities via ChainReasoner
     chains = AttackChainReasoner.find_chains(state.session_id)
 
     new_weapons =
