@@ -138,8 +138,8 @@ jobs:
           if-no-files-found: error
 
   # ── macOS arm64 (Apple Silicon): OTP release + Rust TUI ──────────────
-  # Secondary target. Publishing does NOT block on it (see publish.needs)
-  # so a flaky mac build never holds the Linux release hostage.
+  # Its artifacts are REQUIRED to publish (see the gate in `publish`): macOS is
+  # a shipping platform, and install.sh fetches osa-macos-arm64.tar.gz by name.
   build-macos-arm64:
     # macos-15, not macos-14: the macOS 14 images entered deprecation on
     # 2026-07-06, have brownout windows through October that terminate the job,
@@ -180,10 +180,28 @@ jobs:
           mix local.rebar --force
           mix deps.get --only prod
 
+      # Run from the repo root — both scripts derive every path from their own
+      # location ($0), never from the caller's cwd. ScreenShare/build.sh did NOT
+      # until v1.0.178: it passed cwd-relative swiftc inputs, died here on every
+      # tagged release, and took the whole macOS lane down with it (#238).
+      #
+      # The `-nt` check is the other half of that lesson. priv/helpers/ is
+      # TRACKED, so a helper that failed to deploy leaves the stale checked-in
+      # binary behind and a mere existence test passes; `mix release` below then
+      # bundles the stale copy and ships it silently. Comparing against a stamp
+      # taken before the builds asserts the binaries were actually rewritten now.
       - name: Build bundled macOS desktop helpers
         run: |
+          stamp="$(mktemp)"
           native/macos/ScreenShare/build.sh
           native/macos/AccessibilityHelper/build.sh
+          for h in priv/helpers/osa-screen-capture-darwin priv/helpers/osa-accessibility-darwin; do
+            [ -s "$h" ] && [ "$h" -nt "$stamp" ] || {
+              echo "::error::macOS helper was not (re)built this run: $h"
+              exit 1
+            }
+          done
+          ls -l priv/helpers/
 
       # Stamp the tag version — see the linux job for the rationale.
       - name: Stamp version from tag
@@ -239,8 +257,8 @@ jobs:
           if-no-files-found: error
 
   # ── Windows x64: OTP release (ERTS-bundled) + Rust TUI ───────────────
-  # Secondary target. Publishing does NOT block on it (see publish.needs)
-  # so a flaky Windows build never holds the Linux release hostage.
+  # Its artifacts are REQUIRED to publish (see the gate in `publish`): install.ps1
+  # fetches osa-windows-x64.zip by name.
   build-windows-x64:
     # `windows-latest` is a floating label (currently windows-2025); setup-beam
     # supports OTP 21-29 on both windows-2022 and windows-2025, so there is no
@@ -331,16 +349,17 @@ jobs:
           if-no-files-found: error
 
   # ── Publish GitHub Release ───────────────────────────────────────────
-  # Depends ONLY on the Linux x64 build (the immediate consumer). The macOS
-  # and Windows jobs still run in parallel; their assets are attached if
-  # present, skipped if the build failed (fail_on_unmatched_files defaults
-  # to false).
+  # Publishes ONLY a complete release: every platform's assets, or nothing.
+  # See the "Verify every expected asset" gate below for why.
   publish:
     # Wait for ALL platform builds so every artifact is present before attaching
     # (previously only needed linux-x64, which raced: publish ran the instant
     # linux finished and missed the windows artifact that landed seconds later).
-    # if: always() keeps the release going even if one platform fails — it
-    # attaches whatever artifacts did get produced.
+    #
+    # if: always() runs this job even when a platform build failed — NOT to
+    # publish anyway, but so the gate below can name the exact assets that went
+    # missing and fail with that message. Skipping the job instead would leave
+    # only a red build-* job and no statement about the release itself.
     needs: [build-linux-x64, build-macos-arm64, build-windows-x64]
     if: always()
     # Safe to move to 24.04 ahead of the build jobs: this one ships no compiled
@@ -372,6 +391,56 @@ jobs:
           done
           ls -la
 
+      # ── Gate: a partial release must never publish green ─────────────────
+      #
+      # v1.0.177 shipped with ZERO macOS assets and a green Release page. The
+      # macOS lane died early (a build script that only worked from its own
+      # directory), so its tarball and TUI never existed — and NOTHING in the
+      # publish path noticed: `if: always()` kept this job going and
+      # softprops/action-gh-release defaults fail_on_unmatched_files:false, so
+      # it attached whatever files did show up and called it done.
+      # install.sh downloads osa-macos-arm64.tar.gz by name, so every new macOS
+      # install and every macOS auto-update broke, silently, for real users.
+      #
+      # The asymmetry is the whole point: a tag is cheap and re-runnable, a
+      # published-but-broken Release is neither — it is immediately visible to
+      # installers and to `osa update`. So the expected asset set is verified
+      # HERE, before the Release exists, and a gap fails the job with the names
+      # of the missing files. A broken platform is still perfectly visible (its
+      # own job is red, and this step says which assets it owed); it just can no
+      # longer produce a green, half-empty release.
+      #
+      # Fix the platform build and re-run the workflow — the same tag then
+      # publishes complete. Shipping deliberately without a platform stays
+      # possible, but only as a conscious manual act (`gh release create`),
+      # never as the silent default.
+      - name: Verify every expected asset is present
+        run: |
+          missing=""
+          for f in \
+            osa-linux-x64.tar.gz \
+            osagent-tui-linux-x64 \
+            osa-macos-arm64.tar.gz \
+            osagent-tui-macos-arm64 \
+            osa-windows-x64.zip \
+            osagent-tui-windows-x64.exe
+          do
+            # -s, not -e: a 0-byte tarball is a missing asset wearing a filename.
+            # The .sha256 sidecar is checked too — install.sh verifies against it,
+            # so an asset without one is not installable either.
+            for a in "$f" "$f.sha256"; do
+              [ -s "release-assets/$a" ] || missing="${missing} ${a}"
+            done
+          done
+          if [ -n "${missing}" ]; then
+            echo "::error::Refusing to publish ${GITHUB_REF_NAME} — missing release assets:${missing}"
+            echo "No GitHub Release was created. Check the failed build-* job above,"
+            echo "fix it, and re-run this workflow for the same tag."
+            exit 1
+          fi
+          echo "All expected assets present:"
+          ls -1 release-assets
+
       - name: Create GitHub Release and upload assets
         uses: softprops/action-gh-release@v3
         with:
@@ -380,6 +449,10 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
+          # Backstop for the gate above: if this list and the gate's list ever
+          # drift, an unmatched pattern fails the job instead of quietly
+          # attaching one file fewer.
+          fail_on_unmatched_files: true
           files: |
             release-assets/osa-linux-x64.tar.gz
             release-assets/osa-linux-x64.tar.gz.sha256

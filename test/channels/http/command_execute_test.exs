@@ -102,7 +102,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.CommandExecuteTest do
     refute OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?(other_session_id)
 
     assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
-             provider: :openai_codex,
+             provider: :openai,
              session_id: session_id
            }) == "priority"
 
@@ -116,18 +116,75 @@ defmodule OptimalSystemAgent.Channels.HTTP.CommandExecuteTest do
              session_id: session_id
            }) == "auto"
 
-    assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
-             provider: :ollama,
-             session_id: session_id
-           }) == nil
+    # A provider only gets a tier when OSA has a verified way to ask IT to go
+    # faster. `openai_codex` is the sharp case: it is an OpenAI endpoint, but
+    # the ChatGPT backend does not accept the `service_tier` field at all and
+    # `OpenAICodex.request_opts/2` strips it, so resolving one here would be a
+    # value invented for a request that will never carry it.
+    for provider <- [:openai_codex, :google, :bedrock, :xai, :openrouter, :ollama] do
+      assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
+               provider: provider,
+               session_id: session_id
+             }) == nil
+    end
 
     assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
-             provider: :openai_codex,
+             provider: :openai,
              session_id: other_session_id
            }) == nil
 
     execute("fast", session_id)
     refute OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?(session_id)
+  end
+
+  test "/fast says so when the current provider cannot accelerate" do
+    session_id = "fast-honest-#{System.unique_integer([:positive])}"
+    previous = Application.get_env(:optimal_system_agent, :default_provider)
+    Application.put_env(:optimal_system_agent, :default_provider, :ollama)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:optimal_system_agent, :default_provider, previous),
+        else: Application.delete_env(:optimal_system_agent, :default_provider)
+
+      OptimalSystemAgent.Settings.clear_session(session_id)
+    end)
+
+    output = execute("fast", session_id).resp_body |> Jason.decode!() |> Map.get("output")
+
+    # The setting really is on, so the confirmation stands...
+    assert output =~ "enabled"
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?(session_id)
+
+    # ...but nothing about an ollama request changes, and the user is told that
+    # instead of being left to infer acceleration that never arrives.
+    assert output =~ "ollama has no acceleration tier"
+    assert output =~ "It takes effect on: anthropic, groq, openai"
+
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
+             provider: :ollama,
+             session_id: session_id
+           }) == nil
+  end
+
+  test "/fast names the tier it will ask for when the provider can accelerate" do
+    session_id = "fast-real-#{System.unique_integer([:positive])}"
+    previous = Application.get_env(:optimal_system_agent, :default_provider)
+    Application.put_env(:optimal_system_agent, :default_provider, :anthropic)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:optimal_system_agent, :default_provider, previous),
+        else: Application.delete_env(:optimal_system_agent, :default_provider)
+
+      OptimalSystemAgent.Settings.clear_session(session_id)
+    end)
+
+    output = execute("fast", session_id).resp_body |> Jason.decode!() |> Map.get("output")
+
+    assert output =~ "enabled"
+    assert output =~ ~s(Asking anthropic for its "auto" tier)
+    refute output =~ "no acceleration tier"
   end
 
   test "fast-tier fallback only recognizes acceleration-specific errors" do

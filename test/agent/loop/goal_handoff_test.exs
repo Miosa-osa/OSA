@@ -28,6 +28,133 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalHandoffTest do
     refute ReactLoop.goal_continue_due?(state)
   end
 
+  # `maybe_wait_for_user/2` spends a real triage round-trip on the same provider
+  # that just drove the turn, so it has to answer to the same operator switch
+  # and the same per-turn spend counters as `maybe_gate/1`. Ungated it fired on
+  # every tool-call-free generation inside a goal turn: an anchored goal with a
+  # 3-continuation budget bought 8 provider round-trips instead of 4, and an
+  # explicit `goal_verifier_enabled: false` — the setting whose whole job is to
+  # buy silence from this module — stopped none of them.
+  test "the handoff triage answers to the verifier switch and its spend guards", %{
+    sid: sid,
+    request: r
+  } do
+    keys = [:goal_verifier_enabled, :goal_verifier_triage_runner]
+    previous = Map.new(keys, &{&1, Application.fetch_env(:optimal_system_agent, &1)})
+
+    on_exit(fn ->
+      for {key, value} <- previous do
+        case value do
+          {:ok, v} -> Application.put_env(:optimal_system_agent, key, v)
+          :error -> Application.delete_env(:optimal_system_agent, key)
+        end
+      end
+    end)
+
+    parent = self()
+
+    Application.put_env(:optimal_system_agent, :goal_verifier_triage_runner, fn _ ->
+      send(parent, :triaged)
+      {:ok, Jason.encode!(Map.put(r, "status", "awaiting_user"))}
+    end)
+
+    state = %{session_id: sid, goal_mode: true, messages: []}
+
+    Application.put_env(:optimal_system_agent, :goal_verifier_enabled, false)
+    GoalVerifier.maybe_wait_for_user(state, "Draft is ready; please review.")
+
+    refute_received :triaged,
+                    "an explicit goal_verifier_enabled: false must buy silence on this path too"
+
+    Application.put_env(:optimal_system_agent, :goal_verifier_enabled, true)
+
+    # The per-turn run cap (3) and the stall early-exit (2) are budget guards,
+    # not size heuristics — unlike `:no_work`/`:trivial`, which this path exists
+    # to bypass for goals that write nothing.
+    GoalVerifier.maybe_wait_for_user(Map.put(state, :goal_verifier_runs, 3), "Draft is ready.")
+    refute_received :triaged, "the per-turn verification run cap must bound the triage too"
+
+    GoalVerifier.maybe_wait_for_user(
+      Map.put(state, :goal_verifier_stall_count, 2),
+      "Draft is ready."
+    )
+
+    refute_received :triaged, "a stalled goal must not keep paying for triage"
+
+    # And with every guard satisfied it still does its job.
+    GoalVerifier.maybe_wait_for_user(state, "Draft is ready; please review.")
+    assert_received :triaged
+    assert GoalTracker.awaiting_user?(sid)
+  end
+
+  # The handoff clause in `ReactLoop.handle_result/3` returns the waiting notice
+  # INSTEAD of the answer, and `Loop.run_and_reply/1` records only the returned
+  # string as the turn's assistant message. So the answer the user watched
+  # stream — the very artifact they are being asked to approve — has to be put
+  # into the transcript by the halting clause itself, or it is lost from
+  # history, from the persisted session, and from the context the model resumes
+  # with after `/goal approve`.
+  test "the answer that triggered the handoff stays in history", %{sid: sid, request: r} do
+    keys = [
+      :default_provider,
+      :mock_provider_final_text,
+      :max_iterations,
+      :goal_verifier_enabled,
+      :goal_verifier_triage_runner,
+      :proactive_compaction_enabled
+    ]
+
+    previous = Map.new(keys, &{&1, Application.fetch_env(:optimal_system_agent, &1)})
+
+    on_exit(fn ->
+      for {key, value} <- previous do
+        case value do
+          {:ok, v} -> Application.put_env(:optimal_system_agent, key, v)
+          :error -> Application.delete_env(:optimal_system_agent, key)
+        end
+      end
+    end)
+
+    answer = "Draft v1 is at thesis.md — the argument now runs from the survey data."
+
+    Application.put_env(:optimal_system_agent, :default_provider, :mock)
+    Application.put_env(:optimal_system_agent, :mock_provider_final_text, answer)
+    Application.put_env(:optimal_system_agent, :max_iterations, 12)
+    Application.put_env(:optimal_system_agent, :goal_verifier_enabled, true)
+    Application.put_env(:optimal_system_agent, :proactive_compaction_enabled, false)
+
+    Application.put_env(:optimal_system_agent, :goal_verifier_triage_runner, fn _ ->
+      {:ok, Jason.encode!(Map.put(r, "status", "awaiting_user"))}
+    end)
+
+    state =
+      Map.from_struct(%OptimalSystemAgent.Agent.Loop{
+        session_id: sid,
+        provider: :mock,
+        model: "mock-model-1.0",
+        iteration: 0,
+        auto_continues: 0,
+        messages: [%{role: "user", content: "draft the thesis"}],
+        tools: [],
+        permission_mode: :ask,
+        permission_tier: :full,
+        working_dir: File.cwd!()
+      })
+
+    OptimalSystemAgent.Test.MockProvider.reset_round_trips()
+    {reply, final} = ReactLoop.run(state)
+
+    assert GoalTracker.awaiting_user?(sid)
+    assert reply =~ "Waiting for your decision"
+
+    assert Enum.any?(final.messages, &(&1[:role] == "assistant" and &1[:content] == answer)),
+           "the handoff halted on the waiting notice and left the model's own answer out " <>
+             "of the transcript: #{inspect(final.messages)}"
+
+    assert OptimalSystemAgent.Test.MockProvider.round_trips() == 1,
+           "handing off to the user must cost exactly the one generation the user read"
+  end
+
   test "HTTP commands expose pending decision and clear leaves no active goal", %{
     sid: sid,
     request: r

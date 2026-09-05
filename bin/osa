@@ -148,6 +148,62 @@ _port_in_use() {
   fi
 }
 
+# ── Daemon ownership: whose backend is that, really? ─────────────
+#
+# Auto-isolation (below) keys a workspace off a hash of the launch directory
+# and remembers the port it chose in that workspace's own backend.port. But a
+# FILE outlives the process it describes: a daemon that dies without cleaning
+# up leaves a port NUMBER behind, and the OS is free to hand that number to the
+# next process that asks for one — including another workspace's OSA daemon.
+#
+# "Something healthy answers on that port" is therefore not evidence that the
+# something is ours. It used to be the entire test, which is how one folder
+# could attach to a different folder's backend and `osa stop` could kill it.
+# So ownership is asked of the daemon itself: /health reports `workspace`, the
+# OSA_ORIGINAL_CWD it was started with — the exact string this script exported
+# when it launched that daemon — and adoption requires it to equal ours.
+
+# The launch directory a daemon claims, or empty when it does not answer or
+# does not report one (any daemon older than this field). Never fails the
+# caller: "it did not say" is an answer the callers below handle explicitly.
+_daemon_workspace() {
+  local body=""
+  if command -v curl >/dev/null 2>&1; then
+    body="$(curl -sf --max-time 3 "http://localhost:${1}/health" 2>/dev/null || true)"
+  elif command -v wget >/dev/null 2>&1; then
+    body="$(wget -qO- --timeout=3 "http://localhost:${1}/health" 2>/dev/null || true)"
+  fi
+  [ -n "$body" ] || return 0
+  printf '%s' "$body" \
+    | sed -n 's/.*"workspace"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+}
+
+# Same directory? Both sides are absolute (the daemon reports a Path.expand'ed
+# string, ours is $PWD), so this only has to absorb a trailing slash. Two empty
+# paths are NOT "the same" — an unknown workspace must never match ours.
+_same_dir() {
+  local a="${1:-}" b="${2:-}"
+  [ -n "$a" ] && [ -n "$b" ] && [ "${a%/}" = "${b%/}" ]
+}
+
+# Version-independent ownership proof, for daemons too old to report a
+# workspace: is the PID this workspace recorded for its OWN daemon the process
+# currently listening on that port? Deliberately positive-only — a "no" does
+# not mean the daemon is foreign, only that we cannot prove it is ours, which
+# is exactly how the caller treats it. False positives would need a recycled
+# PID to also hold that listener; false negatives just cost a second daemon.
+_pidfile_owns_port() {
+  local pid owner
+  command -v lsof >/dev/null 2>&1 || return 1
+  [ -f "$1" ] || return 1
+  pid="$(cat "$1" 2>/dev/null || true)"
+  [ -n "$pid" ] || return 1
+  for owner in $(lsof -ti ":${2}" -sTCP:LISTEN 2>/dev/null || true); do
+    if [ "$owner" = "$pid" ]; then return 0; fi
+  done
+  return 1
+}
+
 # Elixir version check (>= 1.17)
 check_elixir_version() {
   local ver major minor
@@ -227,21 +283,45 @@ done
 # Skip entirely when the user explicitly sets either port name or OSA_HOME (the power-
 # user escape hatch). `--dev` also bypasses: the dev profile is a single
 # fixed instance on 19001.
+_OSA_AUTO_WS=0
 if [ -z "$_EXPLICIT_PORT" ] && [ "${OSA_HOME:-${HOME}/.osa}" = "${HOME}/.osa" ]; then
   _dev_flag=0
   for _a in "$@"; do [ "$_a" = "--dev" ] && _dev_flag=1; done
   if [ "$_dev_flag" -eq 0 ]; then
+    # Auto-isolation is live for this run. Recorded so the stop path knows it
+    # is dealing with a port this script CHOSE, not one the operator named.
+    _OSA_AUTO_WS=1
+
     # Hash the working directory into a short, stable slug.
     _ws_hash=$(printf '%s' "$OSA_ORIGINAL_CWD" | shasum -a 256 | cut -c1-12)
     _ws_home="${HOME}/.osa/workspaces/${_ws_hash}"
     _ws_port_file="${_ws_home}/run/backend.port"
 
-    # Does this workspace already have a daemon? Check its port file + health.
+    # Does this workspace already have a daemon? Its port file names a port —
+    # but the port file outlives the daemon, so a healthy answer there is not
+    # proof of ownership (see _daemon_workspace above). Ask who it belongs to.
     if [ -f "$_ws_port_file" ]; then
       _ws_port="$(cat "$_ws_port_file" 2>/dev/null || true)"
       if [ -n "$_ws_port" ] && _http_ok "http://localhost:${_ws_port}/health" 2>/dev/null; then
-        PORT="$_ws_port"
-        OSA_HOME="$_ws_home"
+        _ws_owner="$(_daemon_workspace "$_ws_port")"
+        if _same_dir "$_ws_owner" "$OSA_ORIGINAL_CWD"; then
+          # It says it is ours, and it is.
+          PORT="$_ws_port"
+          OSA_HOME="$_ws_home"
+        elif [ -z "$_ws_owner" ] && _pidfile_owns_port "${_ws_home}/run/backend.pid" "$_ws_port"; then
+          # It predates the `workspace` field, so it cannot identify itself —
+          # and refusing every such daemon would orphan the warm backend of
+          # every user upgrading past this version, leaving it running on a
+          # port nobody adopts again. Adopt it only on independent proof: the
+          # PID we recorded for THIS workspace is the one holding that listener.
+          # The skew repair further down then restarts it onto the new build.
+          PORT="$_ws_port"
+          OSA_HOME="$_ws_home"
+        elif [ -n "$_ws_owner" ]; then
+          # It answered, and named someone else's folder. Say so once — this is
+          # the case that used to silently hijack another workspace's backend.
+          echo -e "${DIM}:${_ws_port} now belongs to ${_ws_owner} — starting a separate backend for this folder.${RESET}" >&2
+        fi
       fi
     fi
 
@@ -531,6 +611,39 @@ stop_daemon() {
   echo -e "${GREEN}✓${RESET} Backend stopped."
 }
 
+# ── Last gate before anything gets killed ───────────────────────────────────
+#
+# Auto-isolation adopts a daemon only after it confirms the workspace, but that
+# decision and this kill are separated by everything in between: our daemon can
+# exit and another workspace's can take the port number in the gap. So the
+# question is asked again, right here, against the process that is answering
+# NOW. 0 = safe to stop, 1 = it belongs to someone else, leave it alone.
+#
+# Two deliberate exemptions, both "the operator named this target explicitly":
+#
+#   * $_OSA_AUTO_WS = 0 — OSA_PORT / OSA_HOME / --dev bypass isolation entirely.
+#     Those are documented single-instance escape hatches; `osa stop --dev` must
+#     keep stopping the dev daemon on :19001 no matter which folder it is run
+#     from, which is precisely a cross-workspace stop, deliberately.
+#   * A daemon that answers but reports no workspace (older than the field).
+#     It is unidentifiable, not foreign, and refusing would leave `osa stop`
+#     permanently unable to clean up after any pre-1.0.178 daemon. Silence is
+#     permission here; the adoption path is where an unidentifiable daemon has
+#     to earn its way in, and it does that against the pidfile instead.
+_stop_target_is_ours() {
+  local owner
+  [ "${_OSA_AUTO_WS:-0}" = "1" ] || return 0
+  owner="$(_daemon_workspace "$PORT")"
+  [ -n "$owner" ] || return 0
+  _same_dir "$owner" "$OSA_ORIGINAL_CWD" && return 0
+
+  echo -e "${YELLOW}⚠${RESET} ${BOLD}Refusing to stop the backend on :${PORT} — it is not this folder's.${RESET}" >&2
+  echo -e "    ${DIM}that daemon's folder:${RESET} ${owner}" >&2
+  echo -e "    ${DIM}this folder:${RESET}         ${OSA_ORIGINAL_CWD}" >&2
+  echo -e "  ${DIM}Stop it where it belongs:${RESET} ${CYAN}cd ${owner} && osa stop${RESET}" >&2
+  return 1
+}
+
 # Stop the backend and POLL until :$PORT really stops answering.
 #
 # `stop_daemon` signals and waits on the PID, but the PID is not the contract —
@@ -543,8 +656,14 @@ stop_daemon() {
 # Pass "quiet" to swallow stop_daemon's own pid/progress chatter — the launch
 # path repairs skew as routine housekeeping and should read as one calm line,
 # not as a three-line incident report about a process the user never asked about.
+#
+# Refuses outright when :$PORT is answering for a DIFFERENT workspace — see
+# _stop_target_is_ours. Killing by port is the one irreversible act in this
+# script, so ownership is re-checked here and not merely inherited from the
+# adoption decision several hundred lines earlier.
 _stop_backend_confirmed() {
   local n=0
+  _stop_target_is_ours || return 1
   if [ "${1:-}" = "quiet" ]; then
     stop_daemon >/dev/null 2>&1 || true
   else

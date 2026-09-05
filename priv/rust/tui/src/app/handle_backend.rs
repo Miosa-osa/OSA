@@ -1583,10 +1583,26 @@ impl App {
                             crate::components::toast::ToastLevel::Info,
                         );
                     }
+                    // No drain here on purpose: `start_sse` above reattaches the
+                    // stream to this id, and `SseConnected` is the boundary that
+                    // drains the queue. Sending a queued prompt from here would
+                    // race the attach and stream the answer into a session
+                    // nothing is listening on yet.
                 }
                 Err(e) => {
+                    // **Reopen the gate.** `create_session` closes it
+                    // (`session_creation_pending = true`) and, until this line,
+                    // only the `Ok` arm above ever reopened it — so a failed
+                    // create left `startup_session_pending` true forever. From
+                    // there `submit_input` enqueued every message and returned,
+                    // and `maybe_dequeue_message` early-returned at every
+                    // turn-completion site: the user typed, watched a dim queued
+                    // line pile up, and nothing was ever sent, with no way out
+                    // short of restarting. A failed create is a failed create —
+                    // it must not also be a wedged session.
+                    self.session_creation_pending = false;
                     self.toasts.push(
-                        format!("Session create failed: {}", e),
+                        format!("Session create failed: {} \u{2014} /new to retry", e),
                         crate::components::toast::ToastLevel::Error,
                     );
                 }
@@ -3379,11 +3395,29 @@ impl App {
                         self.transition(AppState::Idle);
                     }
 
+                    // First run has no session yet — the wizard branch replaced
+                    // the resolution step. Without this every message typed
+                    // after setup is enqueued forever.
+                    self.resolve_session_after_onboarding();
+
                     // Auto-send bootstrap message — agent speaks first
-                    // This kicks off the BOOTSTRAP.md identity ritual
-                    self.submit_prompt("Hey, I just set you up. What's good?");
+                    // This kicks off the BOOTSTRAP.md identity ritual.
+                    //
+                    // Through `submit_input`, not `submit_prompt`: the session
+                    // requested above does not exist yet, and `submit_prompt`
+                    // would fire the greeting at the provisional id that
+                    // `SessionCreated` is about to replace — the very race the
+                    // startup gate exists to prevent. `submit_input` respects
+                    // that gate, so the greeting queues and goes out the moment
+                    // the real id lands.
+                    self.submit_input("Hey, I just set you up. What's good?");
                 }
                 Err(e) => {
+                    // Setup failed, but the dialog handler already dismissed the
+                    // wizard before POSTing, so the user is sitting at an Idle
+                    // prompt that the unresolved startup gate is still swallowing
+                    // input from. Give them a session to retry in.
+                    self.resolve_session_after_onboarding();
                     self.toasts.push(
                         format!("Onboarding failed: {}", e),
                         crate::components::toast::ToastLevel::Error,

@@ -517,6 +517,44 @@ mod tests {
         ));
     }
 
+    /// **ESC followed by a multi-byte char must not abort the session.**
+    ///
+    /// Both escape scrubbers advance by `util::escape_len_at`'s byte length, and
+    /// the catch-all two-byte escape returned 2 whatever followed ESC. When that
+    /// was a UTF-8 lead byte the slice landed mid-codepoint:
+    ///
+    /// ```text
+    /// byte index 2 is not a char boundary; it is inside '✓' (bytes 1..4)
+    /// ```
+    ///
+    /// This path carries RAW tool output (`tools::bash` → `collapse` →
+    /// `scrub_terminal_output`), so `printf '\033✓'` in a command, or an ANSI
+    /// sequence a log clipped mid-escape, killed the TUI.
+    #[test]
+    fn an_escape_before_a_multibyte_char_does_not_panic() {
+        // The reported string, exactly.
+        assert_eq!(&*scrub_terminal_output("\u{1b}\u{2713} done"), " done");
+
+        // The same input through the span backstop, the other escape scrubber.
+        assert_eq!(scrub_rendered_span("\u{1b}\u{2713} done"), " done");
+
+        // Every multi-byte width, at the head, in the middle and at the end —
+        // and a clipped CSI/OSC whose parameters run into non-ASCII text.
+        for hostile in [
+            "\u{1b}\u{2713}",
+            "a\u{1b}\u{20ac}b",
+            "a\u{1b}\u{1f600}",
+            "\u{1b}\u{e9}tape",
+            "a\u{1b}[38;5;\u{2713}b",
+            "a\u{1b}]0;\u{2713}",
+            "\u{1b}\u{2713}\u{1b}\u{2713}\u{1b}",
+        ] {
+            let out = scrub_terminal_output(hostile);
+            assert!(!out.contains('\u{1b}'), "ESC survived: {out:?}");
+            let _ = scrub_rendered_span(hostile);
+        }
+    }
+
     #[test]
     fn the_optional_variant_preserves_none() {
         assert_eq!(scrub_untrusted_line_opt(None), None);

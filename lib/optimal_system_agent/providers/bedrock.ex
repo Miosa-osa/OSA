@@ -155,8 +155,16 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
   def build_request_body(messages, model, opts \\ []) do
     {system, conversation} = split_system(messages)
 
+    # No service tier on this body, deliberately. The shape it used to send,
+    # `"serviceTier" => %{"type" => tier}` at the Converse top level, is not a
+    # field this module ever verified against the live API, and the tier it
+    # carried ("priority") is OpenAI's vocabulary rather than anything AWS
+    # documents. Converse's documented latency knob is `performanceConfig`, a
+    # different field with a different shape. Guessing costs a rejected request
+    # plus the tier-less retry behind it on every `/fast` turn, which is worse
+    # than not having the feature, so this stays out until a live call
+    # confirms the field name and its accepted values.
     %{"messages" => format_messages(conversation)}
-    |> maybe_put_service_tier(Keyword.get(opts, :service_tier))
     |> put_unless_empty("system", Enum.map(system, &%{"text" => &1}))
     |> put_inference_config(opts)
     |> put_tool_config(opts)
@@ -170,11 +178,6 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
     |> ImageBudget.gate_unsupported(:bedrock, model)
     |> ImageBudget.apply(provider: :bedrock)
   end
-
-  # Bedrock Converse expects a tagged object, not the bare tier string used by
-  # OpenAI-compatible and Gemini APIs.
-  defp maybe_put_service_tier(body, nil), do: body
-  defp maybe_put_service_tier(body, tier), do: Map.put(body, "serviceTier", %{"type" => tier})
 
   defp do_chat(auth, model, messages, opts) do
     body = build_request_body(messages, model, opts)

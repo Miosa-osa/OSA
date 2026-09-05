@@ -96,7 +96,8 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
   @doc """
   Configured context budget, falling back to Codex's advertised client maximum.
   An explicit per-model override is a client budget, not proof of account
-  entitlement. Never expand a small model or exceed its published model window.
+  entitlement. Never expand a small model, and never exceed either the model's
+  published window or what this transport accepts.
   """
   def context_window(model) do
     context_window(model, OptimalSystemAgent.Settings.get("codex_context_windows", %{}))
@@ -107,7 +108,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
     fallback = Map.get(@context_windows, model)
     requested = if is_map(overrides), do: Map.get(overrides, model)
     published = OptimalSystemAgent.Providers.OpenAIModels.model(model)
-    ceiling = if published, do: published.ctx, else: fallback
+    ceiling = ceiling(published, fallback)
 
     if is_integer(requested) and requested > 0 and is_integer(ceiling) do
       min(requested, ceiling)
@@ -115,6 +116,20 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
       fallback
     end
   end
+
+  # An override has to clear BOTH ceilings, not just the published one. The
+  # model card carries the PUBLIC API's window (1.05M across the 5.6 family);
+  # Codex is a different transport with its own, smaller advertised maximum
+  # (872k), so a budget built to the public number over-fills this endpoint by
+  # up to 178k tokens. That failure is silent in the worst way: compaction
+  # never fires, because OSA believes the context still fits, and the request
+  # then dies at the wire with the same undiagnosable empty 400 Codex answers
+  # every unsupported request with.
+  defp ceiling(%{ctx: ctx}, fallback) when is_integer(ctx) and is_integer(fallback),
+    do: min(ctx, fallback)
+
+  defp ceiling(%{ctx: ctx}, _fallback) when is_integer(ctx), do: ctx
+  defp ceiling(_published, fallback), do: fallback
 
   @doc "True when a ChatGPT plan is connected. Pure read — never refreshes."
   @spec configured?() :: boolean()
@@ -242,6 +257,17 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
     # agent loop supplies `max_tokens` for every provider, so strip it at this
     # provider boundary and let Codex enforce its own output ceiling.
     |> Keyword.delete(:max_tokens)
+    # `service_tier` is that same defect wearing a different field name: one
+    # more public Responses field this endpoint does not accept, answered with
+    # the same bodyless 400 whose reason string ("HTTP 400: ") names nothing.
+    # It matters more than it looks, because `/fast` is a persistent
+    # per-session toggle: without this delete the first `/fast` turn on a Codex
+    # plan fails and so does every turn after it, with no error text anyone can
+    # act on. Stripped here rather than where the tier is resolved because this
+    # is the one chokepoint every Codex-bound request passes through, the
+    # `openai` -> `openai_codex` fallback hop included (Registry's
+    # `cross_provider_opts/1` drops only `:model`).
+    |> Keyword.delete(:service_tier)
   end
 
   defp auth_error(reason) do

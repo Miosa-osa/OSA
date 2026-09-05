@@ -101,12 +101,17 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
   def capped_retry_delay_ms(_), do: 0
 
-  # Map the session's speed priority to a provider processing tier. Adapters
-  # gate and translate this option, so unsupported providers ignore it. :loose → "flex" (~50%
-  # cheaper, slower — right for long-horizon background work); :immediate →
-  # "priority" (faster). The interactive `/fast` toggle also opts ordinary
-  # foreground turns into OpenAI Fast processing; provider adapters that do
-  # not support service tiers simply ignore the option.
+  # Map the session's speed priority to a provider processing tier, or to `nil`
+  # when this provider has no tier OSA can ask it for.
+  #
+  # `nil` is an answer here, not a gap. The previous shape resolved a tier for
+  # every provider on the theory that adapters gate and translate the option so
+  # unsupported providers ignore it, and no API does that: an unrecognized
+  # `service_tier` is a validation error, and one endpoint (ChatGPT Codex)
+  # rejects the FIELD itself with an empty 400. So the tier is resolved once,
+  # here, against the vocabulary each provider actually has, and the provider
+  # boundaries re-check it (`Anthropic.apply_service_tier/2`, `OpenAICompat`'s
+  # `@service_tiers`) for callers that never come through this path.
   defp maybe_put_service_tier(opts, state) do
     case service_tier_for(state) do
       nil -> opts
@@ -114,16 +119,53 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     end
   end
 
+  # The acceleration tier OSA may request from a provider, and the word that
+  # provider uses for it. Absence is the meaningful part: it says OSA has no
+  # verified way to ask THIS provider to go faster, so `/fast` changes nothing
+  # on it and the command surface has to say so.
+  #
+  #   * `openai` takes "priority", its documented paid-acceleration tier.
+  #   * `anthropic` and `groq` both define "auto" as "use priority/performance
+  #     capacity when this account has it, otherwise standard capacity", which
+  #     is what makes `/fast` safe without a capacity commitment.
+  #   * `openai_codex` is absent even though it is an OpenAI endpoint: the
+  #     ChatGPT backend does not accept the `service_tier` field at all, so
+  #     `OpenAICodex.request_opts/2` strips it and a tier resolved here would
+  #     be thrown away one layer down.
+  #   * `google`, `bedrock`, `xai` and `openrouter` are absent because neither
+  #     a field name nor an accepted value has been verified against them.
+  @fast_tiers %{openai: "priority", anthropic: "auto", groq: "auto"}
+
+  # The cheaper-and-slower counterpart, for long-horizon background work
+  # (`:loose`). Same rule: only where "flex" is in the provider's own
+  # vocabulary, which is why it is a shorter list than @fast_tiers.
+  @flex_tiers %{openai: "flex", groq: "flex"}
+
+  @doc """
+  The acceleration tier `provider` accepts, or `nil` when it has none.
+
+  Public because `/fast` has to tell the user which of the two they got.
+  Announcing "enabled" on a provider that cannot accelerate is a claim OSA
+  cannot keep: nothing about the request changes and the turn runs at exactly
+  the speed it would have anyway.
+  """
+  @spec fast_tier_for(atom()) :: String.t() | nil
+  def fast_tier_for(provider), do: Map.get(@fast_tiers, provider)
+
+  @doc "The providers `/fast` genuinely accelerates, for user-facing copy."
+  @spec fast_tier_providers() :: [atom()]
+  def fast_tier_providers, do: @fast_tiers |> Map.keys() |> Enum.sort()
+
   @doc false
   def service_tier_for(state) when is_map(state) do
     provider = Map.get(state, :provider)
 
     case Map.get(state, :priority) do
       :loose ->
-        "flex"
+        Map.get(@flex_tiers, provider)
 
       :immediate ->
-        "priority"
+        fast_tier_for(provider)
 
       _ ->
         if fast_service_tier?(Map.get(state, :session_id)),
@@ -133,17 +175,6 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   end
 
   def service_tier_for(_), do: nil
-
-  # Both Anthropic and Groq define `auto` as "use priority/performance capacity
-  # when this account has it, otherwise fall back to standard capacity". That
-  # makes `/fast` safe for accounts without a paid capacity commitment.
-  defp fast_tier_for(provider) when provider in [:anthropic, :groq], do: "auto"
-
-  defp fast_tier_for(provider)
-       when provider in [:openai, :openai_codex, :xai, :google, :openrouter, :bedrock],
-       do: "priority"
-
-  defp fast_tier_for(_), do: nil
 
   @doc "Whether provider Fast processing is enabled independently of reasoning effort."
   def fast_service_tier? do
@@ -161,10 +192,31 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     enabled
   end
 
-  def toggle_fast_service_tier(session_id) do
+  def toggle_fast_service_tier(session_id) when is_binary(session_id) and session_id != "" do
     enabled = not fast_service_tier?(session_id)
     OptimalSystemAgent.Settings.set_session_for(session_id, :openai_fast_service_tier, enabled)
     enabled
+  end
+
+  # No usable session id. `set_session_for(nil, …)` writes the daemon-wide
+  # `:global` session row, and every session resolves the global rows UNDER its
+  # own, so one caller toggling `/fast` with a missing id would silently switch
+  # fast processing on for every concurrent session in the daemon. Defer to the
+  # arity that resolves the CALLER's own session from the process dictionary,
+  # which reaches `:global` only when there is genuinely no session anywhere to
+  # scope to. That last case stays possible on purpose (a one-shot headless run
+  # has no session), but it does not stay quiet: a daemon-wide flip of an
+  # interactive per-session toggle is exactly the kind of thing nobody can
+  # explain afterwards.
+  def toggle_fast_service_tier(_session_id) do
+    if OptimalSystemAgent.Settings.current_session() == :global do
+      Logger.warning(
+        "[llm] /fast was toggled with no session in context, so it applies daemon-wide: " <>
+          "every session without a setting of its own will read it"
+      )
+    end
+
+    toggle_fast_service_tier()
   end
 
   defp retry_after_cap_ms do
@@ -444,9 +496,18 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   # Priority tiers are entitlement- and model-dependent. A provider may reject
   # the tier even though it supports the field generally. Fall back once to the
   # identical request at its normal tier; never alter reasoning, tools, or model.
+  #
+  # Two ways a provider says no, and only one of them is in words. The second,
+  # a 4xx with no message at all, is read as a tier rejection ONLY here, where
+  # the request is already known to have carried a `service_tier`: an empty 400
+  # on a request that never mentioned a tier keeps its own meaning and is
+  # returned untouched. The cost of being wrong is one repeated round-trip on a
+  # turn that was already failing; the cost of not reading it was a permanent
+  # dead end on any endpoint that reports unsupported fields silently.
   defp maybe_retry_without_service_tier({:error, reason}, messages, opts, request)
        when is_function(request, 2) do
-    if Keyword.has_key?(opts, :service_tier) and tier_rejection?(reason) do
+    if Keyword.has_key?(opts, :service_tier) and
+         (tier_rejection?(reason) or bodyless_client_error?(reason)) do
       Logger.warning("[llm] Fast tier unavailable; retrying at the provider's default tier")
       request.(messages, Keyword.delete(opts, :service_tier))
     else
@@ -469,6 +530,31 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       "fast mode"
     ])
   end
+
+  @doc """
+  A 4xx that arrived carrying no message at all.
+
+  Deliberately NOT folded into `tier_rejection?/1`. On its own an empty 400
+  says nothing about tiers, and classifying it as one everywhere would swallow
+  unrelated failures; it is read at the single call site that already knows a
+  `service_tier` was attached to the request.
+
+  It has to be read somewhere, though, because the endpoint most likely to
+  refuse a tier is also the one that explains itself least: the ChatGPT Codex
+  backend answers an unsupported request field with a bare HTTP 400 and an
+  empty body, which reaches this module as the reason string `"HTTP 400: "`.
+  No vocabulary match can fire on that, so the turn simply dead-ended, once per
+  turn, for as long as the `/fast` toggle stayed on.
+  """
+  @spec bodyless_client_error?(term()) :: boolean()
+  def bodyless_client_error?(reason) when is_binary(reason) do
+    case Regex.run(~r/^\s*HTTP\s+4\d\d\s*:\s*(.*)$/s, reason) do
+      [_, detail] -> String.trim(detail) == ""
+      _ -> false
+    end
+  end
+
+  def bodyless_client_error?(_), do: false
 
   defp repair_field(%{} = result, key) do
     case Map.get(result, key) do

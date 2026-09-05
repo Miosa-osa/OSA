@@ -1311,25 +1311,48 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     end
   end
 
-  # OpenAI o-series reasoning models (o1/o3/o4) reject the classic `max_tokens`
-  # field and require `max_completion_tokens`. Every other OpenAI-compatible
-  # provider uses `max_tokens`. Route the value to the right key so o-series
-  # calls don't 400 ("max_tokens is not supported with this model").
-  # Processing tiers are not universally OpenAI-compatible. Send the field only
-  # to providers whose native API documents it; local and unknown compatibility
-  # endpoints continue to receive no extra field.
+  # Processing tiers are not universally OpenAI-compatible, and the vocabulary
+  # is per-provider even where the FIELD is shared: "priority" is OpenAI's
+  # word, "performance" is Groq's, "standard_only" is Anthropic's. Forwarding
+  # one provider's word to another is not a harmless no-op, because an
+  # unrecognized `service_tier` is a validation error rather than an ignored
+  # field: the turn pays for a rejected request plus the tier-less retry behind
+  # it, every turn, for acceleration the account never receives.
+  #
+  # Hence an allowlist PER PROVIDER, not a list of providers that get whatever
+  # the loop resolved. Same shape as `Anthropic.apply_service_tier/2`. Anything
+  # outside a provider's own vocabulary is dropped, which lands the request on
+  # that provider's default tier: exactly where the fallback retry would have
+  # put it, minus the extra round-trip.
+  #
+  # `:xai` and `:openrouter` are absent on purpose. Neither documents a tier
+  # vocabulary OSA has verified, and an unknown `service_tier` came back from
+  # them as an HTTP 422. Add either one back only with a value checked against
+  # the live API.
+  @service_tiers %{
+    # OpenAI's documented enum.
+    openai: ["auto", "default", "flex", "priority", "scale"],
+    # Groq's own words. "auto" means "use performance capacity when this
+    # account has it, otherwise on-demand", which is why `/fast` resolves to it
+    # for Groq instead of to OpenAI's "priority".
+    groq: ["auto", "on_demand", "flex", "performance"]
+  }
+
   defp maybe_add_service_tier(body, opts) do
     tier = Keyword.get(opts, :service_tier)
     provider = Keyword.get(opts, :provider, image_provider(opts))
 
-    if is_binary(tier) and tier != "" and
-         provider in [:openai, :xai, :openrouter, :groq] do
+    if tier in Map.get(@service_tiers, provider, []) do
       Map.put(body, :service_tier, tier)
     else
       body
     end
   end
 
+  # OpenAI o-series reasoning models (o1/o3/o4) reject the classic `max_tokens`
+  # field and require `max_completion_tokens`. Every other OpenAI-compatible
+  # provider uses `max_tokens`. Route the value to the right key so o-series
+  # calls don't 400 ("max_tokens is not supported with this model").
   defp maybe_add_max_tokens(body, model, opts) do
     case Keyword.get(opts, :max_tokens) do
       nil ->

@@ -71,6 +71,8 @@ pub fn fit_cols(s: &str, max_cols: usize) -> String {
 ///   visible text, and then the trailing `ESC \` eats the real output after it.
 /// * **DCS/SOS/PM/APC** — `ESC P|X|^|_` … terminated by `ST` (tmux passthrough).
 /// * **Two-byte** — `ESC <single byte>`, the catch-all (includes a bare `ESC \`).
+///
+/// The length returned is always a char boundary, so callers can slice with it.
 pub fn escape_len_at(s: &str, at: usize) -> Option<usize> {
     let b = s.as_bytes();
     if b.get(at) != Some(&0x1b) {
@@ -103,8 +105,14 @@ pub fn escape_len_at(s: &str, at: usize) -> Option<usize> {
             }
             Some(b.len() - at)
         }
-        // Anything else is a two-byte escape (`ESC \`, `ESC =`, charset selects…).
-        _ => Some(2),
+        // Anything else is a two-byte escape (`ESC \`, `ESC =`, charset selects…)
+        // — except when the byte after ESC is a UTF-8 lead byte, where "two
+        // bytes" lands INSIDE a char. Every caller slices at the length returned
+        // here, so `printf '\033✓'` or an ANSI sequence clipped mid-escape by a
+        // log used to abort the process on a char-boundary panic. Consume the
+        // following char whole: still the fail-closed direction (the char is
+        // attributed to the escape and dropped), and always a boundary.
+        _ => Some(1 + s[at + 1..].chars().next().map_or(1, char::len_utf8)),
     }
 }
 
@@ -875,5 +883,35 @@ mod tests {
     #[test]
     fn fit_arg_summary_leaves_short_values_untouched() {
         assert_eq!(fit_arg_summary("smoke-e2e", 60), "smoke-e2e");
+    }
+
+    /// **Every length this returns must be a char boundary.**
+    ///
+    /// The catch-all two-byte escape returned 2 regardless of what followed
+    /// ESC, so `printf '\033✓'` — or any ANSI sequence a log clipped mid-escape
+    /// — made every caller slice into the middle of a codepoint and abort the
+    /// session: `byte index 2 is not a char boundary; it is inside '✓'`. Raw
+    /// tool output reaches these scanners unsanitised, so the input is the
+    /// attacker's to choose.
+    #[test]
+    fn escape_len_never_splits_a_codepoint() {
+        for tail in ["\u{2713} done", "\u{20ac}", "\u{1f600}!", "\u{e9}", "=b"] {
+            let s = format!("a\u{1b}{tail}");
+            let len = escape_len_at(&s, 1).expect("ESC at byte 1");
+            assert!(
+                s.is_char_boundary(1 + len),
+                "escape_len_at cut inside a codepoint of {s:?}: len={len}"
+            );
+            // The callers' loop, which is what actually panicked.
+            let _ = &s[1 + len..];
+        }
+    }
+
+    /// `cols` walks the same lengths, so it inherited the panic. A width
+    /// measurement must never abort — it runs on every frame of every row.
+    #[test]
+    fn cols_survives_an_escape_before_a_multibyte_char() {
+        assert_eq!(cols("\u{1b}\u{2713} done"), 5); // ESC+✓ consumed, " done" measured
+        assert_eq!(cols("a\u{1b}\u{1f600}b"), 2);
     }
 }
