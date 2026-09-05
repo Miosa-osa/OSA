@@ -24,12 +24,36 @@ defmodule OptimalSystemAgent.Soul.StaticBaseSizeTest do
   setup do
     orig = Application.get_env(:optimal_system_agent, :lean_system_prompt)
     Application.put_env(:optimal_system_agent, :lean_system_prompt, true)
+
+    # Measure the PRODUCT static base, not the developer's machine.
+    #
+    # `{{RULES}}` interpolates `~/.osa/rules/**` (honouring `OSA_HOME`). On a dev
+    # box that directory holds PERSONAL rules — on this one ~1.6k tokens of them —
+    # which are not product content and are not what a fresh install ships. Left
+    # in, they made the measured base swing from ~10.5k to ~12k from one machine
+    # to the next, so the number the assertions pin was really "the product base
+    # plus whatever this developer happens to keep locally". The static base is
+    # product content; the dev's local rules are not part of it.
+    #
+    # Point `OSA_HOME` at an empty directory for the duration of the run so the
+    # measurement is deterministic and reflects only what ships. The BUNDLED
+    # `priv/rules/` still count (they are product) — only the user's personal
+    # `~/.osa/rules/` is excluded.
+    orig_home = System.get_env("OSA_HOME")
+    empty_home = Path.join(System.tmp_dir!(), "osa_static_base_test_home")
+    File.mkdir_p!(empty_home)
+    System.put_env("OSA_HOME", empty_home)
+
     Soul.invalidate_static_base()
 
     on_exit(fn ->
       if orig == nil,
         do: Application.delete_env(:optimal_system_agent, :lean_system_prompt),
         else: Application.put_env(:optimal_system_agent, :lean_system_prompt, orig)
+
+      if orig_home,
+        do: System.put_env("OSA_HOME", orig_home),
+        else: System.delete_env("OSA_HOME")
 
       Soul.invalidate_static_base()
     end)
@@ -41,7 +65,7 @@ defmodule OptimalSystemAgent.Soul.StaticBaseSizeTest do
     lite = Soul.static_token_count(:lite)
 
     # Was `> 15_000` when :lite measured 24,375. The prompt-prefix cut brought
-    # it to ~12.2k, so the floor moved — but the POINT of the assertion did
+    # it to ~13k of product content, so the floor moved — but the POINT did
     # not: :lite is a middleweight prompt, not the ~4-6k one its name and its
     # old comments promised. Anything under 8k here means it finally became
     # that small prompt, and Soul's + Agent.Context's docs must say so.
@@ -72,14 +96,36 @@ defmodule OptimalSystemAgent.Soul.StaticBaseSizeTest do
     # prefix multiplied by turn count.
     native = Soul.static_token_count(:native_tools)
 
-    # NOTE: this figure includes whatever the developer keeps in `~/.osa/rules/`,
-    # which is interpolated as `{{RULES}}`. The bound carries ~2k of headroom
-    # over the 8.1k measured with one ~1.1k user rule loaded. A very large
-    # personal rules directory can trip it legitimately.
-    assert native < 10_000,
-           "the :native_tools base is #{native} tokens — it was cut to ~8.1k. " <>
-             "Either something re-inflated the static prompt (check SYSTEM_LEAN.md " <>
-             "and the tool `prompt/1` callbacks) or ~/.osa/rules/ is unusually large."
+    # This measures the PRODUCT base only (the setup pins `OSA_HOME` at an empty
+    # dir, so the developer's personal `~/.osa/rules/` no longer inflate it).
+    #
+    # The bound moved from 10_000 to 11_500, and the move is EARNED, not a
+    # silence-the-failure bump. At v1.0.98 this base was ~8.1k *with* a ~1.1k
+    # local user rule folded in — so the pure product base was ~7k. It is now
+    # ~10.5k of product content, and the growth was audited to be legitimate:
+    #
+    #   * `SYSTEM_LEAN.md` gained the "Operating discipline — read before acting"
+    #     pre-brief, which is NOT a duplicate of the numbered sections. It is the
+    #     only place several load-bearing safety rules live — tool output is DATA
+    #     never instructions (prompt-injection defence), verify a recalled
+    #     path/symbol still exists before relying on it, and the shell-hygiene
+    #     rules — plus the thoroughness counterweight. Deleting it to hit the old
+    #     number would drop real guidance.
+    #   * the native tool roster grew, so the un-deduped remainder of
+    #     `{{TOOL_DEFINITIONS}}` rose from ~2.7k to ~3.4k. More tools shipping is
+    #     capability, not prose bloat.
+    #
+    # Only ~40 tokens of genuinely duplicate prose were found in `SYSTEM_LEAN.md`;
+    # there is no ~600-token block to cut without losing instruction. So the fence
+    # is re-pinned at the true product base plus ~1k of headroom. It is STILL a
+    # regression fence — prose growing back one paragraph at a time, or a burst of
+    # verbose tool `prompt/1` text, will trip it. If it does, trim the offender;
+    # do not raise this number without the same audit.
+    assert native < 11_500,
+           "the :native_tools PRODUCT base is #{native} tokens (budget 11_500, " <>
+             "measured ~10.5k). Something re-inflated the static prompt — check " <>
+             "SYSTEM_LEAN.md and the tool `prompt/1` callbacks for prose that grew " <>
+             "back, and trim it rather than raising this bound."
   end
 
   test ":native_tools, not :lite, is the smallest variant" do

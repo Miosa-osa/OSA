@@ -39,6 +39,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUseTest do
       {:wait, 1}
     ]
 
+    # `function_exported?/3` reports false for a module that is not yet loaded,
+    # so without this the test passes or fails on pure load order — it flaked as
+    # a phantom "missing get_tree/0" in full-suite runs where nothing had loaded
+    # the adapter first (issue #208). Load it, then check the surface.
+    assert Code.ensure_loaded?(MacOSAdapter)
+
     Enum.each(callbacks, fn {name, arity} ->
       assert function_exported?(MacOSAdapter, name, arity), "missing #{name}/#{arity}"
     end)

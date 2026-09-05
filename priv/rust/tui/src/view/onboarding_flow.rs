@@ -387,6 +387,34 @@ fn push_provider_select(
     lines.push(Line::from(""));
 }
 
+/// Render one credential input row: an active field gets the pointer glyph and
+/// a trailing caret; an inactive field is drawn dim with no caret, so with two
+/// fields it is always clear which one the keyboard is editing.
+fn input_field_line<'a>(
+    value: String,
+    active: bool,
+    theme: &crate::style::Theme,
+) -> Line<'a> {
+    if active {
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(SYM_CURSOR.to_string(), Style::default().fg(theme.colors.primary)),
+            Span::raw(" "),
+            Span::styled(
+                format!("{}_", value),
+                Style::default()
+                    .fg(theme.colors.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::raw("    "),
+            Span::styled(value, Style::default().fg(theme.colors.dim)),
+        ])
+    }
+}
+
 fn push_details_input(
     lines: &mut Vec<Line<'static>>,
     wizard: &OnboardingWizard,
@@ -439,17 +467,9 @@ fn push_details_input(
             display.clone()
         };
 
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(SYM_CURSOR.to_string(), Style::default().fg(theme.colors.primary)),
-            Span::raw(" "),
-            Span::styled(
-                format!("{}_", masked_indicator),
-                Style::default()
-                    .fg(theme.colors.primary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        // The key field is active unless the cursor has moved to the URL field.
+        let key_active = !wizard.flow_details_on_url();
+        lines.push(input_field_line(masked_indicator, key_active, theme));
         lines.push(Line::from(""));
     }
 
@@ -459,15 +479,21 @@ fn push_details_input(
             Span::styled("Base URL:".to_string(), Style::default().fg(theme.colors.muted)),
         ]));
 
-        let url = wizard.flow_base_url();
+        let url = wizard.flow_base_url().to_string();
+        let url_active = wizard.flow_details_on_url();
+        lines.push(input_field_line(url, url_active, theme));
+        lines.push(Line::from(""));
+    }
+
+    // Inline validation (e.g. required base URL left blank), shown in place so
+    // the user fixes it here instead of hitting an opaque failure at Verify.
+    if let Some(err) = wizard.flow_details_error() {
         lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(SYM_CURSOR.to_string(), Style::default().fg(theme.colors.primary)),
-            Span::raw(" "),
+            Span::raw("     "),
             Span::styled(
-                format!("{}_", url),
+                err.to_string(),
                 Style::default()
-                    .fg(theme.colors.primary)
+                    .fg(theme.colors.error)
                     .add_modifier(Modifier::BOLD),
             ),
         ]));
@@ -970,10 +996,15 @@ fn build_help_line<'a>(
             ]);
         }
         1 => {
+            // Only advertise field navigation when there are two fields to move
+            // between, and the reveal chord only when there is a key to reveal.
+            if wizard.flow_provider_needs_key() && wizard.flow_provider_needs_url() {
+                spans.extend([key("Tab"), desc(" switch field"), sep()]);
+            }
+            if wizard.flow_provider_needs_key() {
+                spans.extend([key("Ctrl+R"), desc(" show/hide"), sep()]);
+            }
             spans.extend([
-                key("Tab"),
-                desc(" show/hide"),
-                sep(),
                 key("Enter"),
                 desc(" next"),
                 sep(),
@@ -1070,6 +1101,13 @@ mod flow_render_tests {
         let _ = wizard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
     }
 
+    /// Type a base URL into the details step (custom providers require one).
+    fn type_base_url(wizard: &mut OnboardingWizard) {
+        for c in "https://api.example.com/v1".chars() {
+            let _ = wizard.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
+        }
+    }
+
     fn wizard_with(providers: serde_json::Value) -> OnboardingWizard {
         let providers = serde_json::from_value(providers).unwrap();
         OnboardingWizard::new(OnboardingData {
@@ -1102,6 +1140,8 @@ mod flow_render_tests {
                 { "id": "m2", "name": "gpt\u{2011}4o\u{2011}\u{4e2d}\u{6587}", "ctx": 128000 }
             ]
         }]));
+        enter(&mut wizard); // -> details
+        type_base_url(&mut wizard);
         for _ in 0..8 {
             draw_all_sizes(&wizard);
             enter(&mut wizard);
@@ -1121,7 +1161,9 @@ mod flow_render_tests {
             "models": [ { "id": "m1", "name": "model-one", "ctx": 1000 } ]
         }]));
         // provider->details->model->verify->channels
-        for _ in 0..4 {
+        enter(&mut wizard); // -> details
+        type_base_url(&mut wizard);
+        for _ in 0..3 {
             enter(&mut wizard);
         }
         let _ = wizard.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()));
@@ -1136,7 +1178,9 @@ mod flow_render_tests {
             "models": [ { "id": "m1", "name": "model-one", "ctx": 1000 } ]
         }]));
         // provider -> details -> model -> verify
-        for _ in 0..3 {
+        enter(&mut wizard); // -> details
+        type_base_url(&mut wizard);
+        for _ in 0..2 {
             enter(&mut wizard);
         }
         wizard.set_verify_success(5);

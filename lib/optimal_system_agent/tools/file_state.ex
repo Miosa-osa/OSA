@@ -150,8 +150,8 @@ defmodule OptimalSystemAgent.Tools.FileState do
   @spec record_read(term(), String.t(), keyword()) :: :ok
   def record_read(session_id, path, opts \\ []) do
     ensure_table()
-    cpath = canonical(path)
-    key = {skey(session_id), cpath}
+    cpath = fs_path(path)
+    key = {skey(session_id), key_path(cpath)}
     range = Keyword.get(opts, :range, :whole)
     delivered = Keyword.get(opts, :bytes, 0)
     lines = Keyword.get(opts, :lines, [])
@@ -220,8 +220,8 @@ defmodule OptimalSystemAgent.Tools.FileState do
   @spec record_write(term(), String.t()) :: :ok
   def record_write(session_id, path) do
     ensure_table()
-    cpath = canonical(path)
-    key = {skey(session_id), cpath}
+    cpath = fs_path(path)
+    key = {skey(session_id), key_path(cpath)}
 
     case stat(cpath) do
       {:ok, mtime, size} ->
@@ -263,8 +263,8 @@ defmodule OptimalSystemAgent.Tools.FileState do
   def held_lines(session_id, path) do
     if enforce?(session_id) do
       ensure_table()
-      cpath = canonical(path)
-      key = {skey(session_id), cpath}
+      cpath = fs_path(path)
+      key = {skey(session_id), key_path(cpath)}
 
       case safe_lookup(key) do
         [{^key, %{mtime: rmtime, size: rsize, hash: rhash, epoch: repoch} = entry}] ->
@@ -321,8 +321,8 @@ defmodule OptimalSystemAgent.Tools.FileState do
   def read_status(session_id, path, range \\ :whole) do
     if enforce?(session_id) do
       ensure_table()
-      cpath = canonical(path)
-      key = {skey(session_id), cpath}
+      cpath = fs_path(path)
+      key = {skey(session_id), key_path(cpath)}
 
       case safe_lookup(key) do
         [{^key, %{mtime: rmtime, size: rsize, hash: rhash, epoch: repoch, ranges: ranges}}]
@@ -424,8 +424,8 @@ defmodule OptimalSystemAgent.Tools.FileState do
   def check_read(session_id, path) do
     if enforce?(session_id) do
       ensure_table()
-      cpath = canonical(path)
-      key = {skey(session_id), cpath}
+      cpath = fs_path(path)
+      key = {skey(session_id), key_path(cpath)}
 
       case safe_lookup(key) do
         [{^key, %{mtime: rmtime, size: rsize}}] ->
@@ -461,7 +461,7 @@ defmodule OptimalSystemAgent.Tools.FileState do
   @spec read?(term(), String.t()) :: boolean()
   def read?(session_id, path) do
     ensure_table()
-    key = {skey(session_id), canonical(path)}
+    key = {skey(session_id), key_path(fs_path(path))}
     match?([{^key, _}], safe_lookup(key))
   end
 
@@ -498,17 +498,31 @@ defmodule OptimalSystemAgent.Tools.FileState do
   defp skey(session_id) when is_binary(session_id), do: session_id
   defp skey(session_id), do: session_id
 
-  # Canonical absolute path: expand, then resolve the full symlink chain so the
-  # key agrees across file_read (resolves symlinks), file_write and
-  # multi_file_edit (expand only) — resolution here makes them converge. The
-  # key is also Unicode NFC-normalised: macOS stores names in NFD while callers
-  # commonly type NFC, and a rescue read under one form must satisfy
-  # check_read/2 for the other — otherwise the caller reads successfully and is
-  # then told it never read the file.
-  defp canonical(path) do
-    path
-    |> OptimalSystemAgent.Agent.Safety.PathCanon.canonicalize()
-    |> :unicode.characters_to_nfc_binary()
+  # The real filesystem path: expand, then resolve the full symlink chain so it
+  # agrees across file_read (resolves symlinks), file_write and multi_file_edit
+  # (expand only) — resolution here makes them converge. Every filesystem
+  # operation in this module (`stat/1`, `content_hash/2`) uses THIS path, not
+  # the ledger key: a name's bytes are preserved verbatim by Linux filesystems,
+  # so a read rescued to the on-disk NFD form must be stat'd under those same
+  # bytes. NFC-normalising first would yield a path that does not exist on Linux
+  # and the read would be silently dropped (#212).
+  defp fs_path(path) do
+    OptimalSystemAgent.Agent.Safety.PathCanon.canonicalize(path)
+  end
+
+  # The ledger key derived from an already-resolved `fs_path/1`: Unicode
+  # NFC-normalised so a read recorded under one normalisation form (e.g. the NFD
+  # name file_read rescued to on disk) is found by a lookup under the other (e.g.
+  # the NFC name the model typed). macOS (APFS) collapses the two at the FS
+  # layer; Linux preserves the bytes, so the ledger must normalise them itself —
+  # otherwise the caller reads successfully and is then told it never read the
+  # file. Falls back to the raw path if the bytes are not valid UTF-8 (a name is
+  # arbitrary bytes), which at worst declines to unify the two forms.
+  defp key_path(fspath) do
+    case :unicode.characters_to_nfc_binary(fspath) do
+      bin when is_binary(bin) -> bin
+      _ -> fspath
+    end
   end
 
   defp stat(path) do

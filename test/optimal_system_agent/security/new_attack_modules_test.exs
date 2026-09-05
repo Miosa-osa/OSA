@@ -460,6 +460,20 @@ defmodule OptimalSystemAgent.Security.WeaponCatalogTest do
       result = AttackOrchestrator.execute_sequence(state)
       assert match?({:blocked, _}, result)
     end
+
+    test "runs the full sequence on real findings without raising" do
+      state = %{
+        session_id: "eng-seq-#{System.unique_integer([:positive])}",
+        phase: :exploitation,
+        findings: [@sample_finding, %{@sample_weapon | id: "test-003"}],
+        weapons: [],
+        completed: [],
+        failed: []
+      }
+
+      assert {:results, %{weapons: weapons}} = AttackOrchestrator.execute_sequence(state)
+      assert is_list(weapons)
+    end
   end
 
   describe "AttackOrchestrator.next_target/1" do
