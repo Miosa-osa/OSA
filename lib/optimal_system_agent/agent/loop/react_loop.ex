@@ -194,7 +194,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   @doc false
   def turn_effort(state) do
     cond do
-      planning_turn?(state) and not Effort.current_at_least?(:high) -> :high
+      planning_turn?(state) and not Effort.current_at_least?(:high) ->
+        :high
+
       not planning_turn?(state) and continuation_turn?(state) and
           not Effort.current_at_least?(:high) ->
         :fast
@@ -291,6 +293,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         })
 
         finalize_interrupt(state, nil)
+
+      GoalTracker.awaiting_user?(sid) ->
+        TerminalSource.halt(GoalTracker.waiting_message(sid), state, :control)
 
       paused?(sid) ->
         Logger.info("[loop] Paused at iteration #{iter} — soft-stopping until resumed")
@@ -1100,6 +1105,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     announcement = Guardrails.announcement_continue(content, state.messages)
     announcement_spent = Map.get(state, :announcement_continues, 0)
 
+    state =
+      if not Cancellation.cancelled?(state.session_id) do
+        GoalVerifier.maybe_wait_for_user(state, content)
+      else
+        state
+      end
+
     # An exhausted cap must be LOUD. One nudge is the whole budget, so this
     # backstop is done — and "the model announced again after being told" and
     # "the model reported a result" are different endings that used to look
@@ -1144,6 +1156,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         )
 
         finish_turn(content, state)
+
+      GoalTracker.awaiting_user?(state.session_id) ->
+        TerminalSource.halt(GoalTracker.waiting_message(state.session_id), state, :control)
 
       prose_continue?(state) and state.auto_continues < 2 and
           Guardrails.wants_to_continue?(content) ->
@@ -2339,86 +2354,63 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # char/word heuristic guarded by emit_context_pressure's own rescue.
     Telemetry.emit_context_pressure(state)
 
-    # Short-circuit: if ALL tool calls were computer_use and ALL succeeded,
-    # return directly to avoid burning another LLM round-trip.
-    all_computer_use = Enum.all?(tool_calls, fn tc -> tc.name == "computer_use" end)
+    # Always return computer-use results to the model. In particular, a
+    # screenshot is an observation, not a completed task: the next iteration
+    # must inspect it, perform the requested action, and verify the outcome.
+    # The former computer_use fast-return ended the turn at the screenshot and
+    # surfaced only `[image: ...]` to the user.
+    Checkpoint.checkpoint_state(state)
 
-    all_succeeded =
-      Enum.all?(results, fn {_tc, {_msg, result_str}} ->
-        not String.starts_with?(result_str, "Error:")
-      end)
+    state = ToolExecutor.inject_read_nudges(state, tool_calls)
 
-    if all_computer_use and all_succeeded do
-      summary =
-        results
-        |> Enum.map(fn {_tc, {_msg, result_str}} -> result_str end)
-        |> Enum.join("\n")
+    # Invalidate system message cache if memory_save ran successfully
+    if Enum.any?(tool_calls, fn tc -> tc.name == "memory_save" end) and
+         Enum.any?(results, fn {tc, {_msg, result_str}} ->
+           tc.name == "memory_save" and not String.starts_with?(result_str, "Error:")
+         end) do
+      Process.put(:osa_memory_version, Process.get(:osa_memory_version, 0) + 1)
+    end
 
-      # Even on this fast-return path (no synthesis round-trip), run doom-loop
-      # detection so a pathological computer_use-only loop is still caught by the
-      # identical-call / absolute call-cap safety net, and so these calls count
-      # toward total_tool_calls (DoomLoop.check increments it). Respect a halt.
-      case DoomLoop.check(results, tool_calls, state) do
-        {:halt, doom_message, halted_state} ->
-          Resample.handle(doom_message, halted_state, resample_snapshot, &run/1)
+    state = inject_post_tool_nudges(state, tool_calls)
 
-        {:ok, state} ->
-          {summary, Map.put(state, :doom_resamples, 0)}
-      end
-    else
-      Checkpoint.checkpoint_state(state)
+    case DoomLoop.check(results, tool_calls, state) do
+      {:halt, doom_message, halted_state} ->
+        Resample.handle(doom_message, halted_state, resample_snapshot, &run/1)
 
-      state = ToolExecutor.inject_read_nudges(state, tool_calls)
+      {:ok, state} ->
+        # Clean turn — reset the consecutive-resample budget so recovery
+        # attempts bound only a *stuck* stretch, not the session lifetime.
+        state = Map.put(state, :doom_resamples, 0)
 
-      # Invalidate system message cache if memory_save ran successfully
-      if Enum.any?(tool_calls, fn tc -> tc.name == "memory_save" end) and
-           Enum.any?(results, fn {tc, {_msg, result_str}} ->
-             tc.name == "memory_save" and not String.starts_with?(result_str, "Error:")
-           end) do
-        Process.put(:osa_memory_version, Process.get(:osa_memory_version, 0) + 1)
-      end
+        # Auto-mode: if the safety Guardian paused this session after N blocked
+        # dangerous actions, halt the loop and surface a review prompt instead
+        # of recursing into another unattended iteration.
+        if state.permission_tier == :auto and
+             OptimalSystemAgent.Agent.Safety.Guardian.paused?(state.session_id) do
+          blocks = OptimalSystemAgent.Agent.Safety.Guardian.block_count(state.session_id)
 
-      state = inject_post_tool_nudges(state, tool_calls)
+          pause_message =
+            "Auto-mode paused for review: #{blocks} dangerous action(s) were blocked. " <>
+              "Review the blocked calls, then resume to continue."
 
-      case DoomLoop.check(results, tool_calls, state) do
-        {:halt, doom_message, halted_state} ->
-          Resample.handle(doom_message, halted_state, resample_snapshot, &run/1)
-
-        {:ok, state} ->
-          # Clean turn — reset the consecutive-resample budget so recovery
-          # attempts bound only a *stuck* stretch, not the session lifetime.
-          state = Map.put(state, :doom_resamples, 0)
-
-          # Auto-mode: if the safety Guardian paused this session after N blocked
-          # dangerous actions, halt the loop and surface a review prompt instead
-          # of recursing into another unattended iteration.
-          if state.permission_tier == :auto and
-               OptimalSystemAgent.Agent.Safety.Guardian.paused?(state.session_id) do
-            blocks = OptimalSystemAgent.Agent.Safety.Guardian.block_count(state.session_id)
-
-            pause_message =
-              "Auto-mode paused for review: #{blocks} dangerous action(s) were blocked. " <>
-                "Review the blocked calls, then resume to continue."
-
-            TerminalSource.halt(pause_message, state, :control)
-          else
-            # Goal-level verification runs HERE — at the tool-result boundary,
-            # before the next generation — and nowhere else. Two reasons:
-            #
-            #   1. ONE ENDING. Assistant text streams to the user token-by-token,
-            #      so a conclusion cannot be retracted once generated. Verifying
-            #      after a text response and then looping is what made a turn end
-            #      twice. Verifying here puts the panel's findings in context
-            #      *before* the model writes its conclusion, so there is exactly
-            #      one.
-            #   2. CHEAP BY DEFAULT. `maybe_gate/1` is a three-tier gate: free
-            #      local skips → one cheap triage call → the expensive skeptic
-            #      panel only on `candidate_complete`. It appends at most one
-            #      system directive and never raises.
-            state = GoalVerifier.maybe_gate(state)
-            run(state)
-          end
-      end
+          TerminalSource.halt(pause_message, state, :control)
+        else
+          # Goal-level verification runs HERE — at the tool-result boundary,
+          # before the next generation — and nowhere else. Two reasons:
+          #
+          #   1. ONE ENDING. Assistant text streams to the user token-by-token,
+          #      so a conclusion cannot be retracted once generated. Verifying
+          #      after a text response and then looping is what made a turn end
+          #      twice. Verifying here puts the panel's findings in context
+          #      *before* the model writes its conclusion, so there is exactly
+          #      one.
+          #   2. CHEAP BY DEFAULT. `maybe_gate/1` is a three-tier gate: free
+          #      local skips → one cheap triage call → the expensive skeptic
+          #      panel only on `candidate_complete`. It appends at most one
+          #      system directive and never raises.
+          state = GoalVerifier.maybe_gate(state)
+          run(state)
+        end
     end
   end
 

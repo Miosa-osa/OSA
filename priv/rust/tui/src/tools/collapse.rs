@@ -782,6 +782,9 @@ pub(crate) fn try_format_json(line: &str) -> Option<String> {
 /// Expand a raw result into logical display lines, pretty-printing any line that
 /// is a JSON object/array.
 fn expand_json_lines(result: &str) -> Vec<String> {
+    // Strip input terminal controls before URL detection and wrapping. Doing
+    // it after splitting spans can turn an OSC-8 target into duplicate text.
+    let result = crate::render::sanitize::scrub_terminal_output(result);
     let mut out = Vec::new();
     for line in result.lines() {
         match try_format_json(line) {
@@ -936,7 +939,8 @@ fn normalized_output_rows(result: &str) -> Vec<String> {
     let mut pending_blank = false;
     for raw in result.lines() {
         let logical = apply_carriage_returns(raw);
-        let expanded = match try_format_json(logical) {
+        let logical = crate::render::sanitize::scrub_terminal_output(logical);
+        let expanded = match try_format_json(&logical) {
             Some(pretty) => pretty.lines().map(|l| l.to_string()).collect::<Vec<_>>(),
             None => vec![logical.to_string()],
         };
@@ -1170,6 +1174,13 @@ mod output_quality_tests {
         assert!(joined.contains("\x1b]8;;https://osa.dev/docs"), "{joined:?}");
         // No manual cleanup: the guards restore TERM and OSA_HYPERLINKS on
         // drop, including if an assertion above unwinds.
+    }
+
+    #[test]
+    fn original_terminal_link_target_is_not_rendered_twice() {
+        let raw = "preview at \x1b]8;;https://osa.dev\x1b\\https://osa.dev\x1b]8;;\x1b\\";
+        assert_eq!(expand_json_lines(raw), vec!["preview at https://osa.dev"]);
+        assert_eq!(normalized_output_rows(raw), vec!["preview at https://osa.dev"]);
     }
 
     #[test]

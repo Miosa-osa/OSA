@@ -911,7 +911,10 @@ defmodule OptimalSystemAgent.Providers.Registry do
   @spec plain_prefix_cache?(atom() | {:compat, atom()}, String.t() | nil) :: boolean()
   def plain_prefix_cache?(provider, model \\ nil)
   def plain_prefix_cache?(p, _model) when p in [:ollama, :lmstudio, :llamacpp], do: true
-  def plain_prefix_cache?({:compat, p}, _model) when p in [:ollama, :lmstudio, :llamacpp], do: true
+
+  def plain_prefix_cache?({:compat, p}, _model) when p in [:ollama, :lmstudio, :llamacpp],
+    do: true
+
   def plain_prefix_cache?(_target, _model), do: false
 
   @doc """
@@ -1873,6 +1876,9 @@ defmodule OptimalSystemAgent.Providers.Registry do
   config default (128k), preserving prior behavior for cloud providers.
   """
   @spec effective_context_window(String.t() | nil, atom()) :: pos_integer()
+  def effective_context_window(model, :openai_codex),
+    do: Providers.OpenAICodex.context_window(model) || context_window(model)
+
   def effective_context_window(model, provider) do
     model
     |> context_window()
@@ -1888,6 +1894,13 @@ defmodule OptimalSystemAgent.Providers.Registry do
   """
   @spec effective_context_window_info(String.t() | nil, atom() | nil) ::
           {:ok, pos_integer()} | :unknown
+  def effective_context_window_info(model, :openai_codex) do
+    case Providers.OpenAICodex.context_window(model) do
+      n when is_integer(n) and n > 0 -> {:ok, n}
+      _ -> context_window_info(model)
+    end
+  end
+
   def effective_context_window_info(model, provider) do
     case context_window_info(model) do
       {:ok, trained} -> {:ok, apply_local_ceiling(trained, model, provider)}
@@ -2444,10 +2457,22 @@ defmodule OptimalSystemAgent.Providers.Registry do
     key = :"#{provider}_api_key"
 
     case Application.get_env(:optimal_system_agent, key) do
-      nil -> live_cloud_key_present?(provider)
-      "" -> live_cloud_key_present?(provider)
+      nil -> live_cloud_key_present?(provider) or connected_account?(provider)
+      "" -> live_cloud_key_present?(provider) or connected_account?(provider)
       _ -> true
     end
+  end
+
+  # Account sign-in is a provider-wide credential source, just like an API
+  # key. Keep this in the generic path so every current and future provider
+  # registered with Auth.Subscription is reflected consistently by /model,
+  # doctor, routing, and the TUI instead of requiring another provider-specific
+  # clause each time account auth is added.
+  defp connected_account?(provider) do
+    OptimalSystemAgent.Auth.Subscription.supported?(provider) and
+      OptimalSystemAgent.Auth.SubscriptionStore.connected?(provider)
+  rescue
+    _ -> false
   end
 
   # Local/keyless providers are excluded from live key checks and from the

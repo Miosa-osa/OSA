@@ -53,11 +53,11 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
         do: state.last_input_tokens,
         else: OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
 
-    # Percent is measured against the EFFECTIVE window (window - output reserve),
-    # Claude Code parity, so "N% used" lines up with the auto-compact threshold.
+    # Display occupancy against the SAME denominator emitted as max_tokens.
+    # Reserve-based warning/compaction thresholds remain independent below.
     utilization =
       if max_tok > 0,
-        do: CompactionThresholds.used_percent(estimated, max_tok),
+        do: min(100.0, Float.round(estimated / max_tok * 100, 1)),
         else: 0.0
 
     warning =

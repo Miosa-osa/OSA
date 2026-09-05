@@ -47,6 +47,16 @@ defmodule OptimalSystemAgent.Providers.GoogleSystemHoistTest do
   defp text_of(content), do: Enum.map_join(content["parts"], "", &(&1["text"] || ""))
 
   describe "extract_system — leading vs mid-conversation system messages" do
+    test "priority service tier is placed at the GenerateContent top level" do
+      body =
+        Google.build_request_body([%{role: "user", content: "hi"}], @model,
+          service_tier: "priority"
+        )
+
+      assert body.serviceTier == "priority"
+      refute Map.has_key?(body.generationConfig, :serviceTier)
+    end
+
     test "a LEADING system message becomes systemInstruction" do
       {system_text, contents} =
         Google.build_contents([

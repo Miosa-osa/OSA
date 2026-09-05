@@ -36,6 +36,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.Goal.Handler do
       String.trim(objective) == "" ->
         {:error, "objective must not be empty", -32_602}
 
+      String.downcase(String.trim(objective)) in ~w(end stop pause resume clear cancel off reset) ->
+        {:error,
+         "That is a goal control command, not an objective. Use /goal pause or /goal clear.",
+         -32_602}
+
       String.length(objective) > Constants.max_objective_chars() ->
         {:error, "objective must be at most #{Constants.max_objective_chars()} characters",
          -32_602}
@@ -140,13 +145,26 @@ defmodule OptimalSystemAgent.Tools.Builtins.Goal.Handler do
 
   @spec validate_update(map(), UseContext.t()) :: {:ok, map()} | {:error, String.t(), integer()}
   def validate_update(%{"status" => status} = input, _ctx) when is_binary(status) do
-    if String.downcase(String.trim(status)) in Constants.model_statuses() do
-      {:ok, input}
+    if String.downcase(String.trim(status)) == "awaiting_user" do
+      if Enum.all?(~w(question criterion work_summary artifact), fn key ->
+           is_binary(input[key]) and String.trim(input[key]) != "" and
+             String.length(input[key]) <= 4000
+         end) do
+        {:ok, input}
+      else
+        {:error,
+         "awaiting_user requires question, criterion, work_summary, and artifact (nonempty, at most 4000 characters each)",
+         -32_602}
+      end
     else
-      {:error,
-       "#{Constants.update_tool_name()} can only mark the existing goal complete or blocked, " <>
-         "or abandon it outright; pause, resume, and objective changes are controlled by the " <>
-         "user", -32_602}
+      if String.downcase(String.trim(status)) in Constants.model_statuses() do
+        {:ok, input}
+      else
+        {:error,
+         "#{Constants.update_tool_name()} can only mark the existing goal complete or blocked, " <>
+           "or abandon it outright; pause, resume, and objective changes are controlled by the " <>
+           "user", -32_602}
+      end
     end
   end
 
@@ -163,11 +181,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.Goal.Handler do
         {:error, "No session is active, so there is no goal to update."}
 
       sid ->
-        input
-        |> Map.get("status")
-        |> String.trim()
-        |> String.downcase()
-        |> apply_status(sid)
+        if String.downcase(String.trim(Map.get(input, "status", ""))) == "awaiting_user" do
+          case GoalTracker.request_decision(sid, input) do
+            {:ok, _} -> {:ok, GoalTracker.waiting_message(sid)}
+            {:error, reason} -> {:error, "Cannot wait for a decision: #{inspect(reason)}"}
+          end
+        else
+          input
+          |> Map.get("status")
+          |> String.trim()
+          |> String.downcase()
+          |> apply_status(sid)
+        end
     end
   end
 

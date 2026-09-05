@@ -27,12 +27,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Tool do
   def aliases, do: ["computer", "desktop_control"]
 
   @impl true
-  def search_hint, do: "control the desktop: screenshot, click, type, scroll, key press"
+  def search_hint,
+    do:
+      "control the desktop semantically: inspect accessibility tree, press controls, type, scroll"
 
   # ── Schema & description ───────────────────────────────────────────────
 
   @impl true
-  def description, do: Prompt.render([])
+  def description do
+    "Control the desktop with semantic accessibility refs first; use screenshots and " <>
+      "coordinates only when the UI has no usable accessibility tree."
+  end
 
   @impl true
   def prompt(opts), do: Prompt.render(opts)
@@ -74,11 +79,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Tool do
         },
         "window_id" => %{
           "type" => "string",
-          "description" => "Window ID for focus_window"
+          "description" =>
+            "Window ID returned by list_windows; used by focus_window, close_window, or get_tree"
         },
         "app" => %{
           "type" => "string",
-          "description" => "Application name or command for launch"
+          "description" =>
+            "Application name for launch, targeted get_tree, list_tabs, or close_tabs"
+        },
+        "url_contains" => %{
+          "type" => "string",
+          "description" => "URL substring used by close_tabs"
+        },
+        "title_contains" => %{
+          "type" => "string",
+          "description" => "Title substring used by close_tabs"
         },
         "seconds" => %{
           "type" => "number",
@@ -157,8 +172,24 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Tool do
   def concurrency_safe?(_input, _ctx), do: false
 
   @impl true
-  # Only screenshot is read-only; all other actions mutate desktop state.
-  def read_only?(%{"action" => "screenshot"}, _ctx), do: true
+  # Perception calls must not incur write approval or be described as desktop
+  # mutations. Keeping these cheap is essential to the observe/verify loop.
+  def read_only?(%{"action" => action}, _ctx)
+      when action in [
+             "screenshot",
+             "get_tree",
+             "snapshot",
+             "list_apps",
+             "list_windows",
+             "list_surfaces",
+             "list_tabs",
+             "cursor",
+             "cursor_position",
+             "clipboard_get",
+             "wait"
+           ],
+      do: true
+
   def read_only?(_input, _ctx), do: false
 
   @impl true

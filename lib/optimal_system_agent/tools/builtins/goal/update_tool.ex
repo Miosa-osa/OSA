@@ -1,12 +1,13 @@
 defmodule OptimalSystemAgent.Tools.Builtins.Goal.UpdateTool do
   @moduledoc """
-  `update_goal` — the only status the model may move a goal to, and the only
-  two values it may move it to.
+  `update_goal` — model-controlled completion claims, blockers, abandonment,
+  and structured human handoff. Decision fields cannot rewrite the objective;
+  approval/rejection are exclusively user commands, not model statuses.
 
   Ported from Codex's `update_goal` (`codex-rs/ext/goal/src/spec.rs` and
   `tool.rs`). Two properties of that design are carried over exactly:
 
-    * The parameter set is `status` and nothing else. There is no path from the
+    * Decision metadata names a pending question; there is no path from the
       model to the objective. Codex's handler builds its update with
       `objective: None` hardcoded.
 
@@ -53,6 +54,25 @@ defmodule OptimalSystemAgent.Tools.Builtins.Goal.UpdateTool do
     %{
       "type" => "object",
       "properties" => %{
+        "question" => %{
+          "type" => "string",
+          "description" => "For awaiting_user: the specific decision only the user can make."
+        },
+        "criterion" => %{
+          "type" => "string",
+          "description" =>
+            "For awaiting_user: the existing user-grounded requirement needing input; never invent an approval gate."
+        },
+        "work_summary" => %{
+          "type" => "string",
+          "description" =>
+            "For awaiting_user: completed work and any remaining machine-verifiable work. Waiting is not completion."
+        },
+        "artifact" => %{
+          "type" => "string",
+          "description" =>
+            "For awaiting_user: exact artifact/version or decision scope the user is reviewing."
+        },
         "status" => %{
           "type" => "string",
           "enum" => Constants.model_statuses(),
@@ -65,7 +85,10 @@ defmodule OptimalSystemAgent.Tools.Builtins.Goal.UpdateTool do
               "audit. Set to `abandoned` only when this objective is no longer the work at " <>
               "all — the direction changed, not the difficulty; it ends the goal permanently, " <>
               "records it as abandoned, and lets a new goal be anchored, but the successor " <>
-              "inherits the turns and verification rounds already spent."
+              "inherits the turns and verification rounds already spent. Use awaiting_user when " <>
+              "progress requires a specific human decision; provide question, criterion, work_summary " <>
+              "and artifact. This stops autonomous work without declaring completion. Never invent " <>
+              "approval requirements, and never use repeated busywork as evidence of progress."
         }
       },
       "required" => ["status"]

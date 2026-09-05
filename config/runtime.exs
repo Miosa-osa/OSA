@@ -325,8 +325,14 @@ config :optimal_system_agent,
   wecom_bot_key: System.get_env("WECOM_BOT_KEY"),
   wecom_webhook_token: System.get_env("WECOM_WEBHOOK_TOKEN"),
 
-  # Computer Use — set OSA_COMPUTER_USE=true to enable desktop control tool
-  computer_use_enabled: System.get_env("OSA_COMPUTER_USE") == "true",
+  # Computer Use is part of the standard agent harness on supported desktops.
+  # Keep an explicit opt-out for managed/headless deployments; absence means
+  # enabled so every provider sees the same machine-action capability.
+  computer_use_enabled:
+    (case System.get_env("OSA_COMPUTER_USE") do
+       value when value in ["false", "0", "no", "off"] -> false
+       _ -> true
+     end),
   computer_use_platform:
     (case System.get_env("OSA_COMPUTER_USE_PLATFORM") do
        nil -> nil

@@ -685,6 +685,14 @@ impl App {
             return;
         }
 
+        // Startup discovery can finish after the user types. Do not send a
+        // prompt on the provisional ID which SessionCreated will replace.
+        if !matches!(text, "/exit" | "/quit" | "/clear" | "/new" | "/help")
+            && startup_session_pending(self.dir_session_resolved, self.session_creation_pending) {
+            self.enqueue_message(text);
+            return;
+        }
+
         // /steer <text>: inject a high-priority message. Handled before the
         // Processing-enqueue path so it can jump to the FRONT of the queue.
         if let Some(rest) = text.strip_prefix("/steer") {
@@ -823,6 +831,9 @@ impl App {
     /// Idle (turn fully ended — not mid-turn, not auto-continued by /goal, no
     /// open dialog). FIFO: oldest first. Called at every turn-completion site.
     pub(super) fn maybe_dequeue_message(&mut self) {
+        if startup_session_pending(self.dir_session_resolved, self.session_creation_pending) {
+            return;
+        }
         if !queue_may_drain(self.state, self.turn_done) {
             return;
         }
@@ -1912,6 +1923,8 @@ impl App {
     }
 
     pub(crate) fn create_session(&mut self) {
+        self.dir_session_resolved = true;
+        self.session_creation_pending = true;
         let client = self.client.clone();
         let tx = self.event_tx.clone();
         // Always start FRESH (Claude-Code semantics): create with no working_dir so
@@ -2268,6 +2281,8 @@ impl App {
             // different next steps, and the `DONE` sentinel could not tell them
             // apart because it never asked anything that knew.
             let msg = match (status.status.as_deref(), status.pause_reason.as_deref()) {
+                (Some("awaiting_user"), _) => "Goal is waiting for your decision, not complete. Use /goal to review the request or /goal clear to cancel it.".to_string(),
+                (Some("cleared"), _) => "Goal cleared by you. It was not marked complete; auto-continue stopped.".to_string(),
                 (Some("completed"), _) => format!(
                     "Goal verified complete by the skeptic panel after {} backend turn(s). \
                      Auto-continue stopped.",
@@ -2370,9 +2385,10 @@ fn goal_intent_for(arg: &str) -> GoalIntent {
     // "clear"/"off"/"reset" forget it. Anything else anchors a new goal, with
     // `::` separating optional acceptance criteria.
     let inspecting = verb.is_empty()
-        || ["status", "pause", "stop", "resume", "clear", "off", "reset"]
+        || ["status", "pause", "stop", "resume", "clear", "off", "reset", "cancel", "end", "approve", "reject"]
             .iter()
-            .any(|v| verb.eq_ignore_ascii_case(v));
+            .any(|v| verb.eq_ignore_ascii_case(v))
+        || verb.starts_with("approve ") || verb.starts_with("reject ");
     if inspecting {
         GoalIntent::Inspect
     } else {
@@ -2715,6 +2731,28 @@ pub(crate) fn queue_may_drain(state: AppState, turn_done: bool) -> bool {
     state == AppState::Idle && turn_done
 }
 
+fn startup_session_pending(resolved: bool, creating: bool) -> bool {
+    !resolved || creating
+}
+
+#[cfg(test)]
+mod startup_session_tests {
+    use super::startup_session_pending;
+
+    #[test]
+    fn early_prompt_waits_through_discovery_and_session_creation() {
+        assert!(startup_session_pending(false, false));
+        assert!(startup_session_pending(true, true));
+        assert!(!startup_session_pending(true, false));
+    }
+
+    #[test]
+    fn session_commands_also_wait_for_the_replacement_session() {
+        assert!(startup_session_pending(false, true));
+        assert!(startup_session_pending(true, true));
+    }
+}
+
 #[cfg(test)]
 mod turn_ending_tests {
     use super::{classify_turn_ending, TurnEnding};
@@ -3024,7 +3062,7 @@ mod goal_routing_tests {
         assert_eq!(goal_intent_for("stop the flaky test"), GoalIntent::Anchor);
 
         // The backend's own subcommands.
-        for verb in ["", "  ", "status", "pause", "stop", "resume", "clear", "off", "reset"] {
+        for verb in ["", "  ", "status", "pause", "stop", "resume", "clear", "off", "reset", "cancel", "approve decision-123", "reject decision-123 fix draft"] {
             assert_eq!(
                 goal_intent_for(verb),
                 GoalIntent::Inspect,

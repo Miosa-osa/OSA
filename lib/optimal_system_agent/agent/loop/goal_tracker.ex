@@ -122,7 +122,15 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
 
   @table :osa_goal_tracker
 
-  @type status :: :active | :paused | :completed | :off_track | :blocked | :abandoned
+  @type status ::
+          :active
+          | :paused
+          | :completed
+          | :off_track
+          | :blocked
+          | :abandoned
+          | :awaiting_user
+          | :cleared
   @type phase :: :idle | :planning | :executing
   @type pause_reason ::
           :no_progress
@@ -160,6 +168,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
             updated_at: DateTime.t() | nil
           }
     defstruct session_id: nil,
+              pending_decision: nil,
+              decision_history: [],
               status: :active,
               phase: :executing,
               goal_id: nil,
@@ -310,6 +320,21 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
 
   def start(session_id, goal, opts)
       when is_binary(session_id) and is_binary(goal) and is_list(opts) do
+    transaction(session_id, fn -> do_start(session_id, goal, opts) end)
+  end
+
+  defp do_start(session_id, goal, opts) do
+    # A user-cleared goal must not lend its old immutable brief to the next
+    # objective. Keep its history in the ledger; establish a fresh contract.
+    if match?(%Snapshot{status: :cleared}, get(session_id)) do
+      OptimalSystemAgent.Agent.TaskBrief.save(session_id, %{
+        goal: goal,
+        acceptance_criteria: Keyword.get(opts, :acceptance_criteria) || goal,
+        constraints: Keyword.get(opts, :constraints) || "",
+        created_at: DateTime.to_iso8601(DateTime.utc_now())
+      })
+    end
+
     # A fresh identity per anchoring. It is what makes the ledger's `## Log`
     # attributable: without it, a re-issued `/goal` overwrote the `## Goal`
     # head in place while the previous goal's log lines stayed put, and
@@ -388,7 +413,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
       when is_binary(session_id) and is_binary(goal) and is_list(opts) do
     case get(session_id) do
       %Snapshot{status: status, goal: existing} = snap
-      when status in [:active, :off_track] and is_binary(existing) and existing != "" ->
+      when status in [:active, :off_track, :awaiting_user] and is_binary(existing) and
+             existing != "" ->
         {:error, {:goal_active, snap}}
 
       %Snapshot{status: status} = prior when status in [:blocked, :abandoned] ->
@@ -908,6 +934,10 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   @doc "Manually pause the goal (e.g. user-initiated `/goal pause`)."
   @spec pause(String.t(), pause_reason()) :: Snapshot.t()
   def pause(session_id, reason \\ :user) when is_binary(session_id) do
+    transaction(session_id, fn -> do_pause(session_id, reason) end)
+  end
+
+  defp do_pause(session_id, reason) do
     snap = ensure(session_id)
     snap = %{snap | status: :paused, pause_reason: reason, updated_at: DateTime.utc_now()}
     put(snap)
@@ -921,27 +951,211 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   """
   @spec resume(String.t()) :: Snapshot.t()
   def resume(session_id) when is_binary(session_id) do
+    transaction(session_id, fn -> do_resume(session_id) end)
+  end
+
+  defp do_resume(session_id) do
     snap = ensure(session_id)
 
-    snap = %{
+    if snap.pending_decision != nil or snap.status in [:cleared, :completed, :abandoned] do
       snap
-      | status: :active,
-        phase: :executing,
-        pause_reason: nil,
-        last_gap_fingerprint: nil,
-        stall_count: 0,
-        rounds_since_verify: 0,
-        # "If the user resumes a goal that was previously marked blocked, treat
-        # the resumed run as a fresh blocked audit" — Codex's update_goal spec,
-        # and grok's behaviour. Carrying the streak across a resume would let the
-        # goal re-block on the first claim after the user asked for more work.
-        blocked_claims: 0,
-        blocked_claim_turn: nil,
-        updated_at: DateTime.utc_now()
-    }
+    else
+      snap = %{
+        snap
+        | status: :active,
+          phase: :executing,
+          pause_reason: nil,
+          last_gap_fingerprint: nil,
+          stall_count: 0,
+          rounds_since_verify: 0,
+          # "If the user resumes a goal that was previously marked blocked, treat
+          # the resumed run as a fresh blocked audit" — Codex's update_goal spec,
+          # and grok's behaviour. Carrying the streak across a resume would let the
+          # goal re-block on the first claim after the user asked for more work.
+          blocked_claims: 0,
+          blocked_claim_turn: nil,
+          updated_at: DateTime.utc_now()
+      }
 
-    put(snap)
-    transition(snap, "goal RESUMED")
+      put(snap)
+      transition(snap, "goal RESUMED")
+    end
+  end
+
+  # Control changes and verification commits share a lock. A panel runs outside
+  # the lock; its result must still match the snapshot it actually reviewed.
+  defp transaction(sid, fun), do: :global.trans({{__MODULE__, sid}, self()}, fun)
+
+  def verification_token(sid) do
+    case get(sid) do
+      %Snapshot{} = snap -> {snap.goal_id, snap.updated_at, snap.status}
+      _ -> nil
+    end
+  end
+
+  def advance_if_current(sid, expected, result, work_marker) do
+    transaction(sid, fn ->
+      case get(sid) do
+        %Snapshot{status: status} when status in [:active, :off_track] ->
+          if verification_token(sid) == expected do
+            {:ok, advance(sid, result, work_marker)}
+          else
+            {:error, :stale_verification}
+          end
+
+        _ ->
+          {:error, :stale_verification}
+      end
+    end)
+  end
+
+  def awaiting_user?(sid), do: status(sid) == :awaiting_user
+
+  def request_decision(sid, request, expected \\ :any) when is_map(request) do
+    transaction(sid, fn ->
+      if expected != :any and verification_token(sid) != expected do
+        {:error, :stale_verification}
+      else
+        case get(sid) do
+          %Snapshot{status: :awaiting_user} = snap ->
+            keys = ~w(question criterion work_summary artifact)
+
+            if Map.take(request, keys) == Map.take(snap.pending_decision || %{}, keys),
+              do: {:ok, snap},
+              else: {:error, :pending_decision_exists}
+
+          %Snapshot{status: status} = snap when status in [:active, :off_track] ->
+            required = ~w(question criterion work_summary artifact)
+
+            if Enum.all?(required, fn key ->
+                 value = request[key]
+                 is_binary(value) and String.trim(value) != "" and String.length(value) <= 4000
+               end) do
+              pending =
+                Map.take(request, required)
+                |> Map.put(
+                  "request_id",
+                  "decision-" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
+                )
+                |> Map.put("goal_id", snap.goal_id)
+
+              snap = %{
+                snap
+                | status: :awaiting_user,
+                  phase: :idle,
+                  pending_decision: pending,
+                  updated_at: DateTime.utc_now()
+              }
+
+              case persist_decision(snap) do
+                :ok ->
+                  cache(snap)
+                  transition(snap, "AWAITING USER: #{pending["question"]}")
+                  {:ok, snap}
+
+                error ->
+                  error
+              end
+            else
+              {:error, :invalid_decision_request}
+            end
+
+          _ ->
+            {:error, :not_live}
+        end
+      end
+    end)
+  end
+
+  # Only the user command/API path calls this. The model tool has no approval
+  # field. Request identity prevents duplicate or stale approvals crossing goals.
+  def resolve_decision(sid, request_id, decision, note \\ "") do
+    transaction(sid, fn ->
+      case get(sid) do
+        %Snapshot{pending_decision: %{"request_id" => ^request_id} = pending} = snap
+        when decision in ["approve", "reject"] ->
+          entry =
+            Map.merge(pending, %{
+              "decision" => decision,
+              "note" => note,
+              "decided_at" => DateTime.to_iso8601(DateTime.utc_now())
+            })
+
+          next = %{
+            snap
+            | status: :active,
+              phase: :executing,
+              pending_decision: nil,
+              decision_history: snap.decision_history ++ [entry],
+              rounds_since_verify: reverify_after(),
+              updated_at: DateTime.utc_now()
+          }
+
+          case persist_decision(next) do
+            :ok ->
+              cache(next)
+
+              transition(
+                next,
+                "User decision #{decision} for #{request_id}; verification still required"
+              )
+
+              {:ok, next}
+
+            error ->
+              error
+          end
+
+        _ ->
+          {:error, :stale_or_missing_request}
+      end
+    end)
+  end
+
+  defp persist_decision(snap) do
+    case AtomicFile.write(store_path(snap.session_id), Jason.encode!(encode(snap))) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:persistence_failed, reason}}
+    end
+  rescue
+    e -> {:error, {:persistence_failed, Exception.message(e)}}
+  end
+
+  def waiting_message(sid) do
+    case get(sid) do
+      %Snapshot{pending_decision: %{} = p} ->
+        "Waiting for your decision — not complete.\n\n#{p["question"]}\n" <>
+          "Review: #{p["artifact"]}\n" <>
+          "/goal approve #{p["request_id"]} or /goal reject #{p["request_id"]} <changes>. " <>
+          "/goal clear stops and clears this goal."
+
+      _ ->
+        "No pending decision."
+    end
+  end
+
+  def clear(sid) do
+    transaction(sid, fn ->
+      snap = ensure(sid)
+
+      snap = %{
+        snap
+        | status: :cleared,
+          phase: :idle,
+          pending_decision: nil,
+          updated_at: DateTime.utc_now()
+      }
+
+      case persist_decision(snap) do
+        :ok ->
+          cache(snap)
+          transition(snap, "Goal CLEARED by user; not completed")
+          {:ok, snap}
+
+        error ->
+          error
+      end
+    end)
   end
 
   @doc "Forget the tracker entry for `session_id` (test / new-goal cleanup)."
@@ -1327,13 +1541,28 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
     _ -> nil
   end
 
-  @statuses [:active, :paused, :completed, :off_track, :blocked, :abandoned]
+  @statuses [
+    :active,
+    :paused,
+    :completed,
+    :off_track,
+    :blocked,
+    :abandoned,
+    :awaiting_user,
+    :cleared
+  ]
   @phases [:idle, :planning, :executing]
   @pause_reasons [:no_progress, :run_cap, :off_track, :user, :blocked, :abandoned]
 
   defp encode(%Snapshot{} = snap) do
     %{
       "session_id" => snap.session_id,
+      "pending_decision" => snap.pending_decision,
+      "decision_history" => snap.decision_history,
+      "token_budget" => snap.token_budget,
+      "tokens_at_start" => snap.tokens_at_start,
+      "tokens_used" => snap.tokens_used,
+      "started_at" => snap.started_at && DateTime.to_iso8601(snap.started_at),
       "status" => to_string(snap.status),
       "phase" => to_string(snap.phase),
       "goal_id" => snap.goal_id,
@@ -1343,6 +1572,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
       "verify_run_count" => snap.verify_run_count,
       "last_gap_fingerprint" => snap.last_gap_fingerprint,
       "stall_count" => snap.stall_count,
+      "last_work_marker" => snap.last_work_marker,
       "pause_reason" => snap.pause_reason && to_string(snap.pause_reason),
       "blocked_claims" => snap.blocked_claims,
       "blocked_claim_turn" => snap.blocked_claim_turn,
@@ -1358,6 +1588,14 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   defp decode(session_id, map) do
     %Snapshot{
       session_id: Map.get(map, "session_id") || session_id,
+      pending_decision:
+        if(is_map(map["pending_decision"]), do: map["pending_decision"], else: nil),
+      decision_history:
+        if(is_list(map["decision_history"]), do: map["decision_history"], else: []),
+      token_budget: int_or_nil(map["token_budget"]),
+      tokens_at_start: int_or_nil(map["tokens_at_start"]),
+      tokens_used: non_neg_int(map["tokens_used"]),
+      started_at: decode_datetime(map["started_at"]),
       status: known_atom(Map.get(map, "status"), @statuses, :paused),
       phase: known_atom(Map.get(map, "phase"), @phases, :executing),
       goal_id: string_or_nil(Map.get(map, "goal_id")),
@@ -1367,6 +1605,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
       verify_run_count: non_neg_int(Map.get(map, "verify_run_count")),
       last_gap_fingerprint: int_or_nil(Map.get(map, "last_gap_fingerprint")),
       stall_count: non_neg_int(Map.get(map, "stall_count")),
+      last_work_marker: int_or_nil(map["last_work_marker"]),
       pause_reason: known_atom(Map.get(map, "pause_reason"), @pause_reasons, nil),
       blocked_claims: non_neg_int(Map.get(map, "blocked_claims")),
       blocked_claim_turn: int_or_nil(Map.get(map, "blocked_claim_turn")),

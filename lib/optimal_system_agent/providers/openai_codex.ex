@@ -49,6 +49,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
   # authoritative source is the Codex CLI's own picker for a signed-in plan;
   # `codex -m <name>` still reaches older ids that the picker has dropped.
   @models [
+    "gpt-6-astra",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
@@ -65,12 +66,55 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
   # system-prompt text. See Providers.Behaviour.native_tool_schemas?/0.
   def native_tool_schemas?, do: true
 
+  # OpenAI Responses accepts `input_image` content parts. Keep this declaration
+  # beside the adapter so Registry does not flatten screenshots before the
+  # serializer can encode them.
+  @spec supports_image_content?() :: boolean()
+  def supports_image_content?, do: true
+
   @spec default_model() :: String.t()
   def default_model,
     do: Application.get_env(:optimal_system_agent, :openai_codex_model, @default_model)
 
   @spec available_models() :: [String.t()]
   def available_models, do: @models
+
+  # Codex CLI 0.153.3 model catalog, checked 2026-09-04. Use the
+  # advertised max_context_window, not the smaller client default.
+  # These are Codex transport limits, not public API model-card limits.
+  @context_windows %{
+    "gpt-6-astra" => 872_000,
+    "gpt-5.6-sol" => 872_000,
+    "gpt-5.6-terra" => 872_000,
+    "gpt-5.6-luna" => 872_000,
+    "gpt-5.5" => 272_000,
+    "gpt-5.4" => 1_000_000,
+    "gpt-5.4-mini" => 272_000,
+    "gpt-5.3-codex-spark" => 128_000
+  }
+
+  @doc """
+  Configured context budget, falling back to Codex's advertised client maximum.
+  An explicit per-model override is a client budget, not proof of account
+  entitlement. Never expand a small model or exceed its published model window.
+  """
+  def context_window(model) do
+    context_window(model, OptimalSystemAgent.Settings.get("codex_context_windows", %{}))
+  end
+
+  @doc false
+  def context_window(model, overrides) do
+    fallback = Map.get(@context_windows, model)
+    requested = if is_map(overrides), do: Map.get(overrides, model)
+    published = OptimalSystemAgent.Providers.OpenAIModels.model(model)
+    ceiling = if published, do: published.ctx, else: fallback
+
+    if is_integer(requested) and requested > 0 and is_integer(ceiling) do
+      min(requested, ceiling)
+    else
+      fallback
+    end
+  end
 
   @doc "True when a ChatGPT plan is connected. Pure read — never refreshes."
   @spec configured?() :: boolean()
@@ -193,6 +237,11 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
     |> Keyword.put(:account_id, cred.account_id)
     |> Keyword.put(:originator, Auth.originator())
     |> Keyword.delete(:model)
+    # The ChatGPT Codex endpoint rejects `max_output_tokens` outright (with an
+    # empty HTTP 400), even though the public Responses API accepts it. The
+    # agent loop supplies `max_tokens` for every provider, so strip it at this
+    # provider boundary and let Codex enforce its own output ceiling.
+    |> Keyword.delete(:max_tokens)
   end
 
   defp auth_error(reason) do

@@ -93,6 +93,43 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponsesTest do
                body.input
     end
 
+    test "a screenshot tool result preserves the call output and sends an input_image" do
+      messages = [
+        %{
+          role: "tool",
+          tool_call_id: "call_vision",
+          content: [
+            %{type: "text", text: "Image: /tmp/screen.png"},
+            %{type: "image", source: %{type: "base64", media_type: "image/png", data: "aGVsbG8="}}
+          ]
+        }
+      ]
+
+      body = OpenAIResponses.build_body("gpt-5.6-sol", messages, [], true)
+
+      assert [%{type: "function_call_output", call_id: "call_vision", output: output}] =
+               body.input
+
+      assert Enum.any?(output, &(&1.type == "input_image"))
+    end
+
+    test "user image content is encoded for Responses rather than flattened" do
+      messages = [
+        %{
+          role: "user",
+          content: [
+            %{type: "text", text: "look"},
+            %{type: "image", source: %{media_type: "image/jpeg", data: "YWJj"}}
+          ]
+        }
+      ]
+
+      body = OpenAIResponses.build_body("gpt-5.6-sol", messages, [], false)
+
+      assert [%{content: [%{type: "input_text", text: "look"}, %{type: "input_image"}]}] =
+               body.input
+    end
+
     test "an assistant turn with both text and calls emits both, in order" do
       messages = [
         %{
@@ -114,6 +151,24 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponsesTest do
       assert body.stream == true
       assert body.max_output_tokens == 100
       refute Map.has_key?(body, :max_tokens)
+    end
+
+    test "Codex requests explicitly disable server-side storage" do
+      body = OpenAIResponses.build_body("m", [%{role: "user", content: "x"}], [], true)
+
+      assert body.store == false
+    end
+
+    test "passes OpenAI Fast processing through as a service tier" do
+      body =
+        OpenAIResponses.build_body(
+          "gpt-5.6-sol",
+          [%{role: "user", content: "x"}],
+          [service_tier: "fast"],
+          true
+        )
+
+      assert body.service_tier == "fast"
     end
   end
 

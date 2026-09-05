@@ -64,6 +64,19 @@ defmodule OptimalSystemAgent.Providers.OpenAIModels do
   # Order is the picker's display order: flagship first, legacy last.
   @models [
     %{
+      id: "gpt-6-astra",
+      name: "GPT-6 Astra",
+      ctx: 1_050_000,
+      max_output: 128_000,
+      reasoning: true,
+      vision: true,
+      tools: true,
+      pricing: {10.00, 50.00},
+      recommended: false,
+      legacy: false,
+      note: "Responses API required for tools; availability depends on account access"
+    },
+    %{
       id: "gpt-5.6-terra",
       name: "GPT-5.6 Terra",
       ctx: 1_050_000,

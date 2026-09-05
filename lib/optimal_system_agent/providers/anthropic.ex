@@ -88,6 +88,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       |> maybe_add_tools(opts)
       |> maybe_add_thinking(thinking)
       |> maybe_add_output_config(model, opts)
+      |> apply_service_tier(opts)
       # Keep the serialized body under Anthropic's request-size cap by evicting
       # the oldest inline images to an honest placeholder (see ImageBudget).
       # Strict no-op — body byte-for-byte unchanged — when already under budget.
@@ -256,6 +257,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       |> maybe_add_tools(opts)
       |> maybe_add_thinking(thinking)
       |> maybe_add_output_config(model, opts)
+      |> apply_service_tier(opts)
       # Keep the serialized body under Anthropic's request-size cap by evicting
       # the oldest inline images to an honest placeholder (see ImageBudget).
       # Strict no-op — body byte-for-byte unchanged — when already under budget.
@@ -379,6 +381,14 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       stop_reason: acc.stop_reason,
       usage: Map.get(acc, :usage, %{})
     }
+  end
+
+  @doc false
+  def apply_service_tier(body, opts) when is_map(body) and is_list(opts) do
+    case Keyword.get(opts, :service_tier) do
+      tier when tier in ["auto", "standard_only"] -> Map.put(body, :service_tier, tier)
+      _ -> body
+    end
   end
 
   defp collect_stream(resp, callback, acc) do

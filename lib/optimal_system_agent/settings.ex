@@ -183,6 +183,27 @@ defmodule OptimalSystemAgent.Settings do
 
   def set_session_for(_session_id, key, value), do: put_session(:global, key, value)
 
+  @doc "Get a setting using the session layer for a SPECIFIC session id."
+  @spec get_session_for(String.t() | nil, atom() | String.t(), term()) :: term()
+  def get_session_for(session_id, key, default \\ nil) do
+    session =
+      case session_id do
+        sid when is_binary(sid) and sid != "" ->
+          global = session_rows({{:session, :"$1"}, :"$2"})
+          Map.merge(global, session_rows({{:session, sid, :"$1"}, :"$2"}))
+
+        _ ->
+          session_rows({{:session, :"$1"}, :"$2"})
+      end
+
+    case Map.fetch(session, to_string(key)) do
+      {:ok, value} -> value
+      :error -> default
+    end
+  rescue
+    _ -> default
+  end
+
   @doc """
   Remove ONE session-scoped setting, so the cascade resolves it again.
 

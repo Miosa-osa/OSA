@@ -409,7 +409,8 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
 
           body =
             Jason.encode!(%{
-              system_tokens: budget[:static_base_tokens] || 0,
+              system_tokens:
+                (budget[:static_base_tokens] || 0) + (budget[:dynamic_context_tokens] || 0),
               conversation_tokens: budget[:conversation_tokens] || 0,
               tool_result_tokens: budget[:tool_result_tokens] || 0,
               tool_schema_tokens: budget[:tool_schema_tokens] || 0,

@@ -76,7 +76,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "coordinator" => {"Toggle coordinator mode (delegation only)", :cmd_coordinator},
     "ask-user" => {"Let the agent ask you questions mid-task (off by default)", :cmd_ask_user},
     "effort" => {"Set thinking effort level (low/medium/high/max)", :cmd_effort},
-    "fast" => {"Toggle fast mode (low effort)", :cmd_fast},
+    "fast" => {"Toggle provider Fast processing (reasoning and tools unchanged)", :cmd_fast},
     "think" => {"Toggle model reasoning on/off (off = faster replies)", :cmd_think},
     "permissions" => {"View and manage permission rules", :cmd_permissions},
     "hooks" => {"View registered hooks", :cmd_hooks},
@@ -2634,7 +2634,14 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     IO.puts("")
 
-    case String.trim(args) do
+    trimmed = String.trim(args)
+
+    normalized =
+      if String.downcase(trimmed) in ~w(status pause stop resume clear off reset cancel end approve reject),
+        do: String.downcase(trimmed),
+        else: trimmed
+
+    case normalized do
       "" ->
         print_goal_status(session_id)
 
@@ -2643,18 +2650,51 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         IO.puts("  #{@green}✓#{@reset} Goal paused. #{@dim}/goal resume to continue.#{@reset}")
 
       "resume" ->
-        GoalTracker.resume(session_id)
-        IO.puts("  #{@green}✓#{@reset} Goal resumed — stall bookkeeping reset.")
+        snap = GoalTracker.resume(session_id)
 
-      verb when verb in ["clear", "off", "reset"] ->
-        GoalTracker.reset(session_id)
-        IO.puts("  #{@green}✓#{@reset} Goal cleared. Auto-continue toward it stops.")
+        if snap.status == :active and is_binary(snap.goal) and snap.goal != "" do
+          IO.puts("  #{@green}✓#{@reset} Goal resumed — stall bookkeeping reset.")
+        else
+          IO.puts("  Goal was not resumed. " <> GoalTracker.waiting_message(session_id))
+        end
+
+      verb when verb in ["clear", "off", "reset", "cancel"] ->
+        case GoalTracker.clear(session_id) do
+          {:ok, _} ->
+            Loop.cancel(session_id)
+
+            IO.puts(
+              "  #{@green}✓#{@reset} Goal cleared, not completed. Auto-continue toward it stops."
+            )
+
+          {:error, reason} ->
+            IO.puts("  Could not durably clear goal: #{inspect(reason)}")
+        end
 
       "status" ->
         print_goal_status(session_id)
 
+      verb when verb in ["end", "approve", "reject"] ->
+        IO.puts(
+          "  Use /goal clear to stop, or /goal approve|reject <request_id> to answer a pending decision."
+        )
+
       text ->
-        anchor_goal_command(text, session_id)
+        case String.split(text, " ", parts: 3, trim: true) do
+          [decision, id | notes] when decision in ["approve", "reject"] ->
+            case GoalTracker.resolve_decision(session_id, id, decision, Enum.join(notes, " ")) do
+              {:ok, _} ->
+                IO.puts(
+                  "  Decision recorded. Send a message to continue; completion still requires verification."
+                )
+
+              {:error, reason} ->
+                IO.puts("  Decision not accepted: #{inspect(reason)}")
+            end
+
+          _ ->
+            anchor_goal_command(text, session_id)
+        end
     end
 
     IO.puts("")
@@ -2730,6 +2770,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         IO.puts("")
 
         reason = if snap.pause_reason, do: " (#{snap.pause_reason})", else: ""
+
+        if snap.pending_decision != nil, do: IO.puts(GoalTracker.waiting_message(session_id))
 
         IO.puts(
           "  #{@dim}status:#{@reset} #{snap.status}#{reason}  #{@dim}phase:#{@reset} #{snap.phase}"
@@ -3136,22 +3178,15 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   end
 
   def cmd_fast(_args, session_id) do
-    alias OptimalSystemAgent.Agent.Effort
+    alias OptimalSystemAgent.Agent.Loop.LLMClient
     IO.puts("")
 
-    Effort.toggle_fast()
-    config = Effort.get(Effort.current())
+    enabled = LLMClient.toggle_fast_service_tier(session_id)
+    mode = if enabled, do: "enabled", else: "disabled"
 
-    mode =
-      if Effort.fast_mode?(),
-        do: "enabled",
-        else: "disabled"
-
-    IO.puts("  #{@green}✓#{@reset} Fast mode #{@bold}#{mode}#{@reset}")
-    IO.puts("  #{@dim}Effort:#{@reset}     #{Effort.current()}")
-    IO.puts("  #{@dim}Iterations:#{@reset} #{effort_iteration_display()}")
-    IO.puts("  #{@dim}Output cap:#{@reset} #{config.max_response_tokens} tokens")
-    IO.puts("  #{@dim}Tool cap:#{@reset}   #{config.tool_budget}")
+    IO.puts("  #{@green}✓#{@reset} Provider Fast processing #{@bold}#{mode}#{@reset}")
+    IO.puts("  #{@dim}Uses the selected provider's supported acceleration tier.#{@reset}")
+    IO.puts("  #{@dim}Reasoning effort and tool budgets are unchanged.#{@reset}")
 
     IO.puts("")
     session_id
