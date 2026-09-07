@@ -34,6 +34,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop do
 
   @impl true
   def init({job, reply}) do
+    Process.flag(:trap_exit, true)
     send(self(), :run)
     {:ok, %{job: job, reply: reply, x11: nil, ws: nil, bridge: nil}}
   end
@@ -64,25 +65,25 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop do
   # Bridge loop finished (either side closed).
   def handle_info({:relay_done, reason}, state) do
     Logger.info("[Desktop] relay finished: #{inspect(reason)}")
-    cleanup(state)
     {:stop, :normal, state}
   end
 
   # Desktop helper OS process exited (Port message).
   def handle_info({port, {:exit_status, status}}, %{x11: %{port: port}} = state) do
     Logger.warning("[Desktop] helper exited with status #{status}")
-    cleanup(state)
     {:stop, :normal, state}
   end
 
   # Bridge Task exited.
   def handle_info({:DOWN, _ref, :process, pid, reason}, %{bridge: %Task{pid: pid}} = state) do
     Logger.info("[Desktop] bridge task down: #{inspect(reason)}")
-    cleanup(state)
     {:stop, :normal, state}
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  @impl true
+  def terminate(_reason, state), do: cleanup(state)
 
   # ── Private ──────────────────────────────────────────────────────────
 
@@ -110,19 +111,49 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop do
   defp start_session(job, reply) do
     relay_url = Map.get(job, :relay_url, "")
 
-    with {:desktop, {:ok, x11}} <- {:desktop, spawn_desktop(job)},
-         {:ws, {:ok, ws}} <- {:ws, Relay.open(relay_url)},
-         :ok <- reply.({:job_done, job.id, %{status: :streaming}}),
-         {:bridge, {:ok, task}} <- {:bridge, Bridge.start(x11.vnc_port, ws, self())} do
-      Process.monitor(task.pid)
-      {:ok, %{job: job, reply: reply, x11: x11, ws: ws, bridge: task}}
-    else
-      {:desktop, {:error, {:missing_binary, msg}}} -> {:error, :missing_binary, msg}
-      {:desktop, {:error, {:missing_display, msg}}} -> {:error, :missing_display, msg}
-      {:desktop, {:error, {:missing_helper, msg}}} -> {:error, :missing_helper, msg}
-      {:desktop, {:error, reason}} -> {:error, :desktop_start_failed, inspect(reason)}
-      {:ws, {:error, reason}} -> {:error, :ws_connect_failed, inspect(reason)}
-      {:bridge, {:error, reason}} -> {:error, :bridge_start_failed, inspect(reason)}
+    case spawn_desktop(job) do
+      {:ok, x11} ->
+        try do
+          case Relay.open(relay_url) do
+            {:ok, ws} ->
+              start_bridge(job, reply, x11, ws)
+
+            {:error, reason} ->
+              kill_desktop(x11)
+              {:error, :ws_connect_failed, inspect(reason)}
+          end
+        catch
+          kind, reason ->
+            kill_desktop(x11)
+            :erlang.raise(kind, reason, __STACKTRACE__)
+        end
+
+      {:error, {kind, msg}} when kind in [:missing_binary, :missing_display, :missing_helper] ->
+        {:error, kind, msg}
+
+      {:error, reason} ->
+        {:error, :desktop_start_failed, inspect(reason)}
+    end
+  end
+
+  defp start_bridge(job, reply, x11, ws) do
+    state = %{job: job, reply: reply, x11: x11, ws: ws, bridge: nil}
+
+    try do
+      case Bridge.start(x11.vnc_port, ws, self()) do
+        {:ok, task} ->
+          :ok = reply.({:job_done, job.id, %{status: :streaming}})
+          Process.monitor(task.pid)
+          {:ok, %{state | bridge: task}}
+
+        {:error, reason} ->
+          cleanup(state)
+          {:error, :bridge_start_failed, inspect(reason)}
+      end
+    catch
+      kind, reason ->
+        cleanup(state)
+        :erlang.raise(kind, reason, __STACKTRACE__)
     end
   end
 

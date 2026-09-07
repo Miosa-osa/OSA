@@ -33,7 +33,11 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Relay do
     with {:ok, conn} <-
            Mint.HTTP.connect(scheme, uri.host, port,
              protocols: [:http1],
-             transport_opts: TlsOpts.build()
+             transport_opts:
+               if(scheme == :https,
+                 do: Keyword.put(TlsOpts.build(), :timeout, @connect_timeout_ms),
+                 else: [timeout: @connect_timeout_ms]
+               )
            ),
          {:ok, conn, ref} <-
            Mint.WebSocket.upgrade(ws_scheme, conn, path, []),

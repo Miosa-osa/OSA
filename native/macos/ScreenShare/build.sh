@@ -53,6 +53,7 @@ swiftc \
     -framework CoreMedia \
     -framework CoreVideo \
     -framework Network \
+    "${SRC_DIR}/Lifetime.swift" \
     "${SRC_DIR}/FrameEncoder.swift" \
     "${SRC_DIR}/VncServer.swift" \
     "${SRC_DIR}/Capture.swift" \

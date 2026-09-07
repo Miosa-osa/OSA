@@ -29,7 +29,8 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.MacOS do
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.HelperPath
 
   @helper_name "osa-screen-capture-darwin"
-  @port_pattern ~r/PORT=(\d+)/
+  @port_pattern ~r/(?:^|\n)PORT=(\d+)\r?\n/
+  @max_startup_output_bytes 16_384
   @startup_timeout_ms 8_000
 
   @type t :: %__MODULE__{
@@ -48,20 +49,39 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.MacOS do
   @spec spawn() :: {:ok, t()} | {:error, term()}
   def spawn do
     with {:ok, helper_path} <- find_helper(),
-         {:ok, port} <- open_port(helper_path),
-         {:ok, os_pid} <- fetch_os_pid(port),
-         {:ok, vnc_port} <- await_port_announcement(port) do
-      {:ok, %__MODULE__{port: port, os_pid: os_pid, vnc_port: vnc_port}}
+         {:ok, port} <- open_port(helper_path) do
+      result =
+        with {:ok, os_pid} <- fetch_os_pid(port),
+             {:ok, vnc_port} <- await_port_announcement(port) do
+          {:ok, %__MODULE__{port: port, os_pid: os_pid, vnc_port: vnc_port}}
+        end
+
+      case result do
+        {:ok, _} ->
+          result
+
+        {:error, _} ->
+          stop(port)
+          result
+      end
     end
   end
 
   @doc "Terminates the helper OS process and closes the Port."
   @spec kill(t()) :: :ok
   def kill(%__MODULE__{port: port, os_pid: os_pid}) do
-    try do
+    # Only signal the PID while its owning Port is still alive, avoiding PID reuse.
+    if Port.info(port, :os_pid) == {:os_pid, os_pid} do
       System.cmd("kill", ["-TERM", to_string(os_pid)], stderr_to_stdout: true)
-    rescue
-      _ -> :ok
+
+      receive do
+        {^port, {:exit_status, _}} -> :ok
+      after
+        500 ->
+          if Port.info(port, :os_pid) == {:os_pid, os_pid} do
+            System.cmd("kill", ["-KILL", to_string(os_pid)], stderr_to_stdout: true)
+          end
+      end
     end
 
     catch_exit(fn -> Port.close(port) end)
@@ -146,19 +166,23 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.MacOS do
         {^port, {:data, chunk}} ->
           buffer = acc <> chunk
 
-          case Regex.run(@port_pattern, buffer, capture: :all_but_first) do
-            [num] ->
-              case Integer.parse(num) do
-                {vnc_port, ""} when vnc_port > 0 ->
-                  Logger.debug("[MacOS] helper announced RFB port #{vnc_port}")
-                  {:ok, vnc_port}
+          if byte_size(buffer) > @max_startup_output_bytes do
+            {:error, :startup_output_limit}
+          else
+            case Regex.run(@port_pattern, buffer, capture: :all_but_first) do
+              [num] ->
+                case Integer.parse(num) do
+                  {vnc_port, ""} when vnc_port > 0 and vnc_port <= 65_535 ->
+                    Logger.debug("[MacOS] helper announced RFB port #{vnc_port}")
+                    {:ok, vnc_port}
 
-                _ ->
-                  {:error, {:bad_port_value, num}}
-              end
+                  _ ->
+                    {:error, {:bad_port_value, num}}
+                end
 
-            nil ->
-              await_port_announcement(port, buffer, deadline)
+              nil ->
+                await_port_announcement(port, buffer, deadline)
+            end
           end
 
         {^port, {:exit_status, status}} ->

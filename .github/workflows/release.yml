@@ -193,7 +193,7 @@ jobs:
       - name: Build bundled macOS desktop helpers
         run: |
           stamp="$(mktemp)"
-          native/macos/ScreenShare/build.sh
+          sh native/macos/ScreenShare/test.sh
           native/macos/AccessibilityHelper/build.sh
           for h in priv/helpers/osa-screen-capture-darwin priv/helpers/osa-accessibility-darwin; do
             [ -s "$h" ] && [ "$h" -nt "$stamp" ] || {

@@ -34,18 +34,20 @@ final class VncServer {
     private let port: UInt16
     private var listener: NWListener?
     private var connection: NWConnection?
+    private let stateLock = NSLock()
+    private let activity: () -> Void
     private var stopped = false
 
     // Atomic frame storage — updated by Capture, read by the send loop
     private let frameLock = NSLock()
     private var _frameSource: FrameSource = .stub
-    private var pendingUpdateRequest = false
 
     // Default stub dimensions — overridden once a live frame arrives
-    private var stubWidth  = 1920
+    private var stubWidth = 1920
     private var stubHeight = 1080
 
-    init(port: UInt16) {
+    init(port: UInt16, activity: @escaping () -> Void) {
+        self.activity = activity
         self.port = port
     }
 
@@ -58,25 +60,38 @@ final class VncServer {
         // Restrict to loopback — never accept outside connections
         params.requiredInterfaceType = .loopback
 
-        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
-            throw NSError(domain: "ScreenShare", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "Invalid port \(port)"])
-        }
-
-        let listener = try NWListener(using: params, on: nwPort)
+        let nwPort = port == 0 ? NWEndpoint.Port.any : NWEndpoint.Port(rawValue: port)!
+        params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: nwPort)
+        let listener = try NWListener(using: params)
         self.listener = listener
-        fputs("[ScreenShare] bound 127.0.0.1:\(port)\n", stderr)
-
-        // Announce port on stdout so the Elixir MacOS adapter can discover it
-        // via the PORT= pattern (same contract as x11vnc.ex).
-        print("PORT=\(port)")
-        fflush(stdout)
+        listener.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                guard let bound = listener.port else { exit(1) }
+                print("PORT=\(bound.rawValue)")
+                fflush(stdout)
+            case .failed(let error):
+                fputs("[ScreenShare] bind_failed \(error)\n", stderr)
+                exit(1)
+            default: break
+            }
+        }
     }
 
     func stop() {
+        stateLock.lock()
         stopped = true
-        connection?.cancel()
+        let current = connection
+        stateLock.unlock()
+        current?.cancel()
         listener?.cancel()
+    }
+
+    func setDimensions(width: Int, height: Int) {
+        frameLock.lock()
+        stubWidth = width
+        stubHeight = height
+        frameLock.unlock()
     }
 
     func setFrameSource(_ source: FrameSource) {
@@ -93,7 +108,9 @@ final class VncServer {
         listener.newConnectionHandler = { [weak self] conn in
             guard let self = self else { return }
 
+            self.stateLock.lock()
             if self.connection != nil {
+                self.stateLock.unlock()
                 // Already serving one client — reject
                 conn.cancel()
                 return
@@ -101,6 +118,8 @@ final class VncServer {
 
             fputs("[ScreenShare] client_connected\n", stderr)
             self.connection = conn
+            self.stateLock.unlock()
+            self.activity()
             conn.start(queue: .global(qos: .userInteractive))
 
             Task { await self.serve(conn) }
@@ -109,7 +128,7 @@ final class VncServer {
         listener.start(queue: .global(qos: .userInteractive))
 
         // Keep the task alive until stopped
-        while !stopped {
+        while !isStopped {
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
     }
@@ -140,7 +159,8 @@ final class VncServer {
             let (initWidth, initHeight) = frameDimensions()
 
             // 8. Send ServerInit
-            try await send(conn, data: FrameEncoder.serverInit(width: initWidth, height: initHeight))
+            try await send(
+                conn, data: FrameEncoder.serverInit(width: initWidth, height: initHeight))
 
             // 9. Message loop
             try await messageLoop(conn, width: initWidth, height: initHeight)
@@ -149,12 +169,12 @@ final class VncServer {
             fputs("[ScreenShare] client_disconnected (\(error))\n", stderr)
         }
 
-        connection = nil
+        releaseConnection(conn)
         fputs("[ScreenShare] client_disconnected\n", stderr)
     }
 
     private func messageLoop(_ conn: NWConnection, width: Int, height: Int) async throws {
-        while !stopped {
+        while !isStopped {
             // Read message type (1 byte)
             let typeByte = try await recv(conn, count: 1)
             guard let msgType = typeByte.first else { break }
@@ -164,28 +184,32 @@ final class VncServer {
                 // 9 bytes: incremental(1) x(2) y(2) w(2) h(2)
                 _ = try await recv(conn, count: 9)
                 // Send one full-screen update
+                activity()
                 let frameData = currentFrame(width: width, height: height)
-                let update = FrameEncoder.framebufferUpdate(x: 0, y: 0, width: width, height: height, pixelData: frameData)
+                let update = FrameEncoder.framebufferUpdate(
+                    x: 0, y: 0, width: width, height: height, pixelData: frameData)
                 try await send(conn, data: update)
 
             case RFBClientMsg.setPixelFormat.rawValue:
-                _ = try await recv(conn, count: 19) // 3 padding + 16 format bytes
+                _ = try await recv(conn, count: 19)  // 3 padding + 16 format bytes
 
             case RFBClientMsg.setEncodings.rawValue:
-                let header = try await recv(conn, count: 3) // 1 padding + 2 count
+                let header = try await recv(conn, count: 3)  // 1 padding + 2 count
                 let count = Int(header[1]) << 8 | Int(header[2])
-                _ = try await recv(conn, count: count * 4) // each encoding is int32
+                _ = try await recv(conn, count: count * 4)  // each encoding is int32
 
             case RFBClientMsg.keyEvent.rawValue:
-                _ = try await recv(conn, count: 7) // down(1) pad(2) key(4)
+                _ = try await recv(conn, count: 7)  // down(1) pad(2) key(4)
 
             case RFBClientMsg.pointerEvent.rawValue:
-                _ = try await recv(conn, count: 5) // buttonMask(1) x(2) y(2)
+                _ = try await recv(conn, count: 5)  // buttonMask(1) x(2) y(2)
 
             case RFBClientMsg.clientCutText.rawValue:
-                let header = try await recv(conn, count: 7) // 3 padding + 4 length
-                let length = Int(header[3]) << 24 | Int(header[4]) << 16 |
-                             Int(header[5]) << 8  | Int(header[6])
+                let header = try await recv(conn, count: 7)  // 3 padding + 4 length
+                let length =
+                    Int(header[3]) << 24 | Int(header[4]) << 16 | Int(header[5]) << 8
+                    | Int(header[6])
+                guard length <= 1024 * 1024 else { return }
                 if length > 0 { _ = try await recv(conn, count: length) }
 
             default:
@@ -194,6 +218,25 @@ final class VncServer {
                 return
             }
         }
+    }
+
+    private var isStopped: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return stopped
+    }
+
+    var hasClient: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return connection != nil
+    }
+
+    private func releaseConnection(_ conn: NWConnection) {
+        conn.cancel()
+        stateLock.lock()
+        if connection === conn { connection = nil }
+        stateLock.unlock()
     }
 
     // MARK: - Frame helpers
@@ -230,10 +273,10 @@ final class VncServer {
         data.withUnsafeMutableBytes { (ptr: UnsafeMutableRawBufferPointer) in
             var i = 0
             while i < pixelCount * 4 {
-                ptr[i]     = 0x18 // B — dark blue
-                ptr[i + 1] = 0x18 // G
-                ptr[i + 2] = 0x2E // R
-                ptr[i + 3] = 0xFF // pad / alpha (ignored by RFB)
+                ptr[i] = 0x18  // B — dark blue
+                ptr[i + 1] = 0x18  // G
+                ptr[i + 2] = 0x2E  // R
+                ptr[i + 3] = 0xFF  // pad / alpha (ignored by RFB)
                 i += 4
             }
         }
@@ -244,27 +287,33 @@ final class VncServer {
 
     private func send(_ conn: NWConnection, data: Data) async throws {
         return try await withCheckedThrowingContinuation { continuation in
-            conn.send(content: data, completion: .contentProcessed { error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
-                }
-            })
+            conn.send(
+                content: data,
+                completion: .contentProcessed { error in
+                    if let error = error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
+                })
         }
     }
 
     private func recv(_ conn: NWConnection, count: Int) async throws -> Data {
+        if count == 0 { return Data() }
         return try await withCheckedThrowingContinuation { continuation in
-            conn.receive(minimumIncompleteLength: count, maximumLength: count) { data, _, isComplete, error in
+            conn.receive(minimumIncompleteLength: count, maximumLength: count) {
+                data, _, _, error in
                 if let error = error {
                     continuation.resume(throwing: error)
                 } else if let data = data, data.count >= count {
                     continuation.resume(returning: data)
-                } else if isComplete {
-                    continuation.resume(throwing: NSError(
-                        domain: "ScreenShare", code: 2,
-                        userInfo: [NSLocalizedDescriptionKey: "Connection closed while reading"]))
+                } else {
+                    continuation.resume(
+                        throwing: NSError(
+                            domain: "ScreenShare", code: 2,
+                            userInfo: [NSLocalizedDescriptionKey: "Connection closed while reading"]
+                        ))
                 }
             }
         }
