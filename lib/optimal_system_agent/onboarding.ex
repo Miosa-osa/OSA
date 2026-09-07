@@ -335,6 +335,19 @@ defmodule OptimalSystemAgent.Onboarding do
         ]
       },
       %{
+        id: "surplus",
+        name: "Surplus Intelligence",
+        description: "One API → a curated marketplace of frontier models",
+        group: "recommended",
+        requires_key: true,
+        env_var: "SURPLUS_API_KEY",
+        default_model: OptimalSystemAgent.Providers.SurplusModels.default_model(),
+        base_url: "https://api.surplusintelligence.ai/v1",
+        signup_url: "https://www.surplusintelligence.ai/",
+        allow_free_text: true,
+        models: OptimalSystemAgent.Providers.SurplusModels.picker_models()
+      },
+      %{
         id: "anthropic",
         name: "Anthropic",
         description: "Claude direct — best for coding",
@@ -992,6 +1005,16 @@ defmodule OptimalSystemAgent.Onboarding do
         api_key = Keyword.get(opts, :api_key) || System.get_env("MIOSA_API_KEY")
         fetch_openai_models("https://optimal.miosa.ai/v1", api_key)
 
+      "surplus" ->
+        # Surplus' catalog endpoint is public and changes as marketplace
+        # inventory changes. Keep the curated shortlist first, then expose the
+        # rest of the live catalog so the picker is useful without becoming a
+        # stale hardcoded dump of every model.
+        case fetch_surplus_models() do
+          {:ok, models} when models != [] -> {:ok, models}
+          _ -> {:ok, hardcoded_models(provider_id)}
+        end
+
       # The rows are aliases, and an alias alone does not answer "which model
       # am I actually running" — the question the picker exists to answer.
       # Claude Code resolves the alias downstream and reports the concrete id
@@ -1263,6 +1286,27 @@ defmodule OptimalSystemAgent.Onboarding do
     end
   rescue
     e -> {:error, "OpenRouter fetch failed: #{Exception.message(e)}"}
+  end
+
+  defp fetch_surplus_models do
+    case Req.get("https://api.surplusintelligence.ai/v1/models",
+           receive_timeout: 10_000,
+           retry: false
+         ) do
+      {:ok, %{status: 200, body: %{"data" => models}}} when is_list(models) ->
+        {:ok,
+         models
+         |> Enum.map(&OptimalSystemAgent.Providers.SurplusModels.parse/1)
+         |> OptimalSystemAgent.Providers.SurplusModels.order_catalog()}
+
+      {:ok, %{status: status}} ->
+        {:error, "Surplus returned #{status}"}
+
+      {:error, reason} ->
+        {:error, "Can't reach Surplus: #{inspect(reason)}"}
+    end
+  rescue
+    e -> {:error, "Surplus model fetch failed: #{Exception.message(e)}"}
   end
 
   # OpenRouter prices are per-token USD strings (e.g. "0.000003"). Convert to a

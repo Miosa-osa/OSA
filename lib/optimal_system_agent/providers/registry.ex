@@ -66,6 +66,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
                  perplexity: {:compat, :perplexity},
                  mistral: {:compat, :mistral},
                  openrouter: {:compat, :openrouter},
+                 surplus: {:compat, :surplus},
 
                  # ChatGPT Plus/Pro plan over the Responses API. A SEPARATE
                  # entry from :openai, not a second auth mode on it — different

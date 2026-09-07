@@ -34,6 +34,10 @@ config :optimal_system_agent,
   # config's default; verified present in the live GET /api/v1/models catalog.
   openrouter_model: "anthropic/claude-opus-5",
 
+  # Surplus Intelligence settings (set SURPLUS_API_KEY env var)
+  surplus_url: "https://api.surplusintelligence.ai/v1",
+  surplus_model: "claude-fable-5.1",
+
   # Drop, from the cached system prompt, the tool documentation that the
   # request's own native tool definitions already carry byte-for-byte.
   # Applies ONLY to providers that declare `native_tool_schemas?/0` (the

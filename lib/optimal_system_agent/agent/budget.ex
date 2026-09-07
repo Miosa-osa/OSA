@@ -29,6 +29,7 @@ defmodule OptimalSystemAgent.Agent.Budget do
     groq: %{input: 0.27, output: 0.27},
     ollama: %{input: 0.0, output: 0.0},
     openrouter: %{input: 2.0, output: 6.0},
+    surplus: %{input: 2.0, output: 10.0},
     default: %{input: 1.0, output: 3.0}
   }
 

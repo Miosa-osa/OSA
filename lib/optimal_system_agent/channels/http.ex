@@ -1066,7 +1066,7 @@ defmodule OptimalSystemAgent.Channels.HTTP do
     ids ++ @extra_health_check_slugs
   rescue
     # Never let a catalog problem turn every key check into a 400.
-    _ -> ~w(anthropic openai ollama ollama_local ollama_cloud openrouter miosa custom)
+    _ -> ~w(anthropic openai ollama ollama_local ollama_cloud openrouter surplus miosa custom)
   end
 
   # Run a risky call, degrading to `default` on ANY exception/throw/exit
