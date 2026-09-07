@@ -18,6 +18,7 @@ defmodule OptimalSystemAgent.Providers.SurplusModels do
     {"gpt-6-astra", "GPT-6 Astra"},
     {"gemini-3.8-flash", "Gemini 3.8 Flash"},
     {"kimi-k3", "Kimi K3"},
+    {"kimi-k3-fast-api", "Kimi K3 Fast"},
     {"qwen3.8-flash", "Qwen3.8 Flash"},
     {"deepseek-v4-pro", "DeepSeek V4 Pro"},
     {"deepseek-v4-flash", "DeepSeek V4 Flash"},

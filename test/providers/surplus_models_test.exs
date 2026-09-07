@@ -16,6 +16,7 @@ defmodule OptimalSystemAgent.Providers.SurplusModelsTest do
     assert "claude-fable-5.1" in ids
     assert "gpt-6-astra" in ids
     assert "kimi-k3" in ids
+    assert "kimi-k3-fast-api" in ids
     assert "muse-spark-1.3-contributor" in ids
     assert "qwen3.8-flash" in ids
     assert "deepseek-v4-pro" in ids
