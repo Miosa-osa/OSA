@@ -80,6 +80,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.LifecycleTest
     assert {:error, :closed} = :gen_tcp.recv(second, 0, 2_000)
   end
 
+  @tag :macos_native
   test "a refused relay connection reaps the real native helper" do
     helper = Path.join(:code.priv_dir(:optimal_system_agent), "helpers/osa-screen-capture-darwin")
 
