@@ -20,6 +20,10 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTrackerStallTest do
     %GoalVerifier.Result{verdict: :incomplete, reason: "still going", gaps: gaps}
   end
 
+  defp off_track(gaps) do
+    %GoalVerifier.Result{verdict: :off_track, reason: "unachievable as framed", gaps: gaps}
+  end
+
   defp start(session_id) do
     GoalTracker.start(session_id, "organise the filesystem across every workspace")
   end
@@ -174,6 +178,105 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTrackerStallTest do
       assert GoalTracker.run_cap_reached?(3)
       refute GoalTracker.run_cap_reached?(2)
       assert GoalTracker.max_runs_label() == "3"
+    end
+  end
+
+  describe "G1 — an :off_track verdict is not exempt from stall/run-cap detection" do
+    # Before this fix, `apply_verdict/3`'s `:off_track` clause never called
+    # `advance_stall/3` and never checked `run_cap_reached?/1` — only
+    # `:incomplete` did. So a goal the panel kept judging unachievable as
+    # framed, round after round, had NO cross-turn circuit breaker at all:
+    # `continue?/1` stays true for `:off_track` forever, and
+    # `pause_reason: :off_track` was declared in the type but never actually
+    # assigned. This is the concrete "circling instead of a terminal state"
+    # defect G1 exists to close.
+    test "the SAME off_track verdict twice in a row auto-pauses, not just re-plans forever" do
+      s = sid()
+      start(s)
+      gaps = ["the goal contradicts an existing constraint"]
+
+      GoalTracker.advance(s, off_track(gaps))
+      refute GoalTracker.paused?(s), "one round alone is not yet a stall"
+      assert GoalTracker.snapshot(s).status == :off_track
+
+      GoalTracker.advance(s, off_track(gaps))
+
+      assert GoalTracker.paused?(s),
+             "a repeating off_track verdict never reached a terminal state"
+
+      assert GoalTracker.snapshot(s).pause_reason == :off_track
+    end
+
+    test "the gap list surfaces on the paused snapshot (`last_gaps`), not just a count" do
+      s = sid()
+      start(s)
+      gaps = ["contradicts an existing constraint", "missing prerequisite service"]
+
+      GoalTracker.advance(s, off_track(gaps))
+      GoalTracker.advance(s, off_track(gaps))
+
+      snap = GoalTracker.snapshot(s)
+      assert snap.status == :paused
+      assert snap.last_gaps == gaps
+    end
+
+    test "work landing between off_track rounds vetoes the stall, same as :incomplete" do
+      s = sid()
+      start(s)
+      gaps = ["same contradiction cited"]
+
+      for calls <- [10, 40, 90], do: GoalTracker.advance(s, off_track(gaps), calls)
+
+      refute GoalTracker.paused?(s), "a moving work marker should veto an off_track stall too"
+    end
+
+    test "an off_track verdict following an incomplete one citing the SAME gap also stalls" do
+      # The fingerprint mechanism is verdict-agnostic; a goal that flips
+      # between "not yet done" and "unachievable as framed" while citing the
+      # identical underlying gap is exactly as stuck as one that stays on a
+      # single verdict.
+      s = sid()
+      start(s)
+      gaps = ["the same missing prerequisite"]
+
+      GoalTracker.advance(s, incomplete(gaps))
+      refute GoalTracker.paused?(s)
+
+      GoalTracker.advance(s, off_track(gaps))
+
+      assert GoalTracker.paused?(s)
+      assert GoalTracker.snapshot(s).pause_reason == :off_track
+    end
+
+    test "the lifetime run cap also applies to a persistently off_track goal" do
+      Application.put_env(:optimal_system_agent, :goal_tracker_max_runs, 3)
+
+      on_exit(fn ->
+        Application.delete_env(:optimal_system_agent, :goal_tracker_max_runs)
+      end)
+
+      s = sid()
+      start(s)
+
+      # Different gaps every round so the STALL path never trips — isolating
+      # the run-cap path.
+      for n <- 1..3, do: GoalTracker.advance(s, off_track(["reason #{n}"]), n * 5)
+
+      snap = GoalTracker.snapshot(s)
+      assert snap.status == :paused
+      assert snap.pause_reason == :run_cap
+    end
+
+    test "an off_track goal completing later still clears last_gaps" do
+      s = sid()
+      start(s)
+      GoalTracker.advance(s, off_track(["a gap"]))
+
+      GoalTracker.advance(s, %GoalVerifier.Result{verdict: :complete, reason: "done"})
+
+      snap = GoalTracker.snapshot(s)
+      assert snap.status == :completed
+      assert snap.last_gaps == []
     end
   end
 

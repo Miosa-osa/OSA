@@ -461,7 +461,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
       "codefix_report" -> do_codefix_report(session_id)
       "summary_build" -> do_summary_build(session_id)
       "summary_load" -> do_summary_load(session_id)
-      "whitebox_scan" -> do_whitebox_scan(session_id, input)
+      "whitebox_scan" -> do_whitebox_scan(session_id, input, ctx)
       "cvss_score" -> do_cvss_score(input)
       "cwe_lookup" -> do_cwe_lookup(input)
       "roe_check" -> do_roe_check(input)
@@ -710,11 +710,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
 
   # ── TDA ─────────────────────────────────────────────────────────────────
 
-  defp do_whitebox_scan(session_id, input) do
-    wb = case Map.get(input, "whitebox") do
-      m when is_map(m) -> m
-      _ -> %{}
-    end
+  defp do_whitebox_scan(session_id, input, ctx) do
+    wb =
+      case Map.get(input, "whitebox") do
+        m when is_map(m) -> m
+        _ -> %{}
+      end
 
     # Accept the entry file's source (and its siblings) either nested under
     # `whitebox` — canonical — or at the top level. A model that calls
@@ -760,9 +761,28 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
         reader: reader
       ]
 
+      opts = maybe_put_runner(opts, ctx)
+
       do_whitebox_analyze(session_id, opts)
     end
   end
+
+  # `CallChainAnalyzer.analyze/1` already accepts an injected `:runner` for
+  # exactly this reason (see its moduledoc "Testability" section) — this tool
+  # just needed a way to reach it. `ctx.extras` is the designated extension
+  # point on `UseContext` for experimental/test-only wiring, so a stub runner
+  # rides in as `extras.whitebox_runner` and never touches production callers,
+  # which build `UseContext` with an empty `extras` map. When absent (every
+  # real call), `opts` carries no `:runner` key and `analyze/1` falls back to
+  # its own `default_runner/0` — production behavior is unchanged.
+  defp maybe_put_runner(opts, %UseContext{extras: extras}) when is_map(extras) do
+    case Map.get(extras, :whitebox_runner) do
+      runner when is_function(runner, 1) -> Keyword.put(opts, :runner, runner)
+      _ -> opts
+    end
+  end
+
+  defp maybe_put_runner(opts, _ctx), do: opts
 
   defp do_whitebox_analyze(session_id, opts) do
     case CallChainAnalyzer.analyze(opts) do

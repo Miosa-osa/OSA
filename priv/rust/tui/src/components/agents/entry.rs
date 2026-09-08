@@ -106,6 +106,17 @@ pub struct AgentEntry {
     /// same claim as `Some(0.0)`. It renders as `—`; rendering it as `$0.00`
     /// would be the panel asserting a measurement nobody made.
     pub cost_usd: Option<f64>,
+    /// This agent's per-subagent spend ceiling in USD (`max_budget_usd` on the
+    /// Elixir orchestrator — a caller override or the spawning tier's default,
+    /// e.g. elite $8 / specialist $4 / utility $1.50), when the backend has
+    /// reported it.
+    ///
+    /// Fixed at spawn time (the cap does not change over the run), so this is
+    /// set once and never revised, unlike `cost_usd` which updates live.
+    /// `None` on an older backend that does not yet send the field — the
+    /// roster then shows the live cost alone, exactly as before this field
+    /// existed, rather than fabricating a cap.
+    pub budget_cap_usd: Option<f64>,
     /// The last phase the BACKEND reported for this agent (`background_agent_phase`):
     /// what it is doing during the stretch before it has tool activity to show.
     ///

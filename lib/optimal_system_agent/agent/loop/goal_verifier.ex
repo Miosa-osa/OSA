@@ -623,6 +623,17 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
       `GoalTracker` goal). Without a goal the panel would be judging the work
       against a guess at the first user message — expensive and meaningless.
     * `:trivial`     — a trivial turn, per `trivial_turn?/1`.
+    * `:awaiting_background_work` — a delegated background agent is still
+      `:running` for this session (see `awaiting_background_work?/1`). This
+      TOOL-CALLED path (`maybe_gate/1`, reached at the tool-result boundary)
+      used to lack the guard `maybe_wait_for_user/2`'s tool-call-free sibling
+      already had: a turn that made an incidental read while genuinely
+      waiting on a background delegation could still triage
+      `:candidate_complete` on stale evidence, spawn a real panel round that
+      finds "nothing changed" (true, but not a stall — real work is running
+      elsewhere), and feed that into the SAME cross-turn stall fingerprint
+      `GoalTracker` uses to auto-pause. Two such rounds in a row is exactly
+      the residual false "no_progress" pause this guard exists to prevent.
   """
   @spec skip_reason(map()) :: atom() | nil
   def skip_reason(state) when is_map(state) do
@@ -644,6 +655,9 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
 
       stalled?(state) ->
         :stalled
+
+      awaiting_background_work?(state) ->
+        :awaiting_background_work
 
       not has_accumulated_work?(session_id) ->
         :no_work
@@ -1099,6 +1113,23 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
     skeptic_results = spawn_panel(session_id, goal, diff, state)
     {refuted_count, total, verdict, reason, gaps} = aggregate(skeptic_results)
 
+    # C2 — a completion claim must not pass verification while the gate itself
+    # is RED. The skeptic panel judges the GOAL; it is not asked to re-run the
+    # project's own build/test suite (a fresh read-only session re-running the
+    # full suite every round would be exactly the kind of over-exploration this
+    # module's docs warn about elsewhere), so a panel vote of `:complete` says
+    # nothing about whether the last recorded build/test actually passed. This
+    # is a deterministic, harness-owned check instead of a panel opinion: the
+    # LATEST recorded run of each distinct build/test command this session must
+    # have exited 0. A red one is folded in as an explicit gap and forces the
+    # verdict to `:incomplete` even when every skeptic voted `:complete` — a
+    # failing test is a fact about the workspace, not a matter of panel vote,
+    # and must never be silently folded into "done". It must be SURFACED (as a
+    # gap, same as any other) so the user sees it and can accept it as a known
+    # exception rather than discover it after the goal already reports itself
+    # finished.
+    {verdict, reason, gaps} = enforce_red_test_gate(session_id, verdict, reason, gaps)
+
     fingerprint = fingerprint(skeptic_results)
     {stall_count, _} = advance_stall(state, fingerprint, verdict)
 
@@ -1214,7 +1245,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
         ) <>
         "\nApproval applies only to the named artifact/version. Never treat the request " <>
         "itself as approval or extend a decision to changed work. Reject missing approval, " <>
-        "but distinguish a human gate from work the agent can perform."
+        "but distinguish a human gate from work the agent can perform." <>
+        "\n\n" <> evidence_digest(session_id)
 
     configs =
       for idx <- 0..(n - 1) do
@@ -1403,6 +1435,81 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
     end)
   end
 
+  # G4 — feed the panel what the agent already did instead of letting it
+  # rediscover the whole repository from scratch.
+  #
+  # Before this, a skeptic's ONLY inputs were the goal, the diff, and the
+  # agent's own (untrusted) closing prose — nothing said which files were
+  # actually touched or which build/test commands already ran and whether they
+  # passed. So a skeptic with no other lead reasonably starts from a broad
+  # `file_glob`/`dir_list` of the whole tree to find its bearings, which is
+  # measurably expensive: 29+ file reads and ~$2.61 per verification round on
+  # one observed engagement, re-crawling territory the agent's own tool-call
+  # ledger (`VerificationEvidence`) already describes precisely. This digest is
+  # that ledger, compacted for the prompt — the panel's scope is bounded by
+  # GIVING it the answer to "what changed and did it already pass a check",
+  # not by removing tools it needs to corroborate specific claims.
+  @evidence_digest_max_paths 40
+  @evidence_digest_max_checks 20
+
+  defp evidence_digest(session_id) do
+    entries =
+      if is_binary(session_id), do: VerificationEvidence.entries(session_id), else: []
+
+    writes =
+      entries
+      |> Enum.filter(&(Map.get(&1, :kind) == :write and Map.get(&1, :success) == true))
+      |> Enum.flat_map(fn e -> List.wrap(Map.get(e, :paths)) end)
+      |> Enum.reject(&(is_nil(&1) or &1 == ""))
+      |> Enum.map(&to_string/1)
+      |> Enum.uniq()
+
+    # Most recent attempt per DISTINCT command — a red run a later green rerun
+    # of the same command superseded is resolved, not a live gap; showing both
+    # would read as a contradiction instead of the normal red -> fix -> green
+    # loop.
+    checks =
+      entries
+      |> Enum.filter(&(Map.get(&1, :kind) == :check))
+      |> Enum.group_by(&Map.get(&1, :command))
+      |> Enum.map(fn {_cmd, es} -> Enum.max_by(es, &Map.get(&1, :ts, 0)) end)
+      |> Enum.sort_by(&Map.get(&1, :ts, 0))
+
+    writes_block =
+      case writes do
+        [] ->
+          "  (no successful writes recorded this session)"
+
+        paths ->
+          Enum.map_join(Enum.take(paths, @evidence_digest_max_paths), "\n", &"  - #{&1}")
+      end
+
+    checks_block =
+      case checks do
+        [] ->
+          "  (no build/test/shell command recorded this session)"
+
+        cs ->
+          cs
+          |> Enum.take(@evidence_digest_max_checks)
+          |> Enum.map_join("\n", fn e ->
+            status = if Map.get(e, :success) == true, do: "PASSED", else: "FAILED"
+            cmd = Map.get(e, :command) || Map.get(e, :tool) || "(unnamed check)"
+            "  - `#{cmd}` — #{status}"
+          end)
+      end
+
+    "## Evidence already gathered this session — CORROBORATE, do not re-derive\n\n" <>
+      "The agent's own tool-call ledger, recorded as each call actually ran (not self-reported):\n\n" <>
+      "Files written (#{length(writes)}):\n" <>
+      writes_block <>
+      "\n\nBuild/test/shell checks (latest attempt per distinct command):\n" <>
+      checks_block <>
+      "\n\nThis is ALREADY GROUND TRUTH about what ran and whether it passed — you do not need " <>
+      "to rediscover it. Judge the diff against the goal using this ledger and targeted reads " <>
+      "of the files it names; do not re-run these checks yourself or re-explore the wider tree."
+  end
+
   defp founding_contract(session_id, goal) do
     with true <- is_binary(session_id) and session_id != "",
          {:ok, brief} <- OptimalSystemAgent.Agent.TaskBrief.load(session_id),
@@ -1483,8 +1590,15 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
 
     ## Your task
 
-    1. Read the diff. For anything unclear or that needs corroboration, use your read-only tools \
-       to inspect the actual repository state (the diff can lie about context; the files cannot).
+    1. Read the diff and the evidence ledger above FIRST — they are your primary evidence, \
+       already gathered from the actual repository, not the agent's self-report. Use your \
+       read-only tools ONLY to corroborate a SPECIFIC claim you cannot settle from the diff and \
+       ledger alone (does this exact file contain what the diff claims, does a symbol the goal \
+       requires actually exist). Do NOT re-glob or re-read the wider repository beyond files the \
+       diff, the ledger, or the goal's acceptance criteria actually point you to — undirected \
+       exploration of files this change never touched burns your iteration budget on a full \
+       re-crawl of the tree instead of judging the change in front of you, and is exactly the \
+       cost this instruction exists to stop.
     2. Judge the goal THROUGH YOUR #{lens.title} LENS specifically — do not try to re-check every \
        possible angle; other independent reviewers cover the other angles.
     3. Reply with your verdict as a SINGLE JSON object.
@@ -1513,6 +1627,65 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
         {"refuted": true, "off_track": false, "reason": "lib/widget/exporter.ex writes CSV but the goal asked for JSON output"}
     """
   end
+
+  # ---------------------------------------------------------------------------
+  # Red-test gate (C2) — a deterministic override of a `:complete` verdict
+  # ---------------------------------------------------------------------------
+
+  # Only a `:complete` verdict can be vetoed — an `:incomplete`/`:off_track`
+  # verdict already blocks the turn on the skeptics' own findings, and this
+  # gate exists to catch what THEY might miss (or aren't asked to check), not
+  # to duplicate their reasons.
+  defp enforce_red_test_gate(session_id, :complete = verdict, reason, gaps) do
+    case red_test_gap(session_id) do
+      nil ->
+        {verdict, reason, gaps}
+
+      gap ->
+        Logger.info("[goal-verifier] red-test gate vetoed completion: #{gap}")
+
+        {:incomplete,
+         "a completion claim cannot stand while the test/build gate is RED " <>
+           "(independent of the skeptic panel's own verdict)", [gap]}
+    end
+  end
+
+  defp enforce_red_test_gate(_session_id, verdict, reason, gaps), do: {verdict, reason, gaps}
+
+  # `nil` when the latest recorded run of every distinct build/test command
+  # this session executed exited 0 (or none were ever run — silence is not a
+  # red test). Otherwise a ready-to-surface gap string naming the command.
+  #
+  # Grouped by `command` and reduced to the MOST RECENT attempt per command: a
+  # red run that a LATER green rerun of the exact same command superseded is
+  # resolved, not a standing gap — this must not punish the normal
+  # red -> fix -> green loop the ledger is designed to recognize elsewhere
+  # (`VerificationEvidence`'s own moduledoc).
+  defp red_test_gap(session_id) when is_binary(session_id) do
+    session_id
+    |> VerificationEvidence.entries()
+    |> Enum.filter(fn e ->
+      Map.get(e, :kind) == :check and
+        (Map.get(e, :build_or_test) == true or Map.get(e, :test_command) == true)
+    end)
+    |> Enum.group_by(&Map.get(&1, :command))
+    |> Enum.map(fn {_cmd, entries} -> Enum.max_by(entries, &Map.get(&1, :ts, 0)) end)
+    |> Enum.find(&(Map.get(&1, :success) != true))
+    |> case do
+      nil ->
+        nil
+
+      entry ->
+        cmd = Map.get(entry, :command) || "a build/test command"
+
+        "[red-test] `#{cmd}` last ran RED (non-zero exit) — fix it, or the user must " <>
+          "explicitly accept it as a known exception before this goal can complete"
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp red_test_gap(_session_id), do: nil
 
   # ---------------------------------------------------------------------------
   # Aggregation (majority-refute)

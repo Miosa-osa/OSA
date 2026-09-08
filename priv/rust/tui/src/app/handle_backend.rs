@@ -367,12 +367,15 @@ impl App {
                     // Reasoning is over once real tokens stream. Freeze the
                     // thinking box to its done state ("∴ Thought for Ns") instead
                     // of clearing it, so the reasoning summary persists rather
-                    // than vanishing. `finish()` is idempotent, and a later
-                    // ThinkingDelta (multi-iteration turn) starts a fresh run.
-                    // thinking_buf is kept — it is the transcript accumulator.
-                    if !self.thinking_box.is_empty() {
-                        self.thinking_box.finish();
-                    }
+                    // than vanishing — UNLESS it is already frozen from an
+                    // EARLIER action (a prior tool call, a prior text chunk),
+                    // in which case that summary was already shown once and
+                    // must not keep rendering as current for this new one
+                    // (G2 — see `ThinkingBox::on_action_start`). A later
+                    // ThinkingDelta (multi-iteration turn) still starts a
+                    // fresh run. thinking_buf is kept — it is the transcript
+                    // accumulator.
+                    self.thinking_box.on_action_start();
                     // Deltas do not paint directly — they go through the
                     // de-jitter buffer, which hands back only what this instant
                     // is owed. On a stream that already arrives smoothly (and
@@ -523,14 +526,14 @@ impl App {
                 // think_row_height). If the model went thinking → straight to a
                 // tool call with no interleaved streaming text, the box would
                 // stay up and hide the live tool feed for the rest of the turn.
-                // Clear it here (StreamingToken already does the same) so each
-                // running tool is visible with its name + status + spinner.
-                // Freeze to the done state ("∴ Thought for Ns") rather than
-                // clearing so the reasoning summary persists across the
-                // reasoning→tool edge instead of silently vanishing.
-                if !self.thinking_box.is_empty() {
-                    self.thinking_box.finish();
-                }
+                // `on_action_start` (G2) freezes it to the done state ("∴
+                // Thought for Ns") the FIRST time — so the reasoning summary
+                // persists across the reasoning→tool edge instead of silently
+                // vanishing — but CLEARS it if it was already frozen from an
+                // earlier action, so a run of several tool calls with no fresh
+                // reasoning between them doesn't keep hiding the live tool
+                // feed behind the SAME stale thought for the rest of the turn.
+                self.thinking_box.on_action_start();
 
                 if !self.activity.is_active() {
                     self.activity.start();
@@ -1947,6 +1950,7 @@ impl App {
                 subject,
                 batch_id,
                 elapsed_ms,
+                budget_cap_usd,
             } => {
                 self.agents.agent_started(
                     &agent_name,
@@ -1956,6 +1960,14 @@ impl App {
                     batch_id,
                     elapsed_ms,
                 );
+                // 2e — record the spend ceiling this run is bounded by, so the
+                // roster can show live cost WITH the cap ("$2.48 / $4") rather
+                // than a bare number with no sense of how close it is to the
+                // limit. `None` on an older backend leaves the field unset,
+                // same as every other cost reading degrading to "—"/no cap.
+                if let Some(cap) = budget_cap_usd {
+                    self.agents.set_agent_budget_cap(&agent_name, cap);
+                }
                 // Short human label, never the raw `agent:session-…:osa-x` key.
                 let short = crate::components::agents::short_agent_label(&agent_name);
                 let display = if role.is_empty() {
@@ -3002,6 +3014,11 @@ impl App {
                     turn_count,
                     verify_run_count,
                     pause_reason,
+                    // `GoalTransition` is the routine lifecycle chatter, not
+                    // the completion overview — those fields ride on
+                    // `GoalCompletionOverview` / the `/goal` HTTP pull
+                    // (`apply_goal_status`) instead.
+                    ..Default::default()
                 };
                 self.goal_status = goal
                     .as_ref()
@@ -3017,6 +3034,41 @@ impl App {
                 }
                 self.sync_goal_indicator();
                 self.recompute_layout();
+            }
+
+            // Item #3 — a goal reached a TERMINAL status (completed/blocked/
+            // abandoned): open the full-screen completion report. Fired
+            // exactly once per terminal transition (see
+            // `GoalTracker.maybe_emit_completion_overview/1`), separately from
+            // the routine `GoalTransition` chatter above.
+            BackendEvent::GoalCompletionOverview {
+                goal_id: _,
+                goal,
+                status,
+                pause_reason,
+                gaps,
+                work_summary,
+                acceptance_criteria,
+                turn_count: _,
+                verify_run_count: _,
+                latest,
+            } => {
+                // The event only ever fires on a terminal status, but a
+                // string off the wire is never trusted blindly — an
+                // unrecognized spelling degrades to "say nothing" rather than
+                // a fabricated outcome.
+                use crate::components::completion_panel::{CompletionOutcome, CompletionReport};
+                if let Some(outcome) = CompletionOutcome::from_status(&status) {
+                    self.open_completion_panel(CompletionReport {
+                        outcome,
+                        goal: goal.unwrap_or_default(),
+                        work_summary,
+                        acceptance_criteria: acceptance_criteria.unwrap_or_default(),
+                        gaps,
+                        pause_reason: pause_reason.unwrap_or_default(),
+                        latest: latest.unwrap_or_default(),
+                    });
+                }
             }
 
             // === Context compaction: make a multi-minute blocking step visible ===

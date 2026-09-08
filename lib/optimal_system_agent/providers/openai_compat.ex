@@ -111,7 +111,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       |> OptimalSystemAgent.Providers.ImageBudget.gate_unsupported(image_provider(opts), model)
       |> OptimalSystemAgent.Providers.ImageBudget.apply(provider: image_provider(opts))
       |> maybe_add_temperature(model, opts)
-      |> maybe_add_tools(opts)
+      |> maybe_add_tools(model, opts)
       |> maybe_add_max_tokens(model, opts)
       |> maybe_add_service_tier(opts)
       |> maybe_add_reasoning(model, opts)
@@ -267,9 +267,11 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   # DIAGNOSTIC ONLY — measures whether the tool-schema array is inside the cached
   # prefix on a WARM turn of a Claude-family compat route (OpenRouter/Surplus →
   # Anthropic), or is being re-sent as fresh input (~8k tokens) at full rate
-  # every turn. Places no cache hint: it exists so a real warm capture can decide
-  # whether `maybe_add_tools/2` needs a `cache_control` breakpoint on the last
-  # tool definition.
+  # every turn. Places no cache hint itself — `maybe_cache_tools/3` is what does
+  # that, gated on the same `Registry.anthropic_prompt_cache?/2` predicate. This
+  # stays in place as a live regression check: a route this probe flags
+  # UNCACHED after the breakpoint shipped means the gateway stopped honouring
+  # the marker (or the two gates drifted apart), not that one was never added.
   #
   # The signal: on OpenAI-shaped usage `input_tokens` is INCLUSIVE of the cached
   # slices, so the genuinely fresh tokens are `input - cache_read - cache_creation`.
@@ -311,8 +313,8 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
           if tools_cached?,
             do: "INSIDE the cached prefix (no action needed)",
             else:
-              "UNCACHED — re-sent at full rate each turn; add a cache_control breakpoint on the " <>
-                "last tool def in maybe_add_tools/2 for this route"
+              "UNCACHED — re-sent at full rate each turn; check whether this route/model still " <>
+                "clears Registry.anthropic_prompt_cache?/2 for the maybe_cache_tools/3 breakpoint"
 
         Logger.info(
           "[PromptCache] TOOL-SCHEMA CACHE PROBE (#{model}): tool_schema≈#{tool_tokens} tok, " <>
@@ -399,7 +401,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     |> OptimalSystemAgent.Providers.ImageBudget.gate_unsupported(image_provider(opts), model)
     |> OptimalSystemAgent.Providers.ImageBudget.apply(provider: image_provider(opts))
     |> maybe_add_temperature(model, opts)
-    |> maybe_add_tools(opts)
+    |> maybe_add_tools(model, opts)
     |> maybe_add_max_tokens(model, opts)
     |> maybe_add_service_tier(opts)
     |> maybe_add_reasoning(model, opts)
@@ -1511,7 +1513,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
   # --- Private helpers ---
 
-  defp maybe_add_tools(body, opts) do
+  defp maybe_add_tools(body, model, opts) do
     case Keyword.get(opts, :tools) do
       nil ->
         body
@@ -1523,8 +1525,42 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
         body
         |> Map.put(:tools, format_tools(tools))
         |> Map.put(:tool_choice, "auto")
+        |> maybe_cache_tools(model, opts)
     end
   end
+
+  # Places the SAME `cache_control` breakpoint `Anthropic.maybe_add_tools/2`
+  # places natively, on the last tool definition — but only where the wire
+  # honours it. Gated on the identical predicate `Agent.Context.build_system_message/5`
+  # already uses for the system-prompt blocks (`Registry.anthropic_prompt_cache?/2`):
+  # a `{:compat, _}` gateway that forwards content-part fields verbatim
+  # (OpenRouter, Surplus, api.uncensored.com) AND a Claude-family model id.
+  # Tools ride the same wire mechanism as the system prefix — Anthropic has no
+  # automatic prefix caching — so a route that already earns a system-prompt
+  # breakpoint earns this one too, and a route that does not must see the exact
+  # bytes it saw before: `cache_control` is an Anthropic-only field, and handing
+  # it to a non-Anthropic upstream (or a non-Claude id on the same gateway) is a
+  # foreign-field 400 waiting to happen, not a harmless no-op.
+  #
+  # `probe_tool_schema_cache/3` measured this dark: on a warm Claude-family
+  # compat turn the tool array (~8k tokens) was as large as the total fresh
+  # input, meaning it rode OUTSIDE the cached prefix the system-prompt
+  # breakpoint had already established and was rebilled at full rate every
+  # turn. This is the fix the probe's own log line names ("add a cache_control
+  # breakpoint on the last tool def in maybe_add_tools/2 for this route").
+  defp maybe_cache_tools(%{tools: [_ | _] = tools} = body, model, opts) do
+    provider = Keyword.get(opts, :provider)
+
+    if OptimalSystemAgent.Providers.Registry.anthropic_prompt_cache?(provider, model) do
+      {leading, [last]} = Enum.split(tools, -1)
+      marked = leading ++ [Map.put(last, "cache_control", %{"type" => "ephemeral"})]
+      Map.put(body, :tools, marked)
+    else
+      body
+    end
+  end
+
+  defp maybe_cache_tools(body, _model, _opts), do: body
 
   # Processing tiers are not universally OpenAI-compatible, and the vocabulary
   # is per-provider even where the FIELD is shared: "priority" is OpenAI's

@@ -246,32 +246,59 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # `reason` is `:user`, and simply wrong for `:run_cap` / `:usage_limits`,
   # neither of which is a stall). Mirrors the TUI's own reason-branching in
   # `continue_goal_from` (`handle_actions.rs`) so both surfaces agree.
-  @spec goal_pause_halt_message(GoalTracker.pause_reason()) :: String.t()
-  defp goal_pause_halt_message(:no_progress) do
-    "Goal auto-paused: no measurable progress across turns (the same gap(s) kept " <>
-      "coming back with no new work landing). Review the goal and resume, refine it, " <>
-      "or send a new instruction."
+  # `gaps` is the panel's own last recorded finding list (`snap.last_gaps`) —
+  # WHAT is unresolved, not just that something is. Before this, every reason
+  # (including a genuine stall) rendered a fixed, gap-free sentence, so a user
+  # walking back into a paused goal learned only its CATEGORY ("no measurable
+  # progress") and had to go dig through `/goal status` or the ledger to find
+  # out what the panel had actually been citing round after round. A manual
+  # pause (`:user`) never carries panel gaps and omits the block entirely.
+  @spec goal_pause_halt_message(GoalTracker.pause_reason(), [String.t()]) :: String.t()
+  defp goal_pause_halt_message(:no_progress, gaps) do
+    "Goal auto-paused: no measurable progress across turns — the same gap(s) kept coming " <>
+      "back with no new work landing:\n" <>
+      goal_gaps_block(gaps) <>
+      "\nReview the goal and resume, refine it, or send a new instruction."
   end
 
-  defp goal_pause_halt_message(:run_cap) do
-    "Goal auto-paused: hit its lifetime verification-run cap while still incomplete. " <>
-      "The goal is kept — resume it, refine it, or send a new instruction."
+  defp goal_pause_halt_message(:off_track, gaps) do
+    "Goal auto-paused: an independent skeptic panel repeatedly judged this goal NOT " <>
+      "achievable as currently framed (not merely unfinished):\n" <>
+      goal_gaps_block(gaps) <>
+      "\nReconsider the approach, refine the goal, or send a new instruction."
   end
 
-  defp goal_pause_halt_message(:usage_limits) do
-    "Goal auto-paused: spent its token budget before the panel verified it complete. " <>
-      "The goal is kept — resume it, refine it, or send a new instruction."
+  defp goal_pause_halt_message(:run_cap, gaps) do
+    "Goal auto-paused: hit its lifetime verification-run cap while still incomplete." <>
+      goal_pause_gaps_suffix(gaps) <>
+      " The goal is kept — resume it, refine it, or send a new instruction."
   end
 
-  defp goal_pause_halt_message(:user) do
+  defp goal_pause_halt_message(:usage_limits, gaps) do
+    "Goal auto-paused: spent its token budget before the panel verified it complete." <>
+      goal_pause_gaps_suffix(gaps) <>
+      " The goal is kept — resume it, refine it, or send a new instruction."
+  end
+
+  defp goal_pause_halt_message(:user, _gaps) do
     "Goal paused (by you, or an interrupt) — not a stall. Resume it, refine it, or " <>
       "send a new instruction."
   end
 
-  defp goal_pause_halt_message(reason) do
-    "Goal auto-paused (#{reason}). Review the goal and resume, refine it, or send a " <>
-      "new instruction."
+  defp goal_pause_halt_message(reason, gaps) do
+    "Goal auto-paused (#{reason})." <>
+      goal_pause_gaps_suffix(gaps) <>
+      " Review the goal and resume, refine it, or send a new instruction."
   end
+
+  defp goal_pause_gaps_suffix([]), do: ""
+
+  defp goal_pause_gaps_suffix(gaps) do
+    " Still unresolved:\n" <> goal_gaps_block(gaps)
+  end
+
+  defp goal_gaps_block([]), do: "  (no structured findings recorded)"
+  defp goal_gaps_block(gaps), do: Enum.map_join(gaps, "\n", &"  - #{&1}")
 
   @doc """
   Run the agent loop for the given state.
@@ -373,16 +400,18 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       iter > 0 and GoalTracker.enabled?(state) and GoalTracker.paused?(sid) ->
         snap = GoalTracker.snapshot(sid)
         reason = Map.get(snap || %{}, :pause_reason, :no_progress)
+        gaps = Map.get(snap || %{}, :last_gaps, []) || []
         Logger.info("[loop] Goal auto-paused (#{reason}) at iteration #{iter}")
 
         Bus.emit(:system_event, %{
           event: :goal_auto_paused,
           session_id: sid,
           iteration: iter,
-          reason: reason
+          reason: reason,
+          gaps: gaps
         })
 
-        TerminalSource.halt(goal_pause_halt_message(reason), state, :control)
+        TerminalSource.halt(goal_pause_halt_message(reason, gaps), state, :control)
 
       # Real budget cap (primitive #29) — abort a single runaway turn mid-loop,
       # not just at the next turn boundary. Only fires when a caller set
@@ -1155,6 +1184,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     announcement = Guardrails.announcement_continue(content, state.messages)
     announcement_spent = Map.get(state, :announcement_continues, 0)
 
+    # Captured BEFORE `maybe_wait_for_user/2` so the halt clause below can tell
+    # a goal this call JUST paused (real news, worth surfacing) apart from one
+    # that was already dormant-paused before this turn even started (a
+    # unrelated Q&A turn must not have its own answer stomped by a stale
+    # pause notice — see the halt clause's own comment).
+    goal_was_driving? = GoalTracker.continue?(state.session_id)
+
     state =
       if not Cancellation.cancelled?(state.session_id) do
         GoalVerifier.maybe_wait_for_user(state, content)
@@ -1225,6 +1261,44 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         state = %{state | messages: state.messages ++ [%{role: "assistant", content: content}]}
 
         TerminalSource.halt(GoalTracker.waiting_message(state.session_id), state, :control)
+
+      # `maybe_wait_for_user/2` (just above) is the ONE reverify path that can
+      # transition a goal to `:paused` without ever passing back through the
+      # top of `run/1` — its sibling, the tool-called path, always re-enters
+      # `run/1` after `GoalVerifier.maybe_gate/1`, where the `iter > 0 and
+      # GoalTracker.paused?/1` clause already halts with the reason and gaps.
+      # This one does not recurse: it falls straight through this SAME `cond`
+      # toward `finish_turn`, so before this clause a goal the panel just
+      # auto-paused (a real, unresolved-gaps stall or a persistently off-track
+      # verdict) surfaced NOTHING but the model's own last line of text — the
+      # exact silent-circling defect this halt closes.
+      #
+      # Scoped to a FRESH transition (`goal_was_driving?`, captured before
+      # `maybe_wait_for_user/2` ran): a goal already dormant-paused before this
+      # turn started must not have this turn's real answer to an unrelated
+      # question stomped by a stale pause notice — see the "never swallows a
+      # fresh turn" precedent in `goal_pause_halt_message/2`'s call site.
+      goal_was_driving? and GoalTracker.paused?(state.session_id) ->
+        snap = GoalTracker.snapshot(state.session_id)
+        reason = Map.get(snap || %{}, :pause_reason, :no_progress)
+        gaps = Map.get(snap || %{}, :last_gaps, []) || []
+
+        Logger.info(
+          "[loop] Goal auto-paused (#{reason}) after a tool-call-free reverify round " <>
+            "(iteration #{state.iteration})"
+        )
+
+        Bus.emit(:system_event, %{
+          event: :goal_auto_paused,
+          session_id: state.session_id,
+          iteration: state.iteration,
+          reason: reason,
+          gaps: gaps
+        })
+
+        state = %{state | messages: state.messages ++ [%{role: "assistant", content: content}]}
+
+        TerminalSource.halt(goal_pause_halt_message(reason, gaps), state, :control)
 
       prose_continue?(state) and state.auto_continues < 2 and
           Guardrails.wants_to_continue?(content) ->

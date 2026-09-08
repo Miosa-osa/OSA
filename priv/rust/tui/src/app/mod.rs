@@ -159,6 +159,10 @@ pub struct App {
     pub mcp_servers: Option<crate::dialogs::mcp_servers::McpServers>,
     /// `/cost` — cost dashboard (AppState::Cost), from GET /api/v1/cost.
     pub cost_dashboard: Option<crate::dialogs::cost_dashboard::CostDashboard>,
+    /// Full-screen goal-COMPLETION report (item #3, AppState::GoalCompletion),
+    /// populated from a terminal `goal_tracker_transition` frame. Never
+    /// opened by a user command — see `BackendEvent::GoalTransition`.
+    pub completion_panel: Option<crate::components::completion_panel::CompletionPanel>,
     /// `/skill` `/skills` — skills browser (AppState::Skills), from GET /api/v1/skills.
     pub skills_browser: Option<crate::dialogs::skills_browser::SkillsBrowser>,
     /// `/channels` — channel connectivity panel (AppState::Channels).
@@ -771,6 +775,7 @@ impl App {
             hooks_viewer: None,
             mcp_servers: None,
             cost_dashboard: None,
+            completion_panel: None,
             skills_browser: None,
             channels_panel: None,
             memory_browser: None,
@@ -1154,6 +1159,27 @@ impl App {
         self.transition(target);
     }
 
+    /// Open the full-screen goal-completion report (item #3) for a NEWLY
+    /// terminal goal (completed/blocked/abandoned).
+    ///
+    /// Shared by both surfaces that can learn of a completion: the one-time
+    /// live `GoalCompletionOverview` event (`handle_backend.rs`) and the
+    /// `/goal` HTTP pull path — the reconnect-time quiet poll, or a
+    /// user-typed `/goal status` — which now carries the same fields on
+    /// `GoalStatus` (`handle_actions::apply_goal_status`). Takes the built
+    /// `CompletionReport` directly (rather than its many individual fields)
+    /// so the two callers can never disagree about the shape, and so this
+    /// one function stays under clippy's arg-count lint on its own.
+    pub(crate) fn open_completion_panel(
+        &mut self,
+        report: crate::components::completion_panel::CompletionReport,
+    ) {
+        self.completion_panel = Some(crate::components::completion_panel::CompletionPanel::new(report));
+        if self.state.can_transition_to(AppState::GoalCompletion) {
+            self.enter_overlay(AppState::GoalCompletion);
+        }
+    }
+
     /// Close the current overlay, returning to whatever opened it (default
     /// `Idle` if the stack is somehow empty). Deliberately bypasses
     /// `can_transition_to`: returning to the caller — even `Processing` — is
@@ -1235,6 +1261,14 @@ impl App {
         // effort") from the same status-bar effort chip every frame. Cheap
         // clone; additive to the existing thinking timer/verb rotation.
         self.activity.set_current_effort(self.status.effort());
+
+        // 1/2d — feed the live "what a task_wait/join is blocked on" label
+        // from the agents roster every frame. `Activity` only consults this
+        // while ITS OWN `waiting_reason` is Tasks/TaskOutput, so this is inert
+        // outside a join; cheap otherwise (a roster scan for the freshest
+        // live child, no allocation on the common non-join frame's `None`).
+        self.activity
+            .set_join_wait_detail(self.agents.join_wait_label());
 
         // Goal + elapsed indicator: reconcile the status-line "Working on: <goal>
         // · <elapsed>" chip every frame from the live goal state (cheap; the

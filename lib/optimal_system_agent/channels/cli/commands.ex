@@ -2853,6 +2853,15 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
           _ -> :ok
         end
 
+        # G3 — a paused goal's WHAT (the panel's actual gap list) alongside
+        # its WHY (the "latest" line above). Before this, `/goal status` on a
+        # stalled/off-track/run-cap goal showed only the squashed transition
+        # sentence and a `verify_run_count`/`stall_count` — a counter, never
+        # the findings themselves. `:paused` is deliberately excluded from
+        # `@terminal_goal_statuses` (still resumable), so it needs its own
+        # gap section rather than piggybacking on `print_goal_overview/1`.
+        if snap.status == :paused, do: print_goal_gaps(snap)
+
         if snap.status in @terminal_goal_statuses, do: print_goal_overview(session_id)
 
       _ ->
@@ -2882,6 +2891,18 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   end
 
   defp print_goal_banner(_), do: :ok
+
+  # WHAT is unresolved, not just that something is (G3). `snap.last_gaps` is
+  # the panel's own verbatim finding list from the round that paused the
+  # goal — empty for a manual `/goal pause` (`pause_reason: :user`), which
+  # carries no panel findings at all.
+  defp print_goal_gaps(%{last_gaps: gaps}) when is_list(gaps) and gaps != [] do
+    IO.puts("")
+    IO.puts("  #{@bold}Unresolved gap(s)#{@reset}")
+    Enum.each(gaps, &IO.puts("    #{@dim}•#{@reset} #{&1}"))
+  end
+
+  defp print_goal_gaps(_snap), do: :ok
 
   # "What actually got touched" — the one thing `/goal status` never showed
   # even at the finish line: `turns`/`verification rounds` say HOW LONG it

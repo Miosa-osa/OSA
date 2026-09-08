@@ -1,7 +1,7 @@
 defmodule OptimalSystemAgent.FSCheckpoint.Config do
   @moduledoc "Configuration constants for the FSCheckpoint subsystem."
 
-  @destructive_tools ~w(file_write file_edit multi_file_edit notebook_edit)
+  @destructive_tools ~w(file_write file_edit multi_file_edit structural_edit notebook_edit)
 
   # Matched against the BASENAME of each word in the command, not as a
   # substring of the whole string — see `FSCheckpoint.Hook.destructive?/1`.

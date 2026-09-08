@@ -2254,6 +2254,29 @@ impl App {
         status: &crate::client::types::GoalStatus,
         output: &str,
     ) -> bool {
+        // Item #3 pull path — a `/goal` response (the reconnect-time quiet
+        // poll, or a user-typed `/goal status`) can report a goal that
+        // ALREADY finished, possibly in an earlier connection that missed the
+        // one-time live `GoalCompletionOverview` event entirely. Open the
+        // full-screen completion report here too, so a resumed session gets
+        // it "for free" the next time it asks — but only for a NEWLY terminal
+        // status (see `new_completion_outcome`): compare against the CACHED
+        // status (captured before it is overwritten below) so a session that
+        // already showed this same report doesn't reopen (or re-flash) it on
+        // every subsequent poll of an unchanged, still-terminal goal.
+        let cached_status = self.goal_status.as_ref().and_then(|g| g.status.as_deref());
+        if let Some(outcome) = new_completion_outcome(cached_status, status.status.as_deref()) {
+            self.open_completion_panel(crate::components::completion_panel::CompletionReport {
+                outcome,
+                goal: status.goal.clone().unwrap_or_default(),
+                work_summary: status.work_summary.clone(),
+                acceptance_criteria: status.acceptance_criteria.clone().unwrap_or_default(),
+                gaps: status.gaps.clone(),
+                pause_reason: status.pause_reason.clone().unwrap_or_default(),
+                latest: status.latest.clone().unwrap_or_default(),
+            });
+        }
+
         // Mirror the backend. `self.goal` is a CACHE of what the backend last
         // said, never an opinion of ours: `active` is `GoalTracker.goal_loop?/1
         // and continue?/1`, the same pair `ReactLoop` gates its own re-entry on.
@@ -2439,6 +2462,26 @@ fn goal_continue_may_ask(message_queue_is_empty: bool) -> bool {
 /// concurrent turn on top of it.
 fn goal_continue_must_defer(turn_already_active: bool) -> bool {
     turn_already_active
+}
+
+/// Item #3 pull-path gate: whether a `/goal` response's `status` names a
+/// completion outcome the session has NOT already surfaced.
+///
+/// `cached` is `self.goal_status`'s status BEFORE this response overwrites
+/// it — the last one this session actually reported (via a panel or a prior
+/// poll), which may be from an earlier connection entirely if the process
+/// just resumed. `None` when there is nothing NEW to show: either `status`
+/// isn't terminal, or it names the exact same terminal status already
+/// cached (a repeat poll of an unchanged, still-finished goal — reopening
+/// the panel for that would flash it every reconnect).
+fn new_completion_outcome(
+    cached: Option<&str>,
+    status: Option<&str>,
+) -> Option<crate::components::completion_panel::CompletionOutcome> {
+    if cached == status {
+        return None;
+    }
+    crate::components::completion_panel::CompletionOutcome::from_status(status.unwrap_or(""))
 }
 
 /// The message to show once `continue_goal_from` learns the goal is no longer
@@ -3231,6 +3274,50 @@ mod goal_routing_tests {
             ..Default::default()
         };
         assert!(live.active);
+    }
+}
+
+// ── item #3 pull path: the completion panel on reconnect ────────────────────
+#[cfg(test)]
+mod new_completion_outcome_tests {
+    use super::new_completion_outcome;
+    use crate::components::completion_panel::CompletionOutcome;
+
+    #[test]
+    fn a_first_ever_terminal_status_is_new() {
+        // No cache at all (a fresh process, or a resumed session whose
+        // in-memory state never saw this goal) — the reconnect-time case
+        // this whole gate exists to close.
+        assert_eq!(
+            new_completion_outcome(None, Some("completed")),
+            Some(CompletionOutcome::Completed)
+        );
+    }
+
+    #[test]
+    fn the_same_terminal_status_repeated_is_not_new() {
+        // A repeat poll of an unchanged, already-reported goal must not
+        // reopen the panel.
+        assert_eq!(new_completion_outcome(Some("completed"), Some("completed")), None);
+        assert_eq!(new_completion_outcome(Some("blocked"), Some("blocked")), None);
+    }
+
+    #[test]
+    fn a_transition_between_two_different_terminal_statuses_is_new() {
+        // e.g. resumed from blocked, then later abandoned — a different fact,
+        // reported once each.
+        assert_eq!(
+            new_completion_outcome(Some("blocked"), Some("abandoned")),
+            Some(CompletionOutcome::Abandoned)
+        );
+    }
+
+    #[test]
+    fn non_terminal_statuses_are_never_new_regardless_of_cache() {
+        for status in [Some("active"), Some("paused"), Some("off_track"), None] {
+            assert_eq!(new_completion_outcome(None, status), None, "{status:?}");
+            assert_eq!(new_completion_outcome(Some("completed"), status), None, "{status:?}");
+        }
     }
 }
 

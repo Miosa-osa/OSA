@@ -249,6 +249,65 @@ defmodule OptimalSystemAgent.Providers.SurplusClaudeParityTest do
     end
   end
 
+  # #5: the fix the probe above measures for. The tool array rides the wire
+  # exactly like the system-prompt blocks — no automatic Anthropic prefix
+  # caching, `cache_control` is the only mechanism — so it must be marked on
+  # the SAME predicate (`Registry.anthropic_prompt_cache?/2`) and NOT on any
+  # route/model that predicate excludes.
+  describe "tool-schema cache breakpoint (finding #5)" do
+    alias OptimalSystemAgent.Providers.OpenAICompat
+
+    @two_tools [
+      %{name: "read", description: "read a file", parameters: %{"type" => "object"}},
+      %{name: "write", description: "write a file", parameters: %{"type" => "object"}}
+    ]
+
+    defp tool_cache_marks(tools),
+      do: Enum.map(tools, &Map.has_key?(&1, "cache_control"))
+
+    test "a Surplus Claude model gets a breakpoint on the LAST tool only" do
+      body =
+        OpenAICompat.build_stream_body("claude-opus-4.8", [],
+          provider: :surplus,
+          tools: @two_tools
+        )
+
+      assert tool_cache_marks(body.tools) == [false, true]
+
+      last = List.last(body.tools)
+      assert last["cache_control"] == %{"type" => "ephemeral"}
+    end
+
+    test "a Surplus non-Claude model on the same gateway gets no breakpoint" do
+      body =
+        OpenAICompat.build_stream_body("gpt-6-astra", [], provider: :surplus, tools: @two_tools)
+
+      assert tool_cache_marks(body.tools) == [false, false]
+    end
+
+    test "OpenRouter -> Anthropic also gets the breakpoint (the measured route)" do
+      body =
+        OpenAICompat.build_stream_body("anthropic/claude-opus-5", [],
+          provider: :openrouter,
+          tools: @two_tools
+        )
+
+      assert tool_cache_marks(body.tools) == [false, true]
+    end
+
+    test "a non-Claude compat provider (auto-cache / no cache_control wire) gets no breakpoint" do
+      body =
+        OpenAICompat.build_stream_body("gpt-5.6-sol", [], provider: :openai, tools: @two_tools)
+
+      assert tool_cache_marks(body.tools) == [false, false]
+    end
+
+    test "no tools in opts leaves the body without a :tools key at all" do
+      body = OpenAICompat.build_stream_body("claude-opus-4.8", [], provider: :surplus)
+      refute Map.has_key?(body, :tools)
+    end
+  end
+
   # #3 diagnostic: on a WARM Claude turn that carries tools, emit a telemetry
   # event reporting whether the tool-schema array is inside the cached prefix or
   # re-sent as fresh input each turn. Measures only — places no cache hint.

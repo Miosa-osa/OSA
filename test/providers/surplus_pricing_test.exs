@@ -94,7 +94,7 @@ defmodule OptimalSystemAgent.Providers.SurplusPricingTest do
       refute Pricing.rates(key) == {10.0, 50.0}
     end
 
-    test "an id absent from the fetched card still falls to the safe estimate" do
+    test "an id absent from the fetched card AND the static card falls to the safe estimate" do
       SurplusModels.put_runtime_pricing([
         SurplusModels.parse(%{
           "id" => "kimi-k3",
@@ -102,7 +102,9 @@ defmodule OptimalSystemAgent.Providers.SurplusPricingTest do
         })
       ])
 
-      key = Pricing.qualify("claude-fable-5.1", :surplus)
+      # grok-4.6 is featured but non-Claude, so it has no static rate card entry
+      # and is not in this runtime card — it must still price non-zero.
+      key = Pricing.qualify("grok-4.6", :surplus)
 
       assert Pricing.rates(key) == {2.0, 10.0}
       assert Pricing.confidence(key) == :estimated

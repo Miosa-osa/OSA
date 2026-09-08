@@ -1169,6 +1169,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "repl" => OptimalSystemAgent.Tools.Builtins.REPL.Tool,
       "code_symbols" => OptimalSystemAgent.Tools.Builtins.CodeSymbols.Tool,
       "multi_file_edit" => OptimalSystemAgent.Tools.Builtins.MultiFileEdit.Tool,
+      "structural_edit" => OptimalSystemAgent.Tools.Builtins.StructuralEdit.Tool,
       "download" => OptimalSystemAgent.Tools.Builtins.Download.Tool,
 
       # ── Filesystem checkpoints ─────────────────────────────────────────

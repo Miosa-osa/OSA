@@ -688,6 +688,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
         | "swarm_intelligence_completed"
         | "goal_verifier_round"
         | "goal_tracker_transition"
+        | "goal_completion_overview"
         | "scratchpad_activity"
         | "hook_run"
         | "hook_blocked"
@@ -1136,6 +1137,12 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 batch_id: Option<String>,
                 #[serde(default)]
                 elapsed_ms: Option<u64>,
+                // 2e — this agent's per-subagent spend ceiling in USD
+                // (`max_budget_usd` on the orchestrator). `#[serde(default)]`
+                // so an older backend that doesn't yet send it decodes to
+                // `None` rather than failing the whole frame.
+                #[serde(default)]
+                budget_cap_usd: Option<f64>,
             }
             let ev: Ev = serde_json::from_slice(data).ok()?;
             Some(BackendEvent::OrchestratorAgentStarted {
@@ -1145,6 +1152,7 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 subject: ev.description,
                 batch_id: ev.batch_id,
                 elapsed_ms: ev.elapsed_ms,
+                budget_cap_usd: ev.budget_cap_usd,
             })
         }
 
@@ -1785,6 +1793,50 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 pause_reason: ev.pause_reason,
                 turn_count: ev.turn_count,
                 verify_run_count: ev.verify_run_count,
+            })
+        }
+
+        // Item #3 — fires exactly once when a goal reaches a TERMINAL status
+        // (completed/blocked/abandoned). See `GoalTracker.completion_overview/1`.
+        "goal_completion_overview" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                goal_id: Option<String>,
+                #[serde(default)]
+                goal: Option<String>,
+                #[serde(default)]
+                status: String,
+                #[serde(default)]
+                pause_reason: Option<String>,
+                #[serde(default)]
+                gaps: Vec<String>,
+                #[serde(default)]
+                work_summary: Vec<String>,
+                #[serde(default)]
+                acceptance_criteria: Option<String>,
+                #[serde(default)]
+                turn_count: u32,
+                #[serde(default)]
+                verify_run_count: u32,
+                #[serde(default)]
+                latest: Option<String>,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("goal_completion_overview", e)),
+            };
+            Some(BackendEvent::GoalCompletionOverview {
+                goal_id: ev.goal_id,
+                goal: ev.goal,
+                status: ev.status,
+                pause_reason: ev.pause_reason,
+                gaps: ev.gaps,
+                work_summary: ev.work_summary,
+                acceptance_criteria: ev.acceptance_criteria,
+                turn_count: ev.turn_count,
+                verify_run_count: ev.verify_run_count,
+                latest: ev.latest,
             })
         }
 
@@ -2468,6 +2520,31 @@ mod tests {
         }
     }
 
+    // ── 2e: per-agent budget cap on the started frame ───────────────────────
+    #[test]
+    fn orchestrator_agent_started_parses_the_budget_cap_when_present() {
+        let data = br#"{"event":"orchestrator_agent_started","agent_name":"agent:s1:1","role":"coder","model":"grok","description":"ship it","budget_cap_usd":4.0}"#;
+        match parse_sse_event("orchestrator_agent_started", data) {
+            Some(BackendEvent::OrchestratorAgentStarted { budget_cap_usd, .. }) => {
+                assert_eq!(budget_cap_usd, Some(4.0));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn orchestrator_agent_started_omits_the_cap_from_an_older_backend() {
+        // No `budget_cap_usd` field at all — must decode to `None`, not fail
+        // the whole frame.
+        let data = br#"{"event":"orchestrator_agent_started","agent_name":"agent:s1:1","role":"coder","model":"grok","description":"ship it"}"#;
+        match parse_sse_event("orchestrator_agent_started", data) {
+            Some(BackendEvent::OrchestratorAgentStarted { budget_cap_usd, .. }) => {
+                assert_eq!(budget_cap_usd, None);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
     #[test]
     fn parses_goal_verifier_round_start_and_done() {
         // Start phase: a lightweight "verifying…" signal (no verdict yet).
@@ -2528,6 +2605,83 @@ mod tests {
                 assert_eq!(turn_count, 3);
             }
             other => panic!("expected goal transition, got {other:?}"),
+        }
+    }
+
+    // ── item #3: goal_completion_overview (fires once, on a terminal status) ──
+    #[test]
+    fn parses_a_completed_overview_with_work_summary_and_gaps() {
+        let data = br#"{"event":"goal_completion_overview","goal_id":"goal-1","goal":"Ship it","status":"completed","gaps":["docs still stale"],"work_summary":["lib/foo.ex","lib/bar.ex"],"acceptance_criteria":"All tests pass and docs updated","turn_count":9,"verify_run_count":2,"latest":"verified complete"}"#;
+        match parse_sse_event("goal_completion_overview", data) {
+            Some(BackendEvent::GoalCompletionOverview {
+                goal,
+                status,
+                gaps,
+                work_summary,
+                acceptance_criteria,
+                turn_count,
+                verify_run_count,
+                latest,
+                ..
+            }) => {
+                assert_eq!(goal.as_deref(), Some("Ship it"));
+                assert_eq!(status, "completed");
+                assert_eq!(gaps, vec!["docs still stale".to_string()]);
+                assert_eq!(
+                    work_summary,
+                    vec!["lib/foo.ex".to_string(), "lib/bar.ex".to_string()]
+                );
+                assert_eq!(
+                    acceptance_criteria.as_deref(),
+                    Some("All tests pass and docs updated")
+                );
+                assert_eq!(turn_count, 9);
+                assert_eq!(verify_run_count, 2);
+                assert_eq!(latest.as_deref(), Some("verified complete"));
+            }
+            other => panic!("expected completion overview, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_a_blocked_overview_with_a_pause_reason_and_empty_gaps() {
+        // Blocked/abandoned stop via claim_blocked/abandon rather than a
+        // verifier-panel verdict, so `gaps` is commonly empty there.
+        let data = br#"{"event":"goal_completion_overview","goal_id":"goal-1","goal":"Migrate billing","status":"blocked","pause_reason":"blocked","gaps":[],"work_summary":["lib/billing.ex"],"turn_count":40,"verify_run_count":0}"#;
+        match parse_sse_event("goal_completion_overview", data) {
+            Some(BackendEvent::GoalCompletionOverview {
+                status,
+                pause_reason,
+                gaps,
+                acceptance_criteria,
+                ..
+            }) => {
+                assert_eq!(status, "blocked");
+                assert_eq!(pause_reason.as_deref(), Some("blocked"));
+                assert!(gaps.is_empty());
+                assert_eq!(acceptance_criteria, None);
+            }
+            other => panic!("expected completion overview, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_bare_minimal_overview_still_parses() {
+        let data = br#"{"event":"goal_completion_overview","status":"abandoned"}"#;
+        match parse_sse_event("goal_completion_overview", data) {
+            Some(BackendEvent::GoalCompletionOverview {
+                status,
+                goal,
+                gaps,
+                work_summary,
+                ..
+            }) => {
+                assert_eq!(status, "abandoned");
+                assert_eq!(goal, None);
+                assert!(gaps.is_empty());
+                assert!(work_summary.is_empty());
+            }
+            other => panic!("expected completion overview, got {other:?}"),
         }
     }
 

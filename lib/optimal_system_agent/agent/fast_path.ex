@@ -16,7 +16,7 @@ defmodule OptimalSystemAgent.Agent.FastPath do
 
   @intent_tools %{
     code:
-      ~w(file_read file_write file_edit multi_file_edit shell_execute git grep diff task_write),
+      ~w(file_read file_write file_edit multi_file_edit structural_edit shell_execute git grep diff task_write),
     search: ~w(file_read grep glob codebase_explore semantic_search web_search tool_search),
     git: ~w(git diff shell_execute file_read),
     schedule: ~w(cron remote_trigger subscribe_pr task_write),

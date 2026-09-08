@@ -4,6 +4,7 @@
 pub mod activity;
 pub mod agents;
 pub mod chat;
+pub mod completion_panel;
 pub mod header;
 pub mod input;
 pub mod jailbreak;

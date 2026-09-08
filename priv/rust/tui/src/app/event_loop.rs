@@ -2161,6 +2161,11 @@ impl App {
                                     d.draw(frame, area);
                                 }
                             }
+                            AppState::GoalCompletion => {
+                                if let Some(ref p) = self.completion_panel {
+                                    p.draw(frame, area);
+                                }
+                            }
                             _ => {}
                             }
                         }
@@ -2875,8 +2880,25 @@ fn switch_to_inline(
     // `Viewport::Inline` would take reads back a number we wrote. Hand ratatui
     // that number instead (see [`rebuild_inline`] for the full argument). Only
     // the no-remembered-top case — the cursor is genuinely wherever the dialog
-    // left it — still has to ask, and it keeps the priming/retry ladder that
-    // stopped a dropped reply from crashing the session on a dialog close.
+    // left it — still has to ask, and it falls through to the retry ladder
+    // below.
+    //
+    // A separate priming loop used to sit here (`for _ in 0..40 { if
+    // crossterm::cursor::position().is_ok() { break } sleep(25ms) }`), added
+    // back when this function always queried. It was dead weight even before
+    // this rewrite — its answer was discarded, not fed to the retry below —
+    // and on a terminal that keeps dropping the DSR reply (the exact resize
+    // storm this whole function exists to survive) it was actively harmful:
+    // `crossterm::cursor::position()` already blocks up to ~2s per call
+    // internally, so 40 iterations could stall this thread for up to ~80s
+    // BEFORE the retry ladder's own up to ~6 attempts (another ~12s) even
+    // started — the event loop reads as hung, not degraded, and a user who
+    // gives up and kills the terminal mid-stall is the "crash" that leaves the
+    // shell garbled. Ratatui's own construction just below performs the
+    // identical query, so the loop was retrying a call whose result it threw
+    // away, then paying for the real query a second time regardless. Deleting
+    // it changes no behavior on a healthy terminal (which answers in ms) and
+    // caps the unhealthy case at the retry ladder's own bound.
     if let Some(top) = placed {
         if let Ok(t) = Terminal::with_options(
             InlineBackend::primed_at(std::io::stdout(), top),
@@ -2886,13 +2908,6 @@ fn switch_to_inline(
         ) {
             *terminal = t;
             return Ok(());
-        }
-    } else {
-        for _ in 0..40 {
-            if crossterm::cursor::position().is_ok() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(25));
         }
     }
 
@@ -2954,9 +2969,11 @@ fn switch_to_inline(
 /// exactly the stall a terminal that drops DSR (tmux, SSH) used to take, 26
 /// times a turn.
 ///
-/// With `known_top = None` the behaviour is the old one verbatim: prime, query,
-/// retry, degrade. Nothing on the inline path passes `None` today; it exists so
-/// a future caller without a placed cursor is still correct rather than lying.
+/// With `known_top = None` the behaviour falls through to the query/retry/
+/// degrade ladder below (no priming loop first — see the note in
+/// `switch_to_inline`, whose fallback used to duplicate this same dead-weight
+/// wait). Nothing on the inline path passes `None` today; it exists so a
+/// future caller without a placed cursor is still correct rather than lying.
 ///
 /// The caller should still `terminal.clear()` / erase beforehand so no stale
 /// rows of the old-sized region remain.
@@ -2973,13 +2990,6 @@ fn rebuild_inline(terminal: &mut Term, inline_h: u16, known_top: Option<u16>) ->
         ) {
             *terminal = t;
             return Ok(());
-        }
-    } else {
-        for _ in 0..40 {
-            if crossterm::cursor::position().is_ok() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(25));
         }
     }
     let mut last_err = None;

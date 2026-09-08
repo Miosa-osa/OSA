@@ -530,6 +530,23 @@ pub struct Activity {
     /// Named blocking reason (item 3). When the phase is `Waiting`, this
     /// replaces the flavor verb with e.g. "Waiting on subagent…".
     waiting_reason: Option<WaitingReason>,
+    /// Live description of what a `task_wait`/join is blocked ON — the
+    /// backend-side wait a subagent-fan-out parent sits in — fed each frame
+    /// from the agents roster (`Agents::join_wait_label`, via
+    /// `App::sync_chrome`) while `waiting_reason` is `Tasks`/`TaskOutput`.
+    ///
+    /// A join is a DELIBERATE, potentially multi-minute block on other
+    /// agents, not a stall. Before this field existed, a healthy join hit the
+    /// SAME "no response for Ns" alarm (in warning-yellow) as a genuinely
+    /// wedged turn, because the silence notice only ever measured the
+    /// PARENT's own output — which a join intentionally produces none of
+    /// while children work. `Some(text)` — e.g. `"waiting on backend — grep…
+    /// 4m"` — replaces both the flavor verb and the alarm with what is
+    /// actually happening, for as long as a child is reporting; `None` (no
+    /// live child, or the child has ITSELF gone quiet — see
+    /// `Agents::join_wait_label`) lets the original verb + alarm speak,
+    /// which is the correct behaviour for a genuinely stalled join.
+    join_wait_detail: Option<String>,
     /// Backend-named turn phase (Grok `PhaseChanged`). When `Some`, the spinner
     /// states the phase outright ("Waiting on model" / "Streaming reasoning" /
     /// "Writing answer") instead of a flavor verb. `None` by default and whenever
@@ -797,6 +814,7 @@ impl Activity {
             active_verb: None,
             retry: None,
             waiting_reason: None,
+            join_wait_detail: None,
             named_phase: None,
             pending_user: false,
             interrupt_armed: false,
@@ -853,6 +871,15 @@ impl Activity {
     /// flavor verb). Only surfaced while the phase is `Waiting`.
     pub fn set_waiting_reason(&mut self, reason: Option<WaitingReason>) {
         self.waiting_reason = reason;
+    }
+
+    /// Feed the live "what a task_wait/join is blocked on" description (1/2d
+    /// — see `join_wait_detail`), from `Agents::join_wait_label` each frame
+    /// while a join is in progress. Pass `None` once there is nothing healthy
+    /// left to say (no live child, or the child itself went quiet), which
+    /// restores the plain `WaitingReason` verb + the ordinary silence alarm.
+    pub fn set_join_wait_detail(&mut self, detail: Option<String>) {
+        self.join_wait_detail = detail;
     }
 
     /// Feed the WALL-CLOCK elapsed (seconds since the turn's submit) used for the
@@ -1041,6 +1068,7 @@ impl Activity {
         self.thought_for = None;
         self.retry = None;
         self.waiting_reason = None;
+        self.join_wait_detail = None;
         self.named_phase = None;
         self.pending_user = false;
         self.interrupt_armed = false;
@@ -1067,6 +1095,7 @@ impl Activity {
         self.thought_for = None;
         self.retry = None;
         self.waiting_reason = None;
+        self.join_wait_detail = None;
         self.named_phase = None;
         self.pending_user = false;
         self.interrupt_armed = false;
@@ -1361,6 +1390,9 @@ impl Activity {
         if phase != ProcessingPhase::Waiting {
             self.clear_retry();
             self.waiting_reason = None;
+            // A stale join-wait detail must not leak into a LATER, unrelated
+            // wait (e.g. the next tool call happens to be another task_wait).
+            self.join_wait_detail = None;
             // The user's decision unblocked the turn (work is happening again),
             // so the "you're the blocker" pulse is stale (item 5).
             self.pending_user = false;
@@ -1856,6 +1888,22 @@ impl Component for Activity {
             interrupt_affordance(self.interrupt_armed)
         )];
 
+        // 1/2d — a `task_wait`/join is a DELIBERATE block on other agents, and
+        // it can legitimately run minutes. `silent_secs` only ever measures
+        // THIS turn's own output, which a join intentionally produces none of
+        // while children work — so a healthy multi-minute fan-out used to hit
+        // the exact same alarm as a genuinely wedged turn. When a live child is
+        // still reporting (`join_wait_detail` — fed from the agents roster each
+        // frame), that is proof the fleet is alive and the alarm is suppressed
+        // in favour of naming what it's waiting on; the alarm returns the
+        // moment that child ALSO goes quiet (`join_wait_detail` goes back to
+        // `None` — see `Agents::join_wait_label`), which is the one case this
+        // notice exists to report.
+        let join_healthy = matches!(
+            self.waiting_reason,
+            Some(WaitingReason::Tasks | WaitingReason::TaskOutput)
+        ) && self.join_wait_detail.is_some();
+
         // The silence notice outranks everything optional. It is the only segment
         // that reports something is WRONG, and it is the answer to the question
         // the turn timer looks like it is answering but is not: the turn timer
@@ -1863,7 +1911,7 @@ impl Component for Activity {
         // this the row cannot distinguish working from wedged at any width.
         // Placed immediately after the interrupt hint so it is the last thing
         // dropped as the pane narrows.
-        let silence = self.silent_secs();
+        let silence = if join_healthy { None } else { self.silent_secs() };
         if let Some(secs) = silence {
             parts.push(format!("no response for {}", fmt_compact_tight(secs)));
         }
@@ -2005,7 +2053,6 @@ impl Component for Activity {
                 )],
             )
         } else if self.phase == ProcessingPhase::Waiting && self.waiting_reason.is_some() {
-            let label = self.waiting_reason.unwrap().label();
             // This branch used to ignore the stall entirely — it painted
             // `theme.spinner_verb()` unconditionally, so the ONE state the user
             // actually gets stuck in ("Waiting for response…") was also the one
@@ -2017,9 +2064,18 @@ impl Component for Activity {
             } else {
                 theme.spinner_verb()
             };
+            // 1/2d — a healthy join names WHAT it's blocked on + the child's
+            // live activity ("waiting on backend — grep… 4m") instead of the
+            // bare "Waiting on tasks…" flavor verb; see `join_healthy` above.
+            // No trailing ellipsis on the detail form — it already reads as a
+            // complete statement, unlike the bare reason label.
+            let verb = match (join_healthy, self.join_wait_detail.as_deref()) {
+                (true, Some(detail)) => detail.to_string(),
+                _ => format!("{}\u{2026}", self.waiting_reason.unwrap().label()),
+            };
             (
                 Span::styled(format!("{} ", spinner_char), style),
-                vec![Span::styled(format!("{}\u{2026}", label), style)],
+                vec![Span::styled(verb, style)],
             )
         } else if self.named_phase.is_some() && self.phase != ProcessingPhase::ToolCall {
             // The backend named the phase (Grok `PhaseChanged`): state it outright
@@ -3035,6 +3091,126 @@ mod activity_tests {
         assert!(text.contains("esc to interrupt"), "{text}");
         // And the state the user was actually stuck in is still named.
         assert!(text.contains("Waiting for response"), "{text}");
+    }
+
+    // ── 1/2d: a healthy task_wait/join must not read like a hang ───────────
+
+    /// A `task_wait`/join, backdated well past the silence threshold — the
+    /// exact shape that used to render "Waiting on tasks… (… no response for
+    /// Ns)" in warning-yellow for a perfectly healthy multi-minute fan-out.
+    fn wedged_join(silent_for: u64) -> Activity {
+        use std::time::{Duration, Instant};
+        let mut act = Activity::new();
+        act.start();
+        act.set_phase(ProcessingPhase::Waiting);
+        act.set_waiting_reason(Some(WaitingReason::Tasks));
+        act.last_output_at = Some(Instant::now() - Duration::from_secs(silent_for));
+        act
+    }
+
+    #[test]
+    fn a_healthy_join_names_the_child_instead_of_raising_the_alarm() {
+        let mut join = wedged_join(6670);
+        // Before a child is known: the plain verb + the alarm, same as any
+        // other multi-minute wait — nothing regresses for the "unknown"
+        // shape (no agents roster, or an older backend).
+        let before = render_activity_text(&join);
+        assert!(before.contains("Waiting on tasks"), "{before}");
+        assert!(before.contains("no response for"), "{before}");
+
+        // A live child is reported: the alarm is replaced by what it's
+        // actually waiting on, and the row must NOT also claim "no response".
+        join.set_join_wait_detail(Some("waiting on backend \u{2014} grep\u{2026} 4m".into()));
+        let after = render_activity_text(&join);
+        assert!(after.contains("waiting on backend"), "{after}");
+        assert!(after.contains("grep\u{2026} 4m"), "{after}");
+        assert!(
+            !after.contains("no response for"),
+            "a healthy join must not ALSO raise the alarm: {after}"
+        );
+        assert!(
+            !after.contains("Waiting on tasks"),
+            "the detail replaces the flavor verb, it doesn't sit beside it: {after}"
+        );
+    }
+
+    #[test]
+    fn the_alarm_returns_once_the_child_itself_goes_quiet() {
+        // `join_wait_detail` going back to `None` (the child stopped
+        // reporting — see `Agents::join_wait_label`) must restore the
+        // ORIGINAL behaviour: the plain verb, in warning tone, plus the alarm.
+        let mut join = wedged_join(6670);
+        join.set_join_wait_detail(Some("waiting on backend \u{2014} grep\u{2026} 4m".into()));
+        assert!(!render_activity_text(&join).contains("no response for"));
+
+        join.set_join_wait_detail(None);
+        let text = render_activity_text(&join);
+        assert!(text.contains("Waiting on tasks"), "{text}");
+        assert!(text.contains("no response for"), "{text}");
+    }
+
+    #[test]
+    fn a_healthy_join_does_not_borrow_the_warning_tone() {
+        // The whole point: a healthy fan-out must not LOOK like a stall
+        // either. `silent_secs()` still reports the raw, honest fact (the
+        // backend really has produced nothing for 6670s) — that predicate is
+        // general-purpose and other callers may need the truth — but the ROW
+        // must not paint the detail in the alarm's warning color once it has
+        // replaced the alarm text.
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut join = wedged_join(6670);
+        join.set_join_wait_detail(Some("waiting on backend \u{2014} grep\u{2026} 4m".into()));
+        assert_eq!(join.silent_secs(), Some(6670), "the raw fact is unchanged");
+
+        let mut term = Terminal::new(TestBackend::new(120, 1)).unwrap();
+        term.draw(|f| join.draw(f, f.area())).unwrap();
+        let buf = term.backend().buffer().clone();
+        let row: String = (0..120).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        let col = row.find("waiting on backend").expect("detail must be on the row");
+        let theme = crate::style::theme();
+        assert_ne!(
+            buf[(col as u16, 0)].style().fg,
+            Some(theme.colors.warning),
+            "a healthy join's detail must not render in the alarm's warning color"
+        );
+    }
+
+    #[test]
+    fn task_output_wait_gets_the_same_treatment_as_tasks() {
+        let mut join = wedged_join(6670);
+        join.waiting_reason = Some(WaitingReason::TaskOutput);
+        join.set_join_wait_detail(Some("waiting on backend \u{2014} grep\u{2026} 4m".into()));
+        let text = render_activity_text(&join);
+        assert!(text.contains("waiting on backend"), "{text}");
+        assert!(!text.contains("no response for"), "{text}");
+    }
+
+    #[test]
+    fn a_join_detail_is_inert_outside_a_tasks_wait() {
+        // The detail must only ever override a task_wait/join — an unrelated
+        // wait (e.g. on the model) must render exactly as before even if a
+        // stale detail happens to still be set.
+        let mut act = wedged_turn(6670);
+        act.set_join_wait_detail(Some("waiting on backend \u{2014} grep\u{2026} 4m".into()));
+        let text = render_activity_text(&act);
+        assert!(text.contains("Waiting for response"), "{text}");
+        assert!(text.contains("no response for"), "{text}");
+        assert!(!text.contains("waiting on backend"), "{text}");
+    }
+
+    #[test]
+    fn leaving_the_waiting_phase_drops_the_stale_join_detail() {
+        // A stale detail from a FINISHED join must never leak into a later,
+        // unrelated wait.
+        let mut act = wedged_join(0);
+        act.set_join_wait_detail(Some("waiting on backend \u{2014} grep\u{2026} 4m".into()));
+        act.set_phase(ProcessingPhase::Streaming);
+        act.set_phase(ProcessingPhase::Waiting);
+        act.set_waiting_reason(Some(WaitingReason::Tasks));
+        assert!(
+            !render_activity_text(&act).contains("waiting on backend"),
+            "a detail from a previous join must not survive into this one"
+        );
     }
 
     #[test]
