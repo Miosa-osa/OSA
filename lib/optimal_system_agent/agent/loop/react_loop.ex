@@ -352,9 +352,25 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       # Goal auto-pause: the cross-turn GoalTracker tripped stall detection
       # (identical gap fingerprints), the run cap, the token budget, or the
       # goal was paused by the user (a manual `/goal pause`, or the TUI's own
-      # interrupt-driven pause) — a fresh turn that walks into an
-      # already-paused goal must not run, but it must also not lie about why.
-      GoalTracker.enabled?(state) and GoalTracker.paused?(sid) ->
+      # interrupt-driven pause) — the goal's OWN auto-continuation must not
+      # keep driving turns toward a paused goal.
+      #
+      # A genuine USER prompt must NEVER be swallowed by this, though — and a
+      # BRAND NEW top-level turn (`iter == 0`, before this turn's model has
+      # even been called once) is exactly what a user's freshly-typed message
+      # looks like. The TUI's own auto-continue driver already never submits
+      # another goal-continuation turn once it learns the goal is paused (see
+      # `continue_goal_from`/`maybe_continue_goal` in `handle_actions.rs`), so
+      # by construction a NEW top-level turn arriving while paused is the
+      # user, not the goal talking to itself — reported live: two consecutive
+      # ordinary messages ("what's the status", "EXCUSE ME") both got NOTHING
+      # but this halt's canned notice instead of an answer.
+      #
+      # `iter > 0` scopes the halt to what it can actually still be for: a
+      # turn ALREADY in flight (past its first model call) that this SAME
+      # goal's own machinery just paused mid-course — stopping ITS further
+      # self-driven continuation, never a turn that has not even started yet.
+      iter > 0 and GoalTracker.enabled?(state) and GoalTracker.paused?(sid) ->
         snap = GoalTracker.snapshot(sid)
         reason = Map.get(snap || %{}, :pause_reason, :no_progress)
         Logger.info("[loop] Goal auto-paused (#{reason}) at iteration #{iter}")
