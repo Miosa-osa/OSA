@@ -154,7 +154,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWaitTest do
     end
 
     test "on timeout, it says TIMED OUT, tells the coordinator NOT to re-wait, and uses clean names" do
-      RunStore.start_run(%{agent_id: "agent:session-123-abc:frontend-billing-fixes", parent_session_id: "p", role: "frontend"})
+      RunStore.start_run(%{
+        agent_id: "agent:session-123-abc:frontend-billing-fixes",
+        parent_session_id: "p",
+        role: "frontend"
+      })
 
       {:ok, text} =
         Handler.execute(

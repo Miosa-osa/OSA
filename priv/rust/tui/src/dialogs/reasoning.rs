@@ -91,7 +91,10 @@ impl ReasoningSelector {
     // ── Key handling ─────────────────────────────────────────────────────────
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<ReasoningAction> {
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return None;
         }
 
@@ -241,11 +244,19 @@ mod tests {
         // Every level survives index()→from_index() unchanged, and indices are 0..6.
         for (expect_i, level) in ALL.iter().enumerate() {
             assert_eq!(level.index(), expect_i, "index is stable & contiguous");
-            assert_eq!(ReasoningLevel::from_index(level.index()), *level, "roundtrip {level:?}");
+            assert_eq!(
+                ReasoningLevel::from_index(level.index()),
+                *level,
+                "roundtrip {level:?}"
+            );
         }
         // Descriptor table stays in lockstep with the enum order.
         for (i, (level, _, _)) in LEVELS.iter().enumerate() {
-            assert_eq!(*level, ReasoningLevel::from_index(i), "LEVELS[{i}] matches from_index");
+            assert_eq!(
+                *level,
+                ReasoningLevel::from_index(i),
+                "LEVELS[{i}] matches from_index"
+            );
         }
     }
 
@@ -256,7 +267,9 @@ mod tests {
         for level in ALL {
             let mut sel = ReasoningSelector::new(level);
             match sel.handle_key(key(KeyCode::Enter)) {
-                Some(ReasoningAction::Select(got)) => assert_eq!(got, level, "Enter returns seeded level"),
+                Some(ReasoningAction::Select(got)) => {
+                    assert_eq!(got, level, "Enter returns seeded level")
+                }
                 other => panic!("expected Select({level:?}), got {other:?}"),
             }
         }
@@ -281,7 +294,9 @@ mod tests {
         let mut sel = ReasoningSelector::new(ReasoningLevel::Off);
         assert!(sel.handle_key(key(KeyCode::Up)).is_none());
         match sel.handle_key(key(KeyCode::Enter)) {
-            Some(ReasoningAction::Select(got)) => assert_eq!(got, ReasoningLevel::Ultra, "Up wraps to Ultra"),
+            Some(ReasoningAction::Select(got)) => {
+                assert_eq!(got, ReasoningLevel::Ultra, "Up wraps to Ultra")
+            }
             other => panic!("expected Select(Ultra), got {other:?}"),
         }
     }
@@ -292,7 +307,9 @@ mod tests {
         let mut sel = ReasoningSelector::new(ReasoningLevel::Ultra);
         assert!(sel.handle_key(key(KeyCode::Char('j'))).is_none());
         match sel.handle_key(key(KeyCode::Enter)) {
-            Some(ReasoningAction::Select(got)) => assert_eq!(got, ReasoningLevel::Off, "Down wraps to Off"),
+            Some(ReasoningAction::Select(got)) => {
+                assert_eq!(got, ReasoningLevel::Off, "Down wraps to Off")
+            }
             other => panic!("expected Select(Off), got {other:?}"),
         }
     }

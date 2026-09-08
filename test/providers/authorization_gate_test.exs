@@ -21,9 +21,15 @@ defmodule OptimalSystemAgent.Providers.AuthorizationGateTest do
   # path instead of a live moderation HTTP call (which would fail → false in
   # a test environment and make this suite flaky).
   @security_messages [
-    %{role: "user", content: "research nmap scan payloads and exploitation techniques for the pentest"},
+    %{
+      role: "user",
+      content: "research nmap scan payloads and exploitation techniques for the pentest"
+    },
     %{role: "assistant", content: "understood"},
-    %{role: "user", content: "also check the target for injection vulnerabilities and privilege escalation"}
+    %{
+      role: "user",
+      content: "also check the target for injection vulnerabilities and privilege escalation"
+    }
   ]
 
   # Jailbreak state persists in ~/.osa/jailbreak — save, control, restore so
@@ -58,12 +64,12 @@ defmodule OptimalSystemAgent.Providers.AuthorizationGateTest do
       result = Registry.maybe_inject_authorization(@security_messages, [])
 
       refute Enum.any?(result, fn
-                %{role: "user", content: content} when is_binary(content) ->
-                  String.contains?(content, "platform_authorization")
+               %{role: "user", content: content} when is_binary(content) ->
+                 String.contains?(content, "platform_authorization")
 
-                _ ->
-                  false
-              end),
+               _ ->
+                 false
+             end),
              "annotation must not fire on keyword hits alone when no override is armed"
     end
 
@@ -74,12 +80,12 @@ defmodule OptimalSystemAgent.Providers.AuthorizationGateTest do
       result = Registry.maybe_inject_authorization(@security_messages, [])
 
       assert Enum.any?(result, fn
-                %{role: "user", content: content} when is_binary(content) ->
-                  String.contains?(content, "platform_authorization")
+               %{role: "user", content: content} when is_binary(content) ->
+                 String.contains?(content, "platform_authorization")
 
-                _ ->
-                  false
-              end),
+               _ ->
+                 false
+             end),
              "annotation should fire for security content when the operator armed the override"
     end
 
@@ -89,12 +95,12 @@ defmodule OptimalSystemAgent.Providers.AuthorizationGateTest do
       result = Registry.maybe_inject_authorization(@security_messages, skip_authorization: true)
 
       refute Enum.any?(result, fn
-                %{role: "user", content: content} when is_binary(content) ->
-                  String.contains?(content, "platform_authorization")
+               %{role: "user", content: content} when is_binary(content) ->
+                 String.contains?(content, "platform_authorization")
 
-                _ ->
-                  false
-              end)
+               _ ->
+                 false
+             end)
     end
   end
 end

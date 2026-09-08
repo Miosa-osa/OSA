@@ -146,8 +146,14 @@ mod tests {
     fn overdrive_is_replayed_before_the_subcommand() {
         // The exact ordering the launcher must accept, and the one the user
         // asked for: `osa --overdrive resume <id>`.
-        let m = LaunchMode { overdrive: true, ..mode() };
-        assert_eq!(resume_command("sess-1", &m), "osa --overdrive resume sess-1");
+        let m = LaunchMode {
+            overdrive: true,
+            ..mode()
+        };
+        assert_eq!(
+            resume_command("sess-1", &m),
+            "osa --overdrive resume sess-1"
+        );
     }
 
     #[test]
@@ -167,7 +173,10 @@ mod tests {
             permission_mode: Some("plan".into()),
             ..mode()
         };
-        assert_eq!(resume_command("s", &m), "osa --permission-mode plan resume s");
+        assert_eq!(
+            resume_command("s", &m),
+            "osa --permission-mode plan resume s"
+        );
     }
 
     #[test]
@@ -233,7 +242,12 @@ mod tests {
         for alias in ["--overdrive", "--yolo", "--dangerously-skip-permissions"] {
             let cli = Cli::parse_from([alias]).unwrap();
             let m = LaunchMode::from_cli(&cli);
-            assert_eq!(resume_command("s", &m), "osa --overdrive resume s", "{}", alias);
+            assert_eq!(
+                resume_command("s", &m),
+                "osa --overdrive resume s",
+                "{}",
+                alias
+            );
         }
     }
 

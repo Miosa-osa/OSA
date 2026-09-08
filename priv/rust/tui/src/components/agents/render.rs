@@ -1594,7 +1594,10 @@ mod tests {
 
     #[test]
     fn cost_with_cap_pairs_both_figures() {
-        assert_eq!(fmt_cost_opt_with_cap(Some(2.48), Some(4.0)), "$2.48 / $4.00");
+        assert_eq!(
+            fmt_cost_opt_with_cap(Some(2.48), Some(4.0)),
+            "$2.48 / $4.00"
+        );
     }
 
     #[test]

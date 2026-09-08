@@ -1,16 +1,20 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use super::{
-    parse_json_arg, render_tool_box, truncate_lines, RenderOpts, ToolRenderer,
-};
+use super::{parse_json_arg, render_tool_box, truncate_lines, RenderOpts, ToolRenderer};
 
 // ─── FileViewRenderer (Read) ──────────────────────────────────────────────────
 
 pub struct FileViewRenderer;
 
 impl ToolRenderer for FileViewRenderer {
-    fn render(&self, _name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        _name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
         let path = parse_json_arg(args, &["path", "file_path", "filename", "target_file"])
@@ -84,7 +88,13 @@ impl ToolRenderer for FileViewRenderer {
 pub struct FileWriteRenderer;
 
 impl ToolRenderer for FileWriteRenderer {
-    fn render(&self, _name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        _name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
         // Extract path: try args first, then result first line (backend sends path there)
@@ -119,13 +129,21 @@ impl ToolRenderer for FileWriteRenderer {
                 .and_then(|l| l.split_whitespace().next())
                 .and_then(|n| n.parse::<usize>().ok());
             from_header.unwrap_or_else(|| {
-                if content.is_empty() { 0 } else { content.lines().count() }
+                if content.is_empty() {
+                    0
+                } else {
+                    content.lines().count()
+                }
             })
         };
 
         // A file WRITE creates content — `Create` verb (or `Update plan` for a
         // plan file). Diffstat is all-additions; the range spans the whole file.
-        let verb = if is_plan_file(&full_path) { "Update plan" } else { "Create" };
+        let verb = if is_plan_file(&full_path) {
+            "Update plan"
+        } else {
+            "Create"
+        };
         let display_path = if opts.expanded {
             relativize_path(&full_path)
         } else {
@@ -217,7 +235,13 @@ impl ToolRenderer for FileWriteRenderer {
 pub struct FileEditRenderer;
 
 impl ToolRenderer for FileEditRenderer {
-    fn render(&self, name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
         let full_path = parse_json_arg(
@@ -489,7 +513,10 @@ fn relativize_path(path: &str) -> String {
 /// which gets the `Update plan` verb.
 fn is_plan_file(path: &str) -> bool {
     let name = basename_of(path).to_ascii_lowercase();
-    let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name.as_str());
+    let stem = name
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(name.as_str());
     stem == "plan" || stem.ends_with("-plan") || stem.ends_with("_plan")
 }
 
@@ -524,7 +551,11 @@ fn build_edit_trailer(
     if is_multi {
         trailer.push(Span::raw("  ".to_string()));
         trailer.push(Span::styled(
-            format!("({} edit{})", edit_count, if edit_count == 1 { "" } else { "s" }),
+            format!(
+                "({} edit{})",
+                edit_count,
+                if edit_count == 1 { "" } else { "s" }
+            ),
             Style::default().fg(theme.colors.muted),
         ));
         return trailer;
@@ -639,7 +670,12 @@ mod diff_render_tests {
     fn text(lines: &[Line<'static>]) -> Vec<String> {
         lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect()
     }
 
@@ -713,7 +749,10 @@ mod diff_render_tests {
         // File named by basename when collapsed.
         assert!(header.contains("foo.rs"), "header path missing: {header:?}");
         // Compact diffstat `+N -M` from the actual diff.
-        assert!(header.contains("+1 -1"), "header diffstat missing: {header:?}");
+        assert!(
+            header.contains("+1 -1"),
+            "header diffstat missing: {header:?}"
+        );
         // WHERE indicator: the changed line landed on L2.
         assert!(header.contains("L2"), "header range missing: {header:?}");
     }
@@ -722,19 +761,36 @@ mod diff_render_tests {
     fn create_vs_edit_verb_selection() {
         // Empty original → Create.
         let create_args = r#"{"path":"/tmp/new.rs","old_string":"","new_string":"fn main() {}\n"}"#;
-        let create = text(&FileEditRenderer.render("file_edit", create_args, "", &collapsed_opts()));
-        assert!(create[0].contains("Create"), "expected Create verb: {:?}", create[0]);
+        let create =
+            text(&FileEditRenderer.render("file_edit", create_args, "", &collapsed_opts()));
+        assert!(
+            create[0].contains("Create"),
+            "expected Create verb: {:?}",
+            create[0]
+        );
 
         // Real original → Edit.
         let edit_args = r#"{"path":"/tmp/new.rs","old_string":"fn main() {}\n","new_string":"fn main() { work(); }\n"}"#;
         let edit = text(&FileEditRenderer.render("file_edit", edit_args, "", &collapsed_opts()));
-        assert!(edit[0].contains("Edit"), "expected Edit verb: {:?}", edit[0]);
-        assert!(!edit[0].contains("Create"), "must not read Create: {:?}", edit[0]);
+        assert!(
+            edit[0].contains("Edit"),
+            "expected Edit verb: {:?}",
+            edit[0]
+        );
+        assert!(
+            !edit[0].contains("Create"),
+            "must not read Create: {:?}",
+            edit[0]
+        );
 
         // A plan file → Update plan.
         let plan_args = r#"{"path":"/tmp/plan.md","old_string":"- a\n","new_string":"- a\n- b\n"}"#;
         let plan = text(&FileEditRenderer.render("file_edit", plan_args, "", &collapsed_opts()));
-        assert!(plan[0].contains("Update plan"), "expected Update plan: {:?}", plan[0]);
+        assert!(
+            plan[0].contains("Update plan"),
+            "expected Update plan: {:?}",
+            plan[0]
+        );
     }
 
     #[test]
@@ -742,21 +798,33 @@ mod diff_render_tests {
         // Change spanning new-file lines 2..=3 (two inserted lines).
         let args = r#"{"path":"/tmp/f.rs","old_string":"a\nb\nc\n","new_string":"a\nB\nB2\nc\n"}"#;
         let header = &text(&FileEditRenderer.render("file_edit", args, "", &collapsed_opts()))[0];
-        assert!(header.contains("L2-3"), "range should span L2-3: {header:?}");
+        assert!(
+            header.contains("L2-3"),
+            "range should span L2-3: {header:?}"
+        );
 
         // A single-line change collapses to `L2` (no range dash).
         let one = r#"{"path":"/tmp/f.rs","old_string":"a\nb\nc\n","new_string":"a\nB\nc\n"}"#;
         let h1 = &text(&FileEditRenderer.render("file_edit", one, "", &collapsed_opts()))[0];
-        assert!(h1.contains("L2") && !h1.contains("L2-"), "single line range: {h1:?}");
+        assert!(
+            h1.contains("L2") && !h1.contains("L2-"),
+            "single line range: {h1:?}"
+        );
     }
 
     #[test]
     fn multiedit_summarizes_and_suppresses_single_diffstat() {
         let args = r#"{"path":"/tmp/f.rs","edits":[{"old_string":"a","new_string":"b"},{"old_string":"c","new_string":"d"},{"old_string":"e","new_string":"f"}]}"#;
         let header = &text(&FileEditRenderer.render("multiedit", args, "", &collapsed_opts()))[0];
-        assert!(header.contains("(3 edits)"), "multiedit count missing: {header:?}");
+        assert!(
+            header.contains("(3 edits)"),
+            "multiedit count missing: {header:?}"
+        );
         // No misleading single diffstat when several hunks are involved.
-        assert!(!header.contains("+1 -1"), "must not show single diffstat: {header:?}");
+        assert!(
+            !header.contains("+1 -1"),
+            "must not show single diffstat: {header:?}"
+        );
     }
 
     #[test]

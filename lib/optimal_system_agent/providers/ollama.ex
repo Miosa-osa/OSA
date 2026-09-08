@@ -590,6 +590,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
         # fragments before its `:eol` tail. Accumulate them (was previously
         # DISCARDED, truncating the line) and reset the idle watchdog (WS1).
         bump_heartbeat(Map.get(acc, :heartbeat))
+
         cloud_stream_loop(port, callback, %{acc | partial: Map.get(acc, :partial, "") <> fragment})
 
       {^port, {:exit_status, 0}} ->

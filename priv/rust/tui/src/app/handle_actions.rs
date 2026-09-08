@@ -2550,10 +2550,14 @@ fn goal_intent_for(arg: &str) -> GoalIntent {
     // "clear"/"off"/"reset" forget it. Anything else anchors a new goal, with
     // `::` separating optional acceptance criteria.
     let inspecting = verb.is_empty()
-        || ["status", "pause", "stop", "resume", "clear", "off", "reset", "cancel", "end", "approve", "reject"]
-            .iter()
-            .any(|v| verb.eq_ignore_ascii_case(v))
-        || verb.starts_with("approve ") || verb.starts_with("reject ");
+        || [
+            "status", "pause", "stop", "resume", "clear", "off", "reset", "cancel", "end",
+            "approve", "reject",
+        ]
+        .iter()
+        .any(|v| verb.eq_ignore_ascii_case(v))
+        || verb.starts_with("approve ")
+        || verb.starts_with("reject ");
     if inspecting {
         GoalIntent::Inspect
     } else {
@@ -3227,7 +3231,20 @@ mod goal_routing_tests {
         assert_eq!(goal_intent_for("stop the flaky test"), GoalIntent::Anchor);
 
         // The backend's own subcommands.
-        for verb in ["", "  ", "status", "pause", "stop", "resume", "clear", "off", "reset", "cancel", "approve decision-123", "reject decision-123 fix draft"] {
+        for verb in [
+            "",
+            "  ",
+            "status",
+            "pause",
+            "stop",
+            "resume",
+            "clear",
+            "off",
+            "reset",
+            "cancel",
+            "approve decision-123",
+            "reject decision-123 fix draft",
+        ] {
             assert_eq!(
                 goal_intent_for(verb),
                 GoalIntent::Inspect,
@@ -3243,7 +3260,10 @@ mod goal_routing_tests {
     /// their own; one of those landing first used to be indistinguishable.
     #[test]
     fn only_a_goal_answer_settles_a_goal_request() {
-        assert!(is_goal_response(&resp("goal status", Some(GoalStatus::default()))));
+        assert!(is_goal_response(&resp(
+            "goal status",
+            Some(GoalStatus::default())
+        )));
         assert!(is_goal_response(&resp("goal ship the parser", None)));
         assert!(!is_goal_response(&resp("compact", None)));
         assert!(!is_goal_response(&resp("recap", None)));
@@ -3298,8 +3318,14 @@ mod new_completion_outcome_tests {
     fn the_same_terminal_status_repeated_is_not_new() {
         // A repeat poll of an unchanged, already-reported goal must not
         // reopen the panel.
-        assert_eq!(new_completion_outcome(Some("completed"), Some("completed")), None);
-        assert_eq!(new_completion_outcome(Some("blocked"), Some("blocked")), None);
+        assert_eq!(
+            new_completion_outcome(Some("completed"), Some("completed")),
+            None
+        );
+        assert_eq!(
+            new_completion_outcome(Some("blocked"), Some("blocked")),
+            None
+        );
     }
 
     #[test]
@@ -3316,7 +3342,11 @@ mod new_completion_outcome_tests {
     fn non_terminal_statuses_are_never_new_regardless_of_cache() {
         for status in [Some("active"), Some("paused"), Some("off_track"), None] {
             assert_eq!(new_completion_outcome(None, status), None, "{status:?}");
-            assert_eq!(new_completion_outcome(Some("completed"), status), None, "{status:?}");
+            assert_eq!(
+                new_completion_outcome(Some("completed"), status),
+                None,
+                "{status:?}"
+            );
         }
     }
 }
@@ -3530,7 +3560,10 @@ impl App {
         let client = self.client.clone();
         let tx = self.event_tx.clone();
         tokio::spawn(async move {
-            let result = client.local_model_info(&reff).await.map_err(|e| e.to_string());
+            let result = client
+                .local_model_info(&reff)
+                .await
+                .map_err(|e| e.to_string());
             let _ = tx.send(Event::Backend(BackendEvent::LocalModelInfoLoaded(result)));
         });
     }

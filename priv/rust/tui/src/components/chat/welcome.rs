@@ -45,7 +45,11 @@ pub fn welcome_lines(
     let cwd = workspace_dir
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
-        .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()))
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.display().to_string())
+        })
         .map(|s| {
             let home = std::env::var("HOME").unwrap_or_default();
             if !home.is_empty() && s.starts_with(&home) {
@@ -82,7 +86,7 @@ pub fn welcome_lines(
 
     // Helper: pad content to box_width and wrap with left+right border
     let border_color = theme.colors.primary;
-    let left = "\u{2502} ";  // │ + space
+    let left = "\u{2502} "; // │ + space
     let right = " \u{2502}"; // space + │
 
     let make_bordered = |content: &str, style: Style| -> Line<'static> {
@@ -120,7 +124,9 @@ pub fn welcome_lines(
     let greeting_centered = format!("{}{}", " ".repeat(greeting_pad), greeting);
     lines.push(make_bordered(
         &greeting_centered,
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
     ));
 
     // Version subtitle (centered, faint) — single build-time source, never stale.
@@ -143,7 +149,10 @@ pub fn welcome_lines(
             let right_pad = inner.saturating_sub(pad + char_count);
 
             let mut spans: Vec<Span<'static>> = Vec::new();
-            spans.push(Span::styled(left.to_string(), Style::default().fg(border_color)));
+            spans.push(Span::styled(
+                left.to_string(),
+                Style::default().fg(border_color),
+            ));
             spans.push(Span::raw(" ".repeat(pad)));
 
             // Gradient spans for the logo
@@ -153,7 +162,10 @@ pub fn welcome_lines(
             }
 
             spans.push(Span::raw(" ".repeat(right_pad)));
-            spans.push(Span::styled(right.to_string(), Style::default().fg(border_color)));
+            spans.push(Span::styled(
+                right.to_string(),
+                Style::default().fg(border_color),
+            ));
             lines.push(Line::from(spans));
         }
     } else {
@@ -162,7 +174,9 @@ pub fn welcome_lines(
         let centered = format!("{}{}", " ".repeat(pad), compact);
         lines.push(make_bordered(
             &centered,
-            Style::default().fg(border_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(border_color)
+                .add_modifier(Modifier::BOLD),
         ));
     }
 
@@ -244,9 +258,7 @@ fn read_user_name() -> Option<String> {
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("- **Name:**") {
-            let name = trimmed
-                .trim_start_matches("- **Name:**")
-                .trim();
+            let name = trimmed.trim_start_matches("- **Name:**").trim();
             if !name.is_empty() {
                 return Some(name.to_string());
             }
@@ -293,7 +305,11 @@ mod welcome_tests {
 
         // Narrow panes stay compact too (shorter hint, no cheatsheet).
         let narrow = welcome_lines(38, 12, None, None, None);
-        assert!(narrow.len() <= 20, "narrow welcome too tall: {}", narrow.len());
+        assert!(
+            narrow.len() <= 20,
+            "narrow welcome too tall: {}",
+            narrow.len()
+        );
         let narrow_tail = narrow
             .iter()
             .rev()

@@ -127,7 +127,10 @@ impl DoctorPanel {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> DoctorPanelAction {
         // Chorded shortcuts belong to the app, not this panel.
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return DoctorPanelAction::None;
         }
         let last = self.visible().len().saturating_sub(1);
@@ -193,7 +196,10 @@ impl DoctorPanel {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(c.primary))
             .title(Line::from(vec![
-                Span::styled(" OSA ", Style::default().fg(c.primary).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " OSA ",
+                    Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("\u{00b7} doctor ", Style::default().fg(c.muted)),
             ]))
             .style(Style::default().bg(c.dialog_bg));
@@ -212,8 +218,11 @@ impl DoctorPanel {
         let maxw = iw as usize;
         let mut cy = inner.y;
 
-        let (passed, failed, optional) =
-            (self.count(CheckStatus::Pass), self.count(CheckStatus::Fail), self.count(CheckStatus::Optional));
+        let (passed, failed, optional) = (
+            self.count(CheckStatus::Pass),
+            self.count(CheckStatus::Fail),
+            self.count(CheckStatus::Optional),
+        );
 
         // ── READY banner ───────────────────────────────────────────────────
         let (banner, banner_color) = if self.checks.is_empty() {
@@ -227,11 +236,14 @@ impl DoctorPanel {
             frame,
             Paragraph::new(Line::from(vec![
                 Span::styled("\u{25CF} ", Style::default().fg(banner_color)),
-                Span::styled(banner, Style::default().fg(banner_color).add_modifier(Modifier::BOLD)),
                 Span::styled(
-                    format!(
-                        "   {passed} pass \u{00b7} {failed} fail \u{00b7} {optional} optional"
-                    ),
+                    banner,
+                    Style::default()
+                        .fg(banner_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("   {passed} pass \u{00b7} {failed} fail \u{00b7} {optional} optional"),
                     Style::default().fg(c.dim),
                 ),
             ])),
@@ -242,7 +254,10 @@ impl DoctorPanel {
         // ── separator ──────────────────────────────────────────────────────
         put(
             frame,
-            Paragraph::new(Span::styled("\u{2500}".repeat(maxw), Style::default().fg(c.dim))),
+            Paragraph::new(Span::styled(
+                "\u{2500}".repeat(maxw),
+                Style::default().fg(c.dim),
+            )),
             Rect::new(inner.x, cy, iw, 1),
         );
         cy += 1;
@@ -260,13 +275,19 @@ impl DoctorPanel {
             };
             put(
                 frame,
-                Paragraph::new(Span::styled(truncate_chars(&msg, maxw), Style::default().fg(c.muted)))
-                    .alignment(Alignment::Center),
+                Paragraph::new(Span::styled(
+                    truncate_chars(&msg, maxw),
+                    Style::default().fg(c.muted),
+                ))
+                .alignment(Alignment::Center),
                 Rect::new(inner.x, cy + list_h / 2, iw, 1),
             );
         } else {
-            let scroll =
-                crate::dialogs::clamp_scroll_to_cursor(self.scroll, self.cursor, (list_h as usize).max(1));
+            let scroll = crate::dialogs::clamp_scroll_to_cursor(
+                self.scroll,
+                self.cursor,
+                (list_h as usize).max(1),
+            );
             for rel in 0..(list_h as usize) {
                 let abs = rel + scroll;
                 let Some(&ci) = visible.get(abs) else { break };
@@ -289,13 +310,24 @@ impl DoctorPanel {
                     // glyph(1) + space(1) + name + gap(3)
                     let used = 2 + crate::util::cols(&name);
                     let mut spans = vec![
-                        Span::styled(format!("{} ", check.status.glyph()), Style::default().fg(dot_color)),
-                        Span::styled(name, Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            format!("{} ", check.status.glyph()),
+                            Style::default().fg(dot_color),
+                        ),
+                        Span::styled(
+                            name,
+                            Style::default()
+                                .fg(c.secondary)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                     ];
                     let remaining = maxw.saturating_sub(used);
                     if remaining > 5 && !check.detail.is_empty() {
                         let detail = truncate_chars(&check.detail, remaining - 3);
-                        spans.push(Span::styled(format!("   {detail}"), Style::default().fg(c.dim)));
+                        spans.push(Span::styled(
+                            format!("   {detail}"),
+                            Style::default().fg(c.dim),
+                        ));
                     }
                     put(
                         frame,
@@ -311,16 +343,39 @@ impl DoctorPanel {
         put(
             frame,
             Paragraph::new(Line::from(vec![
-                Span::styled("\u{2191}\u{2193}", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
-                Span::styled(" nav  ", Style::default().fg(c.dim)),
-                Span::styled("f", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
                 Span::styled(
-                    if self.failing_only { " all  " } else { " failing  " },
+                    "\u{2191}\u{2193}",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" nav  ", Style::default().fg(c.dim)),
+                Span::styled(
+                    "f",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    if self.failing_only {
+                        " all  "
+                    } else {
+                        " failing  "
+                    },
                     Style::default().fg(c.dim),
                 ),
-                Span::styled("esc", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
                 Span::styled(
-                    if self.failing_only { " clear" } else { " close" },
+                    "esc",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    if self.failing_only {
+                        " clear"
+                    } else {
+                        " close"
+                    },
                     Style::default().fg(c.dim),
                 ),
             ])),
@@ -349,10 +404,26 @@ mod doctor_panel_tests {
 
     fn sample() -> Vec<DoctorCheck> {
         vec![
-            DoctorCheck { name: "Runtime".into(), status: CheckStatus::Pass, detail: "OTP 27".into() },
-            DoctorCheck { name: "TUI".into(), status: CheckStatus::Fail, detail: "binary not found".into() },
-            DoctorCheck { name: "PostgreSQL".into(), status: CheckStatus::Optional, detail: "not configured".into() },
-            DoctorCheck { name: "\u{4e2d}\u{6587}".into(), status: CheckStatus::Fail, detail: "\u{20ac}".repeat(90) },
+            DoctorCheck {
+                name: "Runtime".into(),
+                status: CheckStatus::Pass,
+                detail: "OTP 27".into(),
+            },
+            DoctorCheck {
+                name: "TUI".into(),
+                status: CheckStatus::Fail,
+                detail: "binary not found".into(),
+            },
+            DoctorCheck {
+                name: "PostgreSQL".into(),
+                status: CheckStatus::Optional,
+                detail: "not configured".into(),
+            },
+            DoctorCheck {
+                name: "\u{4e2d}\u{6587}".into(),
+                status: CheckStatus::Fail,
+                detail: "\u{20ac}".repeat(90),
+            },
         ]
     }
 
@@ -385,7 +456,7 @@ mod doctor_panel_tests {
         p.handle_key(key(KeyCode::Char('f')));
         assert!(p.failing_only);
         assert_eq!(p.visible().len(), 2); // only the two Fail rows
-        // Esc clears the filter before closing.
+                                          // Esc clears the filter before closing.
         assert_eq!(p.handle_key(key(KeyCode::Esc)), DoctorPanelAction::None);
         assert!(!p.failing_only);
         assert_eq!(p.handle_key(key(KeyCode::Esc)), DoctorPanelAction::Close);
@@ -414,11 +485,8 @@ mod doctor_panel_tests {
 
     #[test]
     fn draws_at_all_sizes_without_panic() {
-        let states: Vec<(Vec<DoctorCheck>, bool)> = vec![
-            (Vec::new(), false),
-            (sample(), false),
-            (sample(), true),
-        ];
+        let states: Vec<(Vec<DoctorCheck>, bool)> =
+            vec![(Vec::new(), false), (sample(), false), (sample(), true)];
         for (checks, failing_only) in states {
             let mut p = DoctorPanel::new(checks);
             if failing_only {

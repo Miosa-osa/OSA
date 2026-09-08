@@ -12,16 +12,16 @@ use crate::dialogs::onboarding::OnboardingWizard;
 
 // ── Symbols ───────────────────────────────────────────────────────────────────
 
-const SYM_DIAMOND: &str = "\u{25c6}";   // ◆  header / title
-const SYM_OPEN: &str = "\u{25c7}";      // ◇  step prompt
-const SYM_PIPE: &str = "\u{2502}";      // │  connector between steps
-const SYM_RADIO_ON: &str = "\u{25cf}";  // ●  selected radio
+const SYM_DIAMOND: &str = "\u{25c6}"; // ◆  header / title
+const SYM_OPEN: &str = "\u{25c7}"; // ◇  step prompt
+const SYM_PIPE: &str = "\u{2502}"; // │  connector between steps
+const SYM_RADIO_ON: &str = "\u{25cf}"; // ●  selected radio
 const SYM_RADIO_OFF: &str = "\u{25cb}"; // ○  unselected radio
-const SYM_CHECK_ON: &str = "\u{25a0}";  // ■  checked checkbox
+const SYM_CHECK_ON: &str = "\u{25a0}"; // ■  checked checkbox
 const SYM_CHECK_OFF: &str = "\u{25a1}"; // □  unchecked checkbox
-const SYM_DONE: &str = "\u{2713}";      // ✓  completed step answer
-const SYM_CURSOR: &str = "\u{258c}";    // ▌  text-input cursor bar
-const SYM_BULLET: &str = "\u{2022}";    // •  masked char
+const SYM_DONE: &str = "\u{2713}"; // ✓  completed step answer
+const SYM_CURSOR: &str = "\u{258c}"; // ▌  text-input cursor bar
+const SYM_BULLET: &str = "\u{2022}"; // •  masked char
 
 /// ANSI Shadow figlet "OSA" wordmark — shared with the welcome banner so the
 /// first-run flow and the returning-user screen read as the same brand.
@@ -64,7 +64,11 @@ fn push_branded_header(
 ) {
     lines.push(Line::from(""));
 
-    let logo_w = OSA_LOGO.iter().map(|l| l.chars().count()).max().unwrap_or(41);
+    let logo_w = OSA_LOGO
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(41);
     let show_logo = (col_w as usize) >= logo_w && avail_h >= 18;
 
     if show_logo {
@@ -76,7 +80,9 @@ fn push_branded_header(
             lines,
             col_w,
             "Welcome to OSA",
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         );
     } else {
         // Compact: gradient diamond + wordmark on one line.
@@ -85,7 +91,9 @@ fn push_branded_header(
             lines,
             col_w,
             "Welcome to OSA",
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         );
     }
 
@@ -184,10 +192,7 @@ fn push_completed_step(
     // │  Answer (green-ish, dimmed)
     lines.push(Line::from(vec![
         Span::styled(format!("  {}  ", SYM_PIPE), dim),
-        Span::styled(
-            format!("{} {}", SYM_DONE, answer),
-            done_style,
-        ),
+        Span::styled(format!("{} {}", SYM_DONE, answer), done_style),
     ]));
 
     lines.push(Line::from(""));
@@ -266,8 +271,7 @@ fn completed_step_summary(step_idx: usize, wizard: &OnboardingWizard) -> (String
                     .iter()
                     .enumerate()
                     .filter(|(i, (id, _, _))| {
-                        selected.get(*i).copied().unwrap_or(false)
-                            && tokens.contains_key(*id)
+                        selected.get(*i).copied().unwrap_or(false) && tokens.contains_key(*id)
                     })
                     .map(|(_, (_, name, _))| *name)
                     .collect();
@@ -390,15 +394,14 @@ fn push_provider_select(
 /// Render one credential input row: an active field gets the pointer glyph and
 /// a trailing caret; an inactive field is drawn dim with no caret, so with two
 /// fields it is always clear which one the keyboard is editing.
-fn input_field_line<'a>(
-    value: String,
-    active: bool,
-    theme: &crate::style::Theme,
-) -> Line<'a> {
+fn input_field_line<'a>(value: String, active: bool, theme: &crate::style::Theme) -> Line<'a> {
     if active {
         Line::from(vec![
             Span::raw("  "),
-            Span::styled(SYM_CURSOR.to_string(), Style::default().fg(theme.colors.primary)),
+            Span::styled(
+                SYM_CURSOR.to_string(),
+                Style::default().fg(theme.colors.primary),
+            ),
             Span::raw(" "),
             Span::styled(
                 format!("{}_", value),
@@ -476,7 +479,10 @@ fn push_details_input(
     if wizard.flow_provider_needs_url() {
         lines.push(Line::from(vec![
             Span::raw("     "),
-            Span::styled("Base URL:".to_string(), Style::default().fg(theme.colors.muted)),
+            Span::styled(
+                "Base URL:".to_string(),
+                Style::default().fg(theme.colors.muted),
+            ),
         ]));
 
         let url = wizard.flow_base_url().to_string();
@@ -530,12 +536,18 @@ fn push_model_select(
     if model_list.is_empty() {
         lines.push(Line::from(vec![
             Span::raw("     "),
-            Span::styled("Model name:".to_string(), Style::default().fg(theme.colors.muted)),
+            Span::styled(
+                "Model name:".to_string(),
+                Style::default().fg(theme.colors.muted),
+            ),
         ]));
         let input = wizard.flow_model_input();
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(SYM_CURSOR.to_string(), Style::default().fg(theme.colors.primary)),
+            Span::styled(
+                SYM_CURSOR.to_string(),
+                Style::default().fg(theme.colors.primary),
+            ),
             Span::raw(" "),
             Span::styled(
                 format!("{}_", input),
@@ -608,9 +620,7 @@ fn push_verify(
             ),
         ]));
     } else if is_ok {
-        let ms_label = latency
-            .map(|ms| format!(" ({}ms)", ms))
-            .unwrap_or_default();
+        let ms_label = latency.map(|ms| format!(" ({}ms)", ms)).unwrap_or_default();
         lines.push(Line::from(vec![
             Span::raw("     "),
             Span::styled(
@@ -630,10 +640,7 @@ fn push_verify(
         ]));
         lines.push(Line::from(vec![
             Span::raw("     "),
-            Span::styled(
-                "Press r to retry",
-                Style::default().fg(theme.colors.dim),
-            ),
+            Span::styled("Press r to retry", Style::default().fg(theme.colors.dim)),
         ]));
     }
 
@@ -653,7 +660,10 @@ fn push_channels(
     if let Some(ch_idx) = wizard.flow_current_channel_setup() {
         // Token input sub-step for a specific channel. Use .get() so a future
         // drift between the channel and instruction arrays can't panic here.
-        let ch_name = channel_list.get(ch_idx).map(|(_, n, _)| *n).unwrap_or("Channel");
+        let ch_name = channel_list
+            .get(ch_idx)
+            .map(|(_, n, _)| *n)
+            .unwrap_or("Channel");
         let instructions: &[&str] = instructions_list.get(ch_idx).copied().unwrap_or(&[]);
 
         lines.push(Line::from(vec![
@@ -672,7 +682,10 @@ fn push_channels(
 
         lines.push(Line::from(vec![
             Span::raw("     "),
-            Span::styled("Bot token:".to_string(), Style::default().fg(theme.colors.muted)),
+            Span::styled(
+                "Bot token:".to_string(),
+                Style::default().fg(theme.colors.muted),
+            ),
         ]));
 
         let display = wizard.flow_channel_token_display();
@@ -684,7 +697,10 @@ fn push_channels(
 
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(SYM_CURSOR.to_string(), Style::default().fg(theme.colors.primary)),
+            Span::styled(
+                SYM_CURSOR.to_string(),
+                Style::default().fg(theme.colors.primary),
+            ),
             Span::raw(" "),
             Span::styled(
                 format!("{}_", masked_display),
@@ -715,14 +731,20 @@ fn push_channels(
         let selected = wizard.flow_selected_channels();
         let tokens = wizard.flow_channel_tokens();
         // confirm_selected is reused as channel cursor in this step.
-        let cursor = wizard.flow_confirm_selected().min(channel_list.len().saturating_sub(1));
+        let cursor = wizard
+            .flow_confirm_selected()
+            .min(channel_list.len().saturating_sub(1));
 
         for (i, (id, name, hint)) in channel_list.iter().enumerate() {
             let is_checked = selected.get(i).copied().unwrap_or(false);
             let is_cursor = cursor == i;
             let has_token = tokens.contains_key(*id);
 
-            let check = if is_checked { SYM_CHECK_ON } else { SYM_CHECK_OFF };
+            let check = if is_checked {
+                SYM_CHECK_ON
+            } else {
+                SYM_CHECK_OFF
+            };
             let token_mark = if is_checked && has_token {
                 format!("  {}", SYM_DONE)
             } else {
@@ -781,7 +803,10 @@ fn push_identity(
     let focus = wizard.flow_identity_focus();
     let fields = [
         ("Your name:", wizard.flow_user_name_input()),
-        ("Name your agent (or keep OSA):", wizard.flow_agent_name_input()),
+        (
+            "Name your agent (or keep OSA):",
+            wizard.flow_agent_name_input(),
+        ),
     ];
 
     for (i, (label, value)) in fields.iter().enumerate() {
@@ -933,10 +958,7 @@ fn push_confirm(
     ]));
     lines.push(Line::from(vec![
         Span::raw("     "),
-        Span::styled(
-            "   you trust.",
-            Style::default().fg(theme.colors.dim),
-        ),
+        Span::styled("   you trust.", Style::default().fg(theme.colors.dim)),
     ]));
     lines.push(Line::from(""));
 
@@ -973,9 +995,8 @@ fn build_help_line<'a>(
                 .add_modifier(Modifier::BOLD),
         )
     };
-    let sep = || -> Span<'a> {
-        Span::styled("  ".to_string(), Style::default().fg(theme.colors.dim))
-    };
+    let sep =
+        || -> Span<'a> { Span::styled("  ".to_string(), Style::default().fg(theme.colors.dim)) };
     let desc = |s: &str| -> Span<'a> {
         Span::styled(s.to_string(), Style::default().fg(theme.colors.muted))
     };

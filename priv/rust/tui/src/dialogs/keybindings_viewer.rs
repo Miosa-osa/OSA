@@ -61,7 +61,10 @@ pub struct KeybindingsViewer {
 
 impl KeybindingsViewer {
     pub fn new(text: String) -> Self {
-        Self { rows: parse_rows(&text), scroll: 0 }
+        Self {
+            rows: parse_rows(&text),
+            scroll: 0,
+        }
     }
 
     /// Largest valid top-row index (clamped again at draw time against the real
@@ -100,7 +103,9 @@ impl KeybindingsViewer {
         // Fit the card to the content, capped by the terminal and MAX_H.
         // inner content = N list rows + 1 footer row.
         let desired_inner = self.rows.len().max(1) + 1;
-        let h = ((desired_inner as u16).saturating_add(2)).min(MAX_H).min(area.height);
+        let h = ((desired_inner as u16).saturating_add(2))
+            .min(MAX_H)
+            .min(area.height);
         let w = DIALOG_W.min(area.width);
         let x = area.x + area.width.saturating_sub(w) / 2;
         let y = area.y + area.height.saturating_sub(h) / 2;
@@ -112,7 +117,10 @@ impl KeybindingsViewer {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(c.primary))
             .title(Line::from(vec![
-                Span::styled(" OSA ", Style::default().fg(c.primary).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " OSA ",
+                    Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("\u{00b7} keybindings ", Style::default().fg(c.muted)),
             ]))
             .style(Style::default().bg(c.dialog_bg));
@@ -135,11 +143,8 @@ impl KeybindingsViewer {
         if total == 0 {
             put(
                 frame,
-                Paragraph::new(Span::styled(
-                    "no keybindings",
-                    Style::default().fg(c.muted),
-                ))
-                .alignment(Alignment::Center),
+                Paragraph::new(Span::styled("no keybindings", Style::default().fg(c.muted)))
+                    .alignment(Alignment::Center),
                 Rect::new(inner.x, inner.y + inner.height / 2, inner.width, 1),
             );
             return;
@@ -185,7 +190,9 @@ impl KeybindingsViewer {
                         Paragraph::new(Line::from(vec![
                             Span::styled(
                                 key_txt,
-                                Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
+                                Style::default()
+                                    .fg(c.secondary)
+                                    .add_modifier(Modifier::BOLD),
                             ),
                             Span::raw(" ".repeat(gap)),
                             Span::styled(act_txt, Style::default().fg(c.muted)),
@@ -216,13 +223,27 @@ impl KeybindingsViewer {
 
         // ── Footer: hint + position ────────────────────────────────────────
         let fy = inner.y + inner.height - 1;
-        let bind_count = self.rows.iter().filter(|r| matches!(r, Row::Bind { .. })).count();
+        let bind_count = self
+            .rows
+            .iter()
+            .filter(|r| matches!(r, Row::Bind { .. }))
+            .count();
         put(
             frame,
             Paragraph::new(Line::from(vec![
-                Span::styled("esc/q", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "esc/q",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" close  ", Style::default().fg(c.dim)),
-                Span::styled("\u{2191}\u{2193}/jk", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "\u{2191}\u{2193}/jk",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" scroll  ", Style::default().fg(c.dim)),
                 Span::styled(format!("{bind_count} binds"), Style::default().fg(c.dim)),
             ])),
@@ -334,11 +355,35 @@ mod keybindings_viewer_tests {
     fn parses_all_three_separator_forms_and_headings() {
         let rows = parse_rows(SAMPLE);
         assert_eq!(rows[0], Row::Heading("Global".into()));
-        assert_eq!(rows[1], Row::Bind { key: "ctrl+n".into(), action: "app:newSession".into() });
-        assert_eq!(rows[2], Row::Bind { key: "ctrl+o".into(), action: "transcript".into() });
-        assert_eq!(rows[3], Row::Bind { key: "tab".into(), action: "complete".into() });
+        assert_eq!(
+            rows[1],
+            Row::Bind {
+                key: "ctrl+n".into(),
+                action: "app:newSession".into()
+            }
+        );
+        assert_eq!(
+            rows[2],
+            Row::Bind {
+                key: "ctrl+o".into(),
+                action: "transcript".into()
+            }
+        );
+        assert_eq!(
+            rows[3],
+            Row::Bind {
+                key: "tab".into(),
+                action: "complete".into()
+            }
+        );
         assert_eq!(rows[4], Row::Heading("Editing".into()));
-        assert_eq!(rows[5], Row::Bind { key: "ctrl+c".into(), action: "cancel".into() });
+        assert_eq!(
+            rows[5],
+            Row::Bind {
+                key: "ctrl+c".into(),
+                action: "cancel".into()
+            }
+        );
         assert_eq!(rows[6], Row::Heading("plain heading with no split".into()));
         // Blank line dropped, multibyte bind kept.
         assert!(matches!(rows[7], Row::Bind { .. }));
@@ -376,7 +421,10 @@ mod keybindings_viewer_tests {
             String::new(),
             "solo heading".to_string(),
             SAMPLE.to_string(),
-            (0..80).map(|i| format!("key{i} -> action \u{20ac}\u{4e2d} {i}")).collect::<Vec<_>>().join("\n"),
+            (0..80)
+                .map(|i| format!("key{i} -> action \u{20ac}\u{4e2d} {i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
         ];
         for text in inputs {
             let v = KeybindingsViewer::new(text);

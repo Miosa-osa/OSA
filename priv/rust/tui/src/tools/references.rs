@@ -8,7 +8,13 @@ use super::{
 pub struct ReferencesRenderer;
 
 impl ToolRenderer for ReferencesRenderer {
-    fn render(&self, _name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        _name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
         let symbol = parse_json_arg(args, &["symbol", "query", "name", "identifier"])
@@ -150,9 +156,7 @@ fn parse_json_references(arr: &[serde_json::Value]) -> Vec<RefGroup> {
 
     file_order
         .into_iter()
-        .filter_map(|f| {
-            file_map.remove(&f).map(|refs| RefGroup { file: f, refs })
-        })
+        .filter_map(|f| file_map.remove(&f).map(|refs| RefGroup { file: f, refs }))
         .collect()
 }
 
@@ -173,7 +177,10 @@ fn parse_plain_references(text: &str) -> Vec<RefGroup> {
         }
 
         let line_no: u64 = parts[1].trim().parse().unwrap_or(0);
-        let content = parts.get(2).map(|s| s.trim().to_string()).unwrap_or_default();
+        let content = parts
+            .get(2)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
 
         if !file_map.contains_key(&file) {
             file_order.push(file.clone());
@@ -186,8 +193,6 @@ fn parse_plain_references(text: &str) -> Vec<RefGroup> {
 
     file_order
         .into_iter()
-        .filter_map(|f| {
-            file_map.remove(&f).map(|refs| RefGroup { file: f, refs })
-        })
+        .filter_map(|f| file_map.remove(&f).map(|refs| RefGroup { file: f, refs }))
         .collect()
 }

@@ -68,16 +68,24 @@ pub enum ModelPickerAction {
     /// a device-code grant can render its user code and poll to completion
     /// inside the TUI. Closing the dialog here is what previously made every
     /// browser-based sign-in a "run this in another terminal" instruction.
-    StartAccountLogin { provider: String, model: String },
+    StartAccountLogin {
+        provider: String,
+        model: String,
+    },
     /// Ask the backend to abandon an in-flight sign-in (Esc on the wait screen).
-    CancelAccountLogin { session_id: String },
+    CancelAccountLogin {
+        session_id: String,
+    },
     /// Begin a **vendor-CLI-driven** sign-in for a provider.
     ///
     /// Non-terminal, exactly like `StartAccountLogin`, and for a stronger
     /// reason: the CLI's prompts are the sign-in, so the picker must stay open
     /// to draw them. Previously this provider's only answer was a sentence
     /// telling the user to quit OSA and run a command elsewhere.
-    StartCliLogin { provider: String, model: String },
+    StartCliLogin {
+        provider: String,
+        model: String,
+    },
     /// Re-read the CLI's state. Emitted by the CLI login screen after a child
     /// exits, because an exit code is not evidence of a credential.
     RefreshCliLogin,
@@ -88,11 +96,18 @@ pub enum ModelPickerAction {
     /// Fetch `/models/local` for the local catalog screen (non-terminal).
     LoadLocalCatalog,
     /// Fetch one local model's detail — quant ladder, fit, speed (non-terminal).
-    LoadLocalInfo { reff: String },
+    LoadLocalInfo {
+        reff: String,
+    },
     /// Start pulling a local model; the picker polls the job (non-terminal).
-    InstallLocal { reff: String, quant: Option<String> },
+    InstallLocal {
+        reff: String,
+        quant: Option<String>,
+    },
     /// Delete an installed local model from disk (non-terminal).
-    RemoveLocal { tag: String },
+    RemoveLocal {
+        tag: String,
+    },
 }
 
 // ── Internal enums ───────────────────────────────────────────────────────────
@@ -603,9 +618,9 @@ impl ModelPicker {
     }
 
     fn static_models(p: &OnboardingProvider) -> Option<Vec<OnboardingModel>> {
-        p.models
-            .as_array()
-            .map(|_| serde_json::from_value::<Vec<OnboardingModel>>(p.models.clone()).unwrap_or_default())
+        p.models.as_array().map(|_| {
+            serde_json::from_value::<Vec<OnboardingModel>>(p.models.clone()).unwrap_or_default()
+        })
     }
 
     fn provider_matches_filter(&self, p: &OnboardingProvider) -> bool {
@@ -650,7 +665,10 @@ impl ModelPicker {
             // user just signed in to a local Ollama daemon in another pane).
             return Some(ModelPickerAction::Reload);
         }
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return None;
         }
         if key.code == KeyCode::Tab {
@@ -726,9 +744,7 @@ impl ModelPicker {
             .providers
             .iter()
             .enumerate()
-            .filter(|(_, p)| {
-                p.id == current || Self::runtime_provider(&p.id) == current
-            })
+            .filter(|(_, p)| p.id == current || Self::runtime_provider(&p.id) == current)
             .map(|(i, _)| i)
             .collect();
 
@@ -759,8 +775,7 @@ impl ModelPicker {
             // saving the selection would write OLLAMA_URL=https://ollama.com with
             // no key and every request 401s. Use the cloud base_url only when an
             // actual key is present.
-            let key_free_ollama =
-                p.id == "ollama_cloud" && !self.detected_ids().contains(&p.id);
+            let key_free_ollama = p.id == "ollama_cloud" && !self.detected_ids().contains(&p.id);
             self.models_base_url = if key_free_ollama {
                 Some("http://localhost:11434".to_string())
             } else {
@@ -872,10 +887,7 @@ impl ModelPicker {
                 };
                 rows.push(("Account".to_string(), who));
             }
-            None => rows.push((
-                "Account".to_string(),
-                "not connected".to_string(),
-            )),
+            None => rows.push(("Account".to_string(), "not connected".to_string())),
         }
 
         rows.push((
@@ -954,7 +966,9 @@ impl ModelPicker {
     /// Whether a CLI sign-in is on screen. The app uses this to decide whether
     /// to keep a fast repaint ticker running.
     pub fn cli_login_alive(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
-        self.cli_login.as_ref().map(|c| std::sync::Arc::clone(&c.alive))
+        self.cli_login
+            .as_ref()
+            .map(|c| std::sync::Arc::clone(&c.alive))
     }
 
     /// Fold in a reading of `/auth/cli/claude`.
@@ -1125,7 +1139,10 @@ impl ModelPicker {
     }
 
     fn handle_models_key(&mut self, key: KeyEvent) -> Option<ModelPickerAction> {
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return None;
         }
         let vis = self.visible_models();
@@ -1205,7 +1222,10 @@ impl ModelPicker {
             }
             return None;
         }
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return None;
         }
 
@@ -1510,11 +1530,7 @@ impl ModelPicker {
     ///
     /// Reads the backend's `auth.state`, so a row can never advertise a route
     /// the backend does not have.
-    fn status_tag(
-        &self,
-        p: &OnboardingProvider,
-        theme: &crate::style::Theme,
-    ) -> (String, Style) {
+    fn status_tag(&self, p: &OnboardingProvider, theme: &crate::style::Theme) -> (String, Style) {
         let success = Style::default().fg(theme.colors.success);
         let warning = Style::default().fg(theme.colors.warning);
 
@@ -1636,11 +1652,8 @@ impl ModelPicker {
             .iter()
             .position(|(s, _)| *s == Some(scroll))
             .unwrap_or(0);
-        let scroll = super::clamp_scroll_to_cursor(
-            scroll_render,
-            cursor_render,
-            (list_h as usize).max(1),
-        );
+        let scroll =
+            super::clamp_scroll_to_cursor(scroll_render, cursor_render, (list_h as usize).max(1));
 
         let total_rows = render_rows.len();
         for rel in 0..(list_h as usize) {
@@ -1737,11 +1750,9 @@ impl ModelPicker {
             let hint_w = inner.width.saturating_sub(name_w);
             if !p.description.is_empty() && hint_w >= 14 {
                 let hint = format!("{}  ", p.description);
-                let para = Paragraph::new(Span::styled(
-                    hint,
-                    Style::default().fg(theme.colors.dim),
-                ))
-                .alignment(Alignment::Right);
+                let para =
+                    Paragraph::new(Span::styled(hint, Style::default().fg(theme.colors.dim)))
+                        .alignment(Alignment::Right);
                 frame.render_widget(para, Rect::new(inner.x + name_w, ry, hint_w, 1));
             }
         }
@@ -2010,7 +2021,11 @@ impl ModelPicker {
             let mut spans = vec![
                 Span::styled(format!("{} ", cursor_char), row_style),
                 Span::styled(
-                    if m.name.is_empty() { m.id.clone() } else { m.name.clone() },
+                    if m.name.is_empty() {
+                        m.id.clone()
+                    } else {
+                        m.name.clone()
+                    },
                     row_style,
                 ),
             ];
@@ -2065,12 +2080,7 @@ impl ModelPicker {
         } else {
             &[("↑↓/jk", "nav"), ("Enter", "select"), ("Esc", "back")]
         };
-        self.draw_help(
-            frame,
-            inner,
-            theme,
-            help,
-        );
+        self.draw_help(frame, inner, theme, help);
     }
 
     // ── Account sign-in ──────────────────────────────────────────────────
@@ -2170,7 +2180,9 @@ impl ModelPicker {
 
     /// The session id to cancel, if the wait screen owns one.
     pub fn account_login_session_id(&self) -> Option<String> {
-        self.account_login.as_ref().and_then(|al| al.session_id.clone())
+        self.account_login
+            .as_ref()
+            .and_then(|al| al.session_id.clone())
     }
 
     fn handle_account_login_key(&mut self, key: KeyEvent) -> Option<ModelPickerAction> {
@@ -2513,7 +2525,11 @@ fn clean_pasted_key(raw: &str) -> String {
     } else {
         value
     };
-    unquoted.strip_suffix(';').unwrap_or(unquoted).trim().to_string()
+    unquoted
+        .strip_suffix(';')
+        .unwrap_or(unquoted)
+        .trim()
+        .to_string()
 }
 
 #[cfg(test)]
@@ -2982,7 +2998,10 @@ mod hotfix_tests {
         assert!(action.is_none(), "a pending sign-in must not save anything");
         let al = picker.account_login.as_ref().unwrap();
         assert_eq!(al.user_code.as_deref(), Some("ABCD-1234"));
-        assert_eq!(al.verification_uri.as_deref(), Some("https://example.test/device"));
+        assert_eq!(
+            al.verification_uri.as_deref(),
+            Some("https://example.test/device")
+        );
         assert_eq!(picker.account_login_session_id().as_deref(), Some("sess-1"));
     }
 
@@ -3057,7 +3076,11 @@ mod hotfix_tests {
         let mut p = ollama_cloud_provider();
 
         p.auth_modes = None;
-        assert_eq!(ModelPicker::auth_methods(&p).len(), 1, "older backend → key only");
+        assert_eq!(
+            ModelPicker::auth_methods(&p).len(),
+            1,
+            "older backend → key only"
+        );
 
         p.auth_modes = Some(vec!["api_key".into(), "oauth".into()]);
         let methods = ModelPicker::auth_methods(&p);
@@ -3092,8 +3115,7 @@ mod hotfix_tests {
 
     #[test]
     fn fallback_picker_always_has_a_usable_provider_list() {
-        let picker =
-            ModelPicker::new_fallback("anthropic".to_string(), "claude".to_string());
+        let picker = ModelPicker::new_fallback("anthropic".to_string(), "claude".to_string());
         assert!(picker.load_failed);
         assert!(!picker.providers.is_empty());
         // The zero-config local option must always be present so a newcomer
@@ -3103,8 +3125,7 @@ mod hotfix_tests {
 
     #[test]
     fn ctrl_r_in_providers_mode_requests_a_reload() {
-        let mut picker =
-            ModelPicker::new_fallback("anthropic".to_string(), "claude".to_string());
+        let mut picker = ModelPicker::new_fallback("anthropic".to_string(), "claude".to_string());
         let action = picker.handle_key(ctrl(KeyCode::Char('r')));
         assert!(matches!(action, Some(ModelPickerAction::Reload)));
     }
@@ -3570,6 +3591,9 @@ mod models_jump_tests {
 
         picker.jump_to_current_provider_models();
 
-        assert_eq!(picker.prov_cursor, 0, "the jump must not move the highlight");
+        assert_eq!(
+            picker.prov_cursor, 0,
+            "the jump must not move the highlight"
+        );
     }
 }

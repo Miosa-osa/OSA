@@ -295,10 +295,12 @@ fn is_skill_path(path: &str) -> bool {
 /// when every non-neutral segment is a search/read/list command. Anything else
 /// (build, git, test, …) is NonCollapsible and renders in full.
 fn classify_shell_command(args: &str) -> ToolKind {
-    const SEARCH: &[&str] = &["find", "grep", "rg", "ag", "ack", "locate", "which", "whereis"];
+    const SEARCH: &[&str] = &[
+        "find", "grep", "rg", "ag", "ack", "locate", "which", "whereis",
+    ];
     const READ: &[&str] = &[
-        "cat", "head", "tail", "less", "more", "wc", "stat", "file", "strings", "jq", "awk",
-        "cut", "sort", "uniq", "tr",
+        "cat", "head", "tail", "less", "more", "wc", "stat", "file", "strings", "jq", "awk", "cut",
+        "sort", "uniq", "tr",
     ];
     const LIST: &[&str] = &["ls", "tree", "du"];
     const NEUTRAL: &[&str] = &["echo", "printf", "true", "false", ":"];
@@ -486,7 +488,12 @@ pub fn hook_bracket(counts: HookRunCounts, shape: HookBracket) -> Option<Vec<Spa
             // With nothing to disambiguate, the label word is noise: a clean run
             // reads `[hooks: 54]`, not `[hooks: 54 ok]`.
             let bare = counts.blocked == 0 && counts.failed == 0;
-            seg(counts.ok, if bare { "" } else { "ok" }, ok_style, &mut spans);
+            seg(
+                counts.ok,
+                if bare { "" } else { "ok" },
+                ok_style,
+                &mut spans,
+            );
             seg(counts.blocked, "blocked", blocked_style, &mut spans);
             seg(counts.failed, "failed", failed_style, &mut spans);
         }
@@ -605,8 +612,7 @@ impl Accumulator {
         // row falls back to counts so it stays one line.
         if self.buckets.len() == 1 {
             let only = &self.buckets[0];
-            if matches!(only.kind, ToolKind::File | ToolKind::Skill)
-                && !only.read_paths.is_empty()
+            if matches!(only.kind, ToolKind::File | ToolKind::Skill) && !only.read_paths.is_empty()
             {
                 return named_read_summary(only.kind.verb(running), &only.read_paths);
             }
@@ -649,7 +655,10 @@ impl Accumulator {
         let (icon, icon_color) = if self.any_error {
             ("✗".to_string(), theme.colors.error)
         } else {
-            (crate::tools::tool_bullet().to_string(), theme.colors.success)
+            (
+                crate::tools::tool_bullet().to_string(),
+                theme.colors.success,
+            )
         };
         let mut spans = vec![
             Span::styled(
@@ -729,7 +738,12 @@ pub(crate) fn output_panel_bg() -> Color {
 /// output reads as a filled panel block rather than ragged text. `vis_width` is
 /// the display width of the visible text (OSC-8 link escapes are zero-width and
 /// already excluded by the caller).
-fn panelize(mut spans: Vec<Span<'static>>, vis_width: usize, cols: usize, bg: Color) -> Line<'static> {
+fn panelize(
+    mut spans: Vec<Span<'static>>,
+    vis_width: usize,
+    cols: usize,
+    bg: Color,
+) -> Line<'static> {
     for s in &mut spans {
         s.style = s.style.bg(bg);
     }
@@ -811,7 +825,10 @@ fn url_at(text: &str, i: usize) -> Option<usize> {
     for ch in text[end..].chars() {
         if ch.is_whitespace()
             || ch.is_control()
-            || matches!(ch, '"' | '\'' | '<' | '>' | '`' | '|' | '\\' | '^' | '{' | '}')
+            || matches!(
+                ch,
+                '"' | '\'' | '<' | '>' | '`' | '|' | '\\' | '^' | '{' | '}'
+            )
         {
             break;
         }
@@ -853,7 +870,11 @@ fn linkify_row(text: &str, base: Style) -> (Vec<Span<'static>>, usize) {
             idx = end;
             seg_start = end;
         } else {
-            idx += text[idx..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+            idx += text[idx..]
+                .chars()
+                .next()
+                .map(|c| c.len_utf8())
+                .unwrap_or(1);
         }
     }
     if seg_start < text.len() {
@@ -983,11 +1004,7 @@ fn elision_marker(hidden: usize, cols: usize, bg: Color) -> Line<'static> {
 ///
 /// A block that fits in the window prints in full with no marker — the marker
 /// only ever appears when there is something behind it.
-pub(crate) fn capped_execute_block(
-    result: &str,
-    width: u16,
-    is_error: bool,
-) -> Vec<Line<'static>> {
+pub(crate) fn capped_execute_block(result: &str, width: u16, is_error: bool) -> Vec<Line<'static>> {
     let (head, tail) = if is_error {
         (EXEC_HEAD_ERR, EXEC_TAIL_ERR)
     } else {
@@ -1145,7 +1162,10 @@ mod output_quality_tests {
     #[test]
     fn json_line_is_pretty_printed() {
         let pretty = try_format_json(r#"{"a":1,"b":[2,3]}"#).expect("valid json");
-        assert!(pretty.contains('\n'), "pretty json should be multi-line: {pretty:?}");
+        assert!(
+            pretty.contains('\n'),
+            "pretty json should be multi-line: {pretty:?}"
+        );
         assert!(pretty.contains("\"a\""));
         // Non-JSON and scalar-only lines are left untouched.
         assert!(try_format_json("plain text").is_none());
@@ -1171,7 +1191,10 @@ mod output_quality_tests {
         let (spans, _w) = linkify_row("see https://osa.dev/docs now", Style::default());
         let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
         // OSC-8 introducer wraps the URL.
-        assert!(joined.contains("\x1b]8;;https://osa.dev/docs"), "{joined:?}");
+        assert!(
+            joined.contains("\x1b]8;;https://osa.dev/docs"),
+            "{joined:?}"
+        );
         // No manual cleanup: the guards restore TERM and OSA_HYPERLINKS on
         // drop, including if an assertion above unwinds.
     }
@@ -1180,7 +1203,10 @@ mod output_quality_tests {
     fn original_terminal_link_target_is_not_rendered_twice() {
         let raw = "preview at \x1b]8;;https://osa.dev\x1b\\https://osa.dev\x1b]8;;\x1b\\";
         assert_eq!(expand_json_lines(raw), vec!["preview at https://osa.dev"]);
-        assert_eq!(normalized_output_rows(raw), vec!["preview at https://osa.dev"]);
+        assert_eq!(
+            normalized_output_rows(raw),
+            vec!["preview at https://osa.dev"]
+        );
     }
 
     #[test]
@@ -1193,7 +1219,10 @@ mod output_quality_tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(last.starts_with('\u{2026}'), "leading char must be … : {last:?}");
+        assert!(
+            last.starts_with('\u{2026}'),
+            "leading char must be … : {last:?}"
+        );
         assert!(last.contains("+2 lines (ctrl+o to expand)"), "{last:?}");
     }
 
@@ -1270,7 +1299,12 @@ mod capped_execute_block_tests {
     /// are. A marker at the bottom would misdescribe which rows were dropped.
     #[test]
     fn the_marker_sits_between_the_halves() {
-        let rows = build(&(1..=20).map(|i| format!("l{i}")).collect::<Vec<_>>().join("\n"));
+        let rows = build(
+            &(1..=20)
+                .map(|i| format!("l{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
         let marker = rows
             .iter()
             .position(|r| r.starts_with('\u{2026}'))
@@ -1284,7 +1318,12 @@ mod capped_execute_block_tests {
     #[test]
     fn the_marker_counts_every_hidden_row_exactly() {
         // 20 rows, window 1 + 2 → 17 hidden.
-        let rows = build(&(1..=20).map(|i| format!("l{i}")).collect::<Vec<_>>().join("\n"));
+        let rows = build(
+            &(1..=20)
+                .map(|i| format!("l{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
         assert!(
             rows.iter().any(|r| r.contains("+17 lines")),
             "hidden count must be exact: {rows:?}"
@@ -1299,7 +1338,12 @@ mod capped_execute_block_tests {
     #[test]
     fn a_block_that_fits_the_window_prints_in_full() {
         for n in 1..=4 {
-            let rows = build(&(1..=n).map(|i| format!("l{i}")).collect::<Vec<_>>().join("\n"));
+            let rows = build(
+                &(1..=n)
+                    .map(|i| format!("l{i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
             assert_eq!(rows.len(), n, "{n} rows must print in full: {rows:?}");
             assert!(!rows.iter().any(|r| r.starts_with('\u{2026}')), "{rows:?}");
         }
@@ -1309,7 +1353,10 @@ mod capped_execute_block_tests {
     /// a failed command is at the top of its output.
     #[test]
     fn a_failed_block_is_all_tail() {
-        let out = (1..=20).map(|i| format!("l{i}")).collect::<Vec<_>>().join("\n");
+        let out = (1..=20)
+            .map(|i| format!("l{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let rows = flat(&capped_execute_block(&out, 80, true));
         assert!(rows[0].starts_with('\u{2026}'), "marker leads: {rows:?}");
         assert_eq!(rows.len(), 1 + EXEC_TAIL_ERR, "{rows:?}");
@@ -1321,7 +1368,10 @@ mod capped_execute_block_tests {
     #[test]
     fn height_is_bounded_regardless_of_how_much_the_command_printed() {
         for n in [5usize, 50, 500, 5000] {
-            let out = (1..=n).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+            let out = (1..=n)
+                .map(|i| format!("line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n");
             let ok = capped_execute_block(&out, 80, false).len();
             let err = capped_execute_block(&out, 80, true).len();
             assert!(ok <= EXEC_HEAD_OK + EXEC_TAIL_OK + 1, "{n} rows → {ok}");
@@ -1372,12 +1422,15 @@ mod hook_bracket_tests {
     use super::*;
 
     fn text(counts: HookRunCounts, shape: HookBracket) -> Option<String> {
-        hook_bracket(counts, shape)
-            .map(|spans| spans.iter().map(|s| s.content.as_ref()).collect())
+        hook_bracket(counts, shape).map(|spans| spans.iter().map(|s| s.content.as_ref()).collect())
     }
 
     fn counts(ok: usize, blocked: usize, failed: usize) -> HookRunCounts {
-        HookRunCounts { ok, blocked, failed }
+        HookRunCounts {
+            ok,
+            blocked,
+            failed,
+        }
     }
 
     /// §3.4. A user with no hooks configured never sees the word "hooks".
@@ -1511,7 +1564,10 @@ mod hook_bracket_tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(!row2.contains("hooks"), "a hookless run says nothing: {row2:?}");
+        assert!(
+            !row2.contains("hooks"),
+            "a hookless run says nothing: {row2:?}"
+        );
     }
 }
 
@@ -1670,7 +1726,10 @@ mod multi_bucket_summary_tests {
             classify("read", r#"{"path":"/home/u/.osa/skills/foo/SKILL.md"}"#),
             ToolKind::Skill
         );
-        assert_eq!(classify("read", r#"{"path":"/src/main.rs"}"#), ToolKind::File);
+        assert_eq!(
+            classify("read", r#"{"path":"/src/main.rs"}"#),
+            ToolKind::File
+        );
     }
 
     #[test]
@@ -1719,7 +1778,13 @@ mod multi_bucket_summary_tests {
 
     #[test]
     fn every_todo_tool_alias_folds() {
-        for name in ["todoread", "todowrite", "todos", "task_write", "update_plan"] {
+        for name in [
+            "todoread",
+            "todowrite",
+            "todos",
+            "task_write",
+            "update_plan",
+        ] {
             let kind = classify(name, "{}");
             assert_eq!(kind, ToolKind::Todo, "{name} must classify as a todo");
             assert!(kind.folds_eagerly(), "{name} must fold");

@@ -149,6 +149,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskStopTest do
       {:ok, _} = Registry.register(OptimalSystemAgent.SessionRegistry, agent_id, nil)
 
       assert {:ok, msg} = Handler.execute(%{"agent_id" => agent_id}, @ctx)
+
       assert msg =~ "not found or already completed",
              "the tool must not tell the model it cancelled a run that had already finished"
 

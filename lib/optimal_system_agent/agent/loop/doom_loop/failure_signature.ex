@@ -197,7 +197,9 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.FailureSignature do
         # (6). Key those on argument SHAPE so the repeat collapses and escalates
         # at 3. Content-mismatch errors (old_string-not-found, etc.) stay
         # value-sensitive so genuinely different edits never share a signature.
-        digest = if validation_error?(error_prefix), do: args_shape_digest(tc), else: args_digest(tc)
+        digest =
+          if validation_error?(error_prefix), do: args_shape_digest(tc), else: args_digest(tc)
+
         strict = "#{tc.name}:#{digest}:#{error_prefix}"
 
         [%{strict: strict, broad: broad, name: tc.name, error: error_prefix}]

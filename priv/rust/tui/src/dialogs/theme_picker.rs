@@ -57,7 +57,11 @@ impl ThemePicker {
             .map(str::to_string)
             .collect();
         let cursor = names.iter().position(|n| *n == current_theme).unwrap_or(0);
-        Self { names, cursor, current: current_theme }
+        Self {
+            names,
+            cursor,
+            current: current_theme,
+        }
     }
 
     /// Name under the cursor, if any theme is registered.
@@ -234,17 +238,23 @@ impl ThemePicker {
                 Paragraph::new(Line::from(vec![
                     Span::styled(
                         "\u{2191}/\u{2193}",
-                        Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(c.secondary)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(" move  ", Style::default().fg(c.dim)),
                     Span::styled(
                         "enter",
-                        Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(c.secondary)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(" apply  ", Style::default().fg(c.dim)),
                     Span::styled(
                         "esc",
-                        Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(c.secondary)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(" close", Style::default().fg(c.dim)),
                 ])),
@@ -300,7 +310,10 @@ mod theme_picker_tests {
         assert_eq!(p.cursor, p.names.len() - 1);
         // Enter applies the selected name; Esc closes.
         let name = p.names[p.cursor].clone();
-        assert_eq!(p.handle_key(key(KeyCode::Enter)), Some(ThemeAction::Apply(name)));
+        assert_eq!(
+            p.handle_key(key(KeyCode::Enter)),
+            Some(ThemeAction::Apply(name))
+        );
         assert_eq!(p.handle_key(key(KeyCode::Esc)), Some(ThemeAction::Close));
     }
 

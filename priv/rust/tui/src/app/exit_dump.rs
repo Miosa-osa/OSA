@@ -282,7 +282,11 @@ mod tests {
 
         let rows = render_entries(&entries, 80, 50);
 
-        assert!(rows.len() <= 50 + 2, "the cap was not honoured: {}", rows.len());
+        assert!(
+            rows.len() <= 50 + 2,
+            "the cap was not honoured: {}",
+            rows.len()
+        );
         assert!(
             rows[0].contains("earlier rows not shown"),
             "a truncated dump did not announce the truncation: {:?}",

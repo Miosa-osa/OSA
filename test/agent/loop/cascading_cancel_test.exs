@@ -105,6 +105,7 @@ defmodule OptimalSystemAgent.Agent.Loop.CascadingCancelTest do
       descendants = Loop.descendant_session_ids(root)
 
       assert attached_child in descendants
+
       refute bg_child in descendants,
              "a background-dispatched run must not be reachable by the interrupt cascade"
 
@@ -154,6 +155,7 @@ defmodule OptimalSystemAgent.Agent.Loop.CascadingCancelTest do
 
       assert [{^root, true}] = :ets.lookup(@cancel_table, root)
       assert [{^attached, true}] = :ets.lookup(@cancel_table, attached)
+
       assert :ets.lookup(@cancel_table, bg) == [],
              "an interrupt must not set the cooperative cancel flag on a background run"
     end

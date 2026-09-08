@@ -240,33 +240,13 @@ impl Default for KeyMap {
                 KeyModifiers::NONE,
                 "cycle permission mode",
             ),
-            clear_input: KeyBinding::new(
-                KeyCode::Char('u'),
-                KeyModifiers::CONTROL,
-                "clear input",
-            ),
-            new_session: KeyBinding::new(
-                KeyCode::Char('n'),
-                KeyModifiers::CONTROL,
-                "new session",
-            ),
-            palette: KeyBinding::new(
-                KeyCode::Char('k'),
-                KeyModifiers::CONTROL,
-                "command palette",
-            ),
+            clear_input: KeyBinding::new(KeyCode::Char('u'), KeyModifiers::CONTROL, "clear input"),
+            new_session: KeyBinding::new(KeyCode::Char('n'), KeyModifiers::CONTROL, "new session"),
+            palette: KeyBinding::new(KeyCode::Char('k'), KeyModifiers::CONTROL, "command palette"),
             // F2, not the bare `y` this table used to name: a plain character
             // key can never be a shortcut here (see `is_typed_text`).
-            copy_message: KeyBinding::new(
-                KeyCode::F(2),
-                KeyModifiers::NONE,
-                "copy last message",
-            ),
-            voice_toggle: KeyBinding::new(
-                KeyCode::Char('v'),
-                KeyModifiers::ALT,
-                "voice input",
-            ),
+            copy_message: KeyBinding::new(KeyCode::F(2), KeyModifiers::NONE, "copy last message"),
+            voice_toggle: KeyBinding::new(KeyCode::Char('v'), KeyModifiers::ALT, "voice input"),
             voice_hands_free: KeyBinding::new(
                 KeyCode::F(9),
                 KeyModifiers::NONE,
@@ -359,7 +339,10 @@ mod typed_text_tests {
     #[test]
     fn control_chars_delivered_as_char_are_not_text() {
         for c in ['\r', '\n', '\t', '\u{0}', '\u{7f}'] {
-            assert!(!is_typed_text(&k(KeyCode::Char(c), KeyModifiers::NONE)), "{c:?}");
+            assert!(
+                !is_typed_text(&k(KeyCode::Char(c), KeyModifiers::NONE)),
+                "{c:?}"
+            );
         }
     }
 }
@@ -374,7 +357,10 @@ mod esc_tracker_tests {
         let mut t = EscTracker::new(Duration::from_millis(500));
         let now = Instant::now();
         assert!(!t.press(now), "first Esc must not be a double-press");
-        assert!(t.is_pending(), "a lone Esc should be pending a second press");
+        assert!(
+            t.is_pending(),
+            "a lone Esc should be pending a second press"
+        );
     }
 
     #[test]

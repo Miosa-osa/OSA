@@ -186,7 +186,9 @@ pub(super) fn blocked_activity_detail(entry: &AgentEntry) -> String {
     let last_action = if entry.current_action.trim().is_empty() {
         None
     } else {
-        Some(crate::tools::humanize_tool_action(entry.current_action.trim()))
+        Some(crate::tools::humanize_tool_action(
+            entry.current_action.trim(),
+        ))
     };
     match (last_action, phase_desc) {
         (Some(action), Some(desc)) => format!("{action} \u{00b7} {desc}"),
@@ -756,7 +758,9 @@ impl Agents {
         let name = self.display_label(&entry.name);
         let activity = row_activity_display(entry);
         let elapsed = crate::components::status_bar::fmt_elapsed_compact(entry.elapsed_secs());
-        Some(format!("waiting on {name} \u{2014} {activity} \u{00b7} {elapsed}"))
+        Some(format!(
+            "waiting on {name} \u{2014} {activity} \u{00b7} {elapsed}"
+        ))
     }
 
     /// Number of running/spawning background subagents tracked in the panel
@@ -1710,15 +1714,17 @@ mod tests {
         let mut a = Agents::new();
         a.agent_started("agent:s1:1", "backend", "", "wire the API", None, None);
         a.agent_progress("agent:s1:1", "grep: TODO", 2, 40, "", vec![], None);
-        assert!(a.join_wait_label().is_some(), "freshly active — must be named");
+        assert!(
+            a.join_wait_label().is_some(),
+            "freshly active — must be named"
+        );
 
         // Backdate the last signal past the quiet threshold: even the
         // freshest child has stopped reporting, so this must fall back to
         // `None` and let the caller's plain silence alarm speak — reporting
         // otherwise would be exactly the false reassurance this exists to
         // prevent.
-        a.entries[0].last_activity =
-            std::time::Instant::now() - std::time::Duration::from_secs(90);
+        a.entries[0].last_activity = std::time::Instant::now() - std::time::Duration::from_secs(90);
         assert_eq!(a.join_wait_label(), None);
     }
 
@@ -1729,8 +1735,7 @@ mod tests {
         a.agent_started("agent:s1:2", "frontend", "", "wire the UI", None, None);
         // Make w1 stale-ish (but still under the quiet threshold) and w2 the
         // freshest signal.
-        a.entries[0].last_activity =
-            std::time::Instant::now() - std::time::Duration::from_secs(30);
+        a.entries[0].last_activity = std::time::Instant::now() - std::time::Duration::from_secs(30);
         a.agent_progress("agent:s1:2", "file_write: app.tsx", 1, 10, "", vec![], None);
 
         let label = a.join_wait_label().unwrap();
@@ -2680,7 +2685,10 @@ mod tests {
             2,
             20,
             "",
-            vec!["file_read: input.md".to_string(), "dir_list: workdir".to_string()],
+            vec![
+                "file_read: input.md".to_string(),
+                "dir_list: workdir".to_string(),
+            ],
             None,
         );
 
@@ -3340,7 +3348,11 @@ mod tests {
         a.set_agent_budget_cap("w1", 4.0);
 
         assert_eq!(
-            a.entries.iter().find(|e| e.name == "w1").unwrap().budget_cap_usd,
+            a.entries
+                .iter()
+                .find(|e| e.name == "w1")
+                .unwrap()
+                .budget_cap_usd,
             Some(4.0)
         );
 
@@ -3369,7 +3381,10 @@ mod tests {
 
         let text = render_text(&a, 90, 12);
         assert!(text.contains("$2.48"), "{text:?}");
-        assert!(!text.contains("$2.48 /"), "no cap must not print a bare slash: {text:?}");
+        assert!(
+            !text.contains("$2.48 /"),
+            "no cap must not print a bare slash: {text:?}"
+        );
     }
 
     #[test]

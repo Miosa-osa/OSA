@@ -388,7 +388,11 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
   @default_await_timeout_ms 1_200_000
 
   defp await_timeout do
-    case Application.get_env(:optimal_system_agent, :tool_await_timeout_ms, @default_await_timeout_ms) do
+    case Application.get_env(
+           :optimal_system_agent,
+           :tool_await_timeout_ms,
+           @default_await_timeout_ms
+         ) do
       ms when is_integer(ms) and ms > 0 -> ms
       _ -> @default_await_timeout_ms
     end

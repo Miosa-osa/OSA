@@ -153,7 +153,10 @@ enum KeyboardProbeState {
 }
 
 fn keyboard_probe_state(buffer: &[u8]) -> KeyboardProbeState {
-    match (has_keyboard_flags(buffer), has_primary_device_attributes(buffer)) {
+    match (
+        has_keyboard_flags(buffer),
+        has_primary_device_attributes(buffer),
+    ) {
         (true, _) => KeyboardProbeState::Supported,
         (false, true) => KeyboardProbeState::UnsupportedFallback,
         (false, false) => KeyboardProbeState::Pending,
@@ -281,9 +284,7 @@ fn finish_probe(probe: &mut StartupProbe, saw_keyboard_flags: bool) {
 
 #[cfg(unix)]
 mod imp {
-    use super::{
-        finish_probe, probe_complete, update_probe, StartupProbe, BURST,
-    };
+    use super::{finish_probe, probe_complete, update_probe, StartupProbe, BURST};
     use std::fs::{File, OpenOptions};
     use std::io::{self, Write};
     use std::os::fd::{AsRawFd, FromRawFd};
@@ -380,7 +381,9 @@ mod imp {
                     .saturating_duration_since(now)
                     .as_millis()
                     .min(libc::c_int::MAX as u128) as libc::c_int;
-                let result = unsafe { libc::poll(&mut fd, /*nfds*/ 1, timeout_ms) };
+                let result = unsafe {
+                    libc::poll(&mut fd, /*nfds*/ 1, timeout_ms)
+                };
                 if result > 0 {
                     return Ok((fd.revents & libc::POLLIN) != 0);
                 }
@@ -449,7 +452,7 @@ mod imp {
 
 #[cfg(not(unix))]
 mod imp {
-    use super::{StartupProbe, DefaultColors};
+    use super::{DefaultColors, StartupProbe};
     use std::io;
     use std::time::Duration;
 
@@ -459,7 +462,10 @@ mod imp {
             .map(|(col, row)| ratatui::layout::Position { x: col, y: row });
         let keyboard_enhancement_supported =
             crossterm::terminal::supports_keyboard_enhancement().ok();
-        let _ = DefaultColors { fg: (0, 0, 0), bg: (0, 0, 0) }; // keep type referenced
+        let _ = DefaultColors {
+            fg: (0, 0, 0),
+            bg: (0, 0, 0),
+        }; // keep type referenced
         Ok(StartupProbe {
             cursor_position,
             default_colors: None,
@@ -550,13 +556,19 @@ mod tests {
             })
         );
         // Missing bg -> None.
-        assert_eq!(parse_default_colors(b"\x1B]10;rgb:eeee/eeee/eeee\x1B\\"), None);
+        assert_eq!(
+            parse_default_colors(b"\x1B]10;rgb:eeee/eeee/eeee\x1B\\"),
+            None
+        );
     }
 
     #[test]
     fn osc_components_two_and_four_digit() {
         assert_eq!(parse_osc_rgb("rgb:00/80/ff"), Some((0, 128, 255)));
-        assert_eq!(parse_osc_rgb("rgba:ffff/8000/0000/ffff"), Some((255, 127, 0)));
+        assert_eq!(
+            parse_osc_rgb("rgba:ffff/8000/0000/ffff"),
+            Some((255, 127, 0))
+        );
         assert_eq!(parse_osc_rgb("rgb:zz/00/00"), None);
     }
 

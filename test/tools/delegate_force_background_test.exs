@@ -14,12 +14,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.ForceBackgroundTest do
 
   test "force_background overrides an explicit foreground arg" do
     forced = %{force_background: true, background: false}
+
     assert Handler.background?(%{"background" => false}, forced),
            "a force_background role must run background even when foregrounded"
   end
 
   test "without force_background, an explicit foreground arg is honored" do
-    refute Handler.background?(%{"background" => false}, %{force_background: false, background: true})
+    refute Handler.background?(%{"background" => false}, %{
+             force_background: false,
+             background: true
+           })
   end
 
   test "force_background does not disturb the normal default when nothing is set" do

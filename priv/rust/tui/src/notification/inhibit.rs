@@ -97,7 +97,9 @@ mod tests {
         let (prog, args) = inhibit_argv("linux").expect("linux inhibitor");
         assert_eq!(prog, "systemd-inhibit");
         assert!(args.contains(&"--mode=block"));
-        assert!(args.iter().any(|a| a.starts_with("--what=") && a.contains("sleep")));
+        assert!(args
+            .iter()
+            .any(|a| a.starts_with("--what=") && a.contains("sleep")));
         // Must spawn a long-lived holder process.
         assert!(args.ends_with(&["sleep", "infinity"]));
     }

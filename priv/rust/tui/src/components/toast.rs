@@ -131,8 +131,7 @@ impl Toasts {
     }
 
     pub fn tick(&mut self) {
-        self.queue
-            .retain(|t| t.created.elapsed() < t.level.dwell());
+        self.queue.retain(|t| t.created.elapsed() < t.level.dwell());
     }
 
     pub fn has_toasts(&self) -> bool {
@@ -240,7 +239,11 @@ mod dedup_tests {
         toasts.push("stalled: tool-b".into(), ToastLevel::Warning);
         toasts.push("stalled: tool-a".into(), ToastLevel::Warning);
 
-        assert_eq!(toasts.live_count(), 2, "the repeated warning must not stack a third toast");
+        assert_eq!(
+            toasts.live_count(),
+            2,
+            "the repeated warning must not stack a third toast"
+        );
     }
 
     #[test]

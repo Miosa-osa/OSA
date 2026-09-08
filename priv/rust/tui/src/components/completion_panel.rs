@@ -55,9 +55,7 @@ impl CompletionOutcome {
         match status.trim().to_ascii_lowercase().as_str() {
             "completed" | "complete" | "done" | "succeeded" => Some(Self::Completed),
             "blocked" | "stalled" | "capped" | "stuck" => Some(Self::Blocked),
-            "abandoned" | "cancelled" | "canceled" | "gave_up" | "give_up" => {
-                Some(Self::Abandoned)
-            }
+            "abandoned" | "cancelled" | "canceled" | "gave_up" | "give_up" => Some(Self::Abandoned),
             _ => None,
         }
     }
@@ -196,7 +194,8 @@ impl CompletionPanel {
         if !self.report.gaps.is_empty() {
             out.push(hdr("GAPS"));
             for gap in &self.report.gaps {
-                let wrapped = crate::render::markdown::wrap_text(gap.trim(), maxw.saturating_sub(2).max(1));
+                let wrapped =
+                    crate::render::markdown::wrap_text(gap.trim(), maxw.saturating_sub(2).max(1));
                 for (i, line) in wrapped.into_iter().enumerate() {
                     let prefix = if i == 0 { "  \u{2022} " } else { "    " };
                     out.push(Line::from(Span::styled(
@@ -235,7 +234,10 @@ impl CompletionPanel {
             ]));
         }
 
-        if out.last().is_some_and(|l| l.spans.is_empty() || l.spans.iter().all(|s| s.content.is_empty())) {
+        if out
+            .last()
+            .is_some_and(|l| l.spans.is_empty() || l.spans.iter().all(|s| s.content.is_empty()))
+        {
             out.pop();
         }
 
@@ -255,11 +257,15 @@ impl CompletionPanel {
     }
 
     fn max_scroll(&self) -> usize {
-        self.content_len().saturating_sub(self.viewport.get().max(1))
+        self.content_len()
+            .saturating_sub(self.viewport.get().max(1))
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> CompletionPanelAction {
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return CompletionPanelAction::None;
         }
         let max = self.max_scroll();
@@ -305,8 +311,14 @@ impl CompletionPanel {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(accent))
             .title(Line::from(vec![
-                Span::styled(format!(" {glyph} "), Style::default().fg(accent).add_modifier(Modifier::BOLD)),
-                Span::styled(label, Style::default().fg(accent).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!(" {glyph} "),
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    label,
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" "),
             ]))
             .style(Style::default().bg(c.dialog_bg));
@@ -332,7 +344,9 @@ impl CompletionPanel {
         let scroll = self.scroll.min(max);
 
         for rel in 0..list_h {
-            let Some(line) = lines.get(rel + scroll) else { break };
+            let Some(line) = lines.get(rel + scroll) else {
+                break;
+            };
             frame.render_widget(
                 Paragraph::new(line.clone()),
                 Rect::new(inner.x, inner.y + rel as u16, inner.width, 1),
@@ -341,17 +355,27 @@ impl CompletionPanel {
 
         let hint_y = inner.y + inner.height.saturating_sub(1);
         let mut spans = vec![
-            Span::styled("esc", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "esc",
+                Style::default()
+                    .fg(c.secondary)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" close", Style::default().fg(c.dim)),
         ];
         if lines.len() > list_h {
             spans.push(Span::styled(
                 "   \u{2191}\u{2193}",
-                Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(c.secondary)
+                    .add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(" scroll", Style::default().fg(c.dim)));
         }
-        frame.render_widget(Paragraph::new(Line::from(spans)), Rect::new(inner.x, hint_y, inner.width, 1));
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect::new(inner.x, hint_y, inner.width, 1),
+        );
     }
 }
 
@@ -393,13 +417,25 @@ mod tests {
     #[test]
     fn from_status_recognizes_every_terminal_spelling() {
         for s in ["completed", "Complete", "DONE", "succeeded"] {
-            assert_eq!(CompletionOutcome::from_status(s), Some(CompletionOutcome::Completed), "{s}");
+            assert_eq!(
+                CompletionOutcome::from_status(s),
+                Some(CompletionOutcome::Completed),
+                "{s}"
+            );
         }
         for s in ["blocked", "stalled", "capped", "STUCK"] {
-            assert_eq!(CompletionOutcome::from_status(s), Some(CompletionOutcome::Blocked), "{s}");
+            assert_eq!(
+                CompletionOutcome::from_status(s),
+                Some(CompletionOutcome::Blocked),
+                "{s}"
+            );
         }
         for s in ["abandoned", "cancelled", "canceled", "gave_up"] {
-            assert_eq!(CompletionOutcome::from_status(s), Some(CompletionOutcome::Abandoned), "{s}");
+            assert_eq!(
+                CompletionOutcome::from_status(s),
+                Some(CompletionOutcome::Abandoned),
+                "{s}"
+            );
         }
     }
 
@@ -427,7 +463,12 @@ mod tests {
     fn render_text(panel: &CompletionPanel, w: u16, h: u16) -> String {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| panel.draw(f, f.area())).unwrap();
-        term.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
     }
 
     #[test]
@@ -439,11 +480,23 @@ mod tests {
         let text = render_text(&panel, 100, 24);
         assert!(text.contains("Goal Completed"), "{text:?}");
         assert!(text.contains("Ship the v1.0.185 release"), "{text:?}");
-        assert!(text.contains("All tests pass and CHANGELOG updated"), "{text:?}");
-        assert!(text.contains("lib/foo.ex"), "work summary must list files: {text:?}");
-        assert!(text.contains("2 files"), "the file count is stated: {text:?}");
+        assert!(
+            text.contains("All tests pass and CHANGELOG updated"),
+            "{text:?}"
+        );
+        assert!(
+            text.contains("lib/foo.ex"),
+            "work summary must list files: {text:?}"
+        );
+        assert!(
+            text.contains("2 files"),
+            "the file count is stated: {text:?}"
+        );
         assert!(text.contains("docs still reference"), "{text:?}");
-        assert!(text.contains("verified complete"), "the latest history line: {text:?}");
+        assert!(
+            text.contains("verified complete"),
+            "the latest history line: {text:?}"
+        );
     }
 
     #[test]
@@ -456,7 +509,10 @@ mod tests {
         assert!(text.contains("Goal Blocked"), "{text:?}");
         assert!(text.contains("lib/billing/client.ex"), "{text:?}");
         assert!(!text.contains("GAPS"), "no gaps were reported: {text:?}");
-        assert!(text.contains("Reason:") && text.contains("blocked"), "{text:?}");
+        assert!(
+            text.contains("Reason:") && text.contains("blocked"),
+            "{text:?}"
+        );
         assert!(text.contains("claim_blocked calls"), "{text:?}");
     }
 
@@ -502,7 +558,10 @@ mod tests {
     fn scroll_keys_do_not_close_and_clamp_at_the_ends() {
         let mut panel = CompletionPanel::new(blocked_report());
         panel.viewport.set(2); // force a scrollable state
-        assert_eq!(panel.handle_key(key(KeyCode::Down)), CompletionPanelAction::None);
+        assert_eq!(
+            panel.handle_key(key(KeyCode::Down)),
+            CompletionPanelAction::None
+        );
         for _ in 0..200 {
             panel.handle_key(key(KeyCode::Char('j')));
         }

@@ -174,7 +174,11 @@ pub fn badge_spans(armed: bool) -> Vec<ratatui::prelude::Span<'static>> {
 
     // Leading gap from the model name, then the bolt — a gentle flicker.
     spans.push(Span::raw(" "));
-    let bolt_fg = if bolt_bright(bolt_phase()) { BADGE_FG } else { BADGE_DIM };
+    let bolt_fg = if bolt_bright(bolt_phase()) {
+        BADGE_FG
+    } else {
+        BADGE_DIM
+    };
     spans.push(Span::styled(
         "\u{26A1} ",
         Style::default().fg(bolt_fg).add_modifier(Modifier::BOLD),
@@ -271,8 +275,9 @@ mod tests {
 
         // Over one cycle it visits every position — including the `>= len` gap
         // positions where the word rests dim — then wraps back to 0.
-        let seen: std::collections::HashSet<usize> =
-            (0..cycle).map(|s| shimmer_pos_at(s * SHIMMER_STEP_MS, len)).collect();
+        let seen: std::collections::HashSet<usize> = (0..cycle)
+            .map(|s| shimmer_pos_at(s * SHIMMER_STEP_MS, len))
+            .collect();
         assert_eq!(seen.len(), cycle);
         assert!(seen.iter().any(|&p| p >= len), "no dark gap in the sweep");
         assert_eq!(shimmer_pos_at(cycle * SHIMMER_STEP_MS, len), 0);
@@ -303,9 +308,9 @@ mod tests {
 
         fn css(c: Color) -> &'static str {
             match c {
-                Color::Magenta => "#e070e0",             // bright bolt / LIBERATED
-                Color::Rgb(120, 60, 140) => "#78388c",   // dim base
-                Color::Rgb(178, 96, 200) => "#b360c8",   // shimmer mid-tone
+                Color::Magenta => "#e070e0",           // bright bolt / LIBERATED
+                Color::Rgb(120, 60, 140) => "#78388c", // dim base
+                Color::Rgb(178, 96, 200) => "#b360c8", // shimmer mid-tone
                 Color::Cyan => "#4ec9d0",
                 Color::Yellow => "#d7b45a",
                 Color::Red => "#e05561",
@@ -321,8 +326,16 @@ mod tests {
             for x in 0..width {
                 let cell = &buf[(x, y)];
                 let sym = cell.symbol().replace('<', "&lt;").replace('>', "&gt;");
-                let sym = if sym.trim().is_empty() { "&nbsp;".to_string() } else { sym };
-                s.push_str(&format!("<span style=\"color:{}\">{}</span>", css(cell.fg), sym));
+                let sym = if sym.trim().is_empty() {
+                    "&nbsp;".to_string()
+                } else {
+                    sym
+                };
+                s.push_str(&format!(
+                    "<span style=\"color:{}\">{}</span>",
+                    css(cell.fg),
+                    sym
+                ));
             }
             s
         }
@@ -363,11 +376,21 @@ mod tests {
             sb.set_liberated(true);
             let mut t = Terminal::new(TestBackend::new(120, 2)).unwrap();
             t.draw(|f| sb.draw(f, f.area())).unwrap();
-            (0..120).map(|x| t.backend().buffer()[(x, 0)].symbol().to_string()).collect()
+            (0..120)
+                .map(|x| t.backend().buffer()[(x, 0)].symbol().to_string())
+                .collect()
         };
-        assert!(status_text.contains("LIBERATED"), "badge missing from status bar: {status_text:?}");
-        let spinner_text: String = (0..120).map(|x| spinner_buf[(x, 0)].symbol().to_string()).collect();
-        assert!(spinner_text.contains("LIBERATED"), "badge missing from spinner group: {spinner_text:?}");
+        assert!(
+            status_text.contains("LIBERATED"),
+            "badge missing from status bar: {status_text:?}"
+        );
+        let spinner_text: String = (0..120)
+            .map(|x| spinner_buf[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(
+            spinner_text.contains("LIBERATED"),
+            "badge missing from spinner group: {spinner_text:?}"
+        );
 
         let html = format!(
             "<!doctype html><meta charset=utf-8><title>/jailbreak LIBERATED badge</title>\

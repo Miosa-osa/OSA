@@ -1977,8 +1977,7 @@ defmodule OptimalSystemAgent.Orchestrator do
           # global one, so a single turn cannot balloon into hundreds of tool
           # round-trips (the per-turn token balloon). This complements the
           # per-tier USD budget, which bounds COST across turns.
-          max_iterations:
-            Keyword.get(opts, :max_iterations) || subagent_per_turn_tool_ceiling()
+          max_iterations: Keyword.get(opts, :max_iterations) || subagent_per_turn_tool_ceiling()
         )
       rescue
         e ->

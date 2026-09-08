@@ -202,11 +202,16 @@ impl AssistantStream {
         // Scan only appended text plus the longest possible phrase overlap.
         // The guard is sticky; already checked text cannot become unsafe except
         // where the new delta completes a phrase at its boundary.
-        let overlap = crate::app::settle_guard::LEAK_FINGERPRINTS.iter()
+        let overlap = crate::app::settle_guard::LEAK_FINGERPRINTS
+            .iter()
             .chain(crate::app::settle_guard::DEAD_PHRASES.iter())
-            .map(|s| s.len()).max().unwrap_or(0);
+            .map(|s| s.len())
+            .max()
+            .unwrap_or(0);
         let mut start = self.guard_checked.saturating_sub(overlap);
-        while !self.buf.is_char_boundary(start) { start -= 1; }
+        while !self.buf.is_char_boundary(start) {
+            start -= 1;
+        }
         if !crate::app::settle_guard::may_settle(&self.buf[start..]) {
             self.settle_ok = false;
             return None;
@@ -521,11 +526,19 @@ mod tests {
 
         let out = s.finalize(Some("m1"), "Those are the three options.".to_string());
 
-        assert_eq!(out, Finalize::Emit("Those are the three options.".to_string()));
-        let Finalize::Emit(text) = out else { unreachable!() };
+        assert_eq!(
+            out,
+            Finalize::Emit("Those are the three options.".to_string())
+        );
+        let Finalize::Emit(text) = out else {
+            unreachable!()
+        };
         // Exactly once: the accumulation must not survive anywhere in it.
         assert_eq!(text.matches("Those are the three options.").count(), 1);
-        assert!(!text.contains("optionss"), "stale accumulation leaked into the final");
+        assert!(
+            !text.contains("optionss"),
+            "stale accumulation leaked into the final"
+        );
         assert!(s.is_empty(), "buffer must be released to the final");
     }
 
@@ -539,8 +552,14 @@ mod tests {
         );
         // Same message finalized again (SSE replay, or a second code path
         // ending the same turn) renders nothing.
-        assert_eq!(s.finalize(Some("m1"), "hello world".into()), Finalize::Duplicate);
-        assert_eq!(s.finalize(Some("m1"), "hello world".into()), Finalize::Duplicate);
+        assert_eq!(
+            s.finalize(Some("m1"), "hello world".into()),
+            Finalize::Duplicate
+        );
+        assert_eq!(
+            s.finalize(Some("m1"), "hello world".into()),
+            Finalize::Duplicate
+        );
     }
 
     #[test]
@@ -549,7 +568,10 @@ mod tests {
         // still recognised as the same delivery.
         let mut s = AssistantStream::new();
         deltas(&mut s, None, &["hi"]);
-        assert_eq!(s.finalize(None, "hi there".into()), Finalize::Emit("hi there".into()));
+        assert_eq!(
+            s.finalize(None, "hi there".into()),
+            Finalize::Emit("hi there".into())
+        );
         assert_eq!(s.finalize(None, "hi there".into()), Finalize::Duplicate);
         // …but a DIFFERENT final is a different message and still renders.
         assert_eq!(
@@ -584,7 +606,14 @@ mod tests {
         // backend nudges, generation 2 rewrites the ending. The two must never
         // end up welded together in one buffer.
         let mut s = AssistantStream::new();
-        deltas(&mut s, Some("m1"), &["My recommendation: Do Fix 2. ", "Want me to implement Fix 2?"]);
+        deltas(
+            &mut s,
+            Some("m1"),
+            &[
+                "My recommendation: Do Fix 2. ",
+                "Want me to implement Fix 2?",
+            ],
+        );
 
         let superseded = s.push(Some("m2"), "Those are the three options. ");
         assert_eq!(
@@ -592,7 +621,10 @@ mod tests {
             Some("My recommendation: Do Fix 2. Want me to implement Fix 2?"),
             "generation 1 must be handed back for its own block"
         );
-        s.push(Some("m2"), "Want me to implement Fix 2, or were you just scoping?");
+        s.push(
+            Some("m2"),
+            "Want me to implement Fix 2, or were you just scoping?",
+        );
 
         assert_eq!(
             s.text(),
@@ -638,10 +670,16 @@ mod tests {
     fn reset_forgets_the_finalization_so_the_next_turn_renders() {
         let mut s = AssistantStream::new();
         s.push(Some("m1"), "x");
-        assert!(matches!(s.finalize(Some("m1"), "done".into()), Finalize::Emit(_)));
+        assert!(matches!(
+            s.finalize(Some("m1"), "done".into()),
+            Finalize::Emit(_)
+        ));
         s.reset();
         // A new turn that happens to produce the identical text still renders.
-        assert_eq!(s.finalize(None, "done".into()), Finalize::Emit("done".into()));
+        assert_eq!(
+            s.finalize(None, "done".into()),
+            Finalize::Emit("done".into())
+        );
     }
 
     // ── Rendered-output regressions ──────────────────────────────────────
@@ -705,7 +743,10 @@ mod tests {
             assert!(joined.contains("The compile finished."));
             assert!(joined.contains("I'll continue."));
             for needle in ["task-notification", "task-id", "output-file", "bg_5g5byuj8"] {
-                assert!(!joined.contains(needle), "leaked {needle} in rendered text: {joined}");
+                assert!(
+                    !joined.contains(needle),
+                    "leaked {needle} in rendered text: {joined}"
+                );
             }
         }
     }
@@ -718,8 +759,14 @@ mod tests {
 
         on_final(&mut chat, &mut s, &mut header, Some("m1"), NOTIF);
 
-        assert!(chat.agent_blocks().is_empty(), "a pure-plumbing message must not render");
-        assert!(!header, "a suppressed block must not consume the ◈ OSA header");
+        assert!(
+            chat.agent_blocks().is_empty(),
+            "a pure-plumbing message must not render"
+        );
+        assert!(
+            !header,
+            "a suppressed block must not consume the ◈ OSA header"
+        );
     }
 
     #[test]
@@ -729,17 +776,30 @@ mod tests {
         let mut header = false;
 
         on_delta(&mut chat, &mut s, &mut header, Some("m1"), "Those are the ");
-        on_delta(&mut chat, &mut s, &mut header, Some("m1"), "three optionss. Want me to?");
+        on_delta(
+            &mut chat,
+            &mut s,
+            &mut header,
+            Some("m1"),
+            "three optionss. Want me to?",
+        );
         // The backend's final differs from the concatenated deltas (it is the
         // post-processed text the transcript actually stores).
         let final_text = "Those are the three options. Want me to implement Fix 2?";
         on_final(&mut chat, &mut s, &mut header, Some("m1"), final_text);
 
         let blocks = chat.agent_blocks();
-        assert_eq!(blocks, vec![final_text.to_string()], "the final must replace the deltas");
+        assert_eq!(
+            blocks,
+            vec![final_text.to_string()],
+            "the final must replace the deltas"
+        );
         let joined = blocks.join("");
         assert_eq!(joined.matches("Want me to implement Fix 2?").count(), 1);
-        assert!(!joined.contains("optionss"), "the superseded delta text must not survive");
+        assert!(
+            !joined.contains("optionss"),
+            "the superseded delta text must not survive"
+        );
     }
 
     #[test]
@@ -751,10 +811,34 @@ mod tests {
         let mut s = AssistantStream::new();
         let mut header = false;
 
-        on_delta(&mut chat, &mut s, &mut header, Some("m1"), "My recommendation: Do Fix 2. ");
-        on_delta(&mut chat, &mut s, &mut header, Some("m1"), "Want me to implement Fix 2?");
-        on_delta(&mut chat, &mut s, &mut header, Some("m2"), "Those are the three options. ");
-        on_delta(&mut chat, &mut s, &mut header, Some("m2"), "Want me to implement Fix 2, or were you just scoping?");
+        on_delta(
+            &mut chat,
+            &mut s,
+            &mut header,
+            Some("m1"),
+            "My recommendation: Do Fix 2. ",
+        );
+        on_delta(
+            &mut chat,
+            &mut s,
+            &mut header,
+            Some("m1"),
+            "Want me to implement Fix 2?",
+        );
+        on_delta(
+            &mut chat,
+            &mut s,
+            &mut header,
+            Some("m2"),
+            "Those are the three options. ",
+        );
+        on_delta(
+            &mut chat,
+            &mut s,
+            &mut header,
+            Some("m2"),
+            "Want me to implement Fix 2, or were you just scoping?",
+        );
         on_final(
             &mut chat,
             &mut s,
@@ -765,7 +849,10 @@ mod tests {
 
         let blocks = chat.agent_blocks();
         assert_eq!(blocks.len(), 2, "each generation is its own block");
-        assert_eq!(blocks[0], "My recommendation: Do Fix 2. Want me to implement Fix 2?");
+        assert_eq!(
+            blocks[0],
+            "My recommendation: Do Fix 2. Want me to implement Fix 2?"
+        );
         assert_eq!(
             blocks[1],
             "Those are the three options. Want me to implement Fix 2, or were you just scoping?"
@@ -800,10 +887,22 @@ mod tests {
         let mut s = AssistantStream::new();
         let mut header = false;
 
-        on_final(&mut chat, &mut s, &mut header, Some("m1"), "no streaming happened");
+        on_final(
+            &mut chat,
+            &mut s,
+            &mut header,
+            Some("m1"),
+            "no streaming happened",
+        );
 
-        assert_eq!(chat.agent_blocks(), vec!["no streaming happened".to_string()]);
-        assert!(header, "the first block of the turn carries the ◈ OSA header");
+        assert_eq!(
+            chat.agent_blocks(),
+            vec!["no streaming happened".to_string()]
+        );
+        assert!(
+            header,
+            "the first block of the turn carries the ◈ OSA header"
+        );
     }
 
     #[test]
@@ -826,10 +925,16 @@ mod tests {
     fn finalizing_a_second_generation_is_not_a_duplicate() {
         let mut s = AssistantStream::new();
         s.push(Some("m1"), "first");
-        assert!(matches!(s.finalize(Some("m1"), "first".into()), Finalize::Emit(_)));
+        assert!(matches!(
+            s.finalize(Some("m1"), "first".into()),
+            Finalize::Emit(_)
+        ));
         // Mid-turn finalization followed by a genuinely new generation.
         s.push(Some("m2"), "second");
-        assert_eq!(s.finalize(Some("m2"), "second".into()), Finalize::Emit("second".into()));
+        assert_eq!(
+            s.finalize(Some("m2"), "second".into()),
+            Finalize::Emit("second".into())
+        );
     }
 
     // ── late deltas must not resurrect, tear, or re-emit a finalized message ──
@@ -847,7 +952,10 @@ mod tests {
     fn a_delta_after_finalization_does_not_resurrect_the_message() {
         let mut s = AssistantStream::new();
         s.push(Some("m1"), "hello");
-        assert_eq!(s.finalize(Some("m1"), "hello".into()), Finalize::Emit("hello".into()));
+        assert_eq!(
+            s.finalize(Some("m1"), "hello".into()),
+            Finalize::Emit("hello".into())
+        );
 
         assert_eq!(s.push(Some("m1"), " straggler"), None);
         assert!(
@@ -867,7 +975,10 @@ mod tests {
     fn a_straggler_does_not_tear_off_the_current_generation() {
         let mut s = AssistantStream::new();
         s.push(Some("m1"), "first");
-        assert_eq!(s.finalize(Some("m1"), "first".into()), Finalize::Emit("first".into()));
+        assert_eq!(
+            s.finalize(Some("m1"), "first".into()),
+            Finalize::Emit("first".into())
+        );
 
         s.push(Some("m2"), "second partial");
         assert_eq!(
@@ -896,9 +1007,15 @@ mod tests {
     fn a_replay_of_an_earlier_message_is_still_recognised_as_duplicate() {
         let mut s = AssistantStream::new();
         s.push(Some("m1"), "one");
-        assert_eq!(s.finalize(Some("m1"), "one".into()), Finalize::Emit("one".into()));
+        assert_eq!(
+            s.finalize(Some("m1"), "one".into()),
+            Finalize::Emit("one".into())
+        );
         s.push(Some("m2"), "two");
-        assert_eq!(s.finalize(Some("m2"), "two".into()), Finalize::Emit("two".into()));
+        assert_eq!(
+            s.finalize(Some("m2"), "two".into()),
+            Finalize::Emit("two".into())
+        );
 
         assert_eq!(
             s.finalize(Some("m1"), "one".into()),

@@ -327,7 +327,11 @@ impl ThinkingBox {
 
     /// The header string for the current running/done + title state.
     fn header_text(&self) -> String {
-        compose_header(self.running, self.elapsed(), self.reasoning_title.as_deref())
+        compose_header(
+            self.running,
+            self.elapsed(),
+            self.reasoning_title.as_deref(),
+        )
     }
 
     /// The reasoning body (content minus any promoted title) rendered through
@@ -530,7 +534,10 @@ mod tests {
         assert!(!tb.is_empty());
 
         tb.on_action_start(); // tool #2 starts: no new reasoning happened
-        assert!(tb.is_empty(), "a stale frozen thought must be cleared, not rendered as current");
+        assert!(
+            tb.is_empty(),
+            "a stale frozen thought must be cleared, not rendered as current"
+        );
     }
 
     #[test]
@@ -565,7 +572,11 @@ mod tests {
         assert!(!tb.running, "done after finish");
         assert!(tb.elapsed().is_some(), "elapsed frozen");
         // Header is now the done state.
-        assert!(tb.header_text().starts_with("\u{2234} Thought for"), "{}", tb.header_text());
+        assert!(
+            tb.header_text().starts_with("\u{2234} Thought for"),
+            "{}",
+            tb.header_text()
+        );
     }
 
     // ── Item 2: Markdown inside the thinking body ──────────────────────────
@@ -581,7 +592,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         // The unordered-list renderer emits bullets — flat dim text would not.
-        assert!(flat.contains('\u{2022}'), "expected a bullet, got: {flat:?}");
+        assert!(
+            flat.contains('\u{2022}'),
+            "expected a bullet, got: {flat:?}"
+        );
         assert!(flat.contains("first step"), "{flat:?}");
         assert!(flat.contains("second step"), "{flat:?}");
     }

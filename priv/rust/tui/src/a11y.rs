@@ -22,7 +22,12 @@ pub fn env_hint() -> bool {
         return true;
     }
     // Explicit accessibility / screen-reader opt-ins.
-    for key in ["OSA_A11Y", "OSA_SCREEN_READER", "SCREEN_READER", "ACCESSIBILITY"] {
+    for key in [
+        "OSA_A11Y",
+        "OSA_SCREEN_READER",
+        "SCREEN_READER",
+        "ACCESSIBILITY",
+    ] {
         if let Some(v) = std::env::var_os(key) {
             let v = v.to_string_lossy();
             if !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false") {

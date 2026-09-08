@@ -179,6 +179,9 @@ mod tests {
         let out = rank_strings(&items, "co");
         // "clear" has no 'o' after 'c' → excluded; a "co…" prefix ranks first.
         assert!(!out.iter().any(|s| s == "clear"));
-        assert!(matches!(out.first().map(|s| s.as_str()), Some("compact") | Some("context")));
+        assert!(matches!(
+            out.first().map(|s| s.as_str()),
+            Some("compact") | Some("context")
+        ));
     }
 }

@@ -143,7 +143,10 @@ impl TasksPanel {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> TasksPanelAction {
         // Chorded shortcuts belong to the app, not this overlay.
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return TasksPanelAction::None;
         }
         let last = self.ordered().len().saturating_sub(1);
@@ -216,7 +219,10 @@ impl TasksPanel {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(c.primary))
             .title(Line::from(vec![
-                Span::styled(" OSA ", Style::default().fg(c.primary).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " OSA ",
+                    Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("\u{00b7} tasks ", Style::default().fg(c.muted)),
             ]))
             .style(Style::default().bg(c.dialog_bg));
@@ -341,11 +347,7 @@ impl TasksPanel {
                                 Span::styled(desc, Style::default().fg(c.secondary)),
                             ];
                             if show_tag {
-                                let used = 4 + t
-                                    .description
-                                    .chars()
-                                    .count()
-                                    .min(desc_budget);
+                                let used = 4 + t.description.chars().count().min(desc_budget);
                                 let pad = maxw.saturating_sub(used + pw);
                                 spans.push(Span::raw(" ".repeat(pad)));
                                 spans.push(Span::styled(
@@ -369,9 +371,19 @@ impl TasksPanel {
         put(
             frame,
             Paragraph::new(Line::from(vec![
-                Span::styled("\u{2191}\u{2193}", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "\u{2191}\u{2193}",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" nav  ", Style::default().fg(c.dim)),
-                Span::styled("esc", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "esc",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" close", Style::default().fg(c.dim)),
             ])),
             Rect::new(inner.x, hint_y, iw, 1),
@@ -400,12 +412,42 @@ mod tasks_panel_tests {
 
     fn sample() -> Vec<TaskEntry> {
         vec![
-            TaskEntry { id: "t1".into(), description: "Write the parser".into(), status: "completed".into(), priority: "normal".into() },
-            TaskEntry { id: "t2".into(), description: "Wire the endpoint".into(), status: "in_progress".into(), priority: "high".into() },
-            TaskEntry { id: "t3".into(), description: "Draft the tests".into(), status: "pending".into(), priority: "low".into() },
-            TaskEntry { id: "t4".into(), description: "Ship it".into(), status: "pending".into(), priority: "normal".into() },
-            TaskEntry { id: "t5".into(), description: "\u{4e2d}\u{6587}\u{4efb}\u{52a1}".repeat(30), status: "failed".into(), priority: "\u{20ac}".repeat(40) },
-            TaskEntry { id: "t6".into(), description: "Weird one".into(), status: "unknown_state".into(), priority: "".into() },
+            TaskEntry {
+                id: "t1".into(),
+                description: "Write the parser".into(),
+                status: "completed".into(),
+                priority: "normal".into(),
+            },
+            TaskEntry {
+                id: "t2".into(),
+                description: "Wire the endpoint".into(),
+                status: "in_progress".into(),
+                priority: "high".into(),
+            },
+            TaskEntry {
+                id: "t3".into(),
+                description: "Draft the tests".into(),
+                status: "pending".into(),
+                priority: "low".into(),
+            },
+            TaskEntry {
+                id: "t4".into(),
+                description: "Ship it".into(),
+                status: "pending".into(),
+                priority: "normal".into(),
+            },
+            TaskEntry {
+                id: "t5".into(),
+                description: "\u{4e2d}\u{6587}\u{4efb}\u{52a1}".repeat(30),
+                status: "failed".into(),
+                priority: "\u{20ac}".repeat(40),
+            },
+            TaskEntry {
+                id: "t6".into(),
+                description: "Weird one".into(),
+                status: "unknown_state".into(),
+                priority: "".into(),
+            },
         ]
     }
 
@@ -442,7 +484,10 @@ mod tasks_panel_tests {
     fn esc_and_q_close() {
         let mut p = TasksPanel::new(sample());
         assert_eq!(p.handle_key(key(KeyCode::Esc)), TasksPanelAction::Close);
-        assert_eq!(p.handle_key(key(KeyCode::Char('q'))), TasksPanelAction::Close);
+        assert_eq!(
+            p.handle_key(key(KeyCode::Char('q'))),
+            TasksPanelAction::Close
+        );
     }
 
     #[test]

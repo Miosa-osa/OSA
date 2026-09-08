@@ -92,7 +92,9 @@ impl SkillsBrowser {
     fn matches(&self, s: &SkillItem, needle: &str) -> bool {
         s.name.to_lowercase().contains(needle)
             || s.description.to_lowercase().contains(needle)
-            || Self::category_label(&s.category).to_lowercase().contains(needle)
+            || Self::category_label(&s.category)
+                .to_lowercase()
+                .contains(needle)
             || s.triggers.iter().any(|t| t.to_lowercase().contains(needle))
     }
 
@@ -167,7 +169,10 @@ impl SkillsBrowser {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> SkillsBrowserAction {
         // Ignore chorded shortcuts — they belong to the app, not the filter box.
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return SkillsBrowserAction::None;
         }
         let len = self.ordered().len();
@@ -259,7 +264,10 @@ impl SkillsBrowser {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(c.primary))
             .title(Line::from(vec![
-                Span::styled(" OSA ", Style::default().fg(c.primary).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " OSA ",
+                    Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("\u{00b7} skills ", Style::default().fg(c.muted)),
             ]))
             .style(Style::default().bg(c.dialog_bg));
@@ -383,7 +391,10 @@ impl SkillsBrowser {
                             let line = crate::util::pad_cols(&raw, maxw);
                             put(
                                 frame,
-                                Paragraph::new(Line::from(Span::styled(line, theme.button_active()))),
+                                Paragraph::new(Line::from(Span::styled(
+                                    line,
+                                    theme.button_active(),
+                                ))),
                                 Rect::new(inner.x, ry, iw, 1),
                             );
                         } else {
@@ -393,10 +404,14 @@ impl SkillsBrowser {
                                 Span::raw("  "),
                                 Span::styled(
                                     name,
-                                    Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
+                                    Style::default()
+                                        .fg(c.secondary)
+                                        .add_modifier(Modifier::BOLD),
                                 ),
                             ];
-                            if !badge.is_empty() && maxw.saturating_sub(used) > crate::util::cols(&badge) + 2 {
+                            if !badge.is_empty()
+                                && maxw.saturating_sub(used) > crate::util::cols(&badge) + 2
+                            {
                                 spans.push(Span::styled(
                                     format!("  {badge}"),
                                     Style::default().fg(c.warning).add_modifier(Modifier::BOLD),
@@ -434,13 +449,32 @@ impl SkillsBrowser {
         put(
             frame,
             Paragraph::new(Line::from(vec![
-                Span::styled("type", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
-                Span::styled(" filter  ", Style::default().fg(c.dim)),
-                Span::styled("\u{2191}\u{2193}", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
-                Span::styled(" nav  ", Style::default().fg(c.dim)),
-                Span::styled("esc", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
                 Span::styled(
-                    if self.filter.is_empty() { " close" } else { " clear" },
+                    "type",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" filter  ", Style::default().fg(c.dim)),
+                Span::styled(
+                    "\u{2191}\u{2193}",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" nav  ", Style::default().fg(c.dim)),
+                Span::styled(
+                    "esc",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    if self.filter.is_empty() {
+                        " close"
+                    } else {
+                        " clear"
+                    },
                     Style::default().fg(c.dim),
                 ),
             ])),

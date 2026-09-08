@@ -13,13 +13,11 @@
 // the chat store for ownership.
 #![allow(dead_code)]
 
-use crossterm::event::{
-    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::prelude::*;
 use ratatui::widgets::{Clear, Paragraph};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::components::chat::message::{Message, MessageType};
 use crate::style;
@@ -249,7 +247,10 @@ impl TranscriptViewer {
                 self.unwrapped = !self.unwrapped;
                 self.horizontal = 0;
                 let next = flatten_view(entries, body_width(w), self.unwrapped);
-                self.cursor = next.iter().position(|line| line.entry == entry).unwrap_or(0);
+                self.cursor = next
+                    .iter()
+                    .position(|line| line.entry == entry)
+                    .unwrap_or(0);
                 self.recompute_matches(&next);
                 self.ensure_visible(view_h, next.len());
                 return TranscriptAction::None;
@@ -336,7 +337,11 @@ impl TranscriptViewer {
     /// reader; left-drag selects a text range; releasing the drag copies the
     /// selection. All geometry is recomputed from the live viewport (the overlay
     /// always fills the alternate screen), matching every other method here.
-    pub fn handle_mouse(&mut self, me: MouseEvent, entries: &[TranscriptEntry]) -> TranscriptAction {
+    pub fn handle_mouse(
+        &mut self,
+        me: MouseEvent,
+        entries: &[TranscriptEntry],
+    ) -> TranscriptAction {
         let (w, h) = viewport();
         let flat = self.layout(entries, body_width(w));
         self.horizontal = self.effective_pan(&flat, w);
@@ -360,7 +365,13 @@ impl TranscriptViewer {
                 self.ensure_visible(view_h, total);
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(pos) = mouse_to_pos(me.column.saturating_add(self.horizontal), me.row, scroll, view_h, &flat) {
+                if let Some(pos) = mouse_to_pos(
+                    me.column.saturating_add(self.horizontal),
+                    me.row,
+                    scroll,
+                    view_h,
+                    &flat,
+                ) {
                     self.cursor = pos.0;
                     self.selection = Some(Selection {
                         anchor: pos,
@@ -369,7 +380,13 @@ impl TranscriptViewer {
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if let Some(pos) = mouse_to_pos(me.column.saturating_add(self.horizontal), me.row, scroll, view_h, &flat) {
+                if let Some(pos) = mouse_to_pos(
+                    me.column.saturating_add(self.horizontal),
+                    me.row,
+                    scroll,
+                    view_h,
+                    &flat,
+                ) {
                     if let Some(ref mut sel) = self.selection {
                         sel.head = pos;
                         self.cursor = pos.0;
@@ -416,7 +433,10 @@ impl TranscriptViewer {
                     .fg(theme.colors.primary)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("\u{00B7} {} messages", entries.len()), theme.faint()),
+            Span::styled(
+                format!("\u{00B7} {} messages", entries.len()),
+                theme.faint(),
+            ),
         ]);
         frame.render_widget(Paragraph::new(header), rows[0]);
 
@@ -435,7 +455,9 @@ impl TranscriptViewer {
         if total > 0 {
             let end = (scroll + view_h).min(total);
             for i in scroll..end {
-                let line_sel = sel.and_then(|(start, endp)| selection_range_for_line(i, start, endp, &flat[i].text));
+                let line_sel = sel.and_then(|(start, endp)| {
+                    selection_range_for_line(i, start, endp, &flat[i].text)
+                });
                 lines.push(render_line(
                     &flat[i],
                     i == cursor,
@@ -446,7 +468,10 @@ impl TranscriptViewer {
                 ));
             }
         }
-        frame.render_widget(Paragraph::new(lines).scroll((0, self.effective_pan(&flat, body.width))), body);
+        frame.render_widget(
+            Paragraph::new(lines).scroll((0, self.effective_pan(&flat, body.width))),
+            body,
+        );
 
         // ── Footer ────────────────────────────────────────────────────
         let footer = if self.searching {
@@ -464,8 +489,14 @@ impl TranscriptViewer {
                 if area.width < 80 {
                     " ↑↓ scroll · w layout · ←→ pan · Esc close".to_owned()
                 } else {
-                    format!(" ↑↓ scroll · w {} · ←→ pan · / search · y copy · Y all · Esc close",
-                        if self.unwrapped { "wrap" } else { "preserve layout" })
+                    format!(
+                        " ↑↓ scroll · w {} · ←→ pan · / search · y copy · Y all · Esc close",
+                        if self.unwrapped {
+                            "wrap"
+                        } else {
+                            "preserve layout"
+                        }
+                    )
                 },
                 theme.faint(),
             ))
@@ -482,7 +513,9 @@ impl TranscriptViewer {
     }
 
     fn effective_pan(&self, flat: &[FlatLine], width: u16) -> u16 {
-        if !self.unwrapped { return 0; }
+        if !self.unwrapped {
+            return 0;
+        }
         self.horizontal.min(self.pan_limit(flat, width))
     }
 
@@ -490,10 +523,17 @@ impl TranscriptViewer {
         // Unrelated long messages must not keep a short selected diagram
         // scrolled off-screen. Pan within the selected message's geometry.
         let selected = flat.get(self.cursor).map(|line| line.entry);
-        let widest = flat.iter().filter(|line| Some(line.entry) == selected)
-            .map(|line| UnicodeWidthStr::width(line.text.as_str())
-            + line_prefix_width(line.is_header)).max().unwrap_or(0);
-        widest.saturating_sub(usize::from(width)).min(usize::from(u16::MAX)) as u16
+        let widest = flat
+            .iter()
+            .filter(|line| Some(line.entry) == selected)
+            .map(|line| {
+                UnicodeWidthStr::width(line.text.as_str()) + line_prefix_width(line.is_header)
+            })
+            .max()
+            .unwrap_or(0);
+        widest
+            .saturating_sub(usize::from(width))
+            .min(usize::from(u16::MAX)) as u16
     }
 
     // The reader receives immutable snapshots. Cache their layout so a long
@@ -507,7 +547,13 @@ impl TranscriptViewer {
             }
         }
         let lines = Rc::new(flatten_view(entries, width, self.unwrapped));
-        *cache = Some((width, self.unwrapped, entries.len(), bytes, Rc::clone(&lines)));
+        *cache = Some((
+            width,
+            self.unwrapped,
+            entries.len(),
+            bytes,
+            Rc::clone(&lines),
+        ));
         lines
     }
 
@@ -625,12 +671,21 @@ mod wide_layout_tests {
 
     #[test]
     fn unicode_search_does_not_drop_or_duplicate_text() {
-        for (text, query, expected) in [("İabc xyz", "xyz", "xyz"), ("İabc", "i", "İ"), ("İİ", "i", "İİ"), ("ΟΣ", "ος", "ΟΣ")] {
+        for (text, query, expected) in [
+            ("İabc xyz", "xyz", "xyz"),
+            ("İabc", "i", "İ"),
+            ("İİ", "i", "İİ"),
+            ("ΟΣ", "ος", "ΟΣ"),
+        ] {
             let theme = style::theme();
             let spans = highlight(text, query, Style::default(), &theme);
             let all: String = spans.iter().map(|s| s.content.as_ref()).collect();
             assert_eq!(all, text);
-            let matched: String = spans.iter().filter(|s| s.style.bg == Some(theme.colors.warning)).map(|s| s.content.as_ref()).collect();
+            let matched: String = spans
+                .iter()
+                .filter(|s| s.style.bg == Some(theme.colors.warning))
+                .map(|s| s.content.as_ref())
+                .collect();
             assert_eq!(matched, expected);
         }
     }
@@ -639,31 +694,55 @@ mod wide_layout_tests {
     fn emoji_and_combining_marks_are_selected_as_clusters() {
         for emoji in ["👩‍💻", "🇺🇸", "e\u{301}"] {
             let text = format!("{emoji}x");
-            assert_eq!(display_to_char_idx(&text, UnicodeWidthStr::width(emoji)), emoji.chars().count());
+            assert_eq!(
+                display_to_char_idx(&text, UnicodeWidthStr::width(emoji)),
+                emoji.chars().count()
+            );
             assert_eq!(display_to_char_idx(&text, 0), 0);
-            assert_eq!(wrap_plain(&format!("{emoji}{emoji}"), UnicodeWidthStr::width(emoji)), vec![emoji.to_owned(), emoji.to_owned()]);
+            assert_eq!(
+                wrap_plain(&format!("{emoji}{emoji}"), UnicodeWidthStr::width(emoji)),
+                vec![emoji.to_owned(), emoji.to_owned()]
+            );
         }
     }
 
     #[test]
     fn widening_reader_reveals_left_edge_again() {
         let entries = vec![
-            TranscriptEntry { role: TranscriptRole::System, text: "unrelated ".repeat(100) },
-            TranscriptEntry { role: TranscriptRole::Agent, text: "LEFT".to_owned() + &"-".repeat(100) + "RIGHT" },
+            TranscriptEntry {
+                role: TranscriptRole::System,
+                text: "unrelated ".repeat(100),
+            },
+            TranscriptEntry {
+                role: TranscriptRole::Agent,
+                text: "LEFT".to_owned() + &"-".repeat(100) + "RIGHT",
+            },
         ];
         let mut viewer = TranscriptViewer::open(&entries);
         viewer.unwrapped = true;
         viewer.horizontal = 80;
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(200, 20)).unwrap();
-        terminal.draw(|f| viewer.draw(f, f.area(), &entries)).unwrap();
-        let screen: String = terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(200, 20)).unwrap();
+        terminal
+            .draw(|f| viewer.draw(f, f.area(), &entries))
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
         assert!(screen.contains("LEFT"));
     }
 
     #[test]
     fn source_view_keeps_diagram_spaces_and_long_rows() {
         let source = "+---------------------->\n|  A        B          |";
-        let entries = vec![TranscriptEntry { role: TranscriptRole::Agent, text: source.into() }];
+        let entries = vec![TranscriptEntry {
+            role: TranscriptRole::Agent,
+            text: source.into(),
+        }];
         let lines = flatten_view(&entries, 8, true);
         assert_eq!(lines[1].text, source.lines().next().unwrap());
         assert_eq!(lines[2].text, source.lines().nth(1).unwrap());
@@ -673,7 +752,10 @@ mod wide_layout_tests {
 
     #[test]
     fn long_reader_reuses_layout_until_width_or_mode_changes() {
-        let entries = vec![TranscriptEntry { role: TranscriptRole::Agent, text: "long reply ".repeat(10_000) }];
+        let entries = vec![TranscriptEntry {
+            role: TranscriptRole::Agent,
+            text: "long reply ".repeat(10_000),
+        }];
         let mut viewer = TranscriptViewer::open(&entries);
         let a = viewer.layout(&entries, 80);
         assert!(Rc::ptr_eq(&a, &viewer.layout(&entries, 80)));
@@ -694,8 +776,13 @@ fn flatten_view(entries: &[TranscriptEntry], body_w: u16, unwrapped: bool) -> Ve
             text: e.role.label().to_string(),
         });
         let body = if unwrapped {
-            e.text.split('\n').map(|line| crate::render::markdown::expand_tabs(line, 4)).collect()
-        } else { wrap_plain(&e.text, w) };
+            e.text
+                .split('\n')
+                .map(|line| crate::render::markdown::expand_tabs(line, 4))
+                .collect()
+        } else {
+            wrap_plain(&e.text, w)
+        };
         for body in body {
             out.push(FlatLine {
                 entry: ei,
@@ -982,10 +1069,16 @@ fn highlight(text: &str, q: &str, base: Style, theme: &style::Theme) -> Vec<Span
         let original_start = starts[start];
         let matched_end = ends[end - 1];
         if original_start > original_end {
-            spans.push(Span::styled(text[original_end..original_start].to_owned(), base));
+            spans.push(Span::styled(
+                text[original_end..original_start].to_owned(),
+                base,
+            ));
         }
         if matched_end > original_end {
-            spans.push(Span::styled(text[original_start.max(original_end)..matched_end].to_owned(), hl));
+            spans.push(Span::styled(
+                text[original_start.max(original_end)..matched_end].to_owned(),
+                hl,
+            ));
             original_end = matched_end;
         }
         idx = end;
@@ -1166,10 +1259,7 @@ mod tests {
             head: (2, 2),
         };
         // "lo" + "brave" + "wo"
-        assert_eq!(
-            selection_text(&flat, sel).as_deref(),
-            Some("lo\nbrave\nwo")
-        );
+        assert_eq!(selection_text(&flat, sel).as_deref(), Some("lo\nbrave\nwo"));
     }
 
     #[test]
@@ -1201,7 +1291,9 @@ mod tests {
         let none = reversed_slice("hi", 2, 2, Style::default());
         let joined: String = none.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(joined, "hi");
-        assert!(none.iter().all(|s| !s.style.add_modifier.contains(Modifier::REVERSED)));
+        assert!(none
+            .iter()
+            .all(|s| !s.style.add_modifier.contains(Modifier::REVERSED)));
         // Out-of-bounds hi clamps to the char count without panicking.
         let all = reversed_slice("hi", 0, 99, Style::default());
         let joined2: String = all.iter().map(|s| s.content.as_ref()).collect();
@@ -1233,10 +1325,7 @@ mod tests {
         let sel = v.selection.unwrap();
         assert_eq!(selection_text(&flat, sel).as_deref(), Some("hello"));
         // A key press clears the selection highlight.
-        v.handle_key(
-            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-            &entries,
-        );
+        v.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &entries);
         assert!(v.selection.is_none());
     }
 }

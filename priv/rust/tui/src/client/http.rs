@@ -615,7 +615,11 @@ impl ApiClient {
         if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
             return Ok(msg.to_string());
         }
-        let steps = v.get("steps").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+        let steps = v
+            .get("steps")
+            .and_then(|s| s.as_array())
+            .cloned()
+            .unwrap_or_default();
         if steps.is_empty() {
             Ok("No filesystem step snapshots in this session.".into())
         } else {
@@ -1954,7 +1958,6 @@ mod health_check_retry_tests {
     }
 }
 
-
 // === Local model manager (/models/local) ===
 impl ApiClient {
     async fn local_json<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
@@ -1963,9 +1966,20 @@ impl ApiClient {
         if !status.is_success() {
             let msg = serde_json::from_str::<serde_json::Value>(&text)
                 .ok()
-                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_string()))
+                .and_then(|v| {
+                    v.get("error")
+                        .and_then(|e| e.as_str())
+                        .map(|s| s.to_string())
+                })
                 .unwrap_or_else(|| text.clone());
-            anyhow::bail!("{}", if msg.is_empty() { status.to_string() } else { msg });
+            anyhow::bail!(
+                "{}",
+                if msg.is_empty() {
+                    status.to_string()
+                } else {
+                    msg
+                }
+            );
         }
         Ok(serde_json::from_str(&text)?)
     }
@@ -1979,7 +1993,10 @@ impl ApiClient {
     /// GET /models/local/info?ref= — one model, per-quant sizes and fit.
     pub async fn local_model_info(&self, reff: &str) -> Result<LocalModelInfo> {
         let resp = self
-            .get(&format!("/models/local/info?ref={}", Self::percent_encode(reff)))
+            .get(&format!(
+                "/models/local/info?ref={}",
+                Self::percent_encode(reff)
+            ))
             .await?;
         Self::local_json(resp).await
     }
@@ -1991,7 +2008,9 @@ impl ApiClient {
         quant: Option<&str>,
     ) -> Result<LocalInstallStarted> {
         let body = serde_json::json!({ "ref": reff, "quant": quant });
-        let resp = self.post_allow_status("/models/local/install", &body).await?;
+        let resp = self
+            .post_allow_status("/models/local/install", &body)
+            .await?;
         Self::local_json(resp).await
     }
 
@@ -2004,8 +2023,13 @@ impl ApiClient {
     /// POST /models/local/remove — delete a model from disk.
     pub async fn local_model_remove(&self, tag: &str) -> Result<String> {
         let body = serde_json::json!({ "tag": tag });
-        let resp = self.post_allow_status("/models/local/remove", &body).await?;
+        let resp = self
+            .post_allow_status("/models/local/remove", &body)
+            .await?;
         let v: serde_json::Value = Self::local_json(resp).await?;
-        Ok(v.get("removed").and_then(|s| s.as_str()).unwrap_or(tag).to_string())
+        Ok(v.get("removed")
+            .and_then(|s| s.as_str())
+            .unwrap_or(tag)
+            .to_string())
     }
 }

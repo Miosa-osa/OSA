@@ -227,7 +227,10 @@ impl AppState {
     }
 
     pub fn allows_input(&self) -> bool {
-        matches!(self, AppState::Idle | AppState::Processing | AppState::Recording)
+        matches!(
+            self,
+            AppState::Idle | AppState::Processing | AppState::Recording
+        )
     }
 
     pub fn is_processing(&self) -> bool {
@@ -550,7 +553,10 @@ mod overlay_dialog_lost_is_complete {
     #[test]
     fn the_guard_runs_before_the_state_dispatch() {
         let src = include_str!("update.rs");
-        let after = src.split("fn handle_key").nth(1).expect("handle_key exists");
+        let after = src
+            .split("fn handle_key")
+            .nth(1)
+            .expect("handle_key exists");
         let guard = after.find("self.overlay_dialog_lost()");
         let dispatch = after.find("match self.state {");
         assert!(

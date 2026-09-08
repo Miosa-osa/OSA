@@ -902,14 +902,21 @@ for {var, key} <- [
 end
 
 subagent_iter_overrides =
-  [elite: "OSA_SUBAGENT_MAX_ITERS_ELITE", specialist: "OSA_SUBAGENT_MAX_ITERS_SPECIALIST", utility: "OSA_SUBAGENT_MAX_ITERS_UTILITY"]
+  [
+    elite: "OSA_SUBAGENT_MAX_ITERS_ELITE",
+    specialist: "OSA_SUBAGENT_MAX_ITERS_SPECIALIST",
+    utility: "OSA_SUBAGENT_MAX_ITERS_UTILITY"
+  ]
   |> Enum.reduce(%{}, fn {tier, var}, acc ->
     case System.get_env(var) do
-      nil -> acc
-      s -> case Integer.parse(s) do
-              {n, _} when n > 0 -> Map.put(acc, tier, n)
-              _ -> acc
-            end
+      nil ->
+        acc
+
+      s ->
+        case Integer.parse(s) do
+          {n, _} when n > 0 -> Map.put(acc, tier, n)
+          _ -> acc
+        end
     end
   end)
 

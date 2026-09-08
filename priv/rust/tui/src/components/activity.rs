@@ -270,7 +270,12 @@ fn fmt_compact_tight(secs: u64) -> String {
     } else if secs < 3600 {
         format!("{}m{:02}s", secs / 60, secs % 60)
     } else {
-        format!("{}h{:02}m{:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+        format!(
+            "{}h{:02}m{:02}s",
+            secs / 3600,
+            (secs % 3600) / 60,
+            secs % 60
+        )
     }
 }
 
@@ -319,7 +324,6 @@ fn stall_t(stall_secs: f64) -> f64 {
     const RAMP: f64 = 3.0;
     ((stall_secs - THRESHOLD) / RAMP).clamp(0.0, 1.0)
 }
-
 
 /// Escalating verb for the live thinking segment (CC parity:
 /// "thinking" → "thinking more" → "thinking harder" as the current thinking
@@ -403,7 +407,6 @@ fn is_agent_tool(name: &str) -> bool {
 /// looks like a value). Detect that exact shape — two-or-more comma-separated
 /// bare identifiers — and drop it, rather than painting schema noise. A genuine
 /// hint (a path, a command, a query, a skill name) contains separators, spaces
-
 
 /// Verbosity level for tool display (Hermes-inspired 4-level toggle)
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -744,40 +747,204 @@ static VERB_SEED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsiz
 /// OSA / SORX / Signal-Theory flavored ones so it reads as ours, not a copy.
 const SPINNER_VERBS: &[&str] = &[
     // — OSA / SORX / Signal Theory (ours) —
-    "Signaling", "Denoising", "Optimizing", "Transducing", "Attenuating", "Homeostating",
-    "Steering", "Resonating", "Modulating", "Amplifying", "Distilling", "Converging",
-    "Pathfinding", "Aligning", "Focusing", "Sharpening", "Cohering", "Phasing",
-    "Correlating", "Maximizing", "Signalizing", "Osafying", "Steersmanning", "Sorxing",
+    "Signaling",
+    "Denoising",
+    "Optimizing",
+    "Transducing",
+    "Attenuating",
+    "Homeostating",
+    "Steering",
+    "Resonating",
+    "Modulating",
+    "Amplifying",
+    "Distilling",
+    "Converging",
+    "Pathfinding",
+    "Aligning",
+    "Focusing",
+    "Sharpening",
+    "Cohering",
+    "Phasing",
+    "Correlating",
+    "Maximizing",
+    "Signalizing",
+    "Osafying",
+    "Steersmanning",
+    "Sorxing",
     // — playful general set —
-    "Accomplishing", "Actioning", "Actualizing", "Architecting", "Baking", "Beaming",
-    "Befuddling", "Billowing", "Blanching", "Bloviating", "Boogieing", "Boondoggling",
-    "Booping", "Bootstrapping", "Brewing", "Bunning", "Burrowing", "Calculating",
-    "Canoodling", "Caramelizing", "Cascading", "Catapulting", "Cerebrating", "Channeling",
-    "Choreographing", "Churning", "Coalescing", "Cogitating", "Combobulating", "Composing",
-    "Computing", "Concocting", "Considering", "Contemplating", "Cooking", "Crafting",
-    "Creating", "Crunching", "Crystallizing", "Cultivating", "Deciphering", "Deliberating",
-    "Determining", "Discombobulating", "Doing", "Doodling", "Drizzling", "Ebbing",
-    "Effecting", "Elucidating", "Embellishing", "Enchanting", "Envisioning", "Evaporating",
-    "Fermenting", "Finagling", "Flibbertigibbeting", "Flowing", "Flummoxing", "Fluttering",
-    "Forging", "Forming", "Frolicking", "Frosting", "Gallivanting", "Galloping",
-    "Garnishing", "Generating", "Gesticulating", "Germinating", "Grooving", "Gusting",
-    "Harmonizing", "Hashing", "Hatching", "Herding", "Honking", "Hullaballooing",
-    "Hyperspacing", "Ideating", "Imagining", "Improvising", "Incubating", "Inferring",
-    "Infusing", "Ionizing", "Jitterbugging", "Julienning", "Kneading", "Leavening",
-    "Levitating", "Lollygagging", "Manifesting", "Marinating", "Meandering", "Metamorphosing",
-    "Misting", "Moonwalking", "Moseying", "Mulling", "Mustering", "Musing",
-    "Nebulizing", "Nesting", "Noodling", "Nucleating", "Orbiting", "Orchestrating",
-    "Osmosing", "Perambulating", "Percolating", "Perusing", "Philosophising", "Photosynthesizing",
-    "Pollinating", "Pondering", "Pontificating", "Pouncing", "Precipitating", "Prestidigitating",
-    "Processing", "Proofing", "Propagating", "Puttering", "Puzzling", "Quantumizing",
-    "Razzmatazzing", "Recombobulating", "Reticulating", "Roosting", "Ruminating", "Scampering",
-    "Schlepping", "Scurrying", "Seasoning", "Shenaniganing", "Shimmying", "Simmering",
-    "Skedaddling", "Sketching", "Slithering", "Smooshing", "Spelunking", "Spinning",
-    "Sprouting", "Stewing", "Sublimating", "Swirling", "Swooping", "Synthesizing",
-    "Tempering", "Thinking", "Thundering", "Tinkering", "Tomfoolering", "Transfiguring",
-    "Transmuting", "Twisting", "Undulating", "Unfurling", "Unravelling", "Vibing",
-    "Waddling", "Wandering", "Warping", "Whirlpooling", "Whirring", "Whisking",
-    "Wibbling", "Working", "Wrangling", "Zesting", "Zigzagging",
+    "Accomplishing",
+    "Actioning",
+    "Actualizing",
+    "Architecting",
+    "Baking",
+    "Beaming",
+    "Befuddling",
+    "Billowing",
+    "Blanching",
+    "Bloviating",
+    "Boogieing",
+    "Boondoggling",
+    "Booping",
+    "Bootstrapping",
+    "Brewing",
+    "Bunning",
+    "Burrowing",
+    "Calculating",
+    "Canoodling",
+    "Caramelizing",
+    "Cascading",
+    "Catapulting",
+    "Cerebrating",
+    "Channeling",
+    "Choreographing",
+    "Churning",
+    "Coalescing",
+    "Cogitating",
+    "Combobulating",
+    "Composing",
+    "Computing",
+    "Concocting",
+    "Considering",
+    "Contemplating",
+    "Cooking",
+    "Crafting",
+    "Creating",
+    "Crunching",
+    "Crystallizing",
+    "Cultivating",
+    "Deciphering",
+    "Deliberating",
+    "Determining",
+    "Discombobulating",
+    "Doing",
+    "Doodling",
+    "Drizzling",
+    "Ebbing",
+    "Effecting",
+    "Elucidating",
+    "Embellishing",
+    "Enchanting",
+    "Envisioning",
+    "Evaporating",
+    "Fermenting",
+    "Finagling",
+    "Flibbertigibbeting",
+    "Flowing",
+    "Flummoxing",
+    "Fluttering",
+    "Forging",
+    "Forming",
+    "Frolicking",
+    "Frosting",
+    "Gallivanting",
+    "Galloping",
+    "Garnishing",
+    "Generating",
+    "Gesticulating",
+    "Germinating",
+    "Grooving",
+    "Gusting",
+    "Harmonizing",
+    "Hashing",
+    "Hatching",
+    "Herding",
+    "Honking",
+    "Hullaballooing",
+    "Hyperspacing",
+    "Ideating",
+    "Imagining",
+    "Improvising",
+    "Incubating",
+    "Inferring",
+    "Infusing",
+    "Ionizing",
+    "Jitterbugging",
+    "Julienning",
+    "Kneading",
+    "Leavening",
+    "Levitating",
+    "Lollygagging",
+    "Manifesting",
+    "Marinating",
+    "Meandering",
+    "Metamorphosing",
+    "Misting",
+    "Moonwalking",
+    "Moseying",
+    "Mulling",
+    "Mustering",
+    "Musing",
+    "Nebulizing",
+    "Nesting",
+    "Noodling",
+    "Nucleating",
+    "Orbiting",
+    "Orchestrating",
+    "Osmosing",
+    "Perambulating",
+    "Percolating",
+    "Perusing",
+    "Philosophising",
+    "Photosynthesizing",
+    "Pollinating",
+    "Pondering",
+    "Pontificating",
+    "Pouncing",
+    "Precipitating",
+    "Prestidigitating",
+    "Processing",
+    "Proofing",
+    "Propagating",
+    "Puttering",
+    "Puzzling",
+    "Quantumizing",
+    "Razzmatazzing",
+    "Recombobulating",
+    "Reticulating",
+    "Roosting",
+    "Ruminating",
+    "Scampering",
+    "Schlepping",
+    "Scurrying",
+    "Seasoning",
+    "Shenaniganing",
+    "Shimmying",
+    "Simmering",
+    "Skedaddling",
+    "Sketching",
+    "Slithering",
+    "Smooshing",
+    "Spelunking",
+    "Spinning",
+    "Sprouting",
+    "Stewing",
+    "Sublimating",
+    "Swirling",
+    "Swooping",
+    "Synthesizing",
+    "Tempering",
+    "Thinking",
+    "Thundering",
+    "Tinkering",
+    "Tomfoolering",
+    "Transfiguring",
+    "Transmuting",
+    "Twisting",
+    "Undulating",
+    "Unfurling",
+    "Unravelling",
+    "Vibing",
+    "Waddling",
+    "Wandering",
+    "Warping",
+    "Whirlpooling",
+    "Whirring",
+    "Whisking",
+    "Wibbling",
+    "Working",
+    "Wrangling",
+    "Zesting",
+    "Zigzagging",
 ];
 
 impl Activity {
@@ -1049,8 +1216,7 @@ impl Activity {
         self.llm_iteration = 0;
         self.llm_max_iterations = None;
         self.phrase_tick = 0;
-        self.verb_offset =
-            VERB_SEED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.verb_offset = VERB_SEED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let now = std::time::Instant::now();
         self.start_time = Some(now);
         self.phase_since = Some(now);
@@ -1146,8 +1312,10 @@ impl Activity {
     /// excluded, so the reported duration is time the AGENT spent working, not
     /// time the human spent reading a prompt.
     pub fn elapsed_secs(&self) -> Option<u64> {
-        self.start_time
-            .map(|_| self.elapsed_duration_at(std::time::Instant::now()).as_secs())
+        self.start_time.map(|_| {
+            self.elapsed_duration_at(std::time::Instant::now())
+                .as_secs()
+        })
     }
 
     /// Accumulated agent time at `now`: everything banked from earlier stretches
@@ -1290,7 +1458,11 @@ impl Activity {
                     overflowed = true;
                     break 'outer;
                 }
-                let prefix = if out.is_empty() { DETAILS_PREFIX } else { &indent };
+                let prefix = if out.is_empty() {
+                    DETAILS_PREFIX
+                } else {
+                    &indent
+                };
                 out.push(format!("{}{}", prefix, piece));
             }
         }
@@ -1302,7 +1474,11 @@ impl Activity {
             let on_first_row = out.len() == 1;
             if let Some(last) = out.last_mut() {
                 let body: String = last.chars().skip(prefix_chars).collect();
-                let prefix = if on_first_row { DETAILS_PREFIX } else { indent.as_str() };
+                let prefix = if on_first_row {
+                    DETAILS_PREFIX
+                } else {
+                    indent.as_str()
+                };
                 *last = format!("{}{}", prefix, ellipsize_cols(&body, content_cols));
             }
         }
@@ -1774,9 +1950,13 @@ impl Component for Activity {
         // spinner glyph, no braille feed, no color — just plain language a screen
         // reader can announce ("OSA: running (bash) (12s, 1.5k tokens)").
         if self.a11y {
-            let tokens =
-                (self.turn_output_tokens as usize).max((self.stream_chars + self.thinking_chars) / 4);
-            let mut text = format!("OSA: {} ({}", self.a11y_status(), crate::util::fmt_elapsed(elapsed));
+            let tokens = (self.turn_output_tokens as usize)
+                .max((self.stream_chars + self.thinking_chars) / 4);
+            let mut text = format!(
+                "OSA: {} ({}",
+                self.a11y_status(),
+                crate::util::fmt_elapsed(elapsed)
+            );
             if tokens > 0 {
                 text.push_str(&format!(", {} tokens", format_count(tokens)));
             }
@@ -1785,7 +1965,10 @@ impl Component for Activity {
             // matters MORE on this path, not less. Announced in the same plain
             // language as the rest of the line.
             if let Some(secs) = self.silent_secs() {
-                text.push_str(&format!(", no response for {}", crate::util::fmt_elapsed(secs)));
+                text.push_str(&format!(
+                    ", no response for {}",
+                    crate::util::fmt_elapsed(secs)
+                ));
             }
             text.push(')');
             frame.render_widget(
@@ -1847,8 +2030,8 @@ impl Component for Activity {
         // count in tick()). Gated like CC — hidden until ~30s in unless the user
         // asked for verbose — so short turns stay uncluttered while long ones show
         // tokens ticking to prove work is flowing.
-        let show_tokens = self.displayed_tokens > 0
-            && (elapsed >= 30 || self.verbosity == Verbosity::Verbose);
+        let show_tokens =
+            self.displayed_tokens > 0 && (elapsed >= 30 || self.verbosity == Verbosity::Verbose);
 
         // ONE timer, measured from turn start.
         //
@@ -1911,7 +2094,11 @@ impl Component for Activity {
         // this the row cannot distinguish working from wedged at any width.
         // Placed immediately after the interrupt hint so it is the last thing
         // dropped as the pane narrows.
-        let silence = if join_healthy { None } else { self.silent_secs() };
+        let silence = if join_healthy {
+            None
+        } else {
+            self.silent_secs()
+        };
         if let Some(secs) = silence {
             parts.push(format!("no response for {}", fmt_compact_tight(secs)));
         }
@@ -2048,7 +2235,10 @@ impl Component for Activity {
             (
                 Span::styled(format!("{} ", spinner_char), warn),
                 vec![Span::styled(
-                    format!("Retrying (attempt {}/{})\u{2026}", r.attempt, r.max_attempts),
+                    format!(
+                        "Retrying (attempt {}/{})\u{2026}",
+                        r.attempt, r.max_attempts
+                    ),
                     warn.add_modifier(Modifier::BOLD),
                 )],
             )
@@ -2153,9 +2343,15 @@ impl Component for Activity {
                     } else {
                         theme.faint()
                     };
-                    (format!(" \u{00b7} iter {}/{}", self.llm_iteration, max), style)
+                    (
+                        format!(" \u{00b7} iter {}/{}", self.llm_iteration, max),
+                        style,
+                    )
                 }
-                _ => (format!(" \u{00b7} iter {}", self.llm_iteration), theme.faint()),
+                _ => (
+                    format!(" \u{00b7} iter {}", self.llm_iteration),
+                    theme.faint(),
+                ),
             };
             spinner_spans.push(Span::styled(label, style));
         }
@@ -2347,7 +2543,9 @@ mod activity_tests {
         // stall, and an unset clock reports 0.0 intensity forever.
         let mut act = Activity::new();
         act.start();
-        let armed = act.last_output_at.expect("start() must arm the stall clock");
+        let armed = act
+            .last_output_at
+            .expect("start() must arm the stall clock");
         assert!(armed.elapsed().as_secs() < 1);
     }
 
@@ -2406,8 +2604,14 @@ mod activity_tests {
         act.set_phase(ProcessingPhase::Thinking);
         act.set_current_effort(Some("medium".into()));
         let text = render_activity_text(&act);
-        assert!(text.contains("thinking"), "thinking segment present: {text:?}");
-        assert!(text.contains("with medium effort"), "effort suffix present: {text:?}");
+        assert!(
+            text.contains("thinking"),
+            "thinking segment present: {text:?}"
+        );
+        assert!(
+            text.contains("with medium effort"),
+            "effort suffix present: {text:?}"
+        );
 
         // "off" / blank must not render an effort suffix.
         act.set_current_effort(Some("off".into()));
@@ -2565,7 +2769,10 @@ mod activity_tests {
     fn named_phase_states_the_phase_and_is_dormant_when_unset() {
         // Grok PhaseChanged mapping: each phase gets a distinct, human label.
         assert_eq!(StreamPhase::WaitingModel.label(), "Waiting on model");
-        assert_eq!(StreamPhase::StreamingReasoning.label(), "Streaming reasoning");
+        assert_eq!(
+            StreamPhase::StreamingReasoning.label(),
+            "Streaming reasoning"
+        );
         assert_eq!(StreamPhase::WritingAnswer.label(), "Writing answer");
 
         let mut act = Activity::new();
@@ -2609,7 +2816,10 @@ mod activity_tests {
             "true total must exceed output-only"
         );
         let text = render_activity_text(&act);
-        assert!(!text.contains("1.0k in"), "input context leaked onto the row: {text:?}");
+        assert!(
+            !text.contains("1.0k in"),
+            "input context leaked onto the row: {text:?}"
+        );
         assert!(text.contains("cached"), "cache tokens must surface");
     }
 
@@ -2643,14 +2853,22 @@ mod activity_tests {
         assert!(!render_activity_text(&act).contains("queued"));
         act.set_queued(3);
         let text = render_activity_text(&act);
-        assert!(text.contains("3 queued"), "queued hint must render, got: {text:?}");
+        assert!(
+            text.contains("3 queued"),
+            "queued hint must render, got: {text:?}"
+        );
 
         // U-T27 — width-gating keeps leading (priority) segments, drops trailing
         // ones (queued is last), and always keeps at least the first segment.
-        let parts: Vec<String> = ["esc to interrupt", "12s", "\u{2193} 1.2k tokens", "3 queued"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let parts: Vec<String> = [
+            "esc to interrupt",
+            "12s",
+            "\u{2193} 1.2k tokens",
+            "3 queued",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         // Ample budget keeps everything.
         assert_eq!(gate_parts(&parts, 200).len(), 4);
         // Tight budget keeps only the first, never an empty group.
@@ -2717,7 +2935,11 @@ mod activity_tests {
         // 7/8 must NOT round up to a full bar — that would announce completion
         // one whole LLM call early.
         let nearly = progress_bar(7, 8);
-        assert!(nearly.matches('\u{25B0}').count() < PROGRESS_BAR_CELLS, "{}", nearly);
+        assert!(
+            nearly.matches('\u{25B0}').count() < PROGRESS_BAR_CELLS,
+            "{}",
+            nearly
+        );
         assert!(!nearly.contains("100%"), "{}", nearly);
     }
 
@@ -2731,7 +2953,11 @@ mod activity_tests {
         // Filled vs empty differ by GLYPH, not colour, so the bar survives a
         // monochrome terminal and colour-blind readers.
         let bar = progress_bar(1, 4);
-        assert!(bar.contains('\u{25B0}') && bar.contains('\u{25B1}'), "{}", bar);
+        assert!(
+            bar.contains('\u{25B0}') && bar.contains('\u{25B1}'),
+            "{}",
+            bar
+        );
     }
 
     #[test]
@@ -2778,7 +3004,7 @@ mod activity_tests {
         // Small gap steps by at least +3 (visible tick) but never past target.
         assert_eq!(ease_tokens(0, 5), 3);
         assert_eq!(ease_tokens(0, 2), 2); // gap smaller than the min step → land on target
-        // Large gap is capped at +50 so a big jump animates instead of snapping.
+                                          // Large gap is capped at +50 so a big jump animates instead of snapping.
         assert_eq!(ease_tokens(0, 100_000), 50);
         // At/over the target it holds (tokens are monotonic; never counts down).
         assert_eq!(ease_tokens(500, 500), 500);
@@ -2809,7 +3035,10 @@ mod activity_tests {
         assert_eq!(stall_t(0.0), 0.0);
         assert_eq!(stall_t(2.9), 0.0);
         assert_eq!(stall_t(3.0), 0.0, "exactly at the threshold is still calm");
-        assert!(stall_t(4.5) > 0.0 && stall_t(4.5) < 1.0, "ramps in the band");
+        assert!(
+            stall_t(4.5) > 0.0 && stall_t(4.5) < 1.0,
+            "ramps in the band"
+        );
         assert_eq!(stall_t(6.0), 1.0, "fully red a few seconds past threshold");
         assert_eq!(stall_t(100.0), 1.0, "saturates, never exceeds 1");
 
@@ -2817,9 +3046,18 @@ mod activity_tests {
         // stall lands on error-red.
         let base = Color::Rgb(147, 165, 255);
         let red = Color::Rgb(255, 0, 0);
-        assert_eq!(crate::style::gradient::lerp_color(base, red, stall_t(0.0)), base);
-        assert_ne!(crate::style::gradient::lerp_color(base, red, stall_t(5.0)), base);
-        assert_eq!(crate::style::gradient::lerp_color(base, red, stall_t(6.0)), red);
+        assert_eq!(
+            crate::style::gradient::lerp_color(base, red, stall_t(0.0)),
+            base
+        );
+        assert_ne!(
+            crate::style::gradient::lerp_color(base, red, stall_t(5.0)),
+            base
+        );
+        assert_eq!(
+            crate::style::gradient::lerp_color(base, red, stall_t(6.0)),
+            red
+        );
     }
 
     #[test]
@@ -2913,7 +3151,10 @@ mod activity_tests {
         // Reduced-motion freezes the wave to a static rail even while working.
         act.set_reduced_motion(true);
         assert_eq!(act.rail_accent(&theme), theme.colors.success);
-        assert!(act.rail_frozen(), "reduced-motion paints a static full rail");
+        assert!(
+            act.rail_frozen(),
+            "reduced-motion paints a static full rail"
+        );
     }
 
     #[test]
@@ -3166,7 +3407,9 @@ mod activity_tests {
         term.draw(|f| join.draw(f, f.area())).unwrap();
         let buf = term.backend().buffer().clone();
         let row: String = (0..120).map(|x| buf[(x, 0)].symbol().to_string()).collect();
-        let col = row.find("waiting on backend").expect("detail must be on the row");
+        let col = row
+            .find("waiting on backend")
+            .expect("detail must be on the row");
         let theme = crate::style::theme();
         assert_ne!(
             buf[(col as u16, 0)].style().fg,
@@ -3227,7 +3470,8 @@ mod activity_tests {
         // `set_tokens` is a frame, so it just refreshed the stall clock. Re-age
         // it: the state under test is "these counters arrived, and then nothing
         // did for an hour and fifty-one minutes" — which is the screenshot.
-        wedged.last_output_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(6670));
+        wedged.last_output_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(6670));
 
         // Wide: everything is on the row.
         let wide = render_activity_text_sized(&wedged, 160, 1);
@@ -3251,14 +3495,21 @@ mod activity_tests {
         let mut act = Activity::new();
         act.start();
         assert!(act.details().is_none());
-        assert_eq!(act.wrapped_details_lines(40).len(), 0, "no details ⇒ no rows");
+        assert_eq!(
+            act.wrapped_details_lines(40).len(),
+            0,
+            "no details ⇒ no rows"
+        );
 
         // Blank text clears rather than reserving an empty row.
         act.set_details(Some("   ".into()), ACTIVITY_DETAILS_DEFAULT_MAX_LINES);
         assert!(act.details().is_none());
 
         // Fits on one row: just the prefix, no wrapping, no ellipsis.
-        act.set_details(Some("cargo test".into()), ACTIVITY_DETAILS_DEFAULT_MAX_LINES);
+        act.set_details(
+            Some("cargo test".into()),
+            ACTIVITY_DETAILS_DEFAULT_MAX_LINES,
+        );
         let rows = act.wrapped_details_lines(40);
         assert_eq!(rows, vec!["  \u{2514} cargo test".to_string()]);
 
@@ -3270,8 +3521,14 @@ mod activity_tests {
         let rows = act.wrapped_details_lines(30);
         assert_eq!(rows.len(), 2, "one wrap at width 30, got {rows:?}");
         assert!(rows[0].starts_with("  \u{2514} "));
-        assert!(rows[1].starts_with("    "), "continuation is indented: {rows:?}");
-        assert!(!rows[1].starts_with("  \u{2514}"), "prefix only on the first row");
+        assert!(
+            rows[1].starts_with("    "),
+            "continuation is indented: {rows:?}"
+        );
+        assert!(
+            !rows[1].starts_with("  \u{2514}"),
+            "prefix only on the first row"
+        );
         for r in &rows {
             assert!(crate::util::cols(r) <= 30, "row overflows width: {r:?}");
         }
@@ -3329,13 +3586,19 @@ mod activity_tests {
                 ACTIVITY_DETAILS_DEFAULT_MAX_LINES,
             );
             // Before any draw the width is unknown ⇒ reserve the ceiling.
-            assert_eq!(act.height(), bare + ACTIVITY_DETAILS_DEFAULT_MAX_LINES as u16);
+            assert_eq!(
+                act.height(),
+                bare + ACTIVITY_DETAILS_DEFAULT_MAX_LINES as u16
+            );
             assert!(act.height() <= act.max_height());
             assert_eq!(act.height(), act.max_height());
 
             // After a draw the reservation tightens to the rows actually painted.
             let text = render_activity_text_sized(&act, 120, act.height());
-            assert!(text.contains('\u{2514}'), "details row must render: {text:?}");
+            assert!(
+                text.contains('\u{2514}'),
+                "details row must render: {text:?}"
+            );
             assert_eq!(act.details_rows(), 1, "wide pane ⇒ a single details row");
             assert_eq!(act.height(), bare + 1);
             assert_eq!(act.height(), act.max_height());
@@ -3534,7 +3797,11 @@ mod slot_invariant_tests {
 
         // The preview shows the freshest stream — df — and ONLY df's lines.
         let df_view = act.live_output_lines();
-        assert_eq!(df_view, vec!["df line 1", "df line 2"], "df stream leaked du output");
+        assert_eq!(
+            df_view,
+            vec!["df line 1", "df line 2"],
+            "df stream leaked du output"
+        );
 
         // du's buffer is intact and uncontaminated: a delta on it brings its
         // own complete history back into view.
@@ -3553,7 +3820,10 @@ mod slot_invariant_tests {
         // One call finishing drops only ITS buffer.
         act.clear_command_output_for("call_x2");
         assert!(act.live_stream_is_empty("call_x2"));
-        assert!(!act.live_stream_is_empty("call_du"), "du must survive x2 ending");
+        assert!(
+            !act.live_stream_is_empty("call_du"),
+            "du must survive x2 ending"
+        );
         assert!(!act.live_stream_is_empty("call_x1"));
 
         // Turn end drops everything.
@@ -3626,15 +3896,9 @@ mod slot_invariant_tests {
             "alinkb"
         );
         // BEL-terminated OSC (window title) — the other legal terminator.
-        assert_eq!(
-            sanitize_live_line("x\u{1b}]0;my title\u{7}y", 40),
-            "xy"
-        );
+        assert_eq!(sanitize_live_line("x\u{1b}]0;my title\u{7}y", 40), "xy");
         // The tmux DCS passthrough wrapper is a string-family escape too.
-        assert_eq!(
-            sanitize_live_line("p\u{1b}P tmux;junk\u{1b}\\q", 40),
-            "pq"
-        );
+        assert_eq!(sanitize_live_line("p\u{1b}P tmux;junk\u{1b}\\q", 40), "pq");
         // Wide chars are measured in COLUMNS, not bytes.
         assert_eq!(sanitize_live_line("\u{4f60}\u{597d}", 3), "\u{4f60}");
     }
@@ -3690,7 +3954,8 @@ mod turn_start_indicator_tests {
 
         let h = activity.height();
         let mut term = Terminal::new(TestBackend::new(80, h)).unwrap();
-        term.draw(|f| activity.draw(f, Rect::new(0, 0, 80, h))).unwrap();
+        term.draw(|f| activity.draw(f, Rect::new(0, 0, 80, h)))
+            .unwrap();
         let buf = term.backend().buffer().clone();
 
         let painted: String = (0..h)

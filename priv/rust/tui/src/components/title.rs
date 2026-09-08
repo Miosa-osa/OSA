@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const BUSY_ANIM_MS: u128 = 960;
 
 use crate::terminal_title::{
-    SetTerminalTitleResult, clear_title_sequence, prepare_title_sequence, sanitize_terminal_title,
+    clear_title_sequence, prepare_title_sequence, sanitize_terminal_title, SetTerminalTitleResult,
 };
 
 /// Strip control characters, bidi/invisible codepoints and redundant
@@ -176,7 +176,10 @@ mod tests {
             SetTerminalTitleResult::NoVisibleContent
         );
         assert_eq!(st.last, "");
-        assert_eq!(st.update("OSA \u{2014} osa"), SetTerminalTitleResult::Applied);
+        assert_eq!(
+            st.update("OSA \u{2014} osa"),
+            SetTerminalTitleResult::Applied
+        );
     }
 
     #[test]

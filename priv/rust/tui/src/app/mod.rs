@@ -1174,7 +1174,9 @@ impl App {
         &mut self,
         report: crate::components::completion_panel::CompletionReport,
     ) {
-        self.completion_panel = Some(crate::components::completion_panel::CompletionPanel::new(report));
+        self.completion_panel = Some(crate::components::completion_panel::CompletionPanel::new(
+            report,
+        ));
         if self.state.can_transition_to(AppState::GoalCompletion) {
             self.enter_overlay(AppState::GoalCompletion);
         }

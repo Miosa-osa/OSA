@@ -80,7 +80,10 @@ impl McpServers {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> McpServersAction {
         // Chorded shortcuts belong to the app, not this list.
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return McpServersAction::None;
         }
         let last = self.servers.len().saturating_sub(1);
@@ -210,7 +213,9 @@ impl McpServers {
             let scroll = crate::dialogs::clamp_scroll_to_cursor(self.scroll, self.cursor, vp);
             for rel in 0..(list_h as usize) {
                 let abs = rel + scroll;
-                let Some(s) = self.servers.get(abs) else { break };
+                let Some(s) = self.servers.get(abs) else {
+                    break;
+                };
                 let ry = cy + rel as u16;
                 let selected = abs == self.cursor;
                 self.draw_row(frame, s, selected, Rect::new(inner.x, ry, iw, 1), c, &theme);
@@ -224,17 +229,23 @@ impl McpServers {
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     "\u{2191}\u{2193}",
-                    Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" nav  ", Style::default().fg(c.dim)),
                 Span::styled(
                     "space",
-                    Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" enable/disable  ", Style::default().fg(c.dim)),
                 Span::styled(
                     "esc",
-                    Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" close", Style::default().fg(c.dim)),
             ])),
@@ -282,7 +293,11 @@ impl McpServers {
         }
 
         // Reserve space for a right-aligned "off" tag when present.
-        let tag_w = if off_tag.is_empty() { 0 } else { crate::util::cols(&off_tag) + 1 };
+        let tag_w = if off_tag.is_empty() {
+            0
+        } else {
+            crate::util::cols(&off_tag) + 1
+        };
         let body_w = maxw.saturating_sub(tag_w);
 
         let dot = Span::styled("\u{25CF} ", Style::default().fg(dot_color));
@@ -293,7 +308,9 @@ impl McpServers {
             dot,
             Span::styled(
                 name,
-                Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(c.secondary)
+                    .add_modifier(Modifier::BOLD),
             ),
         ];
         let remaining = body_w.saturating_sub(used);
@@ -320,7 +337,10 @@ impl McpServers {
 
 /// Whether a status string reads as an established connection.
 fn is_connected(status: &str) -> bool {
-    matches!(status.trim().to_lowercase().as_str(), "connected" | "ready" | "up")
+    matches!(
+        status.trim().to_lowercase().as_str(),
+        "connected" | "ready" | "up"
+    )
 }
 
 /// Map a server status to its dot color.
@@ -353,11 +373,51 @@ mod mcp_servers_tests {
 
     fn sample() -> Vec<McpServer> {
         vec![
-            McpServer { name: "filesystem".into(), transport: "stdio".into(), enabled: true, status: "connected".into(), tool_count: 12, source: "claude_code".into(), toggleable: true },
-            McpServer { name: "github".into(), transport: "stdio".into(), enabled: true, status: "connecting".into(), tool_count: 0, source: "claude_code".into(), toggleable: true },
-            McpServer { name: "postgres".into(), transport: "http".into(), enabled: false, status: "disabled".into(), tool_count: 3, source: "claude_code".into(), toggleable: true },
-            McpServer { name: "sentry".into(), transport: "sse".into(), enabled: true, status: "error".into(), tool_count: 1, source: "claude_code".into(), toggleable: true },
-            McpServer { name: "\u{4e2d}\u{6587}\u{670d}\u{52a1}\u{5668}".into(), transport: "\u{20ac}".repeat(40), enabled: true, status: "ready".into(), tool_count: 99, source: "claude_code".into(), toggleable: true },
+            McpServer {
+                name: "filesystem".into(),
+                transport: "stdio".into(),
+                enabled: true,
+                status: "connected".into(),
+                tool_count: 12,
+                source: "claude_code".into(),
+                toggleable: true,
+            },
+            McpServer {
+                name: "github".into(),
+                transport: "stdio".into(),
+                enabled: true,
+                status: "connecting".into(),
+                tool_count: 0,
+                source: "claude_code".into(),
+                toggleable: true,
+            },
+            McpServer {
+                name: "postgres".into(),
+                transport: "http".into(),
+                enabled: false,
+                status: "disabled".into(),
+                tool_count: 3,
+                source: "claude_code".into(),
+                toggleable: true,
+            },
+            McpServer {
+                name: "sentry".into(),
+                transport: "sse".into(),
+                enabled: true,
+                status: "error".into(),
+                tool_count: 1,
+                source: "claude_code".into(),
+                toggleable: true,
+            },
+            McpServer {
+                name: "\u{4e2d}\u{6587}\u{670d}\u{52a1}\u{5668}".into(),
+                transport: "\u{20ac}".repeat(40),
+                enabled: true,
+                status: "ready".into(),
+                tool_count: 99,
+                source: "claude_code".into(),
+                toggleable: true,
+            },
         ]
     }
 
@@ -388,7 +448,10 @@ mod mcp_servers_tests {
     #[test]
     fn esc_and_q_close() {
         let mut m = McpServers::new(sample());
-        assert_eq!(m.handle_key(key(KeyCode::Char('q'))), McpServersAction::Close);
+        assert_eq!(
+            m.handle_key(key(KeyCode::Char('q'))),
+            McpServersAction::Close
+        );
         assert_eq!(m.handle_key(key(KeyCode::Esc)), McpServersAction::Close);
     }
 

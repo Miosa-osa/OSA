@@ -22,10 +22,10 @@ pub fn dark() -> Theme {
             primary: hex("#06B6D4"),   // OSA blue — accent, spinner, headers, banner
             secondary: hex("#7DD3FC"), // light blue — user, paths, tool names
             success: Color::Rgb(78, 186, 101), // green — success bullet, done
-            warning: Color::Rgb(255, 193, 7),  // amber
-            error: Color::Rgb(255, 107, 128),  // red — error bullet
-            muted: Color::Rgb(153, 153, 153),  // meta, durations
-            dim: Color::Rgb(80, 80, 80),       // hints, pending bullet, faint rules
+            warning: Color::Rgb(255, 193, 7), // amber
+            error: Color::Rgb(255, 107, 128), // red — error bullet
+            muted: Color::Rgb(153, 153, 153), // meta, durations
+            dim: Color::Rgb(80, 80, 80), // hints, pending bullet, faint rules
             border: Color::Rgb(120, 120, 120), // input-box rule (neutral gray)
             msg_border_user: hex("#7DD3FC"),
             msg_border_agent: hex("#06B6D4"),
@@ -38,10 +38,10 @@ pub fn dark() -> Theme {
             input_bg: hex("#111827"),
             selection_bg: hex("#1E3A5F"), // subtle blue selection
             dialog_bg: hex("#1F2937"),
-            button_active_bg: hex("#06B6D4"),  // OSA blue
+            button_active_bg: hex("#06B6D4"), // OSA blue
             button_active_text: hex("#08131A"),
-            grad_a: hex("#E6F6FD"),   // OSA logo gradient: near-white light blue →
-            grad_b: hex("#06B6D4"),   // OSA blue — visible light→blue fade
+            grad_a: hex("#E6F6FD"), // OSA logo gradient: near-white light blue →
+            grad_b: hex("#06B6D4"), // OSA blue — visible light→blue fade
             // Fenced-code block: a full-row background one step off the
             // terminal ground, plus a body-weight foreground for untagged code.
             code_bg: hex("#151B26"),

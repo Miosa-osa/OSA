@@ -237,7 +237,10 @@ fn the_bands_tile_the_region_with_no_row_shared_and_no_row_lost() {
                     "the bands stop at {cursor} but the region ends at {} ({w}x{h})",
                     area.y + area.height
                 );
-                assert_eq!(total, area.height, "the bands must sum to the region ({w}x{h})");
+                assert_eq!(
+                    total, area.height,
+                    "the bands must sum to the region ({w}x{h})"
+                );
             }
         }
     }

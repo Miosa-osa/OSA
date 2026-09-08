@@ -127,9 +127,7 @@ impl FilePicker {
     fn apply_filter(&mut self) {
         let f = self.filter.to_lowercase();
         self.filtered = (0..self.entries.len())
-            .filter(|&i| {
-                f.is_empty() || self.entries[i].name.to_lowercase().contains(&f)
-            })
+            .filter(|&i| f.is_empty() || self.entries[i].name.to_lowercase().contains(&f))
             .collect();
         self.cursor = self.cursor.min(self.filtered.len().saturating_sub(1));
         self.adjust_scroll();
@@ -139,7 +137,10 @@ impl FilePicker {
 
     fn move_up(&mut self) {
         if !self.filtered.is_empty() {
-            self.cursor = self.cursor.checked_sub(1).unwrap_or(self.filtered.len() - 1);
+            self.cursor = self
+                .cursor
+                .checked_sub(1)
+                .unwrap_or(self.filtered.len() - 1);
             self.adjust_scroll();
         }
     }
@@ -177,9 +178,7 @@ impl FilePicker {
             } else {
                 let mut path = self.current_dir.clone();
                 path.push(&entry.name);
-                Some(FilePickerAction::Select(
-                    path.to_string_lossy().to_string(),
-                ))
+                Some(FilePickerAction::Select(path.to_string_lossy().to_string()))
             }
         } else {
             None
@@ -197,7 +196,10 @@ impl FilePicker {
     // ── Key handling ─────────────────────────────────────────────────────────
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<FilePickerAction> {
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return None;
         }
 
@@ -288,8 +290,7 @@ impl FilePicker {
             format!("  Filter: {}_  ({} items)", self.filter, count)
         };
         frame.render_widget(
-            Paragraph::new(filter_display)
-                .style(Style::default().fg(theme.colors.muted)),
+            Paragraph::new(filter_display).style(Style::default().fg(theme.colors.muted)),
             Rect::new(inner.x, cy, inner.width, 1),
         );
         cy += 1;
@@ -297,8 +298,7 @@ impl FilePicker {
         // Error if any
         if let Some(err) = &self.error {
             frame.render_widget(
-                Paragraph::new(format!("  ⚠ {}", err))
-                    .style(theme.error_text()),
+                Paragraph::new(format!("  ⚠ {}", err)).style(theme.error_text()),
                 Rect::new(inner.x, cy, inner.width, 1),
             );
             cy += 1;
@@ -320,11 +320,7 @@ impl FilePicker {
             self.cursor,
             (list_h as usize).max(1),
         );
-        let visible = self
-            .filtered
-            .iter()
-            .skip(scroll)
-            .take(list_h as usize);
+        let visible = self.filtered.iter().skip(scroll).take(list_h as usize);
 
         for (rel_i, &idx) in visible.enumerate() {
             let abs_i = rel_i + scroll;
@@ -418,7 +414,10 @@ mod picker_render_tests {
     /// with mid-char cuts on a narrow dialog.
     fn unicode_dir() -> PathBuf {
         let mut dir = std::env::temp_dir();
-        dir.push(format!("osa_fp_test_\u{4e2d}\u{6587}_{}", std::process::id()));
+        dir.push(format!(
+            "osa_fp_test_\u{4e2d}\u{6587}_{}",
+            std::process::id()
+        ));
         // A deeply-nested unicode path for the from-the-right header shortening.
         dir.push("caf\u{e9}_\u{20ac}\u{20ac}\u{20ac}_directory_with_a_long_unicode_name");
         let _ = std::fs::create_dir_all(&dir);

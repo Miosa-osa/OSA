@@ -152,16 +152,32 @@ mod tests {
     #[test]
     fn env_detection_matches_known_terminals() {
         assert!(env_supports_kitty_keyboard_from(
-            Some("xterm-kitty"), None, false, false, false
+            Some("xterm-kitty"),
+            None,
+            false,
+            false,
+            false
         ));
         assert!(env_supports_kitty_keyboard_from(
-            Some("xterm-256color"), None, true, false, false // KITTY_WINDOW_ID
+            Some("xterm-256color"),
+            None,
+            true,
+            false,
+            false // KITTY_WINDOW_ID
         ));
         assert!(env_supports_kitty_keyboard_from(
-            Some("screen"), Some("ghostty"), false, false, false
+            Some("screen"),
+            Some("ghostty"),
+            false,
+            false,
+            false
         ));
         assert!(!env_supports_kitty_keyboard_from(
-            Some("xterm-256color"), Some("Apple_Terminal"), false, false, false
+            Some("xterm-256color"),
+            Some("Apple_Terminal"),
+            false,
+            false,
+            false
         ));
     }
 

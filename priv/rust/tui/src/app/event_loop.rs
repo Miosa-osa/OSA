@@ -507,7 +507,6 @@ pub(crate) fn bottom_anchored(slot: Rect, content: u16) -> Rect {
     }
 }
 
-
 pub(crate) fn live_region_height(input_needed: u16, term_rows: u16) -> u16 {
     const OVERHEAD: u16 = 3;
     let want = OVERHEAD.saturating_add(input_needed);
@@ -567,8 +566,7 @@ pub(crate) const STREAM_PREVIEW_STEP: u16 = 6;
 /// the activity feed's tick (so an actively moving band is never shrunk between
 /// updates) and below human perception of a settled screen (so the rows come
 /// back before the user reads the gap as a defect).
-pub(crate) const SLOT_SHRINK_HOLD: std::time::Duration =
-    std::time::Duration::from_millis(200);
+pub(crate) const SLOT_SHRINK_HOLD: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Largest preview slot allowed on a terminal of `term_rows` rows.
 ///
@@ -626,12 +624,7 @@ impl DampedSlot {
     ///
     /// `now` is a parameter rather than an `Instant::now()` call so the timing
     /// behaviour is testable against a synthetic clock.
-    pub(crate) fn resolve(
-        &mut self,
-        content_h: u16,
-        ceiling: u16,
-        now: std::time::Instant,
-    ) -> u16 {
+    pub(crate) fn resolve(&mut self, content_h: u16, ceiling: u16, now: std::time::Instant) -> u16 {
         let want = content_h.min(ceiling);
         if want >= self.reserved {
             // Growth, or already exact. Either way there is no pending shrink.
@@ -1239,8 +1232,8 @@ impl App {
                     // Neither happens if the top simply stays. `min` is the only
                     // clamp: it never lets the region hang off the bottom, and on
                     // a screen with room it is the identity.
-                    let old_top = last_inline_top
-                        .unwrap_or_else(|| size.rows.saturating_sub(cur_inline_h));
+                    let old_top =
+                        last_inline_top.unwrap_or_else(|| size.rows.saturating_sub(cur_inline_h));
                     // Which erase this resize will use decides where the region may
                     // be rebuilt, so resolve it ONCE and let both follow from it.
                     // Splitting the two is what produced the blank band: the clear
@@ -1451,9 +1444,7 @@ impl App {
             // 1b. Emit the OSA welcome banner (bordered box + ASCII logo) into the
             //     scrollback exactly once, before any messages, so it sits at the top.
             if !was_full {
-                if let Some((tool_count, provider, model)) =
-                    self.pending_welcome_banner.take()
-                {
+                if let Some((tool_count, provider, model)) = self.pending_welcome_banner.take() {
                     // This frame's width (the inline frame area can lag a resize
                     // and under-report it, which is why the banner must use the
                     // frame's sampled size rather than `get_frame().area()`).
@@ -1558,8 +1549,7 @@ impl App {
                     // the single choke point every message passes through, so it
                     // retains the full conversation regardless of which handler
                     // produced it.
-                    if let Some(entry) =
-                        crate::dialogs::transcript_viewer::entry_from_message(&msg)
+                    if let Some(entry) = crate::dialogs::transcript_viewer::entry_from_message(&msg)
                     {
                         // Same choke point, so the exit dump and the re-layout
                         // store cannot drift apart.
@@ -1781,7 +1771,9 @@ impl App {
         }
 
         info!("App exiting cleanly");
-        Ok(crate::app::resume::ExitOutcome::normal(self.exit_resume_hint()))
+        Ok(crate::app::resume::ExitOutcome::normal(
+            self.exit_resume_hint(),
+        ))
     }
 
     /// The `Resume this session with: …` block to print after teardown, or
@@ -1845,7 +1837,9 @@ impl App {
                     // interrupt generation or force premature finalization.
                     let mut entries = self.transcript_log.clone();
                     for msg in self.chat.pending_scrollback() {
-                        if let Some(entry) = crate::dialogs::transcript_viewer::entry_from_message(msg) {
+                        if let Some(entry) =
+                            crate::dialogs::transcript_viewer::entry_from_message(msg)
+                        {
                             entries.push(entry);
                         }
                     }
@@ -1856,10 +1850,9 @@ impl App {
                             text: tail.to_owned(),
                         });
                     }
-                    self.transcript =
-                        Some(crate::dialogs::transcript_viewer::TranscriptViewer::open(
-                            &entries,
-                        ));
+                    self.transcript = Some(
+                        crate::dialogs::transcript_viewer::TranscriptViewer::open(&entries),
+                    );
                     self.transcript_override = Some(entries);
                     return false;
                 }
@@ -1967,8 +1960,10 @@ impl App {
                 };
             tv.draw(frame, area, entries);
             if self.toasts.has_toasts() {
-                self.toasts
-                    .draw(frame, toast_rect(area, self.toasts.live_count()).intersection(area));
+                self.toasts.draw(
+                    frame,
+                    toast_rect(area, self.toasts.live_count()).intersection(area),
+                );
             }
             return;
         }
@@ -1977,11 +1972,7 @@ impl App {
             frame.render_widget(ratatui::widgets::Clear, area);
             match self.state {
                 AppState::Connecting => {
-                    crate::view::connecting::draw_connecting(
-                        frame,
-                        area,
-                        self.connecting_draft(),
-                    );
+                    crate::view::connecting::draw_connecting(frame, area, self.connecting_draft());
                 }
                 AppState::Onboarding => {
                     if let Some(ref wizard) = self.onboarding {
@@ -2033,148 +2024,150 @@ impl App {
                         }
                         None => {
                             match self.state {
-                            AppState::Quit => self.quit_dialog.draw(frame, area),
-                            AppState::Palette => self.palette.draw(frame, area),
-                            AppState::ModelPicker => {
-                                if let Some(ref m) = self.model_picker {
-                                    m.draw(frame, area);
+                                AppState::Quit => self.quit_dialog.draw(frame, area),
+                                AppState::Palette => self.palette.draw(frame, area),
+                                AppState::ModelPicker => {
+                                    if let Some(ref m) = self.model_picker {
+                                        m.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Sessions => {
-                                if let Some(ref b) = self.session_browser {
-                                    b.draw(frame, area);
+                                AppState::Sessions => {
+                                    if let Some(ref b) = self.session_browser {
+                                        b.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Rewind => {
-                                if let Some(ref d) = self.rewind_dialog {
-                                    d.draw(frame, area);
+                                AppState::Rewind => {
+                                    if let Some(ref d) = self.rewind_dialog {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            // AppState::Permissions has no draw arm here: the
-                            // permission ask renders inline (see draw_inline), and
-                            // Permissions is not an is_overlay() state, so this
-                            // full-viewport branch was unreachable dead code and was
-                            // removed. It falls through to the `_ => {}` no-op.
-                            // AppState::PlanReview has no draw arm here: like the
-                            // permission ask, the plan-review panel renders INLINE
-                            // (see draw_inline), and PlanReview is no longer an
-                            // is_overlay() state, so this full-viewport branch was
-                            // unreachable. It falls through to the `_ => {}` no-op.
-                            // AppState::Survey has no draw arm either: the
-                            // ask_user picker renders INLINE in its own reserved
-                            // band (see `survey_slot` / `draw_inline`) and Survey
-                            // is no longer an is_overlay() state, so this
-                            // full-viewport branch is unreachable. It falls
-                            // through to the `_ => {}` no-op.
-                            AppState::Status => {
-                                // Stateless: build a live snapshot each frame so the
-                                // dashboard numbers are never stale.
-                                let view = crate::dialogs::status_dashboard::StatusView {
-                                    model: self.header.model_name().to_string(),
-                                    provider: self.header.provider().to_string(),
-                                    tools: self.header.tool_count(),
-                                    context_util: self.status.context_utilization(),
-                                    context_max: self.status.context_max_label(),
-                                    mode: self.status.permission_mode(),
-                                    session: self.session_id.clone(),
-                                    version: crate::config::osa_version_display().to_string(),
-                                };
-                                crate::dialogs::status_dashboard::draw(frame, area, &view);
-                            }
-                            AppState::ThemePicker => {
-                                if let Some(ref d) = self.theme_picker {
-                                    d.draw(frame, area);
+                                // AppState::Permissions has no draw arm here: the
+                                // permission ask renders inline (see draw_inline), and
+                                // Permissions is not an is_overlay() state, so this
+                                // full-viewport branch was unreachable dead code and was
+                                // removed. It falls through to the `_ => {}` no-op.
+                                // AppState::PlanReview has no draw arm here: like the
+                                // permission ask, the plan-review panel renders INLINE
+                                // (see draw_inline), and PlanReview is no longer an
+                                // is_overlay() state, so this full-viewport branch was
+                                // unreachable. It falls through to the `_ => {}` no-op.
+                                // AppState::Survey has no draw arm either: the
+                                // ask_user picker renders INLINE in its own reserved
+                                // band (see `survey_slot` / `draw_inline`) and Survey
+                                // is no longer an is_overlay() state, so this
+                                // full-viewport branch is unreachable. It falls
+                                // through to the `_ => {}` no-op.
+                                AppState::Status => {
+                                    // Stateless: build a live snapshot each frame so the
+                                    // dashboard numbers are never stale.
+                                    let view = crate::dialogs::status_dashboard::StatusView {
+                                        model: self.header.model_name().to_string(),
+                                        provider: self.header.provider().to_string(),
+                                        tools: self.header.tool_count(),
+                                        context_util: self.status.context_utilization(),
+                                        context_max: self.status.context_max_label(),
+                                        mode: self.status.permission_mode(),
+                                        session: self.session_id.clone(),
+                                        version: crate::config::osa_version_display().to_string(),
+                                    };
+                                    crate::dialogs::status_dashboard::draw(frame, area, &view);
                                 }
-                            }
-                            AppState::Keybindings => {
-                                if let Some(ref d) = self.keybindings_viewer {
-                                    d.draw(frame, area);
+                                AppState::ThemePicker => {
+                                    if let Some(ref d) = self.theme_picker {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Tools => {
-                                if let Some(ref d) = self.tools_browser {
-                                    d.draw(frame, area);
+                                AppState::Keybindings => {
+                                    if let Some(ref d) = self.keybindings_viewer {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::ContextBreakdown => {
-                                if let Some(ref s) = self.context_stats {
-                                    crate::dialogs::context_breakdown::draw(frame, area, s);
+                                AppState::Tools => {
+                                    if let Some(ref d) = self.tools_browser {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Trust => {
-                                if let Some(ref d) = self.trust_dialog {
-                                    d.draw(frame, area);
+                                AppState::ContextBreakdown => {
+                                    if let Some(ref s) = self.context_stats {
+                                        crate::dialogs::context_breakdown::draw(frame, area, s);
+                                    }
                                 }
-                            }
-                            AppState::PermissionsManager => {
-                                if let Some(ref d) = self.permissions_manager {
-                                    d.draw(frame, area);
+                                AppState::Trust => {
+                                    if let Some(ref d) = self.trust_dialog {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Hooks => {
-                                if let Some(ref d) = self.hooks_viewer {
-                                    d.draw(frame, area);
+                                AppState::PermissionsManager => {
+                                    if let Some(ref d) = self.permissions_manager {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Mcp => {
-                                if let Some(ref d) = self.mcp_servers {
-                                    d.draw(frame, area);
+                                AppState::Hooks => {
+                                    if let Some(ref d) = self.hooks_viewer {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Cost => {
-                                if let Some(ref d) = self.cost_dashboard {
-                                    d.draw(frame, area);
+                                AppState::Mcp => {
+                                    if let Some(ref d) = self.mcp_servers {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Skills => {
-                                if let Some(ref d) = self.skills_browser {
-                                    d.draw(frame, area);
+                                AppState::Cost => {
+                                    if let Some(ref d) = self.cost_dashboard {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Channels => {
-                                if let Some(ref d) = self.channels_panel {
-                                    d.draw(frame, area);
+                                AppState::Skills => {
+                                    if let Some(ref d) = self.skills_browser {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Memory => {
-                                if let Some(ref d) = self.memory_browser {
-                                    d.draw(frame, area);
+                                AppState::Channels => {
+                                    if let Some(ref d) = self.channels_panel {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Persona => {
-                                if let Some(ref d) = self.persona_picker {
-                                    d.draw(frame, area);
+                                AppState::Memory => {
+                                    if let Some(ref d) = self.memory_browser {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Sandbox => {
-                                if let Some(ref d) = self.sandbox_picker {
-                                    d.draw(frame, area);
+                                AppState::Persona => {
+                                    if let Some(ref d) = self.persona_picker {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Metrics => {
-                                if let Some(ref d) = self.metrics_dashboard {
-                                    d.draw(frame, area);
+                                AppState::Sandbox => {
+                                    if let Some(ref d) = self.sandbox_picker {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Tasks => {
-                                if let Some(ref d) = self.tasks_panel {
-                                    d.draw(frame, area);
+                                AppState::Metrics => {
+                                    if let Some(ref d) = self.metrics_dashboard {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::GoalCompletion => {
-                                if let Some(ref p) = self.completion_panel {
-                                    p.draw(frame, area);
+                                AppState::Tasks => {
+                                    if let Some(ref d) = self.tasks_panel {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            _ => {}
+                                AppState::GoalCompletion => {
+                                    if let Some(ref p) = self.completion_panel {
+                                        p.draw(frame, area);
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
                 }
             }
             if self.toasts.has_toasts() {
-                self.toasts
-                    .draw(frame, toast_rect(area, self.toasts.live_count()).intersection(area));
+                self.toasts.draw(
+                    frame,
+                    toast_rect(area, self.toasts.live_count()).intersection(area),
+                );
             }
         } else {
             self.draw_inline(frame, area);
@@ -2503,7 +2496,6 @@ impl App {
         .capped()
     }
 
-
     /// Draw the compact inline live region: streaming preview, thinking/activity,
     /// status, and input. Finalized conversation lives in native scrollback.
     fn draw_inline(&self, frame: &mut Frame, area: Rect) {
@@ -2549,7 +2541,8 @@ impl App {
             // reserved by desired_inline_height's plan_review branch.
             review.draw(frame, a_stream);
         } else {
-            self.chat.draw_live(frame, a_stream, !self.agent_header_sent);
+            self.chat
+                .draw_live(frame, a_stream, !self.agent_header_sent);
         }
         // In screen-reader mode the boxed thinking display is skipped in favor of
         // the activity's plain-text status line (screen readers choke on the box).
@@ -2593,11 +2586,13 @@ impl App {
             // between the spinner and the composer. Handing it exactly the content
             // rows, anchored to the bottom, keeps the spinner tight above the
             // composer and leaves any slack above it as plain padding.
-            self.activity.draw(frame, bottom_anchored(a_think, self.activity.height()));
+            self.activity
+                .draw(frame, bottom_anchored(a_think, self.activity.height()));
         }
         // Multi-agent activity + background-terminals summary (no-ops when empty).
         // Same treatment: the slot is a stable cap, the roster paints only its rows.
-        self.agents.draw(frame, bottom_anchored(a_agents, self.agents.height()));
+        self.agents
+            .draw(frame, bottom_anchored(a_agents, self.agents.height()));
         self.draw_context_hint(frame, a_hint);
         self.input.draw(frame, a_input);
         // `/` popup or `@` dropdown, in the band reserved by `popup_slot` — never
@@ -2626,7 +2621,8 @@ impl App {
         // an overlay over `a_stream`. The band is full-width; `toast_window`
         // keeps the historical right-hand 40-column placement.
         if a_toast.height > 0 {
-            self.toasts.draw(frame, toast_window(a_toast).intersection(bounds));
+            self.toasts
+                .draw(frame, toast_window(a_toast).intersection(bounds));
         }
     }
 
@@ -2679,9 +2675,7 @@ impl App {
                     "Context low ({}% remaining) \u{00b7} Run /compact to compact & continue",
                     left
                 ),
-                None => {
-                    "Context low \u{00b7} Run /compact to compact & continue".to_string()
-                }
+                None => "Context low \u{00b7} Run /compact to compact & continue".to_string(),
             };
             let para = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(
                 ratatui::text::Span::styled(
@@ -2934,7 +2928,10 @@ fn switch_to_inline(
     // dialog close), degrade to a full-screen terminal — `Terminal::new` never
     // queries the cursor, so it can't fail. The viewport reconciliation will
     // recover the inline region on a later iteration if the terminal recovers.
-    info!("inline rebuild failed ({:?}); degrading to full-screen", last_err);
+    info!(
+        "inline rebuild failed ({:?}); degrading to full-screen",
+        last_err
+    );
     *terminal = Terminal::new(InlineBackend::new(std::io::stdout()))?;
     let _ = terminal.clear();
     Ok(())
@@ -3013,7 +3010,10 @@ fn rebuild_inline(terminal: &mut Term, inline_h: u16, known_top: Option<u16>) ->
     // As in `switch_to_inline`: never surface the DSR timeout to the user. If the
     // cursor query keeps failing, fall back to a full-screen terminal (which does
     // not query the cursor) so the live-region resize can't crash the session.
-    info!("inline height rebuild failed ({:?}); degrading to full-screen", last_err);
+    info!(
+        "inline height rebuild failed ({:?}); degrading to full-screen",
+        last_err
+    );
     *terminal = Terminal::new(InlineBackend::new(std::io::stdout()))?;
     let _ = terminal.clear();
     Ok(())
@@ -3341,9 +3341,7 @@ pub(crate) fn resize_clear_strategy(id: &TermIdent) -> ResizeClear {
     // screen is erased.
     match id.r#override.as_deref().map(str::trim) {
         Some("surgical") => return ResizeClear::Surgical,
-        Some("full") | Some("full-screen") | Some("fullscreen") => {
-            return ResizeClear::FullScreen
-        }
+        Some("full") | Some("full-screen") | Some("fullscreen") => return ResizeClear::FullScreen,
         _ => {}
     }
 
@@ -3416,8 +3414,8 @@ mod render_tests {
     use ratatui::backend::Backend;
     use ratatui::backend::TestBackend;
     use ratatui::layout::{Constraint, Direction, Layout as RLayout, Rect};
-    use ratatui::Frame;
     use ratatui::widgets::{Block, Borders, Paragraph};
+    use ratatui::Frame;
     use ratatui::Terminal;
 
     // `Activity::draw` and `InputComponent::draw` are `Component` trait methods.
@@ -3428,14 +3426,7 @@ mod render_tests {
     use crate::components::Component;
 
     /// The terminal sizes every case is exercised at, from absurdly tiny to large.
-    const SIZES: &[(u16, u16)] = &[
-        (10, 3),
-        (20, 5),
-        (40, 10),
-        (80, 24),
-        (120, 40),
-        (200, 60),
-    ];
+    const SIZES: &[(u16, u16)] = &[(10, 3), (20, 5), (40, 10), (80, 24), (120, 40), (200, 60)];
 
     /// Run `f` inside a `TestBackend` draw at every size. Any panic in `f`
     /// (including a ratatui out-of-buffer index) fails the test.
@@ -3712,7 +3703,9 @@ mod render_tests {
     fn render_inline(top: u16, w: u16, view_h: u16, input: &InputComponent, status: &StatusBar) {
         let total_h = top.saturating_add(view_h).saturating_add(4).max(1);
         let mut backend = TestBackend::new(w, total_h);
-        backend.set_cursor_position(Position { x: 0, y: top }).unwrap();
+        backend
+            .set_cursor_position(Position { x: 0, y: top })
+            .unwrap();
         let mut term = Terminal::with_options(
             backend,
             TerminalOptions {
@@ -3759,7 +3752,14 @@ mod render_tests {
         // — including a hard shrink and a grow — with the slash popup open. The
         // viewport is parked at a non-zero offset each time (the geometry that
         // reproduced the original crash).
-        let sizes = [(92u16, 30u16), (50, 6), (120, 40), (40, 5), (200, 60), (10, 3)];
+        let sizes = [
+            (92u16, 30u16),
+            (50, 6),
+            (120, 40),
+            (40, 5),
+            (200, 60),
+            (10, 3),
+        ];
         for &(w, rows) in &sizes {
             let input = input_with_slash_popup(w);
             let mut status = StatusBar::new();
@@ -3798,8 +3798,14 @@ mod render_tests {
             wide.chat_height,
         );
         let back = Layout::compute(120, 40, false, 0, 0);
-        assert_eq!(back.chat_width, wide.chat_width, "width must converge on round-trip");
-        assert_eq!(back.chat_height, wide.chat_height, "height must converge on round-trip");
+        assert_eq!(
+            back.chat_width, wide.chat_width,
+            "width must converge on round-trip"
+        );
+        assert_eq!(
+            back.chat_height, wide.chat_height,
+            "height must converge on round-trip"
+        );
     }
 
     #[test]
@@ -3843,7 +3849,9 @@ mod render_tests {
             let view_h = super::live_region_height(input.needed_height(), 40);
             let total_h = view_h.saturating_add(4).max(1);
             let mut backend = TestBackend::new(w, total_h);
-            backend.set_cursor_position(Position { x: 0, y: 0 }).unwrap();
+            backend
+                .set_cursor_position(Position { x: 0, y: 0 })
+                .unwrap();
             let mut term = Terminal::with_options(
                 backend,
                 TerminalOptions {
@@ -3876,15 +3884,19 @@ mod render_tests {
 
         // The popup wants rows now that it is open (all sample commands match "").
         let popup_h = input.completions_popup_height();
-        assert!(popup_h >= 3, "open popup should want >= 3 rows, got {popup_h}");
+        assert!(
+            popup_h >= 3,
+            "open popup should want >= 3 rows, got {popup_h}"
+        );
 
         // Viewport height the event loop would build: live region + popup rows.
-        let view_h = super::live_region_height(input.needed_height(), 40)
-            .saturating_add(popup_h);
+        let view_h = super::live_region_height(input.needed_height(), 40).saturating_add(popup_h);
         let total_h = view_h + 4;
 
         let mut backend = TestBackend::new(w, total_h);
-        backend.set_cursor_position(Position { x: 0, y: 0 }).unwrap();
+        backend
+            .set_cursor_position(Position { x: 0, y: 0 })
+            .unwrap();
         let mut term = Terminal::with_options(
             backend,
             TerminalOptions {
@@ -4094,7 +4106,10 @@ mod render_tests {
 
         // Which is not merely "a different row": it is the inversion of the
         // bottom-anchored invariant, so the two disagree by nearly a screen.
-        assert_ne!(ratatui_inline_top(0, 30, 4), resize_clear_top_from_bottom(30, 4));
+        assert_ne!(
+            ratatui_inline_top(0, 30, 4),
+            resize_clear_top_from_bottom(30, 4)
+        );
 
         // Measured against the real binary at 30 rows before the fix
         // (`test/pty/anchor_probe.py`): chrome at rows 25-28 when booted and
@@ -4168,7 +4183,9 @@ mod render_tests {
             .unwrap();
         let mut term = Terminal::with_options(
             backend,
-            TerminalOptions { viewport: Viewport::Inline(old_h) },
+            TerminalOptions {
+                viewport: Viewport::Inline(old_h),
+            },
         )
         .unwrap();
         let input = InputComponent::new();
@@ -4188,7 +4205,10 @@ mod render_tests {
         // and now out of bounds — the exact reason the old `terminal.clear()`
         // could not erase the on-screen chrome.
         let stale_top = term.get_frame().area().top();
-        assert_eq!(stale_top, old_top, "cached inline top must still be the pre-resize row");
+        assert_eq!(
+            stale_top, old_top,
+            "cached inline top must still be the pre-resize row"
+        );
         assert!(
             stale_top >= new_rows,
             "root cause: the stale viewport top ({stale_top}) is out of bounds for the shrunk terminal ({new_rows} rows), so a clear anchored to it misses the old chrome",
@@ -4204,7 +4224,11 @@ mod render_tests {
             fix_top < new_rows,
             "fix: the size-anchored clear top ({fix_top}) is within the resized terminal ({new_rows} rows)",
         );
-        assert_eq!(fix_top, new_rows - old_h, "fix: clear starts on the region's first row");
+        assert_eq!(
+            fix_top,
+            new_rows - old_h,
+            "fix: clear starts on the region's first row"
+        );
     }
 
     /// True if any cell in `row` holds non-blank rendered content.
@@ -4239,10 +4263,14 @@ mod render_tests {
         let total_h = 30u16;
 
         let mut backend = TestBackend::new(w, total_h);
-        backend.set_cursor_position(Position { x: 0, y: old_top }).unwrap();
+        backend
+            .set_cursor_position(Position { x: 0, y: old_top })
+            .unwrap();
         let mut term = Terminal::with_options(
             backend,
-            TerminalOptions { viewport: Viewport::Inline(old_h) },
+            TerminalOptions {
+                viewport: Viewport::Inline(old_h),
+            },
         )
         .unwrap();
         assert_eq!(term.get_frame().area().top(), old_top);
@@ -4260,13 +4288,21 @@ mod render_tests {
         let stale_cursor_row = old_top + old_h - 1;
         let mut carried = term.backend().clone();
         carried
-            .set_cursor_position(Position { x: 0, y: stale_cursor_row })
+            .set_cursor_position(Position {
+                x: 0,
+                y: stale_cursor_row,
+            })
             .unwrap();
 
         // The buggy path: rebuild WITHOUT clearing first.
         let new_h = 8u16;
-        let mut buggy = Terminal::with_options(carried, TerminalOptions { viewport: Viewport::Inline(new_h) })
-            .unwrap();
+        let mut buggy = Terminal::with_options(
+            carried,
+            TerminalOptions {
+                viewport: Viewport::Inline(new_h),
+            },
+        )
+        .unwrap();
         let new_top = buggy.get_frame().area().top();
 
         assert!(
@@ -4291,10 +4327,14 @@ mod render_tests {
         let total_h = 30u16;
 
         let mut backend = TestBackend::new(w, total_h);
-        backend.set_cursor_position(Position { x: 0, y: old_top }).unwrap();
+        backend
+            .set_cursor_position(Position { x: 0, y: old_top })
+            .unwrap();
         let mut term = Terminal::with_options(
             backend,
-            TerminalOptions { viewport: Viewport::Inline(old_h) },
+            TerminalOptions {
+                viewport: Viewport::Inline(old_h),
+            },
         )
         .unwrap();
         let input = InputComponent::new();
@@ -4311,16 +4351,25 @@ mod render_tests {
         let mut fixed = term.backend().clone();
         let term_rows = fixed.size().unwrap().height;
         let top = clamp_inline_top(remembered_top, term_rows).expect("top must be in bounds");
-        fixed.set_cursor_position(Position { x: 0, y: top }).unwrap();
-        fixed.clear_region(ratatui::backend::ClearType::AfterCursor).unwrap();
+        fixed
+            .set_cursor_position(Position { x: 0, y: top })
+            .unwrap();
+        fixed
+            .clear_region(ratatui::backend::ClearType::AfterCursor)
+            .unwrap();
         assert!(
             !row_has_content(&fixed, content_row),
             "clearing from the remembered top must wipe the old chrome"
         );
 
         let new_h = 8u16;
-        let mut fixed_term = Terminal::with_options(fixed, TerminalOptions { viewport: Viewport::Inline(new_h) })
-            .unwrap();
+        let mut fixed_term = Terminal::with_options(
+            fixed,
+            TerminalOptions {
+                viewport: Viewport::Inline(new_h),
+            },
+        )
+        .unwrap();
         assert_eq!(
             fixed_term.get_frame().area().top(),
             old_top,
@@ -4349,22 +4398,27 @@ mod render_tests {
             use ratatui::widgets::Widget;
             let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, old_top - 1, w, 1));
             Paragraph::new("earlier transcript line").render(buf.area, &mut buf);
-            backend.draw(buf.content().iter().enumerate().map(|(i, c)| {
-                let x = (i as u16) % w;
-                let y = old_top - 1;
-                (x, y, c)
-            }))
-            .unwrap();
+            backend
+                .draw(buf.content().iter().enumerate().map(|(i, c)| {
+                    let x = (i as u16) % w;
+                    let y = old_top - 1;
+                    (x, y, c)
+                }))
+                .unwrap();
         }
         assert!(
             row_has_content(&backend, old_top - 1),
             "sanity: fake transcript row must have content before the clear"
         );
 
-        backend.set_cursor_position(Position { x: 0, y: old_top }).unwrap();
+        backend
+            .set_cursor_position(Position { x: 0, y: old_top })
+            .unwrap();
         let mut term = Terminal::with_options(
             backend,
-            TerminalOptions { viewport: Viewport::Inline(old_h) },
+            TerminalOptions {
+                viewport: Viewport::Inline(old_h),
+            },
         )
         .unwrap();
         let input = InputComponent::new();
@@ -4376,8 +4430,12 @@ mod render_tests {
 
         let mut fixed = term.backend().clone();
         let top = clamp_inline_top(Some(old_top), fixed.size().unwrap().height).unwrap();
-        fixed.set_cursor_position(Position { x: 0, y: top }).unwrap();
-        fixed.clear_region(ratatui::backend::ClearType::AfterCursor).unwrap();
+        fixed
+            .set_cursor_position(Position { x: 0, y: top })
+            .unwrap();
+        fixed
+            .clear_region(ratatui::backend::ClearType::AfterCursor)
+            .unwrap();
 
         assert!(
             row_has_content(&fixed, old_top - 1),
@@ -4454,10 +4512,14 @@ mod render_tests {
         let total_h = 30u16;
 
         let mut backend = TestBackend::new(w, total_h);
-        backend.set_cursor_position(Position { x: 0, y: old_top }).unwrap();
+        backend
+            .set_cursor_position(Position { x: 0, y: old_top })
+            .unwrap();
         let mut term = Terminal::with_options(
             backend,
-            TerminalOptions { viewport: Viewport::Inline(old_h) },
+            TerminalOptions {
+                viewport: Viewport::Inline(old_h),
+            },
         )
         .unwrap();
         let input = InputComponent::new();
@@ -4480,8 +4542,13 @@ mod render_tests {
             );
         }
 
-        let mut rebuilt = Terminal::with_options(purged, TerminalOptions { viewport: Viewport::Inline(old_h) })
-            .unwrap();
+        let mut rebuilt = Terminal::with_options(
+            purged,
+            TerminalOptions {
+                viewport: Viewport::Inline(old_h),
+            },
+        )
+        .unwrap();
         assert_eq!(
             rebuilt.get_frame().area().top(),
             0,
@@ -4506,7 +4573,10 @@ mod render_tests {
             grown >= base + 4,
             "composer should grow with newlines: base={base} grown={grown}"
         );
-        assert!(grown >= 7, "5-line composer should need >= 7 rows, got {grown}");
+        assert!(
+            grown >= 7,
+            "5-line composer should need >= 7 rows, got {grown}"
+        );
     }
 
     #[test]
@@ -4565,12 +4635,19 @@ mod render_tests {
         // The slot is exactly the preview window stacked on the chrome, and it
         // sits above the idle base (so a preview row band is actually reserved).
         assert_eq!(h0, overhead + input_needed + STREAM_PREVIEW_ROWS);
-        assert!(h0 > base, "streaming reserves the preview slot above idle base");
+        assert!(
+            h0 > base,
+            "streaming reserves the preview slot above idle base"
+        );
 
         // A grown preview is reserved rows-for-rows — the growth must reach the
         // viewport, or `draw_inline` would carve the extra rows out of somewhere
         // else (the composer), which is the band-accounting bug in reverse.
-        for extra in [0u16, super::STREAM_PREVIEW_STEP, super::STREAM_PREVIEW_STEP * 2] {
+        for extra in [
+            0u16,
+            super::STREAM_PREVIEW_STEP,
+            super::STREAM_PREVIEW_STEP * 2,
+        ] {
             let grown = streaming_inline_height(
                 base,
                 overhead,
@@ -4581,7 +4658,11 @@ mod render_tests {
                 STREAM_PREVIEW_ROWS + extra,
                 hi,
             );
-            assert_eq!(grown, h0 + extra, "a {extra}-row taller preview must reserve {extra} more rows");
+            assert_eq!(
+                grown,
+                h0 + extra,
+                "a {extra}-row taller preview must reserve {extra} more rows"
+            );
         }
     }
 
@@ -4633,14 +4714,18 @@ mod render_tests {
                         "explorer",
                         "test-model",
                         format!("investigating subject number {i}"),
-                        Some("background".to_string()), None,);
+                        Some("background".to_string()),
+                        None,
+                    );
                     agents.agent_progress(
                         &format!("agent-{i}"),
                         "reading files",
                         i as u32,
                         100,
                         "",
-                        vec!["file_read: a.rs".into(), "file_grep: foo".into()], None,);
+                        vec!["file_read: a.rs".into(), "file_grep: foo".into()],
+                        None,
+                    );
                 }
                 agents.set_bg_summary(bg);
                 for_each_size(|frame, area| {
@@ -4665,14 +4750,18 @@ mod render_tests {
                     "explorer",
                     "test-model",
                     format!("investigating a fairly long subject line number {i}"),
-                    Some("batch-1".to_string()), None,);
+                    Some("batch-1".to_string()),
+                    None,
+                );
                 agents.agent_progress(
                     &format!("agent-{i}"),
                     "reading files",
                     i as u32,
                     100,
                     "",
-                    Vec::new(), None,);
+                    Vec::new(),
+                    None,
+                );
             }
             let bg_rows = vec![
                 crate::components::agents::BgTerminalRow {
@@ -4718,9 +4807,9 @@ mod cadence_tests {
     #[test]
     fn only_assistant_deltas_are_deferrable() {
         assert!(is_stream_delta(&token()));
-        assert!(is_stream_delta(&Event::Backend(BackendEvent::ThinkingDelta {
-            text: "…".into()
-        })));
+        assert!(is_stream_delta(&Event::Backend(
+            BackendEvent::ThinkingDelta { text: "…".into() }
+        )));
 
         // A tick drives the spinner; deferring it would stutter the animation.
         assert!(!is_stream_delta(&Event::Tick));
@@ -4736,12 +4825,14 @@ mod cadence_tests {
             crossterm::event::Event::Resize(80, 24)
         )));
         // The terminal event that ENDS the stream draws immediately too.
-        assert!(!is_stream_delta(&Event::Backend(BackendEvent::AgentResponse {
-            response: "done".into(),
-            response_type: "text".into(),
-            signal: None,
-            message_id: Some("m1".into()),
-        })));
+        assert!(!is_stream_delta(&Event::Backend(
+            BackendEvent::AgentResponse {
+                response: "done".into(),
+                response_type: "text".into(),
+                signal: None,
+                message_id: Some("m1".into()),
+            }
+        )));
     }
 
     // ── The waiting repaint rate ────────────────────────────────────────

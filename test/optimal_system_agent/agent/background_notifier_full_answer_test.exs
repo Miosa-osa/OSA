@@ -33,7 +33,10 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifierFullAnswerTest do
     end
 
     tmp =
-      Path.join(System.tmp_dir!(), "osa_bgnotif_full_answer_#{System.unique_integer([:positive])}")
+      Path.join(
+        System.tmp_dir!(),
+        "osa_bgnotif_full_answer_#{System.unique_integer([:positive])}"
+      )
 
     File.mkdir_p!(tmp)
     prev = Application.get_env(:optimal_system_agent, :agent_runs_dir)

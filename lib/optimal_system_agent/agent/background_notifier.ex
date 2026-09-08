@@ -163,7 +163,11 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
     # (agent_id is still the routing id used for task_id below, just not shown.)
     name = Map.get(ev, :display_name) || role
     dur = Map.get(ev, :duration_ms)
-    dur_str = if is_integer(dur), do: " after #{OptimalSystemAgent.Utils.Duration.humanize(dur)}", else: ""
+
+    dur_str =
+      if is_integer(dur),
+        do: " after #{OptimalSystemAgent.Utils.Duration.humanize(dur)}",
+        else: ""
 
     summary =
       case outcome do
@@ -238,7 +242,10 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
     end
   rescue
     e ->
-      Logger.debug("[BackgroundNotifier] completed_result_text fell back: #{Exception.message(e)}")
+      Logger.debug(
+        "[BackgroundNotifier] completed_result_text fell back: #{Exception.message(e)}"
+      )
+
       fallback_result_text(ev)
   end
 

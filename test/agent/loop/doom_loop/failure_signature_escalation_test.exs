@@ -39,6 +39,7 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.FailureSignatureEscalationTest 
       end)
 
     assert s.doom_recovery_count == 1
+
     assert Enum.any?(s.messages, fn m -> m.content =~ "DOOM LOOP RECOVERY" end),
            "the strict threshold should fire a recovery directive by the third jittered repeat"
   end
