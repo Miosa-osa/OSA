@@ -806,3 +806,36 @@ case System.get_env("OSA_CONTEXT_CEILING_SHARE") do
         :ok
     end
 end
+
+# ── Subagent tuning knobs (Claude-Code-like defaults; all optional) ──────────
+# Dial subagent budgets per-session without a code change. Unset = built-in
+# defaults (turn caps 120/60/25, concurrency 24, no default USD cap).
+if v = System.get_env("OSA_MAX_FLEET_AGENTS") do
+  case Integer.parse(v) do
+    {n, _} when n > 0 -> config :optimal_system_agent, max_fleet_agents: n
+    _ -> :ok
+  end
+end
+
+if v = System.get_env("OSA_SUBAGENT_MAX_BUDGET_USD") do
+  case Float.parse(v) do
+    {f, _} when f > 0.0 -> config :optimal_system_agent, subagent_default_budget_usd: f
+    _ -> :ok
+  end
+end
+
+subagent_iter_overrides =
+  [elite: "OSA_SUBAGENT_MAX_ITERS_ELITE", specialist: "OSA_SUBAGENT_MAX_ITERS_SPECIALIST", utility: "OSA_SUBAGENT_MAX_ITERS_UTILITY"]
+  |> Enum.reduce(%{}, fn {tier, var}, acc ->
+    case System.get_env(var) do
+      nil -> acc
+      s -> case Integer.parse(s) do
+              {n, _} when n > 0 -> Map.put(acc, tier, n)
+              _ -> acc
+            end
+    end
+  end)
+
+if map_size(subagent_iter_overrides) > 0 do
+  config :optimal_system_agent, subagent_max_iterations: subagent_iter_overrides
+end

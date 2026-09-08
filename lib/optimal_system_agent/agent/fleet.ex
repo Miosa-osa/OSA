@@ -40,7 +40,7 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   alias OptimalSystemAgent.Scratchpad
   alias OptimalSystemAgent.Workspace.FastWorktree
 
-  @default_max_fleet_agents 16
+  @default_max_fleet_agents 24
   # Run-lifetime kill switch: absolute ceiling on nodes a single fan_out drains.
   @default_max_fleet_total 1000
   # Per-node wall-clock ceiling for a single fan_out item. A hung node is reaped

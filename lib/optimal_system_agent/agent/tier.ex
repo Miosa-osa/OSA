@@ -338,9 +338,19 @@ defmodule OptimalSystemAgent.Agent.Tier do
 
   @doc "Get the max iterations for a sub-agent ReAct loop by tier."
   @spec max_iterations(tier()) :: non_neg_integer()
-  def max_iterations(:elite), do: 25
-  def max_iterations(:specialist), do: 15
-  def max_iterations(:utility), do: 8
+  def max_iterations(:elite), do: iters(:elite, 120)
+  def max_iterations(:specialist), do: iters(:specialist, 60)
+  def max_iterations(:utility), do: iters(:utility, 25)
+
+  # Per-tier subagent turn cap, overridable via config (OSA_SUBAGENT_MAX_ITERS_*
+  # in runtime.exs) so the budget can be dialed per-session without a code change.
+  # Defaults are the Claude-Code-like generous backstop (120/60/25).
+  defp iters(tier, default) do
+    case Application.get_env(:optimal_system_agent, :subagent_max_iterations) do
+      %{} = m -> Map.get(m, tier, default)
+      _ -> default
+    end
+  end
 
   @doc "Get tier display info."
   @spec tier_info(tier()) :: map()

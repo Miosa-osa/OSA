@@ -26,6 +26,17 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   # `empty_result?/1`.
   @empty_response_reason "Empty response from provider (HTTP 200 with no content, tool calls, or reasoning)"
 
+  # Reason string for a stream (or 200 body) that carried a tool call whose
+  # arguments were cut off mid-JSON — the accumulated `arguments_json` is
+  # NON-BLANK yet will not decode to a map. Observed live on flaky providers
+  # under load: a large tool-call payload (e.g. `delegate`'s self-contained task
+  # brief) is truncated mid-arguments. Emitting the call with `%{}` args silently
+  # STRIPS the arguments → instant tool-validation failure → the model retries →
+  # cut off again → "identical arguments N times" doom halt. Kept in one place so
+  # every path emits identical text, which `ErrorCatalog.classify/1` recognises
+  # as `:partial_tool_call` (retryable). See `partial_args?/1`.
+  @partial_tool_call_reason "Provider returned an incomplete tool call (arguments cut off mid-stream)"
+
   @doc """
   Execute a chat completion against any OpenAI-compatible endpoint.
 
@@ -168,11 +179,24 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
           # an empty turn to the agent loop, where three in a row trip the
           # ReasoningOnly doom guard. A 200 that carries tool_calls with empty
           # content is NOT empty and passes straight through.
-          if empty_result?(result) do
-            Logger.warning("OpenAI-compat HTTP 200 with an empty response — retrying")
-            {:error, @empty_response_reason}
-          else
-            {:ok, result}
+          cond do
+            # A 200 body whose tool-call arguments were cut off mid-JSON (non-
+            # blank but undecodable) is a truncated generation, not a real turn.
+            # Surface it as the same retryable error the stream path uses instead
+            # of letting `parse_tool_calls/2` silently strip the args to `%{}`.
+            raw_tool_calls_partial?(msg) ->
+              Logger.warning(
+                "OpenAI-compat HTTP 200 with an incomplete tool call (arguments cut off) — retrying"
+              )
+
+              {:error, @partial_tool_call_reason}
+
+            empty_result?(result) ->
+              Logger.warning("OpenAI-compat HTTP 200 with an empty response — retrying")
+              {:error, @empty_response_reason}
+
+            true ->
+              {:ok, result}
           end
 
         {:ok, %{status: 429, body: resp_body, headers: resp_headers}} ->
@@ -637,6 +661,52 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   defp maybe_append_args(tc, _), do: tc
 
   defp finalize_sse_stream(acc, callback, model, orig_messages) do
+    # A streamed tool call whose accumulated `arguments_json` is non-blank but
+    # will not decode is a stream that was CUT OFF mid-arguments. Do NOT emit it
+    # with `%{}` (that silently strips the arguments — the bug this fixes).
+    # Instead surface a RETRYABLE error so `Resilience.with_retry/2` re-requests
+    # and the intact tool call arrives on a good attempt — mirroring the empty-
+    # response recovery. A bare cut-off tool call fired no text/thinking delta
+    # (we short-circuit BEFORE the think-tail flush below), so the one-way door
+    # (`mark_output_observed/0`) is not tripped and a retry duplicates nothing.
+    # A blank ("") `arguments_json` is NOT partial (legit no-arg tool call) and
+    # flows through `do_finalize_sse_stream/4` → `%{}` untouched.
+    if partial_tool_call?(acc) do
+      Logger.warning(
+        "OpenAI-compat stream cut off mid tool-call arguments (incomplete JSON) — retrying"
+      )
+
+      {:error, @partial_tool_call_reason}
+    else
+      do_finalize_sse_stream(acc, callback, model, orig_messages)
+    end
+  end
+
+  # True when any accumulated streamed tool call has partial (cut-off) arguments.
+  defp partial_tool_call?(%{tool_calls: tcs}) when is_map(tcs) do
+    Enum.any?(tcs, fn {_idx, tc} -> partial_args?(Map.get(tc, :arguments_json)) end)
+  end
+
+  defp partial_tool_call?(_), do: false
+
+  # The blank-vs-incomplete distinction the whole fix turns on.
+  #
+  # A tool call's arguments are "partial" — the generation was cut off
+  # mid-arguments — when the accumulated payload is NON-BLANK yet does not decode
+  # to a JSON map. That is retryable: re-request and the intact call comes back.
+  #
+  # A BLANK ("" / whitespace) payload is NOT partial: it is a legitimate
+  # no-argument tool call and must still become `%{}` and pass through. A payload
+  # that decodes but to a non-map (array/scalar) is malformed like a cut-off, so
+  # it counts as partial too.
+  defp partial_args?(args) when is_binary(args) do
+    String.trim(args) != "" and
+      not match?({:ok, decoded} when is_map(decoded), Jason.decode(args))
+  end
+
+  defp partial_args?(_), do: false
+
+  defp do_finalize_sse_stream(acc, callback, model, orig_messages) do
     # Drain any tag tail the streaming splitter was holding back, so the live
     # display never loses trailing characters at end-of-stream.
     acc =
@@ -1098,6 +1168,19 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       }
     end)
   end
+
+  # True when a raw (non-stream) OpenAI message carries a tool call whose
+  # `function.arguments` string was cut off mid-JSON — the same blank-vs-
+  # incomplete distinction as the stream path (`partial_args?/1`). The sync 200
+  # handler uses this to raise a retryable error before `parse_tool_calls/2`
+  # would silently decode the truncated payload to `%{}`.
+  defp raw_tool_calls_partial?(%{"tool_calls" => calls}) when is_list(calls) do
+    Enum.any?(calls, fn call ->
+      partial_args?(get_in(call, ["function", "arguments"]))
+    end)
+  end
+
+  defp raw_tool_calls_partial?(_), do: false
 
   @doc "Parse tool_calls from an OpenAI-style message map."
   def parse_tool_calls(%{"tool_calls" => calls}) when is_list(calls) do
