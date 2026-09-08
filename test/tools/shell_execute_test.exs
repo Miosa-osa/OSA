@@ -162,25 +162,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecuteTest do
   # Timeout enforcement
   # ---------------------------------------------------------------------------
 
-  describe "wait window (yield, not kill)" do
-    @tag timeout: 120_000
-    test "command still running when the wait window elapses is moved to the background" do
-      # The window bounds how long the AGENT waits, NOT how long the WORK may run.
-      # It used to SIGKILL the process and fail the call, so legitimately long work
-      # (a build, a test suite) destroyed itself at the deadline and took the turn
-      # with it. It is now adopted into the background instead: the process keeps
-      # running, its completion is injected back into the loop, and the model gets
-      # a background_id to poll. See `auto_detach_on_timeout/5`.
-      System.put_env("OSA_SHELL_TIMEOUT_MS", "3000")
-      on_exit(fn -> System.delete_env("OSA_SHELL_TIMEOUT_MS") end)
-
-      assert {:ok, msg} = exec("sleep 20")
-      assert msg =~ "moved to the background"
-      assert msg =~ "background_id"
-      # It must be explicit that the work was NOT destroyed.
-      assert msg =~ "STILL RUNNING"
-    end
-  end
+  # The "wait window (yield, not kill)" test used to live here, but it pins
+  # `OSA_SHELL_TIMEOUT_MS` — a process-wide OS env var every `exec/1` call in
+  # this ENTIRE async:true file (and any other concurrently-running test that
+  # shells out) reads — down to 3000ms for its duration. Under `async: true`
+  # that shrinks every OTHER concurrent shell_execute call's wait window too,
+  # which can move unrelated commands to the background early or flip their
+  # "STILL RUNNING" assertions. See `ShellExecuteTimeoutKillSwitchTest` below
+  # (`async: false`, same isolation shape as
+  # `Agent.Loop.ToolArgMetricsKillSwitchTest`).
 
   # ---------------------------------------------------------------------------
   # Output truncation
@@ -275,5 +265,35 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecuteTest do
       assert Map.has_key?(params["properties"], "command")
       assert "command" in params["required"]
     end
+  end
+end
+
+defmodule OptimalSystemAgent.Tools.Builtins.ShellExecuteTimeoutKillSwitchTest do
+  @moduledoc """
+  Separate, `async: false`: `OSA_SHELL_TIMEOUT_MS` is read from the OS
+  environment, which is process-global, so shrinking it inside the async
+  module above could yield every OTHER shell_execute call running beside it
+  early too.
+  """
+
+  use ExUnit.Case, async: false
+
+  alias OptimalSystemAgent.Tools.Builtins.ShellExecute
+
+  test "command still running when the wait window elapses is moved to the background" do
+    # The window bounds how long the AGENT waits, NOT how long the WORK may run.
+    # It used to SIGKILL the process and fail the call, so legitimately long work
+    # (a build, a test suite) destroyed itself at the deadline and took the turn
+    # with it. It is now adopted into the background instead: the process keeps
+    # running, its completion is injected back into the loop, and the model gets
+    # a background_id to poll. See `auto_detach_on_timeout/5`.
+    System.put_env("OSA_SHELL_TIMEOUT_MS", "3000")
+    on_exit(fn -> System.delete_env("OSA_SHELL_TIMEOUT_MS") end)
+
+    assert {:ok, msg} = ShellExecute.execute(%{"command" => "sleep 20"})
+    assert msg =~ "moved to the background"
+    assert msg =~ "background_id"
+    # It must be explicit that the work was NOT destroyed.
+    assert msg =~ "STILL RUNNING"
   end
 end

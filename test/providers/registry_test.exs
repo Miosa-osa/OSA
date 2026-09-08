@@ -1,5 +1,11 @@
 defmodule OptimalSystemAgent.Providers.RegistryTest do
-  use ExUnit.Case, async: true
+  # "provider_configured?/1 account sign-in configures every subscription-backed
+  # provider" below redirects `OSA_HOME` via `System.put_env/2` — a process-wide
+  # OS env var `SubscriptionStore` re-reads on every call. Left `async: true`,
+  # any other concurrently-running test that also touches `OSA_HOME` can
+  # clobber this test's redirect mid-operation, so its `SubscriptionStore.put/2`
+  # writes (or `provider_configured?/1` reads) the wrong directory.
+  use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Providers.Registry
 
@@ -102,12 +108,17 @@ defmodule OptimalSystemAgent.Providers.RegistryTest do
 
   describe "provider_configured?/1" do
     test "account sign-in configures every subscription-backed provider" do
-      home = Path.join(System.tmp_dir!(), "osa-registry-account-#{System.unique_integer([:positive])}")
+      home =
+        Path.join(System.tmp_dir!(), "osa-registry-account-#{System.unique_integer([:positive])}")
+
       previous_home = System.get_env("OSA_HOME")
       System.put_env("OSA_HOME", home)
 
       on_exit(fn ->
-        if previous_home, do: System.put_env("OSA_HOME", previous_home), else: System.delete_env("OSA_HOME")
+        if previous_home,
+          do: System.put_env("OSA_HOME", previous_home),
+          else: System.delete_env("OSA_HOME")
+
         File.rm_rf(home)
       end)
 
