@@ -8,7 +8,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWaitTest do
   use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Agent.RunStore
-  alias OptimalSystemAgent.Tools.Builtins.TaskWait.{Depth, Handler, Tool}
+  alias OptimalSystemAgent.Tools.Builtins.TaskWait.{Depth, Handler, RewaitGuard, Tool}
   alias OptimalSystemAgent.Tools.UseContext
 
   setup do
@@ -18,6 +18,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWaitTest do
     # "unknown agent id -> No run found" join and flaked it in the full suite.
     # (#208)
     OptimalSystemAgent.Agent.RunStore.reset()
+    # The re-arm guard's ETS is process-global like RunStore's — reset it too so a
+    # warning from one test can't fast-fail an unrelated later test.
+    RewaitGuard.reset()
 
     tmp = Path.join(System.tmp_dir!(), "osa_task_wait_#{System.unique_integer([:positive])}")
     File.mkdir_p!(tmp)
@@ -168,9 +171,98 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWaitTest do
       refute text =~ "### agent:session-123-abc:frontend-billing-fixes"
     end
 
+    test "the synchronous-wait ceiling is the configurable task_wait_max_ms, not a fixed 5 min" do
+      # Item 6 regression: the old fixed 5-min cap outlived a long agent, so the
+      # barrier timed out mid-flight and the coordinator re-polled turn after
+      # turn. The ceiling is now a config knob. With a tiny ceiling and a HUGE
+      # requested timeout, the effective wait binds to the ceiling (not the 5-min
+      # constant, and not the huge request) — proving the cap is configurable.
+      prev = Application.get_env(:optimal_system_agent, :task_wait_max_ms)
+      Application.put_env(:optimal_system_agent, :task_wait_max_ms, 200)
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:optimal_system_agent, :task_wait_max_ms, prev),
+          else: Application.delete_env(:optimal_system_agent, :task_wait_max_ms)
+      end)
+
+      RunStore.start_run(%{agent_id: "agent:p:longrun", parent_session_id: "p", role: "worker"})
+
+      {elapsed, {:ok, text}} =
+        :timer.tc(fn ->
+          Handler.execute(
+            %{"agent_ids" => ["agent:p:longrun"], "timeout_ms" => 999_999_999},
+            ctx("p")
+          )
+        end)
+
+      # Bound by the 200ms ceiling, not the ~5-min old constant nor the huge request.
+      assert elapsed < 5_000_000
+      assert text =~ "still running"
+    end
+
     test "an unknown agent id does not block the join and is reported clearly" do
       {:ok, text} = Handler.execute(%{"agent_ids" => ["agent:p:ghost"]}, ctx("p"))
       assert text =~ "No run found"
+    end
+
+    test "a re-wait on the SAME still-running agent returns fast instead of re-arming (item 6 guard)" do
+      # Real-evidence scenario: one long agent (would take ~37m); the model was
+      # told "healthy, do NOT re-wait" and ignores it, re-calling task_wait.
+      RunStore.start_run(%{agent_id: "agent:p:hipaa", parent_session_id: "p", role: "review"})
+
+      # First wait: short cap so the test doesn't sit — times out, agent still
+      # running, and records the warning.
+      {:ok, first} =
+        Handler.execute(%{"agent_ids" => ["agent:p:hipaa"], "timeout_ms" => 200}, ctx("p"))
+
+      assert first =~ "still running"
+      assert RewaitGuard.warned?("p", "agent:p:hipaa")
+
+      # Second wait: guarded — must NOT arm another ceiling. It returns essentially
+      # instantly (well under even the 200ms cap) with the "already waiting" line.
+      {elapsed, {:ok, second}} =
+        :timer.tc(fn ->
+          Handler.execute(%{"agent_ids" => ["agent:p:hipaa"], "timeout_ms" => 5_000}, ctx("p"))
+        end)
+
+      assert elapsed < 100_000, "guarded re-wait must not block (re-armed a ceiling)"
+      assert second =~ "Already waiting"
+      assert second =~ "Do NOT call task_wait on them again"
+    end
+
+    test "the guard clears once the agent finishes, so its result is still returned" do
+      RunStore.start_run(%{agent_id: "agent:p:job", parent_session_id: "p", role: "worker"})
+
+      # First wait times out (still running) and marks the warning.
+      {:ok, _} = Handler.execute(%{"agent_ids" => ["agent:p:job"], "timeout_ms" => 200}, ctx("p"))
+      assert RewaitGuard.warned?("p", "agent:p:job")
+
+      # The agent finishes.
+      RunStore.complete("agent:p:job", %{status: :completed, summary: "the real result"})
+
+      # A re-wait must NOT be guard-suppressed now — it returns the actual result.
+      {:ok, text} = Handler.execute(%{"agent_ids" => ["agent:p:job"]}, ctx("p"))
+      assert text =~ "the real result"
+      refute text =~ "Already waiting"
+    end
+
+    test "a single wait blocks cleanly until the agent finishes within the window (item 6)" do
+      # The success path the guard complements: when the agent finishes inside the
+      # converge window, one call returns its result — no timeout, no re-wait.
+      RunStore.start_run(%{agent_id: "agent:p:quick", parent_session_id: "p", role: "worker"})
+
+      spawn(fn ->
+        Process.sleep(300)
+        RunStore.complete("agent:p:quick", %{status: :completed, summary: "finished in time"})
+      end)
+
+      {:ok, text} =
+        Handler.execute(%{"agent_ids" => ["agent:p:quick"], "timeout_ms" => 5_000}, ctx("p"))
+
+      assert text =~ "finished in time"
+      refute text =~ "TIMED OUT"
+      refute RewaitGuard.warned?("p", "agent:p:quick")
     end
 
     test "a bare short name resolves to its full child id and joins" do

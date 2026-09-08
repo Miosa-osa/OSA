@@ -185,4 +185,25 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalogTest do
       assert msg =~ "/model"
     end
   end
+
+  describe "partial-tool-call classification (cut-off arguments retry)" do
+    test "the synthesised incomplete-tool-call reason classifies as :partial_tool_call" do
+      reason = "Provider returned an incomplete tool call (arguments cut off mid-stream)"
+      assert Catalog.classify(reason) == :partial_tool_call
+    end
+
+    test "it survives the stream_error / http_error wrappers" do
+      reason = "Provider returned an incomplete tool call (arguments cut off mid-stream)"
+      assert Catalog.classify({:stream_error, reason}) == :partial_tool_call
+      assert Catalog.classify({:http_error, 200, reason}) == :partial_tool_call
+    end
+
+    test ":partial_tool_call carries an actionable, transient-framed user message" do
+      reason = "Provider returned an incomplete tool call (arguments cut off mid-stream)"
+      msg = Catalog.user_message(reason)
+      assert msg =~ "API Error"
+      assert msg =~ "incomplete tool call"
+      assert msg =~ "/model"
+    end
+  end
 end

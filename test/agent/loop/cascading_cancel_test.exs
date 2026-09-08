@@ -73,6 +73,44 @@ defmodule OptimalSystemAgent.Agent.Loop.CascadingCancelTest do
       root = sid("lonely")
       assert Loop.descendant_session_ids(root) == []
     end
+
+    test "excludes a background-dispatched child AND its own subtree" do
+      root = sid("bgexclude")
+      attached_child = "agent:#{root}:attached"
+      bg_child = "agent:#{root}:bg"
+      bg_grandchild = "agent:#{bg_child}:1"
+
+      RunStore.start_run(%{
+        agent_id: attached_child,
+        parent_session_id: root,
+        role: "agent",
+        task: "t"
+      })
+
+      RunStore.start_run(%{
+        agent_id: bg_child,
+        parent_session_id: root,
+        role: "background",
+        task: "t",
+        background: true
+      })
+
+      RunStore.start_run(%{
+        agent_id: bg_grandchild,
+        parent_session_id: bg_child,
+        role: "agent",
+        task: "t"
+      })
+
+      descendants = Loop.descendant_session_ids(root)
+
+      assert attached_child in descendants
+      refute bg_child in descendants,
+             "a background-dispatched run must not be reachable by the interrupt cascade"
+
+      refute bg_grandchild in descendants,
+             "a background run's OWN descendants must not be ripped out from under it either"
+    end
   end
 
   describe "cancel/1 — transitive cooperative flag propagation" do
@@ -95,6 +133,29 @@ defmodule OptimalSystemAgent.Agent.Loop.CascadingCancelTest do
       assert [{^root, true}] = :ets.lookup(@cancel_table, root)
       assert [{^child, true}] = :ets.lookup(@cancel_table, child)
       assert [{^grandchild, true}] = :ets.lookup(@cancel_table, grandchild)
+    end
+
+    test "cancelling the root does NOT flag a background-dispatched descendant" do
+      root = sid("flagbg")
+      attached = "agent:#{root}:attached"
+      bg = "agent:#{root}:bg"
+
+      RunStore.start_run(%{agent_id: attached, parent_session_id: root, role: "agent", task: "t"})
+
+      RunStore.start_run(%{
+        agent_id: bg,
+        parent_session_id: root,
+        role: "background",
+        task: "t",
+        background: true
+      })
+
+      Loop.cancel(root)
+
+      assert [{^root, true}] = :ets.lookup(@cancel_table, root)
+      assert [{^attached, true}] = :ets.lookup(@cancel_table, attached)
+      assert :ets.lookup(@cancel_table, bg) == [],
+             "an interrupt must not set the cooperative cancel flag on a background run"
     end
   end
 

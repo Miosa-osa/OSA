@@ -670,6 +670,9 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
         | "fleet_node_completed"
         | "fleet_summary"
         | "context_pressure"
+        | "monitor_started"
+        | "monitor_event"
+        | "monitor_done"
         | "task_created"
         | "task_updated"
         | "task_checklist_show"
@@ -1179,6 +1182,9 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 /// own session. Absent from older backends -> None.
                 #[serde(default)]
                 context_percent: Option<u32>,
+                /// Cumulative real (cache-discounted) cost in USD (item-10).
+                #[serde(default)]
+                cost_usd: Option<f64>,
             }
             let ev: Ev = serde_json::from_slice(data).ok()?;
             Some(BackendEvent::OrchestratorAgentProgress {
@@ -1197,6 +1203,74 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 delivery_status: ev.delivery_status,
                 available_controls: ev.available_controls,
                 context_percent: ev.context_percent,
+                cost_usd: ev.cost_usd,
+            })
+        }
+
+        // Monitors / watch-tasks (C1b). `id` also arrives as `watch_id`; accept
+        // either. `parent_agent_id` nil → the node attaches to the main root.
+        "monitor_started" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                id: String,
+                #[serde(default)]
+                watch_id: String,
+                #[serde(default)]
+                label: String,
+                #[serde(default)]
+                parent_agent_id: Option<String>,
+            }
+            let ev: Ev = serde_json::from_slice(data).ok()?;
+            let id = if ev.id.is_empty() { ev.watch_id } else { ev.id };
+            Some(BackendEvent::MonitorStarted {
+                id,
+                label: ev.label,
+                parent_agent_id: ev.parent_agent_id.filter(|s| !s.is_empty()),
+            })
+        }
+
+        "monitor_event" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                id: String,
+                #[serde(default)]
+                watch_id: String,
+                #[serde(default)]
+                label: String,
+                #[serde(default)]
+                fire: String,
+            }
+            let ev: Ev = serde_json::from_slice(data).ok()?;
+            let id = if ev.id.is_empty() { ev.watch_id } else { ev.id };
+            // Prefer the explicit fire detail, else fall back to the label.
+            let detail = if ev.fire.is_empty() {
+                ev.label
+            } else {
+                ev.fire
+            };
+            Some(BackendEvent::MonitorEvent { id, detail })
+        }
+
+        "monitor_done" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                id: String,
+                #[serde(default)]
+                watch_id: String,
+                #[serde(default)]
+                state: String,
+                #[serde(default)]
+                detail: Option<String>,
+            }
+            let ev: Ev = serde_json::from_slice(data).ok()?;
+            let id = if ev.id.is_empty() { ev.watch_id } else { ev.id };
+            Some(BackendEvent::MonitorDone {
+                id,
+                state: ev.state,
+                detail: ev.detail.filter(|s| !s.trim().is_empty()),
             })
         }
 
@@ -1227,6 +1301,12 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 // Compact one-line result/error preview (absent from older backends).
                 #[serde(default)]
                 summary: Option<String>,
+                // A capped run comes back RunStore `:completed` with these flags
+                // set; either one marks it resumable-partial.
+                #[serde(default)]
+                partial: bool,
+                #[serde(default)]
+                resumable: bool,
             }
             let ev: Ev = serde_json::from_slice(data).ok()?;
             // Backend uses this event for both success and failure
@@ -1245,6 +1325,7 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                     tool_uses: ev.tool_uses,
                     tokens_used: ev.tokens_used,
                     summary: ev.summary,
+                    resumable: ev.partial || ev.resumable,
                 })
             }
         }
@@ -2598,8 +2679,97 @@ mod tests {
         // Older backend without the field → summary is None (no panic, no drop).
         let legacy = br#"{"type":"system_event","event":"orchestrator_agent_completed","session_id":"s1","agent_name":"w3","status":"completed","tool_uses":1,"tokens_used":10}"#;
         match parse_sse_event("orchestrator_agent_completed", legacy) {
-            Some(BackendEvent::OrchestratorAgentCompleted { summary, .. }) => {
+            Some(BackendEvent::OrchestratorAgentCompleted {
+                summary, resumable, ..
+            }) => {
                 assert_eq!(summary, None);
+                assert!(!resumable, "a plain completion is not resumable");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    /// A capped run (`partial`/`resumable` on the completed frame) decodes as a
+    /// resumable completion, so the handler can surface it as its own state.
+    #[test]
+    fn a_capped_completion_decodes_as_resumable() {
+        for flags in [r#""partial":true"#, r#""resumable":true"#] {
+            let frame = format!(
+                r#"{{"type":"system_event","event":"orchestrator_agent_completed","agent_name":"w1","status":"completed","tool_uses":5,"tokens_used":900,{flags}}}"#
+            );
+            match parse_sse_event("orchestrator_agent_completed", frame.as_bytes()) {
+                Some(BackendEvent::OrchestratorAgentCompleted { resumable, .. }) => {
+                    assert!(resumable, "flags {flags} must decode as resumable");
+                }
+                other => panic!("unexpected for {flags}: {:?}", other),
+            }
+        }
+    }
+
+    /// The live per-worker cost (item-10) decodes off the progress frame.
+    #[test]
+    fn progress_carries_live_cost_usd() {
+        let frame = br#"{"event":"orchestrator_agent_progress","agent_name":"w1","cost_usd":0.42}"#;
+        match parse_sse_event("orchestrator_agent_progress", frame) {
+            Some(BackendEvent::OrchestratorAgentProgress { cost_usd, .. }) => {
+                assert_eq!(cost_usd, Some(0.42));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+        // Older backend without the field → None (leaves the last value intact).
+        let legacy = br#"{"event":"orchestrator_agent_progress","agent_name":"w1"}"#;
+        match parse_sse_event("orchestrator_agent_progress", legacy) {
+            Some(BackendEvent::OrchestratorAgentProgress { cost_usd, .. }) => {
+                assert_eq!(cost_usd, None);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    /// The three monitor frames decode to their events, accepting `id` or
+    /// `watch_id`, and mapping the wire `state` for `done`.
+    #[test]
+    fn monitor_frames_decode_to_their_events() {
+        let started = br#"{"event":"monitor_started","watch_id":"watch_1","label":"file:/x","parent_agent_id":"agent:root:researcher"}"#;
+        match parse_sse_event("monitor_started", started) {
+            Some(BackendEvent::MonitorStarted {
+                id,
+                label,
+                parent_agent_id,
+            }) => {
+                assert_eq!(id, "watch_1"); // accepted via watch_id
+                assert_eq!(label, "file:/x");
+                assert_eq!(parent_agent_id.as_deref(), Some("agent:root:researcher"));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        let event = br#"{"event":"monitor_event","id":"watch_1","fire":"changed"}"#;
+        match parse_sse_event("monitor_event", event) {
+            Some(BackendEvent::MonitorEvent { id, detail }) => {
+                assert_eq!(id, "watch_1");
+                assert_eq!(detail, "changed");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        let done =
+            br#"{"event":"monitor_done","id":"watch_1","state":"timeout","detail":"deadline"}"#;
+        match parse_sse_event("monitor_done", done) {
+            Some(BackendEvent::MonitorDone { id, state, detail }) => {
+                assert_eq!(id, "watch_1");
+                assert_eq!(state, "timeout");
+                assert_eq!(detail.as_deref(), Some("deadline"));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+        // A root monitor: nil parent → None.
+        let root = br#"{"event":"monitor_started","id":"w2","label":"url:https://x","parent_agent_id":null}"#;
+        match parse_sse_event("monitor_started", root) {
+            Some(BackendEvent::MonitorStarted {
+                parent_agent_id, ..
+            }) => {
+                assert_eq!(parent_agent_id, None);
             }
             other => panic!("unexpected: {:?}", other),
         }
@@ -2775,7 +2945,9 @@ mod tests {
         // A frame that includes the live context utilization decodes it...
         let frame = br#"{"event":"orchestrator_agent_progress","agent_name":"worker","current_action":"searching","tool_uses":8,"tokens_used":900000,"context_percent":42}"#;
         match parse_sse_event("orchestrator_agent_progress", frame) {
-            Some(BackendEvent::OrchestratorAgentProgress { context_percent, .. }) => {
+            Some(BackendEvent::OrchestratorAgentProgress {
+                context_percent, ..
+            }) => {
                 assert_eq!(context_percent, Some(42));
             }
             other => panic!("unexpected: {:?}", other),
@@ -2784,7 +2956,9 @@ mod tests {
         // ...and an older frame without it decodes to None rather than dropping.
         let legacy = br#"{"event":"orchestrator_agent_progress","agent_name":"worker","current_action":"searching","tool_uses":8,"tokens_used":900000}"#;
         match parse_sse_event("orchestrator_agent_progress", legacy) {
-            Some(BackendEvent::OrchestratorAgentProgress { context_percent, .. }) => {
+            Some(BackendEvent::OrchestratorAgentProgress {
+                context_percent, ..
+            }) => {
                 assert_eq!(context_percent, None);
             }
             other => panic!("unexpected: {:?}", other),

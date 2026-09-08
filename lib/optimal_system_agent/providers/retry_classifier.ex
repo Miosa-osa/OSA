@@ -110,13 +110,21 @@ defmodule OptimalSystemAgent.Providers.RetryClassifier do
   # Retrying it (bounded by the same budget/backoff as any other transient
   # error) keeps a stray empty from ever reaching the agent loop as a counted
   # "empty generation", which is what trips the ReasoningOnly doom guard.
+  #
+  # `:partial_tool_call` is here for the same reason: a stream cut off mid tool-
+  # call arguments (non-blank JSON that won't decode) is a transient truncation,
+  # not a real turn. Re-requesting yields the intact tool call; retrying it here
+  # (same bounded budget) keeps a stripped-args tool call from ever reaching the
+  # agent loop, where it fails validation and trips the "identical arguments"
+  # doom halt.
   @retryable_categories [
     :server_error,
     :server_overload,
     :rate_limit,
     :timeout,
     :connection_error,
-    :empty_response
+    :empty_response,
+    :partial_tool_call
   ]
 
   @doc "The consecutive-429 retry cap."

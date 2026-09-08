@@ -26,6 +26,17 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   # `empty_result?/1`.
   @empty_response_reason "Empty response from provider (HTTP 200 with no content, tool calls, or reasoning)"
 
+  # Reason string for a stream (or 200 body) that carried a tool call whose
+  # arguments were cut off mid-JSON — the accumulated `arguments_json` is
+  # NON-BLANK yet will not decode to a map. Observed live on flaky providers
+  # under load: a large tool-call payload (e.g. `delegate`'s self-contained task
+  # brief) is truncated mid-arguments. Emitting the call with `%{}` args silently
+  # STRIPS the arguments → instant tool-validation failure → the model retries →
+  # cut off again → "identical arguments N times" doom halt. Kept in one place so
+  # every path emits identical text, which `ErrorCatalog.classify/1` recognises
+  # as `:partial_tool_call` (retryable). See `partial_args?/1`.
+  @partial_tool_call_reason "Provider returned an incomplete tool call (arguments cut off mid-stream)"
+
   @doc """
   Execute a chat completion against any OpenAI-compatible endpoint.
 
@@ -147,6 +158,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
           # name a cache that never warmed at all. Diagnostics only — cannot
           # fail the request (see CacheAttribution).
           observe_cache(cache_fp, usage, opts)
+          probe_tool_schema_cache(usage, opts, model)
 
           # The sync path had NO reasoning handling of any kind — not even the
           # `reasoning_content` clause the streaming path had. Same normaliser,
@@ -168,11 +180,24 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
           # an empty turn to the agent loop, where three in a row trip the
           # ReasoningOnly doom guard. A 200 that carries tool_calls with empty
           # content is NOT empty and passes straight through.
-          if empty_result?(result) do
-            Logger.warning("OpenAI-compat HTTP 200 with an empty response — retrying")
-            {:error, @empty_response_reason}
-          else
-            {:ok, result}
+          cond do
+            # A 200 body whose tool-call arguments were cut off mid-JSON (non-
+            # blank but undecodable) is a truncated generation, not a real turn.
+            # Surface it as the same retryable error the stream path uses instead
+            # of letting `parse_tool_calls/2` silently strip the args to `%{}`.
+            raw_tool_calls_partial?(msg) ->
+              Logger.warning(
+                "OpenAI-compat HTTP 200 with an incomplete tool call (arguments cut off) — retrying"
+              )
+
+              {:error, @partial_tool_call_reason}
+
+            empty_result?(result) ->
+              Logger.warning("OpenAI-compat HTTP 200 with an empty response — retrying")
+              {:error, @empty_response_reason}
+
+            true ->
+              {:ok, result}
           end
 
         {:ok, %{status: 429, body: resp_body, headers: resp_headers}} ->
@@ -237,6 +262,82 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   end
 
   defp reported_usage?(_), do: false
+
+  @doc false
+  # DIAGNOSTIC ONLY — measures whether the tool-schema array is inside the cached
+  # prefix on a WARM turn of a Claude-family compat route (OpenRouter/Surplus →
+  # Anthropic), or is being re-sent as fresh input (~8k tokens) at full rate
+  # every turn. Places no cache hint: it exists so a real warm capture can decide
+  # whether `maybe_add_tools/2` needs a `cache_control` breakpoint on the last
+  # tool definition.
+  #
+  # The signal: on OpenAI-shaped usage `input_tokens` is INCLUSIVE of the cached
+  # slices, so the genuinely fresh tokens are `input - cache_read - cache_creation`.
+  # In a warm agentic loop the fresh slice should be just the new user/tool
+  # message; if it is as large as the tool array, the tools are not in the cached
+  # prefix. Telemetry fires every warm turn (for aggregation); the human-readable
+  # line logs once per process.
+  def probe_tool_schema_cache(usage, opts, model) do
+    with true <- reported_usage?(usage),
+         tools when is_list(tools) and tools != [] <- Keyword.get(opts, :tools),
+         true <- OptimalSystemAgent.Providers.Registry.anthropic_family_model?(model),
+         cache_read when cache_read > 0 <- Map.get(usage, :cache_read_input_tokens, 0) do
+      tool_tokens =
+        tools
+        |> format_tools()
+        |> Jason.encode!()
+        |> byte_size()
+        |> OptimalSystemAgent.Providers.PromptCache.approx_tokens()
+
+      cache_creation = Map.get(usage, :cache_creation_input_tokens, 0)
+      total_in = Map.get(usage, :input_tokens, 0)
+      fresh = max(total_in - cache_read - cache_creation, 0)
+      tools_cached? = fresh < round(tool_tokens * 0.5)
+
+      :telemetry.execute(
+        [:osa, :prompt_cache, :tool_schema_probe],
+        %{
+          tool_tokens: tool_tokens,
+          fresh_input: fresh,
+          cache_read: cache_read,
+          cache_creation: cache_creation,
+          total_input: total_in
+        },
+        %{model: model, tools_cached: tools_cached?}
+      )
+
+      if probe_once?() do
+        verdict =
+          if tools_cached?,
+            do: "INSIDE the cached prefix (no action needed)",
+            else:
+              "UNCACHED — re-sent at full rate each turn; add a cache_control breakpoint on the " <>
+                "last tool def in maybe_add_tools/2 for this route"
+
+        Logger.info(
+          "[PromptCache] TOOL-SCHEMA CACHE PROBE (#{model}): tool_schema≈#{tool_tokens} tok, " <>
+            "fresh_input=#{fresh} tok, cache_read=#{cache_read}, cache_creation=#{cache_creation}, " <>
+            "total_input=#{total_in} → tool array appears #{verdict}"
+        )
+      end
+
+      :ok
+    else
+      _ -> :ok
+    end
+  rescue
+    # A diagnostic on the hot path must never fail the request.
+    _ -> :ok
+  end
+
+  defp probe_once? do
+    if Process.get(:osa_tool_schema_probed) == true do
+      false
+    else
+      Process.put(:osa_tool_schema_probed, true)
+      true
+    end
+  end
 
   # An SSE payload, not JSON: OpenAI-compatible streams are `data: {...}` lines
   # and terminate with `data: [DONE]`.
@@ -427,6 +528,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
           # `estimate_usage_fallback/3` may substitute an estimate — the
           # attributor must only ever see a real measurement.
           observe_cache(cache_fp, Map.get(acc, :usage, %{}), opts)
+          probe_tool_schema_cache(Map.get(acc, :usage, %{}), opts, model)
           finalize_sse_stream(acc, callback, model, messages)
 
         {:error, reason} ->
@@ -637,6 +739,52 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   defp maybe_append_args(tc, _), do: tc
 
   defp finalize_sse_stream(acc, callback, model, orig_messages) do
+    # A streamed tool call whose accumulated `arguments_json` is non-blank but
+    # will not decode is a stream that was CUT OFF mid-arguments. Do NOT emit it
+    # with `%{}` (that silently strips the arguments — the bug this fixes).
+    # Instead surface a RETRYABLE error so `Resilience.with_retry/2` re-requests
+    # and the intact tool call arrives on a good attempt — mirroring the empty-
+    # response recovery. A bare cut-off tool call fired no text/thinking delta
+    # (we short-circuit BEFORE the think-tail flush below), so the one-way door
+    # (`mark_output_observed/0`) is not tripped and a retry duplicates nothing.
+    # A blank ("") `arguments_json` is NOT partial (legit no-arg tool call) and
+    # flows through `do_finalize_sse_stream/4` → `%{}` untouched.
+    if partial_tool_call?(acc) do
+      Logger.warning(
+        "OpenAI-compat stream cut off mid tool-call arguments (incomplete JSON) — retrying"
+      )
+
+      {:error, @partial_tool_call_reason}
+    else
+      do_finalize_sse_stream(acc, callback, model, orig_messages)
+    end
+  end
+
+  # True when any accumulated streamed tool call has partial (cut-off) arguments.
+  defp partial_tool_call?(%{tool_calls: tcs}) when is_map(tcs) do
+    Enum.any?(tcs, fn {_idx, tc} -> partial_args?(Map.get(tc, :arguments_json)) end)
+  end
+
+  defp partial_tool_call?(_), do: false
+
+  # The blank-vs-incomplete distinction the whole fix turns on.
+  #
+  # A tool call's arguments are "partial" — the generation was cut off
+  # mid-arguments — when the accumulated payload is NON-BLANK yet does not decode
+  # to a JSON map. That is retryable: re-request and the intact call comes back.
+  #
+  # A BLANK ("" / whitespace) payload is NOT partial: it is a legitimate
+  # no-argument tool call and must still become `%{}` and pass through. A payload
+  # that decodes but to a non-map (array/scalar) is malformed like a cut-off, so
+  # it counts as partial too.
+  defp partial_args?(args) when is_binary(args) do
+    String.trim(args) != "" and
+      not match?({:ok, decoded} when is_map(decoded), Jason.decode(args))
+  end
+
+  defp partial_args?(_), do: false
+
+  defp do_finalize_sse_stream(acc, callback, model, orig_messages) do
     # Drain any tag tail the streaming splitter was holding back, so the live
     # display never loses trailing characters at end-of-stream.
     acc =
@@ -1098,6 +1246,19 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       }
     end)
   end
+
+  # True when a raw (non-stream) OpenAI message carries a tool call whose
+  # `function.arguments` string was cut off mid-JSON — the same blank-vs-
+  # incomplete distinction as the stream path (`partial_args?/1`). The sync 200
+  # handler uses this to raise a retryable error before `parse_tool_calls/2`
+  # would silently decode the truncated payload to `%{}`.
+  defp raw_tool_calls_partial?(%{"tool_calls" => calls}) when is_list(calls) do
+    Enum.any?(calls, fn call ->
+      partial_args?(get_in(call, ["function", "arguments"]))
+    end)
+  end
+
+  defp raw_tool_calls_partial?(_), do: false
 
   @doc "Parse tool_calls from an OpenAI-style message map."
   def parse_tool_calls(%{"tool_calls" => calls}) when is_list(calls) do

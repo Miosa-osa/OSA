@@ -17,6 +17,17 @@ defmodule OptimalSystemAgent.Security.SecretFilePermissionsTest do
 
   @moduletag :security
 
+  # `write_setup/1` and `upsert_provider_key/1` don't just write the `.env`
+  # file under test — they also apply the same selection to the CURRENT
+  # PROCESS via `Application.put_env`/`System.put_env` (see `apply_env_vars/4`
+  # and `apply_provider_key/2` in `Onboarding`), so it takes effect without a
+  # restart. That is just as global as `OSA_HOME`/`DISPLAY` below, and just as
+  # much this test's responsibility to undo, or the fake keys/model used here
+  # ("sk-ant-secret", "claude-opus-5", …) outlive this file for the rest of
+  # the suite.
+  @touched_app ~w(default_provider default_model anthropic_api_key openai_api_key)a
+  @touched_env ~w(OSA_DEFAULT_PROVIDER ANTHROPIC_API_KEY OPENAI_API_KEY)
+
   setup do
     dir = Path.join(System.tmp_dir!(), "osa_secrets_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
@@ -31,10 +42,25 @@ defmodule OptimalSystemAgent.Security.SecretFilePermissionsTest do
     prev_display = System.get_env("DISPLAY")
     System.delete_env("DISPLAY")
 
+    prev_app =
+      Map.new(@touched_app, fn k -> {k, Application.get_env(:optimal_system_agent, k)} end)
+
+    prev_env = Map.new(@touched_env, &{&1, System.get_env(&1)})
+
     on_exit(fn ->
       if prev_home, do: System.put_env("OSA_HOME", prev_home), else: System.delete_env("OSA_HOME")
       if prev_display, do: System.put_env("DISPLAY", prev_display)
       File.rm_rf(dir)
+
+      Enum.each(prev_app, fn
+        {k, nil} -> Application.delete_env(:optimal_system_agent, k)
+        {k, v} -> Application.put_env(:optimal_system_agent, k, v)
+      end)
+
+      Enum.each(prev_env, fn
+        {k, nil} -> System.delete_env(k)
+        {k, v} -> System.put_env(k, v)
+      end)
     end)
 
     {:ok, dir: dir, env_path: Path.join(dir, ".env")}

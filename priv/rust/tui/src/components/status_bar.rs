@@ -21,6 +21,31 @@ const TITLE_RESERVE_COLS: usize = 26;
 const TITLE_MIN_COLS: usize = 16;
 /// Upper bound so a long title cannot dominate row 0 on a wide terminal.
 const TITLE_MAX_COLS: usize = 32;
+/// Floor for the model-name segment: however narrow the pane, always show at
+/// least this many columns of the model name (ellipsized) so it stays
+/// recognizable rather than vanishing entirely.
+const MODEL_MIN_COLS: usize = 12;
+
+/// Display-column budget for the row-0 model-name segment.
+///
+/// The context meter is the one right-hand segment that must ALWAYS survive, and
+/// row 0 has no global truncation — ratatui simply clips the overflow at the
+/// right edge, which is the meter. The session title is already budgeted against
+/// this (see `draw`); the model name was not, so a long model id
+/// (`provider/really-long-model-name-preview`) could push the meter off an
+/// 80-column pane. This reserves the leading glyph, the cwd label, and
+/// [`TITLE_RESERVE_COLS`] for the meter + trailing chips, and never returns less
+/// than [`MODEL_MIN_COLS`]. A short name that already fits is returned untouched
+/// by the caller's `fit_cols` (fast path), so the common case is unchanged.
+pub(crate) fn model_name_budget(total_cols: usize, cwd_cols: usize) -> usize {
+    const GLYPH_COLS: usize = 2; // "⟐ "
+    const CWD_GAP: usize = 2; // the "  " that trails the cwd
+    total_cols
+        .saturating_sub(GLYPH_COLS)
+        .saturating_sub(cwd_cols + CWD_GAP)
+        .saturating_sub(TITLE_RESERVE_COLS)
+        .max(MODEL_MIN_COLS)
+}
 
 fn spans_cols(spans: &[Span<'_>]) -> usize {
     spans.iter().map(|span| cols(span.content.as_ref())).sum()
@@ -201,10 +226,18 @@ fn watcher_label(monitors: usize, loops: usize) -> Option<String> {
     }
     let mut s = String::from("watching");
     if monitors > 0 {
-        s.push_str(&format!(" \u{00b7} {} monitor{}", monitors, if monitors == 1 { "" } else { "s" }));
+        s.push_str(&format!(
+            " \u{00b7} {} monitor{}",
+            monitors,
+            if monitors == 1 { "" } else { "s" }
+        ));
     }
     if loops > 0 {
-        s.push_str(&format!(" \u{00b7} {} loop{}", loops, if loops == 1 { "" } else { "s" }));
+        s.push_str(&format!(
+            " \u{00b7} {} loop{}",
+            loops,
+            if loops == 1 { "" } else { "s" }
+        ));
     }
     Some(s)
 }
@@ -324,6 +357,47 @@ pub(crate) fn estimate_tokens(text: &str) -> u64 {
     (text.chars().count() as u64).div_ceil(4)
 }
 
+/// Consumed-context ratio at/above which the meter begins a subtle pulse, drawing
+/// the eye a little BEFORE the backend's hard low-context warning band opens.
+/// This is emphasis only — the honest number and colour are unchanged.
+pub(crate) const CTX_PULSE_RATIO: f64 = 0.80;
+
+/// Wall-clock pulse phase for the context meter's 80%+ emphasis.
+///
+/// Mirrors the jailbreak badge's tick-free approach (`jailbreak::bolt_phase`):
+/// derived from the system clock so no tick plumbing is needed and the pulse
+/// animates on every repaint. ~700ms half-period → a slow, non-distracting
+/// breathe rather than a jarring blink.
+fn ctx_pulse_bright() -> bool {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    (ms / 700).is_multiple_of(2)
+}
+
+/// Style for the context percentage / token readout.
+///
+/// Three tiers, from calm to loud:
+///   * below [`CTX_PULSE_RATIO`]: the plain severity colour, no emphasis;
+///   * at/above [`CTX_PULSE_RATIO`] but before the backend's warning band: a
+///     subtle BOLD pulse (`bright` alternates on the wall clock) so the number
+///     "breathes" without a colour change or a jump in width;
+///   * `context_low` (the backend crossed `warn_at`): always bold, in the error
+///     colour the caller has already selected — the hard, persistent warning.
+///
+/// Pure: `bright` is injected so the pulse is deterministic under test.
+pub(crate) fn ctx_pct_style(color: Color, ratio: f64, context_low: bool, bright: bool) -> Style {
+    let base = Style::default().fg(color);
+    if context_low {
+        return base.add_modifier(Modifier::BOLD);
+    }
+    if ratio >= CTX_PULSE_RATIO && bright {
+        return base.add_modifier(Modifier::BOLD);
+    }
+    base
+}
+
 /// Below this many estimated tokens the pending composer input is noise, so the
 /// compact `+~Nk` hint stays hidden (CC only surfaces the size of large pastes).
 /// At or above it the hint appears next to the context readout.
@@ -363,7 +437,11 @@ pub enum GoalVerifyState {
     /// Majority did not refute — the goal reads as met (`verdict: complete`).
     OnTrack,
     /// Majority refuted — not done yet; carries the compact gap summary.
-    Incomplete { refuted: u32, total: u32, gaps: Vec<String> },
+    Incomplete {
+        refuted: u32,
+        total: u32,
+        gaps: Vec<String>,
+    },
     /// Majority judged the goal unachievable as framed (`verdict: off_track`).
     OffTrack,
 }
@@ -658,9 +736,7 @@ impl StatusBar {
     /// design — a compact `⬆ vX`, never a nag.
     pub fn set_update_available(&mut self, update: Option<crate::client::types::HealthUpdate>) {
         self.update_latest = match update {
-            Some(u) if u.available => {
-                u.latest_version.filter(|v| !v.trim().is_empty())
-            }
+            Some(u) if u.available => u.latest_version.filter(|v| !v.trim().is_empty()),
             _ => None,
         };
     }
@@ -788,8 +864,7 @@ impl StatusBar {
             return;
         }
 
-        self.context_utilization =
-            (input_tokens as f64 / self.context_max as f64).clamp(0.0, 1.0);
+        self.context_utilization = (input_tokens as f64 / self.context_max as f64).clamp(0.0, 1.0);
     }
 
     /// Current context utilization ratio (0.0..=1.0), for mirroring into the
@@ -1085,11 +1160,18 @@ impl Component for StatusBar {
         // Reserve a 1-column right gutter on both status rows so the right-most
         // segment (version chip / bg counter) never clips mid-glyph against the
         // terminal edge — parity with draw_context_hint's gutter (edd66d5).
-        let row0 = Rect { width: rows[0].width.saturating_sub(1), ..rows[0] };
-        let goal_row = self.goal_label.as_ref().and_then(|_| rows.get(1)).map(|r| Rect {
-            width: r.width.saturating_sub(1),
-            ..*r
-        });
+        let row0 = Rect {
+            width: rows[0].width.saturating_sub(1),
+            ..rows[0]
+        };
+        let goal_row = self
+            .goal_label
+            .as_ref()
+            .and_then(|_| rows.get(1))
+            .map(|r| Rect {
+                width: r.width.saturating_sub(1),
+                ..*r
+            });
         let skill_row_index = 1 + usize::from(self.goal_label.is_some());
         let skill_row = (!self.active_skills.is_empty()).then(|| Rect {
             width: rows[skill_row_index].width.saturating_sub(1),
@@ -1098,7 +1180,10 @@ impl Component for StatusBar {
         let permission_row_index = rows.len().saturating_sub(1);
         let row1 = rows
             .get(permission_row_index)
-            .map(|r| Rect { width: r.width.saturating_sub(1), ..*r })
+            .map(|r| Rect {
+                width: r.width.saturating_sub(1),
+                ..*r
+            })
             .unwrap_or(row0);
         let area = row0; // special-case single-line indicators render into row 0
 
@@ -1108,11 +1193,17 @@ impl Component for StatusBar {
             let bar_total = 20usize;
             let filled = (pct as usize * bar_total / 100).min(bar_total);
             let empty = bar_total - filled;
-            let bar = format!("[{}{}]", "\u{2588}".repeat(filled), "\u{2591}".repeat(empty));
+            let bar = format!(
+                "[{}{}]",
+                "\u{2588}".repeat(filled),
+                "\u{2591}".repeat(empty)
+            );
             let spans = vec![
                 Span::styled(
                     format!("\u{21E9} Downloading {}: ", self.download_label),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(bar, Style::default().fg(Color::Cyan)),
                 Span::styled(format!(" {}%", pct), theme.progress_label()),
@@ -1152,11 +1243,19 @@ impl Component for StatusBar {
             if self.hands_free {
                 spans.push(Span::styled(
                     " \u{00b7} HF",
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
                 ));
-                spans.push(Span::styled(" \u{2014} auto-stop on silence", theme.faint()));
+                spans.push(Span::styled(
+                    " \u{2014} auto-stop on silence",
+                    theme.faint(),
+                ));
             } else {
-                spans.push(Span::styled(" \u{2014} click \u{25C9} to stop \u{00b7} Esc cancel", theme.faint()));
+                spans.push(Span::styled(
+                    " \u{2014} click \u{25C9} to stop \u{00b7} Esc cancel",
+                    theme.faint(),
+                ));
             }
             let line = Line::from(spans);
             frame.render_widget(Paragraph::new(line), area);
@@ -1165,12 +1264,12 @@ impl Component for StatusBar {
 
         // Transcribing indicator — after recording stops, before result arrives
         if self.transcribing {
-            let spans = vec![
-                Span::styled(
-                    "\u{27F3} Transcribing...",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                ),
-            ];
+            let spans = vec![Span::styled(
+                "\u{27F3} Transcribing...",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )];
             let line = Line::from(spans);
             frame.render_widget(Paragraph::new(line), area);
             return;
@@ -1190,14 +1289,24 @@ impl Component for StatusBar {
             self.provider.as_str()
         };
         if !model_label.is_empty() {
-            spans.push(Span::styled(model_label.to_string(), theme.header_model()));
+            // Budgeted so a long model id can never push the context meter off
+            // the right edge on a narrow pane — the meter must always survive.
+            // A name that already fits is returned unchanged by `fit_cols`.
+            let budget = model_name_budget(area.width as usize, cols(&self.cwd_basename));
+            spans.push(Span::styled(
+                fit_cols(model_label, budget),
+                theme.header_model(),
+            ));
             spans.push(Span::raw("  "));
         }
         // `/jailbreak` badge — animated ⚡ LIBERATED next to the model it is
         // liberating. Empty (zero columns) when disarmed; wall-clock pulsed
         // so it needs no tick plumbing. See `components/jailbreak.rs`.
         spans.extend(super::jailbreak::badge_spans(self.liberated));
-        spans.push(Span::styled(self.cwd_basename.clone(), theme.header_provider()));
+        spans.push(Span::styled(
+            self.cwd_basename.clone(),
+            theme.header_provider(),
+        ));
 
         // Session title — what this conversation is ABOUT, next to where it is.
         //
@@ -1247,11 +1356,10 @@ impl Component for StatusBar {
         } else {
             theme.context_bar_color(disp_ratio)
         };
-        let pct_style = if self.context_low {
-            Style::default().fg(ctx_color).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(ctx_color)
-        };
+        // Subtle 80%+ pulse (tick-free, wall-clock) so the readout draws the eye
+        // a little before the hard `context_low` warning band; `context_low`
+        // itself stays bold-red and persistent (see `draw_context_hint`).
+        let pct_style = ctx_pct_style(ctx_color, disp_ratio, self.context_low, ctx_pulse_bright());
 
         // Unknown window (`context_max == 0`) — the backend could not honestly
         // resolve this model's context length, so there is no denominator and a
@@ -1321,7 +1429,9 @@ impl Component for StatusBar {
             spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
             spans.push(Span::styled(
                 "HF",
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
 
@@ -1354,11 +1464,11 @@ impl Component for StatusBar {
                     gaps,
                 } => {
                     let sym = if legacy { "!" } else { "\u{26A0}" }; // ⚠
-                    // Only genuine, user-meaningful findings are countable or
-                    // showable. Harness diagnostics ("unparsable skeptic
-                    // response", "skeptic failed: :timeout") are filtered out
-                    // by the backend already; this is defence in depth so an
-                    // internal detail can never become a user-facing badge.
+                                                                     // Only genuine, user-meaningful findings are countable or
+                                                                     // showable. Harness diagnostics ("unparsable skeptic
+                                                                     // response", "skeptic failed: :timeout") are filtered out
+                                                                     // by the backend already; this is defence in depth so an
+                                                                     // internal detail can never become a user-facing badge.
                     let shown: Vec<&str> = displayable_gaps(gaps);
                     let mut label = if shown.is_empty() {
                         // Nothing meaningful to name — say the useful thing
@@ -1423,7 +1533,11 @@ impl Component for StatusBar {
         }
 
         if let Some(reasoning) = self.reasoning.as_ref() {
-            let state = if reasoning.starts_with("on:") { "think:on" } else { "think:off" };
+            let state = if reasoning.starts_with("on:") {
+                "think:on"
+            } else {
+                "think:off"
+            };
             push_segment_if_fits(
                 &mut spans,
                 vec![
@@ -1466,7 +1580,9 @@ impl Component for StatusBar {
             spans.push(Span::styled(" \u{2502} ", theme.status_sep()));
             spans.push(Span::styled(
                 format!("\u{273b} {}", swarm),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
 
@@ -1555,7 +1671,9 @@ impl Component for StatusBar {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     format!("\u{25CE} {}", goal_label),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 )))
                 .style(theme.status_bar()),
                 goal_area,
@@ -1563,7 +1681,12 @@ impl Component for StatusBar {
         }
 
         if let Some(skill_area) = skill_row {
-            let visible = self.active_skills.iter().take(3).cloned().collect::<Vec<_>>();
+            let visible = self
+                .active_skills
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>();
             let hidden = self.active_skills.len().saturating_sub(visible.len());
             let label = if hidden == 0 {
                 visible.join(", ")
@@ -1864,8 +1987,10 @@ mod status_bar_tests {
             );
             assert!(narrow.contains("ctx"));
         }
-        assert!(render_title_row(80, Some("Debugging production 500 errors"))
-            .contains("Debugging production 500 errors"));
+        assert!(
+            render_title_row(80, Some("Debugging production 500 errors"))
+                .contains("Debugging production 500 errors")
+        );
     }
 
     #[test]
@@ -1900,7 +2025,10 @@ mod status_bar_tests {
         );
         // Default (ask) mode shows no persistent mode banner at all (CC hides it).
         let def = render_status_text(PermissionMode::Default);
-        assert!(!def.contains("ask on"), "default mode must not print a mode banner");
+        assert!(
+            !def.contains("ask on"),
+            "default mode must not print a mode banner"
+        );
     }
 
     /// Render the status bar with a coordinator flag and flatten to a string.
@@ -2103,14 +2231,22 @@ mod status_bar_tests {
         sb.set_mcp(12);
         sb.set_permission_mode(PermissionMode::BypassPermissions);
         sb.set_goal_label(Some(
-            "Pursuing: Complete the MIOSA Forge product: m… · 3m 54s · /goal pause"
-                .into(),
+            "Pursuing: Complete the MIOSA Forge product: m… · 3m 54s · /goal pause".into(),
         ));
 
         let text = render_sb_at(&sb, 100, 3);
-        assert!(text.contains("Pursuing: Complete the MIOSA Forge product"), "goal description was clipped: {text:?}");
-        assert!(text.contains("/goal pause"), "goal control was clipped: {text:?}");
-        assert!(text.contains("overdrive (full auto) on"), "permission row disappeared: {text:?}");
+        assert!(
+            text.contains("Pursuing: Complete the MIOSA Forge product"),
+            "goal description was clipped: {text:?}"
+        );
+        assert!(
+            text.contains("/goal pause"),
+            "goal control was clipped: {text:?}"
+        );
+        assert!(
+            text.contains("overdrive (full auto) on"),
+            "permission row disappeared: {text:?}"
+        );
     }
 
     #[test]
@@ -2143,19 +2279,31 @@ mod status_bar_tests {
 
         assert_eq!(sb.desired_height(), 3);
         let text = render_sb_at(&sb, 42, 3);
-        assert!(text.contains("Using: diagnosing-bugs"), "skill row missing: {text:?}");
-        assert!(text.contains("overdrive"), "permission row missing: {text:?}");
+        assert!(
+            text.contains("Using: diagnosing-bugs"),
+            "skill row missing: {text:?}"
+        );
+        assert!(
+            text.contains("overdrive"),
+            "permission row missing: {text:?}"
+        );
 
         for skill in ["review", "tdd", "security-auditor"] {
             sb.add_active_skill(skill.into());
         }
         let overflow = render_sb_at(&sb, 60, 3);
-        assert!(overflow.contains("+1"), "hidden skill count missing: {overflow:?}");
+        assert!(
+            overflow.contains("+1"),
+            "hidden skill count missing: {overflow:?}"
+        );
 
         sb.clear_active_skills();
         assert_eq!(sb.desired_height(), 2);
         let cleared = render_sb_at(&sb, 60, 2);
-        assert!(!cleared.contains("Using:"), "skills leaked across sessions: {cleared:?}");
+        assert!(
+            !cleared.contains("Using:"),
+            "skills leaked across sessions: {cleared:?}"
+        );
     }
 
     #[test]
@@ -2197,13 +2345,19 @@ mod status_bar_tests {
         sb.set_background_count(1);
         sb.set_active(false);
         let idle = render_sb(&sb);
-        assert!(idle.contains("watching"), "idle watcher cue must render, got: {idle:?}");
+        assert!(
+            idle.contains("watching"),
+            "idle watcher cue must render, got: {idle:?}"
+        );
         assert!(idle.contains("2 monitors") && idle.contains("1 loop"));
 
         sb.set_active(true);
         let busy = render_sb(&sb);
         assert!(!busy.contains("watching"), "no watcher cue during a turn");
-        assert!(busy.contains("2 shells"), "raw shells detail shows mid-turn");
+        assert!(
+            busy.contains("2 shells"),
+            "raw shells detail shows mid-turn"
+        );
     }
 
     #[test]
@@ -2215,7 +2369,10 @@ mod status_bar_tests {
         sb.set_mcp(2);
         sb.set_swarm(Some("swarm \u{00b7} round 4".to_string()));
         let text = render_sb(&sb);
-        assert!(text.contains("3 subagents"), "subagent footer, got: {text:?}");
+        assert!(
+            text.contains("3 subagents"),
+            "subagent footer, got: {text:?}"
+        );
         assert!(text.contains("$0.42"), "subagent cost");
         assert!(text.contains("manage"), "nav hint");
         assert!(text.contains("2 MCP"), "MCP chip");
@@ -2240,16 +2397,28 @@ mod status_bar_tests {
         // Idle roster: advertise how to open it + the full dashboard.
         sb.set_fleet_select(false);
         let idle = render_sb(&sb);
-        assert!(idle.contains("for agents"), "idle hint present, got: {idle:?}");
+        assert!(
+            idle.contains("for agents"),
+            "idle hint present, got: {idle:?}"
+        );
         assert!(idle.contains("manage"), "idle hint advertises ↓ manage");
-        assert!(!idle.contains("Enter to view"), "no action hint when unfocused");
+        assert!(
+            !idle.contains("Enter to view"),
+            "no action hint when unfocused"
+        );
 
         // Roster focused (`←` pressed): show the per-row actions instead.
         sb.set_fleet_select(true);
         let focused = render_sb(&sb);
-        assert!(focused.contains("Enter to view"), "focused action hint, got: {focused:?}");
+        assert!(
+            focused.contains("Enter to view"),
+            "focused action hint, got: {focused:?}"
+        );
         assert!(focused.contains("x to stop"), "focused stop hint");
-        assert!(!focused.contains("manage"), "idle hint is replaced when focused");
+        assert!(
+            !focused.contains("manage"),
+            "idle hint is replaced when focused"
+        );
     }
 
     #[test]
@@ -2261,7 +2430,10 @@ mod status_bar_tests {
         // No update reported → no chip.
         sb.set_update_available(None);
         assert_eq!(sb.update_latest(), None);
-        assert!(!render_sb(&sb).contains("\u{2B06}"), "no ⬆ chip when absent");
+        assert!(
+            !render_sb(&sb).contains("\u{2B06}"),
+            "no ⬆ chip when absent"
+        );
 
         // available:false (up to date / source build) → still no chip.
         sb.set_update_available(Some(HealthUpdate {
@@ -2270,7 +2442,10 @@ mod status_bar_tests {
             latest_version: Some("0.5.0".into()),
         }));
         assert_eq!(sb.update_latest(), None);
-        assert!(!render_sb(&sb).contains("\u{2B06}"), "no chip when not available");
+        assert!(
+            !render_sb(&sb).contains("\u{2B06}"),
+            "no chip when not available"
+        );
 
         // available:true → compact "⬆ vX" chip appears.
         sb.set_update_available(Some(HealthUpdate {
@@ -2280,12 +2455,18 @@ mod status_bar_tests {
         }));
         assert_eq!(sb.update_latest(), Some("0.5.0"));
         let text = render_sb(&sb);
-        assert!(text.contains("\u{2B06}"), "⬆ chip must render, got: {text:?}");
+        assert!(
+            text.contains("\u{2B06}"),
+            "⬆ chip must render, got: {text:?}"
+        );
         assert!(text.contains("v0.5.0"), "chip shows latest version");
 
         // Cleared again once the backend reports no update.
         sb.set_update_available(None);
-        assert!(!render_sb(&sb).contains("\u{2B06}"), "chip disappears when cleared");
+        assert!(
+            !render_sb(&sb).contains("\u{2B06}"),
+            "chip disappears when cleared"
+        );
     }
 
     #[test]
@@ -2314,7 +2495,10 @@ mod status_bar_tests {
         let inc = render_sb(&sb);
         assert!(inc.contains("2/3"), "refuted/total, got: {inc:?}");
         assert!(inc.contains("1 gap"), "gap count");
-        assert!(inc.contains("completeness"), "first gap label shown on wide pane");
+        assert!(
+            inc.contains("completeness"),
+            "first gap label shown on wide pane"
+        );
 
         // Off-track → "off-track".
         sb.set_goal_verification(Some(GoalVerifyState::OffTrack));
@@ -2357,13 +2541,31 @@ mod status_bar_tests {
             ],
         }));
         let text = render_sb(&sb);
-        assert!(!text.contains("unparsable"), "parse failure leaked: {text:?}");
-        assert!(!text.contains("fail-closed"), "internal marker leaked: {text:?}");
-        assert!(!text.contains("skeptic failed"), "internal marker leaked: {text:?}");
-        assert!(!text.contains("(fai"), "mid-word cut of an internal string: {text:?}");
+        assert!(
+            !text.contains("unparsable"),
+            "parse failure leaked: {text:?}"
+        );
+        assert!(
+            !text.contains("fail-closed"),
+            "internal marker leaked: {text:?}"
+        );
+        assert!(
+            !text.contains("skeptic failed"),
+            "internal marker leaked: {text:?}"
+        );
+        assert!(
+            !text.contains("(fai"),
+            "mid-word cut of an internal string: {text:?}"
+        );
         // Nothing meaningful to name ⇒ say so, never "0 gaps".
-        assert!(!text.contains("0 gap"), "must not report zero gaps: {text:?}");
-        assert!(text.contains("goal not confirmed"), "meaningful fallback: {text:?}");
+        assert!(
+            !text.contains("0 gap"),
+            "must not report zero gaps: {text:?}"
+        );
+        assert!(
+            text.contains("goal not confirmed"),
+            "meaningful fallback: {text:?}"
+        );
         assert!(text.contains("3/3"), "vote counts still shown: {text:?}");
     }
 
@@ -2381,10 +2583,19 @@ mod status_bar_tests {
             ],
         }));
         let text = render_sb(&sb);
-        assert!(text.contains("1 gap"), "only the real finding counts: {text:?}");
+        assert!(
+            text.contains("1 gap"),
+            "only the real finding counts: {text:?}"
+        );
         assert!(!text.contains("1 gaps"), "singular for one gap: {text:?}");
-        assert!(text.contains("completeness"), "real finding is named: {text:?}");
-        assert!(!text.contains("unparsable"), "diagnostic filtered: {text:?}");
+        assert!(
+            text.contains("completeness"),
+            "real finding is named: {text:?}"
+        );
+        assert!(
+            !text.contains("unparsable"),
+            "diagnostic filtered: {text:?}"
+        );
     }
 
     /// The gap label is fitted in DISPLAY COLUMNS and ellipsized on a word
@@ -2409,14 +2620,20 @@ mod status_bar_tests {
         // overflows the budget.
         let cjk = "[correctness] 出力形式が要求と一致していません 詳細は仕様を参照";
         let fitted_cjk = fit_cols_words(cjk, 30);
-        assert!(crate::util::cols(&fitted_cjk) <= 30, "cjk over budget: {fitted_cjk:?}");
+        assert!(
+            crate::util::cols(&fitted_cjk) <= 30,
+            "cjk over budget: {fitted_cjk:?}"
+        );
 
         // A single unbroken token longer than the budget still yields a
         // non-empty label (falls back to the raw column fit).
         let one_word = "[correctness] aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let fitted_one = fit_cols_words(one_word, 20);
         assert!(crate::util::cols(&fitted_one) <= 20);
-        assert!(fitted_one.len() > 5, "not collapsed to nothing: {fitted_one:?}");
+        assert!(
+            fitted_one.len() > 5,
+            "not collapsed to nothing: {fitted_one:?}"
+        );
     }
 
     /// Narrow panes drop the label entirely rather than crowding the line.
@@ -2424,8 +2641,14 @@ mod status_bar_tests {
     fn gap_label_hidden_on_narrow_panes() {
         let gaps = vec!["[completeness] missing the export step".to_string()];
         let shown = displayable_gaps(&gaps);
-        assert!(first_gap_label(&shown, 80).is_none(), "hidden under 100 cols");
-        assert!(first_gap_label(&shown, 120).is_some(), "shown on a wide pane");
+        assert!(
+            first_gap_label(&shown, 80).is_none(),
+            "hidden under 100 cols"
+        );
+        assert!(
+            first_gap_label(&shown, 120).is_some(),
+            "shown on a wide pane"
+        );
         // …and an all-diagnostic list yields nothing at any width.
         let internal = vec!["[correctness] unparsable skeptic response".to_string()];
         let none = displayable_gaps(&internal);
@@ -2442,7 +2665,7 @@ mod status_bar_tests {
         assert_eq!(estimate_tokens("abcd"), 1);
         assert_eq!(estimate_tokens("abcde"), 2); // ceil(5/4)
         assert_eq!(estimate_tokens("abcdefgh"), 2); // exact 8/4
-        // Large paste: 4000 chars ⇒ 1000 tokens (the hint threshold).
+                                                    // Large paste: 4000 chars ⇒ 1000 tokens (the hint threshold).
         assert_eq!(estimate_tokens(&"x".repeat(4000)), 1000);
         // Counts Unicode scalar values, not bytes (a 4-byte emoji is one char).
         assert_eq!(estimate_tokens("\u{1F600}\u{1F600}\u{1F600}\u{1F600}"), 1);
@@ -2536,7 +2759,10 @@ mod status_bar_tests {
             "the unknown-window readout took over a session with a known window: {text}"
         );
         // 80.8k of 200k, derived rather than left at the reported zero.
-        assert!(text.contains("40% ctx"), "expected a real percent, got: {text}");
+        assert!(
+            text.contains("40% ctx"),
+            "expected a real percent, got: {text}"
+        );
     }
 
     /// A window that was never known stays unknown — the fix above must not
@@ -2594,7 +2820,10 @@ mod status_bar_tests {
         sb.set_context(0.0521, 52_100, 1_000_000);
 
         let text = render_sb(&sb);
-        assert!(text.contains("5% ctx"), "expected a real percent, got: {text}");
+        assert!(
+            text.contains("5% ctx"),
+            "expected a real percent, got: {text}"
+        );
         assert!(!text.contains("~52.1k ctx"));
     }
 

@@ -16,27 +16,22 @@ mod a11y;
 mod app;
 mod client;
 mod clipboard;
-#[cfg(test)] mod tool_outcome_tests;
 mod components;
 mod config;
+mod dialogs;
 mod event;
 mod logging;
 mod notification;
 mod render;
 mod style;
-mod view;
-mod dialogs;
-mod util;
 mod terminal_title;
+#[cfg(test)]
+mod tool_outcome_tests;
 mod tools;
+mod util;
+mod view;
 mod voice;
 
-/// A vt100-backed `ratatui::Backend` giving tests a real terminal emulator.
-#[cfg(test)]
-mod test_backend;
-/// Scoped, restoring overrides for the process-global environment.
-#[cfg(test)]
-mod test_env;
 /// The band arbiter's contract: rects derive from measurements, bands tile the
 /// region, and the composer is never shed.
 #[cfg(test)]
@@ -44,6 +39,16 @@ mod layout_contract;
 /// Reserved-vs-drawn layout invariants for the live-region components.
 #[cfg(test)]
 mod layout_invariants;
+/// A vt100-backed `ratatui::Backend` giving tests a real terminal emulator.
+#[cfg(test)]
+mod test_backend;
+/// Scoped, restoring overrides for the process-global environment.
+#[cfg(test)]
+mod test_env;
+/// Cross-cutting visual invariants: fixed-column tool markers, context-meter
+/// pulse styling, and Unicode width panic-safety.
+#[cfg(test)]
+mod visual_invariants;
 
 fn main() -> Result<()> {
     // Parse CLI args
@@ -216,7 +221,10 @@ fn run(cli: config::cli::Cli) -> Result<app::resume::ExitOutcome> {
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         );
     }
-    tracing::info!(kbd_enhanced, "keyboard enhancement (Shift+Enter newline) status");
+    tracing::info!(
+        kbd_enhanced,
+        "keyboard enhancement (Shift+Enter newline) status"
+    );
 
     // The burst above already sent a CPR (ESC[6n) and drained its response, so the
     // terminal is warmed up before ratatui's Viewport::Inline construction issues

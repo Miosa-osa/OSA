@@ -13,6 +13,7 @@ use entry::{
     AgentEntry, AgentPhase, MainRow, ScratchpadNote, SwarmInfo, SwarmStatus, SynthesisState,
     WaveInfo,
 };
+pub use entry::{MonitorNode, MonitorState};
 
 // ─── Batch grouping ──────────────────────────────────────────────────────────
 
@@ -64,6 +65,18 @@ pub struct Agents {
     /// `None` degrades to printing the path as-is, never to a wrong path.
     workspace_root: Option<String>,
     home: Option<String>,
+    /// Agent nodes the user has collapsed INDIVIDUALLY (by name), hiding just
+    /// that node's child trail + monitors while the rest of the tree stays
+    /// expanded. Distinct from `collapsed`, which folds the WHOLE panel to its
+    /// header. A collapsed node still shows its head row (with a `▸` affordance
+    /// and a "+N" count of what it hid); an expanded node with children shows a
+    /// `▾`. Keyed by name so it survives roster re-ordering.
+    collapsed_nodes: std::collections::HashSet<String>,
+    /// Monitor / watch-task nodes, keyed by their backend id. Rendered in the
+    /// SAME tree as the agents — nested under `parent_agent_id` when set, else at
+    /// the fleet root — so a watch task shows start / event / done-verdict inline
+    /// rather than only in the transcript. See [`MonitorNode`].
+    monitors: Vec<MonitorNode>,
 }
 
 /// Fleet-wide live counts for the roster header gauge (`14/16 agents`).
@@ -87,8 +100,18 @@ const SCRATCHPAD_CAP: usize = 5;
 pub(super) const INLINE_ROSTER_MAX_AGENTS: usize = 8;
 
 /// Most recent per-agent actions rendered as the child list under one agent row
-/// (CC `MAX_PROGRESS_MESSAGES_TO_SHOW`).
+/// (bounded most-recent-actions window).
 pub(crate) const TRAIL_MAX_ACTIONS: usize = 3;
+
+/// Once MORE than this many agents are live at once, each agent's child trail
+/// collapses to a single most-recent line (still carrying the "+N earlier"
+/// rollup) so a large fan-out reads as one status line per agent — the shape of
+/// OSA's running-agents view — instead of a wall of every tool call. Below the
+/// threshold the fleet is small enough that the richer up-to-[`TRAIL_MAX_ACTIONS`]
+/// trail costs few rows and is worth showing. This is bandwidth-matching: the
+/// per-agent detail budget shrinks as the number of receivers competing for the
+/// same scarce rows grows.
+pub(crate) const FLEET_DENSE_THRESHOLD: usize = 3;
 
 /// Hard ceiling on the rows one agent's child list may occupy (actions + the
 /// optional "+N more tool uses" counter). Deliberately equal to the `All`
@@ -116,6 +139,21 @@ pub(super) fn row_activity(entry: &AgentEntry) -> &str {
     }
 }
 
+/// A live agent the backend says is NOT actively working — queued behind the
+/// concurrency cap, or blocked waiting on a model response. It is not failed and
+/// not idle-done; it is stuck-in-place, which is the state a runaway or a wedged
+/// fleet shows first. Rendered in the amber caution tone so it reads as distinct
+/// from a healthy running agent (default tone) and a failed one (error tone) at
+/// a glance. Only `Running`/`Spawning` rows qualify — a terminal row's outcome
+/// already dominates its styling.
+pub(super) fn is_blocked_waiting(entry: &AgentEntry) -> bool {
+    matches!(entry.status, AgentStatus::Running | AgentStatus::Spawning)
+        && entry
+            .phase
+            .as_ref()
+            .is_some_and(|p| matches!(p.name.as_str(), "queued" | "awaiting_model"))
+}
+
 /// The de-duplicated, bounded child action list for one running agent, ordered
 /// oldest → newest (the order it is drawn in).
 ///
@@ -130,7 +168,10 @@ pub(super) fn row_activity(entry: &AgentEntry) -> &str {
 ///
 /// MUST stay in lockstep with [`Agents::entry_rows`] and the trail built in
 /// `draw_tree`, which is why all three go through this one function.
-pub(super) fn trail_actions(entry: &AgentEntry) -> Vec<String> {
+pub(super) fn trail_actions(entry: &AgentEntry, cap: usize) -> Vec<String> {
+    // A cap of 0 would show no trail at all; the child list's whole job is to
+    // show at least the single most-recent distinct action, so floor it at 1.
+    let cap = cap.clamp(1, TRAIL_MAX_ACTIONS);
     let head = row_activity(entry);
     let mut out: Vec<String> = Vec::new();
     // `recent_actions` is newest-first; collect newest-first, then flip.
@@ -147,7 +188,7 @@ pub(super) fn trail_actions(entry: &AgentEntry) -> Vec<String> {
             continue;
         }
         out.push(t.to_string());
-        if out.len() == TRAIL_MAX_ACTIONS {
+        if out.len() == cap {
             break;
         }
     }
@@ -305,6 +346,8 @@ impl Agents {
             fleet: None,
             workspace_root: None,
             home: std::env::var("HOME").ok().filter(|h| !h.trim().is_empty()),
+            collapsed_nodes: std::collections::HashSet::new(),
+            monitors: Vec::new(),
         }
     }
 
@@ -345,7 +388,7 @@ impl Agents {
     pub(super) fn trail_display_rows(&self, entry: &AgentEntry) -> Vec<String> {
         let mut prev: Option<String> = None;
         let mut out = Vec::new();
-        for a in trail_actions(entry) {
+        for a in trail_actions(entry, self.trail_cap()) {
             let shortened = self.trail_shorten(&a);
             out.push(match prev {
                 Some(ref p) => crate::util::elide_shared_prefix(p, &shortened),
@@ -378,11 +421,127 @@ impl Agents {
     /// Feed the synthetic `main` root row from live session state (top-level
     /// action, turn elapsed, session output tokens). Rendered as roster index 0.
     pub fn set_main_row(&mut self, activity: impl Into<String>, elapsed_secs: u64, tokens: u32) {
+        // Preserve any context%/cost already learned for the session — those come
+        // from a separate frame (`set_main_context`) and must survive a plain
+        // activity/token refresh.
+        let (context_percent, cost_usd) = self
+            .main_row
+            .as_ref()
+            .map(|m| (m.context_percent, m.cost_usd))
+            .unwrap_or((None, None));
         self.main_row = Some(MainRow {
             activity: activity.into(),
             elapsed_secs,
             tokens,
+            context_percent,
+            cost_usd,
         });
+    }
+
+    /// Feed the `main` root's TRUTHFUL session gauge — context-window occupancy
+    /// (share of the model window) and real cost — from the session frame. Kept
+    /// separate from [`Self::set_main_row`] so the two frames don't clobber each
+    /// other, and so existing callers need no change. `None` leaves the last
+    /// reading intact (an older frame that omits the field never wipes it).
+    pub fn set_main_context(&mut self, context_percent: Option<u32>, cost_usd: Option<f64>) {
+        let row = self.main_row.get_or_insert_with(MainRow::default);
+        if context_percent.is_some() {
+            row.context_percent = context_percent;
+        }
+        if cost_usd.is_some() {
+            row.cost_usd = cost_usd;
+        }
+    }
+
+    // ── Per-node expand/collapse (C1a) ───────────────────────────────────────
+
+    /// Toggle the INDIVIDUAL collapse of one agent node (by name). A collapsed
+    /// node hides just its own child trail + monitors, keeping its head row (and
+    /// the rest of the tree) visible — distinct from [`Self::toggle_collapse`],
+    /// which folds the whole panel to its header.
+    pub fn toggle_node_collapse(&mut self, name: &str) {
+        if !self.collapsed_nodes.remove(name) {
+            self.collapsed_nodes.insert(name.to_string());
+        }
+    }
+
+    /// Toggle collapse of the currently roster-selected node. Roster index 0 is
+    /// `main` (no children to fold); 1..=entries map to agent rows. No-op when
+    /// nothing is selected or `main` is.
+    pub fn toggle_selected_node_collapse(&mut self) {
+        if let Some(sel) = self.roster_selected {
+            if let Some(entry) = sel.checked_sub(1).and_then(|i| self.entries.get(i)) {
+                let name = entry.name.clone();
+                self.toggle_node_collapse(&name);
+            }
+        }
+    }
+
+    /// Whether an agent node is individually collapsed.
+    pub(super) fn is_node_collapsed(&self, name: &str) -> bool {
+        self.collapsed_nodes.contains(name)
+    }
+
+    // ── Monitor / watch-task tree nodes (C1b consumer) ───────────────────────
+
+    /// `monitor_started` frame: a watch task began. Creates the node or revives
+    /// an existing one to `Watching`, (re)binding it under `parent_agent_id`.
+    pub fn monitor_started(&mut self, id: &str, label: &str, parent_agent_id: Option<String>) {
+        if let Some(m) = self.monitors.iter_mut().find(|m| m.id == id) {
+            if !label.trim().is_empty() {
+                m.label = label.to_string();
+            }
+            m.state = MonitorState::Watching;
+            m.parent_agent_id = parent_agent_id;
+        } else {
+            self.monitors.push(MonitorNode {
+                id: id.to_string(),
+                label: label.to_string(),
+                state: MonitorState::Watching,
+                parent_agent_id,
+                last_event: None,
+            });
+        }
+        self.active = true;
+    }
+
+    /// `monitor_event` frame: the monitor reported a progress line, shown as its
+    /// detail. Ignored for an unknown id (no node to attach it to).
+    pub fn monitor_event(&mut self, id: &str, event: &str) {
+        if let Some(m) = self.monitors.iter_mut().find(|m| m.id == id) {
+            if !event.trim().is_empty() {
+                m.last_event = Some(event.trim().to_string());
+            }
+        }
+    }
+
+    /// `monitor_done` frame: the monitor finished. Records the verdict state and,
+    /// when present, the verdict text as the node's detail.
+    pub fn monitor_done(&mut self, id: &str, state: MonitorState, verdict: Option<String>) {
+        if let Some(m) = self.monitors.iter_mut().find(|m| m.id == id) {
+            m.state = state;
+            if let Some(v) = verdict {
+                if !v.trim().is_empty() {
+                    m.last_event = Some(v.trim().to_string());
+                }
+            }
+        }
+    }
+
+    /// Monitors attached to a given agent (nested under its row).
+    pub(super) fn monitor_children(&self, agent_name: &str) -> Vec<&MonitorNode> {
+        self.monitors
+            .iter()
+            .filter(|m| m.parent_agent_id.as_deref() == Some(agent_name))
+            .collect()
+    }
+
+    /// Monitors with no parent agent — rendered at the fleet root.
+    pub(super) fn root_monitors(&self) -> Vec<&MonitorNode> {
+        self.monitors
+            .iter()
+            .filter(|m| m.parent_agent_id.is_none())
+            .collect()
     }
 
     /// Tell the panel where "here" is, so trail rows can print paths the way the
@@ -470,6 +629,7 @@ impl Agents {
             };
             let action = match e.status {
                 AgentStatus::Completed => "done".to_string(),
+                AgentStatus::Partial => "partial (resumable)".to_string(),
                 AgentStatus::Failed if e.current_action.is_empty() => "failed".to_string(),
                 _ if e.current_action.is_empty() => "starting…".to_string(),
                 _ => e.current_action.clone(),
@@ -590,7 +750,7 @@ impl Agents {
     ///     worse bug than a crowded panel.
     ///
     /// Otherwise the only thing it held — session tokens — moves into the header,
-    /// which is the "N=1 inlines, N>1 promotes to rows" rule Codex applies to
+    /// which is the "N=1 inlines, N>1 promotes to rows" rule applied to
     /// delegation targets.
     ///
     /// MUST be consulted by both `height()` and `draw_tree`.
@@ -611,6 +771,29 @@ impl Agents {
         }
     }
 
+    /// Agents that are live right now (running or spawning). Drives the adaptive
+    /// trail density — a dense fleet gets a tighter per-agent trail.
+    pub(super) fn live_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| matches!(e.status, AgentStatus::Running | AgentStatus::Spawning))
+            .count()
+    }
+
+    /// How many child-trail actions one running agent's row may show: the full
+    /// [`TRAIL_MAX_ACTIONS`] for a small fleet, collapsed to the single
+    /// most-recent action once MORE than [`FLEET_DENSE_THRESHOLD`] agents are
+    /// live so the inline roster stays one-line-per-agent under fan-out. Consulted
+    /// by BOTH [`Self::height`] (via `entry_rows_capped`) and `draw_tree` (via
+    /// `trail_display_rows`), so the reservation and the paint never disagree.
+    pub(super) fn trail_cap(&self) -> usize {
+        if self.live_count() > FLEET_DENSE_THRESHOLD {
+            1
+        } else {
+            TRAIL_MAX_ACTIONS
+        }
+    }
+
     /// Total render height: 0 when inactive, else header + 2*agents + batch headers + optional synth + swarm.
     /// Capped at 30 to prevent degenerate cases.
     pub fn height(&self) -> u16 {
@@ -625,13 +808,23 @@ impl Agents {
         }
         // Inline roster is capped at INLINE_ROSTER_MAX_AGENTS rows; the overflow
         // collapses into a single "+K more agents" summary line (see draw_tree).
+        let cap = self.trail_cap();
         let agent_lines: u16 = self
             .entries
             .iter()
             .take(INLINE_ROSTER_MAX_AGENTS)
-            .map(Self::entry_rows)
+            .map(|e| self.entry_block_rows(e, cap))
             .sum();
         let more_line = u16::from(self.entries.len() > INLINE_ROSTER_MAX_AGENTS);
+        // Fleet-root monitors (no parent agent): 1 header + one row each.
+        let root_monitor_lines = {
+            let n = self.root_monitors().len();
+            if n == 0 {
+                0
+            } else {
+                1 + n as u16
+            }
+        };
         let batch_header_lines = {
             let groups = self.grouped_entries();
             // MUST mirror `draw_tree`'s `has_batches` exactly: a rule only exists
@@ -655,7 +848,7 @@ impl Agents {
         } else {
             1 + self.scratchpad.len() as u16
         };
-        // Synthetic `main` root row (CC FleetView). Only drawn when it has
+        // Synthetic `main` root row (roster root). Only drawn when it has
         // something to say — see `main_row_earns_a_row`.
         let main_line = u16::from(self.main_row_earns_a_row());
         // summary + 1 header + main + batch headers + agents + synth + swarm + scratchpad
@@ -665,10 +858,24 @@ impl Agents {
             + batch_header_lines
             + agent_lines
             + more_line
+            + root_monitor_lines
             + synth_lines
             + swarm_lines
             + scratchpad_lines;
         total.min(30)
+    }
+
+    /// Rows one agent's WHOLE block occupies: its head + trail + summary +
+    /// nested monitors when expanded, or just the head row when the node is
+    /// individually collapsed. The single source of truth shared by [`Self::height`]
+    /// and `draw_tree` for per-node collapse + monitor nesting, so the reservation
+    /// and the paint never disagree.
+    pub(super) fn entry_block_rows(&self, entry: &AgentEntry, cap: usize) -> u16 {
+        if self.is_node_collapsed(&entry.name) {
+            1
+        } else {
+            Self::entry_rows_capped(entry, cap) + self.monitor_children(&entry.name).len() as u16
+        }
     }
 
     /// Rows the tree needs for one agent: 1 subject row + the action trail.
@@ -686,10 +893,18 @@ impl Agents {
     /// MUST stay in lockstep with the trail built in `draw_tree` or the layout
     /// desyncs — both go through [`trail_actions`].
     pub(super) fn entry_rows(entry: &AgentEntry) -> u16 {
+        Self::entry_rows_capped(entry, TRAIL_MAX_ACTIONS)
+    }
+
+    /// [`Self::entry_rows`] with an explicit per-agent trail cap, so a dense
+    /// fleet reserves exactly the tighter one-line trail `draw_tree` will paint
+    /// (see [`Self::trail_cap`]). MUST stay in lockstep with the trail built in
+    /// `draw_tree` — both go through [`trail_actions`] with the SAME cap.
+    pub(super) fn entry_rows_capped(entry: &AgentEntry, cap: usize) -> u16 {
         match entry.status {
             AgentStatus::Running | AgentStatus::Spawning => {
-                let shown = trail_actions(entry).len();
-                1 + shown.max(1).min(TRAIL_MAX_ROWS) as u16
+                let shown = trail_actions(entry, cap).len();
+                1 + shown.clamp(1, TRAIL_MAX_ROWS) as u16
             }
             // Unknown / Stalled: 1 subject + exactly 1 state line. No trail (the
             // trail would imply live activity we do not have) and no summary
@@ -748,7 +963,7 @@ impl Agents {
         // 2. Old finished rows → removed; long-Unknown rows → removed as well
         //    (silent removal, never a fabricated terminal state).
         self.entries.retain(|e| match e.status {
-            AgentStatus::Completed | AgentStatus::Failed => e
+            AgentStatus::Completed | AgentStatus::Failed | AgentStatus::Partial => e
                 .finished_at
                 .map(|t| t.elapsed().as_secs() < Self::RETAIN_SECS)
                 .unwrap_or(true),
@@ -910,6 +1125,16 @@ impl Agents {
     ) {
         let subject = subject.into();
         if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
+            // A terminal row is FINAL. A progress frame that arrives after the
+            // completion/failure/partial event is stale (a reorder, a replay, or
+            // an in-flight frame that lost the race) and must not touch the row —
+            // otherwise a `Failed` agent would flicker its action/counters back
+            // as though it were running again, which is exactly the stale-snapshot
+            // inconsistency the fleet view must never show. Mirrors the same guard
+            // in `agent_phase`.
+            if entry.status.is_terminal() {
+                return;
+            }
             // Every progress frame re-states the run's true age, so a row the
             // panel adopted mid-flight converges on the backend's clock rather
             // than counting from whenever this process first saw it.
@@ -1018,6 +1243,36 @@ impl Agents {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
             entry.status = AgentStatus::Completed;
             entry.current_action = "complete".into();
+            if let Some(t) = tool_uses {
+                entry.tool_uses = t;
+            }
+            if let Some(t) = tokens {
+                entry.tokens_used = t;
+            }
+            entry.finished_at = Some(std::time::Instant::now());
+            entry.result_summary = summary.filter(|s| !s.trim().is_empty());
+        }
+    }
+
+    /// Terminal-but-RESUMABLE transition: a capped run (RunStore `:completed`
+    /// carrying `partial`/`resumable`). Non-destructive on the accumulated
+    /// counters like the other terminal setters. Kept separate from
+    /// [`Agents::agent_completed`] so a capped run is surfaced as its own state
+    /// and never reads as a clean "Done".
+    ///
+    /// The last live `current_action` is deliberately LEFT in place (unlike
+    /// `agent_completed`, which overwrites it with "complete"), so the head row
+    /// still shows what the run was doing when it was capped while the trail
+    /// states "Partial · resumable".
+    pub fn agent_partial(
+        &mut self,
+        name: &str,
+        tool_uses: Option<u32>,
+        tokens: Option<u32>,
+        summary: Option<String>,
+    ) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
+            entry.status = AgentStatus::Partial;
             if let Some(t) = tool_uses {
                 entry.tool_uses = t;
             }
@@ -1487,7 +1742,7 @@ mod tests {
         );
     }
 
-    // ── FleetView roster: inline `← for agents` navigation invariants ─────────
+    // ── Roster: inline `← for agents` navigation invariants ───────────────────
     // These lock the ROSTER index space (0 = synthetic `main`, 1..=entries) that
     // `handle_fleet_select_key` / `view_selected_dashboard_item` /
     // `stop_selected_dashboard_item` rely on. See app/update.rs + handle_dialogs.rs.
@@ -1782,7 +2037,7 @@ mod tests {
         assert!(!a.is_active(), "panel goes idle when nothing remains");
     }
 
-    // ── FleetView roster: visual layout / column-alignment snapshots ───────────
+    // ── Roster: visual layout / column-alignment snapshots ─────────────────────
     // These render the panel to a TestBackend and assert on the actual per-row
     // pixels, locking the CC-parity roster columns (glyph · type · activity ·
     // elapsed · ↓tokens) and the box-drawing width accounting.
@@ -1807,9 +2062,10 @@ mod tests {
 
     #[test]
     fn roster_renders_main_root_and_worker_meta_columns() {
-        // The synthetic `main` root row + a live worker, with the CC meta column
-        // (`<elapsed> · ↓<tokens>`) on each. Locks: the green `● main` root, the
-        // `◯` worker glyph, and the right-hand token/elapsed column.
+        // The synthetic `main` root row + a live worker. Locks: the green
+        // `● main` root, the `◯` worker glyph, and the right-hand meta column
+        // (the `main` root keeps its session-token summary; a worker shows the
+        // truthful elapsed/effort meter instead of a cumulative token total).
         let mut a = Agents::new();
         a.set_main_row("orchestrating the fleet", 625, 107_300);
         a.agent_started("worker-1", "researcher", "", "scanning modules", None, None);
@@ -1862,9 +2118,16 @@ mod tests {
             worker_line.contains("reading entry.rs"),
             "worker activity: {worker_line:?}"
         );
+        // Truthful meter: with neither context% nor cost reported yet, the worker
+        // meta floors to the tool-call count — never the cache-inflated token
+        // total. `4.2k tok` (the old cumulative figure) must be gone.
         assert!(
-            worker_line.contains("4.2k tok"),
-            "worker ↓tokens: {worker_line:?}"
+            worker_line.contains("4 tools"),
+            "worker meta shows the tool count floor: {worker_line:?}"
+        );
+        assert!(
+            !worker_line.contains("tok"),
+            "worker row must not render the raw cumulative token total: {worker_line:?}"
         );
         // Tree connector present.
         assert!(
@@ -1969,9 +2232,9 @@ mod tests {
         );
     }
 
-    // ── FleetView roster: right-aligned meta column ────────────────────────────
+    // ── Roster: right-aligned meta column ──────────────────────────────────────
     // The `<elapsed> · ↓<tokens>` meta is flush-right to the pane edge so it forms
-    // a clean vertical column (CC parity), instead of left-flowing after each
+    // a clean vertical column, instead of left-flowing after each
     // agent's activity. These render to a TestBackend and assert on the *cell
     // grid* (not the char-collapsed string) so wide (CJK) glyphs are handled: a
     // wide cell keeps its column and the trailing cell is empty, so a cell's index
@@ -1994,24 +2257,42 @@ mod tests {
             .collect()
     }
 
-    /// The display column of the first `↓` cell in a row, if any.
-    // The meta column now reads `<elapsed> · <tokens> tok` (no `↓`, which read
-    // as a pressable down-key). Anchor alignment on the `tok` unit: it is
-    // present on every roster row (main root and workers), unique per row, and
-    // lines up when the equal-width, flush-right metas align.
-    fn meta_sep_col(row: &[String]) -> Option<usize> {
-        (0..row.len().saturating_sub(2))
-            .find(|&i| row[i] == "t" && row[i + 1] == "o" && row[i + 2] == "k")
+    /// The display column where `needle` begins in a row's cell grid, if present.
+    /// Cell index == display column (wide glyphs keep their column, see
+    /// `render_cells`), so this is the true start column of the substring.
+    fn col_of(row: &[String], needle: &str) -> Option<usize> {
+        let joined: String = row.concat();
+        let byte_pos = joined.find(needle)?;
+        // Map the byte offset back to a cell index by walking the cells.
+        let mut acc = 0usize;
+        for (i, cell) in row.iter().enumerate() {
+            if acc == byte_pos {
+                return Some(i);
+            }
+            acc += cell.len();
+        }
+        None
+    }
+
+    /// A row's meta is flush-right when its final cell is non-blank — the meta
+    /// occupies the last column, which is the invariant `roster_row_line`
+    /// guarantees regardless of each row's meta width.
+    fn meta_is_flush_right(row: &[String]) -> bool {
+        row.last()
+            .map(|c| c != " " && !c.is_empty())
+            .unwrap_or(false)
     }
 
     #[test]
     fn roster_meta_column_is_right_aligned_across_rows() {
-        // main + two workers, all with equal-width metas (`0s · ↓X.Xk`). Because
-        // the meta is flush-right, the `↓` — and the meta's start column — land in
-        // the SAME column on every row: a clean vertical table column.
+        // main + two workers. Every roster row's meta is flush-right against the
+        // pane edge, so the meta column reads as one clean vertical column no
+        // matter each row's meta width. The two workers carry equal-width
+        // truthful metas (`0s · NN% ctx`), so their `ctx` label lands in the
+        // identical column too.
         for w in [60u16, 80u16] {
             let mut a = Agents::new();
-            a.set_main_row("orchestrating the fleet", 0, 5_000); // ↓5.0k
+            a.set_main_row("orchestrating the fleet", 0, 5_000);
             a.agent_started("w1", "researcher", "", "scanning modules", None, None);
             a.agent_progress(
                 "w1",
@@ -2021,7 +2302,8 @@ mod tests {
                 "scanning modules",
                 vec![],
                 None,
-            ); // ↓4.2k
+            );
+            a.set_agent_context("w1", Some(40)); // → "0s · 40% ctx"
             a.agent_started("w2", "coder", "", "building the crate", None, None);
             a.agent_progress(
                 "w2",
@@ -2031,7 +2313,8 @@ mod tests {
                 "building",
                 vec![],
                 None,
-            ); // ↓5.1k
+            );
+            a.set_agent_context("w2", Some(55)); // → "0s · 55% ctx"
 
             let cells = render_cells(&a, w, 12);
 
@@ -2045,24 +2328,38 @@ mod tests {
                 .collect();
             assert_eq!(rows.len(), 3, "expected main + 2 worker rows at w={w}");
 
-            // Every row's meta separator `·` sits in the identical column.
-            let cols: Vec<usize> = rows
-                .iter()
-                .map(|r| meta_sep_col(r).expect("meta separator present"))
-                .collect();
-            assert!(
-                cols.iter().all(|c| *c == cols[0]),
-                "meta column must line up across rows at w={w}: {cols:?}"
-            );
-            // Equal-width metas are flush-right: the last cell is the final `k`
-            // of the `tok` unit.
+            // Every row's meta is flush-right against the pane edge.
             for r in &rows {
+                assert!(
+                    meta_is_flush_right(r),
+                    "meta must end flush at the right edge at w={w}: {:?}",
+                    r.concat()
+                );
                 assert_eq!(
-                    r[w as usize - 1],
-                    "k",
-                    "meta ends flush at the right edge at w={w}"
+                    r.len(),
+                    w as usize,
+                    "row spans exactly the pane width at w={w}"
                 );
             }
+
+            // The two equal-width worker metas put `ctx` in the identical column.
+            let worker_ctx_cols: Vec<usize> = rows
+                .iter()
+                .filter(|r| {
+                    let s: String = r.concat();
+                    s.contains("researcher") || s.contains("coder")
+                })
+                .map(|r| col_of(r, "ctx").expect("worker meta shows ctx"))
+                .collect();
+            assert_eq!(
+                worker_ctx_cols.len(),
+                2,
+                "both workers show a ctx meta at w={w}"
+            );
+            assert_eq!(
+                worker_ctx_cols[0], worker_ctx_cols[1],
+                "equal-width worker metas align their ctx column at w={w}: {worker_ctx_cols:?}"
+            );
         }
     }
 
@@ -2073,7 +2370,7 @@ mod tests {
         // as an ASCII row, and the row still fills the pane exactly (no overflow).
         let w = 70u16;
         let mut a = Agents::new();
-        a.set_main_row("orchestrating", 0, 5_000); // ↓5.0k
+        a.set_main_row("orchestrating", 0, 5_000);
         a.agent_started("w1", "researcher", "", "scanning modules", None, None);
         a.agent_progress(
             "w1",
@@ -2083,10 +2380,12 @@ mod tests {
             "scanning modules",
             vec![],
             None,
-        ); // ↓4.2k
-           // Wide agent-type (研究者 = 3 CJK chars = 6 display columns) + long activity.
+        );
+        a.set_agent_context("w1", Some(40)); // → "0s · 40% ctx"
+                                             // Wide agent-type (研究者 = 3 CJK chars = 6 display columns) + long activity.
         a.agent_started("w2", "研究者", "", "x".repeat(120), None, None);
-        a.agent_progress("w2", "y".repeat(120), 9, 3_300, "", vec![], None); // ↓3.3k
+        a.agent_progress("w2", "y".repeat(120), 9, 3_300, "", vec![], None);
+        a.set_agent_context("w2", Some(55)); // → "0s · 55% ctx"
 
         let cells = render_cells(&a, w, 12);
         let rows: Vec<&Vec<String>> = cells
@@ -2098,9 +2397,12 @@ mod tests {
             .collect();
         assert_eq!(rows.len(), 2, "ascii worker + wide-glyph worker rows");
 
+        // Both workers carry the equal-width `0s · NN% ctx` meta, so the `ctx`
+        // label lands in the identical column even though one row's agent-type is
+        // wide (CJK) — display-width accounting keeps the meta column aligned.
         let cols: Vec<usize> = rows
             .iter()
-            .map(|r| meta_sep_col(r).expect("meta separator present"))
+            .map(|r| col_of(r, "ctx").expect("worker meta shows ctx"))
             .collect();
         assert_eq!(
             cols[0], cols[1],
@@ -2110,8 +2412,163 @@ mod tests {
         // and its meta is flush-right.
         for r in &rows {
             assert_eq!(r.len(), w as usize, "row spans exactly the pane width");
-            assert_eq!(r[w as usize - 1], "k", "meta ends flush at the right edge");
+            assert!(
+                meta_is_flush_right(r),
+                "meta ends flush at the right edge: {:?}",
+                r.concat()
+            );
         }
+    }
+
+    /// A blocked-waiting agent (queued / awaiting a model) paints its activity in
+    /// the amber caution tone, and a failed one in the error tone — so a stuck or
+    /// broken subagent is distinguishable at a glance from a healthy running one,
+    /// which stays in the default faint tone.
+    #[test]
+    fn a_blocked_waiting_agent_is_amber_and_a_failed_one_is_error_toned() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let theme = crate::style::theme();
+
+        let mut a = Agents::new();
+        // Running, but the backend reports it as blocked waiting on a model.
+        a.agent_started("w1", "researcher", "", "waiting on the model", None, None);
+        a.agent_phase("w1", "researcher", "awaiting_model", "", None);
+        // A healthy running agent (no blocking phase).
+        a.agent_started("w2", "coder", "", "compiling the crate", None, None);
+        a.agent_progress("w2", "compiling the crate", 3, 900, "", vec![], None);
+        // A failed agent.
+        a.agent_started("w3", "tester", "", "run suite", None, None);
+        a.agent_failed("w3", "the build failed", None, None, None);
+
+        let (w, h) = (70u16, 14u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| a.draw(f, f.area())).unwrap();
+        let buf = term.backend().buffer().clone();
+
+        // Foreground colour of the first cell of an activity substring (ASCII, so
+        // byte offset == display column).
+        let fg_of = |needle: &str| -> Option<ratatui::style::Color> {
+            for y in 0..h {
+                let row: String = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
+                if let Some(col) = row.find(needle) {
+                    return buf[(col as u16, y)].style().fg;
+                }
+            }
+            None
+        };
+
+        assert_eq!(
+            fg_of("waiting on the model"),
+            Some(theme.colors.warning),
+            "a blocked-waiting agent's activity must be amber"
+        );
+        assert_eq!(
+            fg_of("compiling the crate"),
+            Some(theme.faint().fg.unwrap()),
+            "a healthy running agent's activity stays in the default faint tone"
+        );
+        assert_eq!(
+            fg_of("the build failed"),
+            Some(theme.colors.error),
+            "a failed agent's activity must be error-toned"
+        );
+    }
+
+    /// A deep, wide fleet whose names, activities and actions are full of wide
+    /// (CJK/emoji) and control (ESC) bytes must render at every width from very
+    /// narrow up without panicking and without any row exceeding the pane — the
+    /// grapheme-aware truncation must never split a multibyte cluster or overflow.
+    /// This is the C7 guard against the ESC/multibyte scanner panics.
+    #[test]
+    fn deep_wide_multibyte_fleet_never_panics_or_overflows() {
+        let mut a = Agents::new();
+        a.set_main_row("🚀 orchestrating 研究 the fleet\u{1b}[0m", 625, 5_000);
+        a.set_fleet_summary(6, 4, 24, 30, false);
+        for i in 0..12 {
+            let name = format!("agent:session-abc:研究者-{i}\u{1b}");
+            a.agent_started(
+                &name,
+                "研究者-role",
+                "",
+                &format!("走査 {} \u{1b}[31m module 🔬🔬🔬", "x".repeat(40)),
+                Some("チーム".to_string()),
+                None,
+            );
+            a.agent_progress(
+                &name,
+                &format!("file_read: /w/研究/{}.rs\u{1b}[0m", "y".repeat(30)),
+                7,
+                3_300,
+                "",
+                vec![
+                    "dir_list: /w/研究/深/深/深".into(),
+                    "file_glob: 🔬*.rs".into(),
+                    format!("shell_execute: {}", "z".repeat(60)),
+                ],
+                None,
+            );
+            a.set_agent_context(&name, Some(42));
+        }
+        a.scratchpad_activity("agent:session-abc:研究者-0", "発見.md", "write", 2100);
+
+        // Sweep narrow → wide, including widths below the meta's own width so the
+        // graceful-degradation branch of `roster_row_line` is exercised too.
+        for w in [4u16, 6, 8, 12, 20, 40, 80, 200] {
+            let h = a.height().max(1);
+            let cells = render_cells(&a, w, h);
+            for row in &cells {
+                assert_eq!(
+                    row.len(),
+                    w as usize,
+                    "a row overflowed or underran the pane at w={w}: {:?}",
+                    row.concat()
+                );
+            }
+        }
+    }
+
+    /// GAP #6 data-level guard: a stale progress frame after a terminal event
+    /// must not mutate the row at all — status, action and counters keep their
+    /// terminal snapshot, so the fleet view can never flicker a finished agent
+    /// back to a running/pending appearance.
+    #[test]
+    fn a_late_progress_frame_cannot_revive_or_mutate_a_terminal_row() {
+        let mut a = Agents::new();
+        a.agent_started("w1", "coder", "", "building", None, None);
+        a.agent_failed("w1", "compile error", Some(3), Some(900), None);
+        a.agent_progress(
+            "w1",
+            "still compiling",
+            9,
+            5_000,
+            "",
+            vec!["file_read: /x".into()],
+            None,
+        );
+        let e = a.entries.iter().find(|e| e.name == "w1").unwrap();
+        assert_eq!(
+            e.status,
+            AgentStatus::Failed,
+            "late frame revived a failed row"
+        );
+        assert_eq!(
+            e.current_action, "compile error",
+            "late frame overwrote the outcome"
+        );
+        assert_eq!(e.tool_uses, 3, "late frame overwrote terminal counters");
+
+        // Same guard for a resumable partial.
+        a.agent_started("w2", "researcher", "", "scan", None, None);
+        a.agent_partial("w2", Some(5), Some(1_000), None);
+        a.agent_progress("w2", "scanning again", 20, 9_999, "", vec![], None);
+        let e2 = a.entries.iter().find(|e| e.name == "w2").unwrap();
+        assert_eq!(
+            e2.status,
+            AgentStatus::Partial,
+            "late frame revived a partial row"
+        );
+        assert_eq!(e2.tool_uses, 5, "late frame overwrote partial counters");
     }
 
     // ── Wave 1: the panel must not state things that are false ────────────────

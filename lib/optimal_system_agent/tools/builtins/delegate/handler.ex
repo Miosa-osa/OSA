@@ -256,11 +256,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       # the single-task and fan-out paths; nil lets Orchestrator fall back to
       # `:subagent_join_timeout_ms` / `@default_subagent_timeout_ms`.
       timeout_ms: parse_timeout_ms(Map.get(args, "timeout_ms")),
-      # Per-subagent USD spend ceiling. nil = off (unchanged default). When set,
-      # the child Loop aborts its own run once it crosses the cap, so a wide
-      # fan-out cannot burn unbounded spend. Each child is capped independently.
+      # Per-subagent USD spend ceiling. The child Loop aborts its own run once it
+      # crosses the cap, so a wide fan-out cannot burn unbounded spend. Each child
+      # is capped independently. A model-supplied value wins; otherwise the child
+      # inherits its TIER default (elite $8 / specialist $4 / utility $1.50), so a
+      # generous turn cap can never turn into a token runaway. See
+      # `Tier.max_budget_usd/1`.
       max_budget_usd:
-        parse_budget_usd(Map.get(args, "max_budget_usd") || Map.get(args, "maxBudgetUsd")),
+        parse_budget_usd(Map.get(args, "max_budget_usd") || Map.get(args, "maxBudgetUsd")) ||
+          Tier.max_budget_usd(tier),
       # Speed/cost tier, normalized by DelegationRouter (nil → :standard). Biases
       # model tier + provider order toward cheaper/local for :loose long-horizon
       # work and toward the best model for :immediate.
@@ -845,7 +849,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   defp resolve_parent_id(args, _ctx), do: Map.get(args, "__session_id__", "unknown")
 
   # Parse a per-subagent USD budget. Accepts a positive number or numeric
-  # string; anything else (including 0 / negative) is "no cap".
+  # string; anything else (including 0 / negative) is "no cap" (falls through to
+  # the tier default). The default itself now lives in `Tier.max_budget_usd/1` so
+  # every delegated child inherits a tier-appropriate cap and self-aborts once it
+  # crosses it (Loop.Limits.budget_exceeded?), bounding a runaway by dollars
+  # rather than only by the turn cap.
   defp parse_budget_usd(n) when is_number(n) and n > 0, do: n * 1.0
 
   defp parse_budget_usd(s) when is_binary(s) do

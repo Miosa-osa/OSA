@@ -146,6 +146,20 @@ defmodule OptimalSystemAgent.Providers.RetryClassifierTest do
     end
   end
 
+  describe "classify/4 — partial-tool-call is retryable (cut-off arguments guard)" do
+    @partial "Provider returned an incomplete tool call (arguments cut off mid-stream)"
+
+    test "a tool call cut off mid-arguments is retried" do
+      assert {:retry_with_client_rebuild, _} = RC.classify(@partial, 0, @max)
+      # And backs off on the second attempt like any other transient error.
+      assert {:retry, _} = RC.classify(@partial, 1, @max)
+    end
+
+    test "it becomes fatal once the retry budget is exhausted (bounded)" do
+      assert {:fatal, @partial} = RC.classify(@partial, @max - 1, @max)
+    end
+  end
+
   describe "classify/4 — :fail_fast_categories override (P1: local-provider connection refusal)" do
     test "connection refused is normally retryable" do
       err = "econnrefused"

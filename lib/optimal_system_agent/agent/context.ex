@@ -1898,7 +1898,6 @@ defmodule OptimalSystemAgent.Agent.Context do
   defp environment_block(state) do
     cwd = Map.get(state, :working_dir) || OptimalSystemAgent.Workspace.Cwd.get()
     git_info = cached_git_info()
-    date = Date.utc_today() |> Date.to_iso8601()
 
     # Resolve identity through the ONE canonical resolver `Runtime.Identity`,
     # the same one `runtime_block/1` and the TUI status bar use. This block
@@ -1921,7 +1920,6 @@ defmodule OptimalSystemAgent.Agent.Context do
     - Working directory: #{cwd}
     - Is directory a git repo: #{if git_info != "", do: "Yes", else: "No"}
     - Platform: #{platform}
-    - Today's date: #{date}
     - You are OSA, powered by the model `#{model}` running on the `#{provider}` provider.
     """
   rescue
@@ -2037,6 +2035,13 @@ defmodule OptimalSystemAgent.Agent.Context do
       # this line sits outside every `cache_control` region (see
       # `build_system_message/4` and `Providers.Anthropic.split_system/2`).
       "- Timestamp: #{DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()}",
+      # `Today's date` lives HERE, in the volatile block, not in the cached
+      # `environment_block/1`. The date flips at UTC midnight, so a cached block
+      # carrying it busts the whole cached prefix (and every history breakpoint
+      # after it) once for any session that crosses midnight. It is emitted every
+      # turn regardless, so nothing is lost by sourcing it from the per-turn block
+      # — and `web_search` reads exactly this string for time-sensitive queries.
+      "- Today's date: #{Date.utc_today() |> Date.to_iso8601()}",
       # Identity is KNOWN, not discoverable: same resolver /health feeds the TUI
       # status bar from, so this line and the bar can never disagree. Without it
       # "what model are you" costs three tool calls and two wrong guesses.

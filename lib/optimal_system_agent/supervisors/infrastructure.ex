@@ -92,7 +92,7 @@ defmodule OptimalSystemAgent.Supervisors.Infrastructure do
 
       # Background watch mechanism — Registry for watch-id → worker lookup +
       # DynamicSupervisor for per-watch supervised watchers (the non-blocking
-      # `monitor` tool streams monitor_started/monitor_fired events from these).
+      # `monitor` tool streams monitor_started/monitor_event/monitor_done events from these).
       {Registry, keys: :unique, name: OptimalSystemAgent.Monitor.WatchRegistry},
       {DynamicSupervisor,
        name: OptimalSystemAgent.Monitor.WatchSupervisor, strategy: :one_for_one},

@@ -353,4 +353,48 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalHandoffTest do
     assert {:error, _, _} = Handler.validate_update(%{"status" => "awaiting_user"}, ctx)
     assert {:error, _, _} = Handler.validate_update(%{"status" => "approve"}, ctx)
   end
+
+  # ── resolve_decision/4 with request_id: nil — no id required ─────────────
+  #
+  # A session has at most one pending decision (`pending_decision` is a single
+  # map, not a list), so making the caller also supply its id back was pure
+  # ceremony. `nil` resolves WHATEVER is currently pending.
+  describe "resolve_decision/4 with a nil request_id" do
+    test "resolves the current pending decision with no id at all", %{sid: sid, request: r} do
+      {:ok, waiting} = GoalTracker.request_decision(sid, r)
+      assert waiting.status == :awaiting_user
+
+      assert {:ok, resolved} = GoalTracker.resolve_decision(sid, nil, "approve")
+      assert resolved.status == :active
+      assert [%{"decision" => "approve"}] = resolved.decision_history
+    end
+
+    test "carries notes through exactly like the explicit-id path", %{sid: sid, request: r} do
+      {:ok, _} = GoalTracker.request_decision(sid, r)
+
+      assert {:ok, resolved} = GoalTracker.resolve_decision(sid, nil, "reject", "needs a redo")
+      assert [%{"decision" => "reject", "note" => "needs a redo"}] = resolved.decision_history
+    end
+
+    test "with nothing pending, fails with a distinct, honest error", %{sid: sid} do
+      refute GoalTracker.awaiting_user?(sid)
+      assert {:error, :no_pending_decision} = GoalTracker.resolve_decision(sid, nil, "approve")
+    end
+
+    test "a nil id never resolves a decision meant for a DIFFERENT session", %{
+      sid: sid,
+      request: r
+    } do
+      other_sid = "handoff-other-#{System.unique_integer([:positive])}"
+      GoalTracker.start(other_sid, "a completely unrelated objective")
+      {:ok, _} = GoalTracker.request_decision(other_sid, r)
+
+      # This session has nothing pending of its own.
+      assert {:error, :no_pending_decision} = GoalTracker.resolve_decision(sid, nil, "approve")
+      # The other session's decision is untouched.
+      assert GoalTracker.awaiting_user?(other_sid)
+
+      GoalTracker.reset(other_sid)
+    end
+  end
 end

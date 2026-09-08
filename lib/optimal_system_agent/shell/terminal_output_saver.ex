@@ -33,7 +33,10 @@ defmodule OptimalSystemAgent.Shell.TerminalOutputSaver do
 
   require Logger
 
-  @max_output_chars 8_000
+  # Char threshold above which terminal output is saved to a file instead of
+  # returned inline. Runtime-configurable (gap #1) via `:terminal_output_max_chars`
+  # / OSA_TERMINAL_OUTPUT_MAX_CHARS; default unchanged (8_000).
+  @default_max_output_chars 8_000
   @output_base_dir "/tmp/terminal_full_output"
 
   @type save_result :: {:saved, String.t(), String.t()} | :not_needed
@@ -49,7 +52,7 @@ defmodule OptimalSystemAgent.Shell.TerminalOutputSaver do
   """
   @spec should_save?(String.t()) :: boolean()
   def should_save?(output) when is_binary(output) do
-    byte_size(output) > @max_output_chars
+    byte_size(output) > max_output_chars()
   end
 
   def should_save?(_), do: false
@@ -174,7 +177,12 @@ defmodule OptimalSystemAgent.Shell.TerminalOutputSaver do
 
   @doc "The maximum output size (in bytes) before saving kicks in."
   @spec max_output_chars() :: non_neg_integer()
-  def max_output_chars, do: @max_output_chars
+  def max_output_chars do
+    case Application.get_env(:optimal_system_agent, :terminal_output_max_chars) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @default_max_output_chars
+    end
+  end
 
   @doc "The base directory where saved outputs are stored."
   @spec output_base_dir() :: String.t()

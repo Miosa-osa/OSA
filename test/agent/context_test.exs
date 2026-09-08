@@ -101,7 +101,9 @@ defmodule OptimalSystemAgent.Agent.ContextTest do
       # For plain-prefix (Ollama) providers the volatile block is appended as a
       # trailing <system-reminder> message (KV-cache prefix stability), so the
       # real conversation is the head of the list; a trailing reminder may follow.
-      real = Enum.reject(conversation, &String.contains?(to_string(&1.content), "<system-reminder>"))
+      real =
+        Enum.reject(conversation, &String.contains?(to_string(&1.content), "<system-reminder>"))
+
       assert length(real) == 2
       assert List.first(real).role == "user"
       assert List.last(real).role == "assistant"
@@ -246,6 +248,31 @@ defmodule OptimalSystemAgent.Agent.ContextTest do
       # SOMEWHERE in the assembled request, not specifically in the system block.
       all_text = Enum.map_join(msgs, "\n", &to_string(&1.content))
       assert String.contains?(all_text, session_id)
+    end
+
+    test "Today's date rides the volatile runtime block, not the cached environment block" do
+      # A real turn (non-empty conversation) so the environment block is assembled.
+      state = base_state(%{messages: [%{role: "user", content: "hi"}]})
+      %{messages: msgs} = Context.build(state)
+      all_text = Enum.map_join(msgs, "\n", &to_string(&1.content))
+
+      # web_search contract: the date is still emitted somewhere every turn.
+      assert String.contains?(all_text, "Today's date"),
+             "the date must still be present for time-sensitive tools"
+
+      # But NOT inside the cached ## Environment section: a value that changes
+      # daily there busts the whole cached prefix once per UTC midnight.
+      if String.contains?(all_text, "## Environment") do
+        env_section =
+          all_text
+          |> String.split("## Environment", parts: 2)
+          |> List.last()
+          |> String.split(~r/\n## /, parts: 2)
+          |> List.first()
+
+        refute String.contains?(env_section, "Today's date"),
+               "the date is back in the cached environment block — it busts the prefix at midnight"
+      end
     end
   end
 

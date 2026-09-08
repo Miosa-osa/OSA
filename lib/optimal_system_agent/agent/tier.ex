@@ -338,9 +338,62 @@ defmodule OptimalSystemAgent.Agent.Tier do
 
   @doc "Get the max iterations for a sub-agent ReAct loop by tier."
   @spec max_iterations(tier()) :: non_neg_integer()
-  def max_iterations(:elite), do: 25
-  def max_iterations(:specialist), do: 15
-  def max_iterations(:utility), do: 8
+  def max_iterations(:elite), do: iters(:elite, 120)
+  def max_iterations(:specialist), do: iters(:specialist, 60)
+  def max_iterations(:utility), do: iters(:utility, 25)
+
+  # Per-tier subagent turn cap, overridable via config (OSA_SUBAGENT_MAX_ITERS_*
+  # in runtime.exs) so the budget can be dialed per-session without a code change.
+  # Defaults are the Claude-Code-like generous backstop (120/60/25).
+  defp iters(tier, default) do
+    case Application.get_env(:optimal_system_agent, :subagent_max_iterations) do
+      %{} = m -> Map.get(m, tier, default)
+      _ -> default
+    end
+  end
+
+  @doc """
+  Default per-subagent USD spend cap by tier.
+
+  This is the REAL runaway bound. The turn caps (`max_iterations/1`, 120/60/25)
+  are a generous backstop, but a high turn cap on a big model with NO budget is
+  exactly how one delegation ran ~32.5M tokens in our own runs (budget was off).
+  Every delegated child now inherits its tier's cap and self-aborts once its
+  accumulated spend crosses it (`Loop.Limits.budget_exceeded?`), so a 120-turn
+  subagent cannot run away.
+
+  A model-supplied `max_budget_usd` still overrides (see the delegate handler and
+  `Orchestrator.run_subagent`). Overridable via config
+  `:subagent_max_budget_usd` (a per-tier map, `OSA_SUBAGENT_MAX_BUDGET_USD_*`)
+  or the flat `:subagent_default_budget_usd` (`OSA_SUBAGENT_MAX_BUDGET_USD`),
+  which acts as a single-number global override for every tier.
+  """
+  @spec max_budget_usd(tier()) :: float()
+  def max_budget_usd(:elite), do: budget(:elite, 8.0)
+  def max_budget_usd(:specialist), do: budget(:specialist, 4.0)
+  def max_budget_usd(:utility), do: budget(:utility, 1.5)
+
+  # Precedence: per-tier map override (most specific) > flat global override >
+  # built-in per-tier default. Mirrors `iters/2` for the turn cap.
+  defp budget(tier, default) do
+    case Application.get_env(:optimal_system_agent, :subagent_max_budget_usd) do
+      %{} = m ->
+        case Map.get(m, tier) do
+          n when is_number(n) and n > 0 -> n * 1.0
+          _ -> flat_budget_or(default)
+        end
+
+      _ ->
+        flat_budget_or(default)
+    end
+  end
+
+  defp flat_budget_or(default) do
+    case Application.get_env(:optimal_system_agent, :subagent_default_budget_usd) do
+      n when is_number(n) and n > 0 -> n * 1.0
+      _ -> default
+    end
+  end
 
   @doc "Get tier display info."
   @spec tier_info(tier()) :: map()
@@ -350,6 +403,7 @@ defmodule OptimalSystemAgent.Agent.Tier do
       budget: budget_for(tier),
       max_agents: max_agents(tier),
       max_iterations: max_iterations(tier),
+      max_budget_usd: max_budget_usd(tier),
       temperature: temperature(tier),
       max_response_tokens: max_response_tokens(tier)
     }

@@ -112,7 +112,26 @@ defmodule OptimalSystemAgent.Agent.RunStore do
           # answer to "when did it last do something". Before this field the only
           # timestamp on a run was `started_at`, so the TUI's own 90-second
           # silence guess was the only signal that existed anywhere.
-          last_progress_at: DateTime.t() | nil
+          last_progress_at: DateTime.t() | nil,
+          # `true` for a run dispatched via `Orchestrator.run_background/2`
+          # (`delegate(background: true)`, and anything that reuses that entry
+          # point — resumes, retries) — the ONE population that is explicitly
+          # designed to keep running after the parent turn that spawned it
+          # ends. Everything else (a synchronous foreground `delegate`, a
+          # `run_parallel`/fan-out workstream the caller awaits directly, a
+          # reconcile-pass coordinator, a Fleet node) is attached to the
+          # dispatching turn and defaults to `false`.
+          #
+          # This is the ONLY thing `Loop.cancel/1`'s descendant cascade
+          # (`descendant_session_ids/1`) reads to decide what an interrupt may
+          # reach — it must NOT be confused with the unrelated `config[:background]`
+          # key `delegate/handler.ex` uses internally to pick an admission
+          # posture; that value can be stale relative to the FINAL dispatch
+          # decision (an explicit foreground override does not unwind it), so
+          # it is never read for this field. Absent/unknown (a row rehydrated
+          # from before this field existed) reads as `false` — fail toward
+          # cancellable, never toward silently surviving an interrupt.
+          background: boolean()
         }
 
   @doc "Start or replace a run record."
@@ -157,7 +176,9 @@ defmodule OptimalSystemAgent.Agent.RunStore do
         phase: Map.get(attrs, :phase),
         phase_detail: Map.get(attrs, :phase_detail),
         phase_at: started_at,
-        last_progress_at: nil
+        last_progress_at: nil,
+        # See @type run — additive, absent callers get `false` (cancellable).
+        background: Map.get(attrs, :background) == true
       }
 
     :ets.insert(@table, {agent_id, run})

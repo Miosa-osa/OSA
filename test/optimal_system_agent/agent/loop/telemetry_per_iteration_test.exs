@@ -122,4 +122,28 @@ defmodule OptimalSystemAgent.Agent.Loop.TelemetryPerIterationTest do
     assert Enum.uniq(utilizations) == utilizations
     assert List.last(utilizations) > List.first(utilizations)
   end
+
+  # Item 10 — the session/main frame the TUI reads (the PubSub :context_pressure
+  # osa_event) must carry `context_percent` and real `cost_usd`, so the root row
+  # shows context% + $ instead of a cache-inflated cumulative token count.
+  test "the session context-pressure frame carries context_percent and cost_usd" do
+    session_id = "ctx-headline-#{:erlang.unique_integer([:positive])}"
+    Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{session_id}")
+
+    state = %{
+      session_id: session_id,
+      model: "claude-sonnet-5",
+      provider: :anthropic,
+      last_input_tokens: 50_000,
+      session_cost_usd: 0.42,
+      messages: [%{role: "user", content: "hello"}]
+    }
+
+    Telemetry.emit_context_pressure(state)
+
+    assert_receive {:osa_event, %{type: :context_pressure} = frame}, 1_000
+    assert is_integer(frame.context_percent)
+    assert frame.context_percent == frame.utilization
+    assert frame.cost_usd == 0.42
+  end
 end

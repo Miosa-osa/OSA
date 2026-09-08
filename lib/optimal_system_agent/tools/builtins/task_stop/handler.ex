@@ -38,8 +38,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskStop.Handler do
     case Registry.lookup(OptimalSystemAgent.SessionRegistry, agent_id) do
       [{_pid, _}] ->
         Loop.cancel(agent_id)
-        complete_cancelled(agent_id)
-        {:ok, "Agent #{agent_id} cancelled."}
+
+        # A live `SessionRegistry` entry does not guarantee the run is still
+        # `:running` in RunStore — a loop can linger briefly past its own
+        # completion — so `complete_cancelled/1` reports back whether it
+        # actually changed anything. Telling the calling model "cancelled"
+        # for a run that had already finished on its own would be a lie the
+        # model then acts on.
+        if complete_cancelled(agent_id) do
+          {:ok, "Agent #{agent_id} cancelled."}
+        else
+          {:ok, "Agent #{agent_id} not found or already completed."}
+        end
 
       [] ->
         {:ok, "Agent #{agent_id} not found or already completed."}
@@ -50,12 +60,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskStop.Handler do
 
   def execute(_input, _ctx), do: {:error, "Missing required parameter: agent_id"}
 
+  # No-op — returns `false`, writes nothing — on a run RunStore already
+  # considers terminal. Re-completing an already-finished run as `:cancelled`
+  # would silently overwrite its real outcome.
+  @spec complete_cancelled(String.t()) :: boolean()
   defp complete_cancelled(agent_id) do
     case RunStore.get(agent_id) do
-      nil ->
-        :ok
-
-      run ->
+      %{status: :running} = run ->
         RunStore.complete(agent_id, %{
           agent_id: agent_id,
           parent_session_id: run.parent_session_id,
@@ -72,6 +83,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskStop.Handler do
           transcript_path: run.transcript_path,
           worktree: nil
         })
+
+        true
+
+      _ ->
+        false
     end
   end
 end

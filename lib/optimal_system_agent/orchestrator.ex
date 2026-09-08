@@ -48,6 +48,12 @@ defmodule OptimalSystemAgent.Orchestrator do
   # is no stray minute-scale cap anywhere that could kill a day-long agent.
   @default_subagent_timeout_ms 3 * 24 * 60 * 60 * 1000
 
+  # Upper bound on the answer text a background completion carries into the parent
+  # channel (Bus event + CLI print). Matches ResultSummarizer's own summary cap so
+  # the background path delivers the SAME answer the foreground delegate path does,
+  # instead of the old 500-char slice that dropped a teammate's real findings.
+  @background_result_max_chars 10_000
+
   @doc false
   def runner_key(agent_id), do: "subagent-runner:" <> agent_id
 
@@ -294,7 +300,14 @@ defmodule OptimalSystemAgent.Orchestrator do
       # P6 peer-resume (sibling handoff) — carried through from the delegate
       # handler when this run was seeded from a peer's saved context rather
       # than a fresh spawn or a parent-fork.
-      resumed_from: Map.get(config, :resumed_from)
+      resumed_from: Map.get(config, :resumed_from),
+      # `:background_dispatch`, NOT the pre-existing `config[:background]` —
+      # that key is `delegate/handler.ex`'s internal admission-posture default
+      # and can be stale relative to the actual dispatch decision (an explicit
+      # foreground override does not unwind it). `:background_dispatch` is set
+      # in exactly one place, `run_background/2`, right before it calls
+      # `run_subagent/1` — see `RunStore`'s `background` field doc.
+      background: Map.get(config, :background_dispatch) == true
     })
 
     ensure_execution_control(subagent_id, config, %{
@@ -488,12 +501,15 @@ defmodule OptimalSystemAgent.Orchestrator do
       # handler from its UseContext). ToolFilter strips the child's spawning
       # tools once this reaches the configured max — the fork-bomb ceiling.
       delegation_depth: Map.get(config, :delegation_depth, 0) + 1,
-      # Per-subagent spend ceiling. nil = off (the default, so nothing changes
-      # for callers that don't set it); when present the child Loop aborts its
-      # own run mid-loop via `Loop.Limits.budget_exceeded?` once it crosses the
-      # cap, so a wide fan-out cannot burn unbounded spend. Enforced per child;
-      # the parent's own budget is independent.
-      max_budget_usd: Map.get(config, :max_budget_usd),
+      # Per-subagent spend ceiling. A caller-supplied value wins; otherwise the
+      # child inherits its TIER default (`Tier.max_budget_usd/1`, elite $8 /
+      # specialist $4 / utility $1.50) so EVERY subagent path — delegate,
+      # orchestrate, swarm, fleet — is bounded by dollars, not just by the turn
+      # cap. The child Loop aborts its own run mid-loop via
+      # `Loop.Limits.budget_exceeded?` once it crosses the cap, so a wide fan-out
+      # (or a single 120-turn elite) cannot burn unbounded spend. Enforced per
+      # child; the parent's own budget is independent.
+      max_budget_usd: Map.get(config, :max_budget_usd) || Tier.max_budget_usd(tier),
       # Speed/cost priority (routes a service_tier for OpenAI; also set the
       # quality tier + provider order in DelegationRouter).
       priority: Map.get(config, :priority)
@@ -689,6 +705,25 @@ defmodule OptimalSystemAgent.Orchestrator do
       )
   end
 
+  # Per-turn tool-call ceiling for a subagent when neither its agent def nor the
+  # delegate call set an explicit `max_iterations`. Complements the per-tier USD
+  # budget (`Tier.max_budget_usd/1`): the budget bounds COST across turns, this
+  # bounds the number of tool round-trips WITHIN a single turn. Without it a
+  # subagent falls back to the effectively-unbounded global default and a single
+  # turn can balloon into hundreds of tool calls. Overridable via
+  # `:subagent_max_tool_calls_per_turn` (OSA_SUBAGENT_MAX_TOOL_CALLS_PER_TURN);
+  # default 50. Only the subagent path (`execute_and_collect`) routes through
+  # here, so the main/parent loop is unchanged.
+  @default_subagent_per_turn_tool_ceiling 50
+  @doc false
+  @spec subagent_per_turn_tool_ceiling() :: pos_integer()
+  def subagent_per_turn_tool_ceiling do
+    case Application.get_env(:optimal_system_agent, :subagent_max_tool_calls_per_turn) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @default_subagent_per_turn_tool_ceiling
+    end
+  end
+
   # ── Cheaper agent wake (#3): keep a finished subagent RESIDENT briefly ──
   #
   # A terminated subagent Loop is expensive to bring back: `resume_subagent/2`
@@ -856,7 +891,10 @@ defmodule OptimalSystemAgent.Orchestrator do
           parent_session_id: parent_id,
           role: role,
           task: task,
-          resumed_from: Map.get(config, :resumed_from)
+          resumed_from: Map.get(config, :resumed_from),
+          # See the matching call in `run_fresh_subagent/1` — same config, same
+          # marker, whichever of the two paths actually dispatches this run.
+          background: Map.get(config, :background_dispatch) == true
         })
 
         ensure_execution_control(agent_id, config, %{
@@ -1121,7 +1159,14 @@ defmodule OptimalSystemAgent.Orchestrator do
       task: Map.get(config, :task, ""),
       resumed_from: Map.get(config, :resumed_from),
       phase: :queued,
-      phase_detail: "waiting for a concurrency slot"
+      phase_detail: "waiting for a concurrency slot",
+      # This IS the background-dispatch entry point — mark the row now, before
+      # admission, so a parent interrupt landing while this run is still
+      # `:queued` already excludes it. `run_fresh_subagent/1`'s own
+      # `RunStore.start_run` call (once the Task below actually runs) restates
+      # this via `:background_dispatch` on `config`, since `start_run/1`
+      # replaces the row wholesale.
+      background: true
     })
 
     ensure_execution_control(subagent_id, config, %{
@@ -1179,7 +1224,15 @@ defmodule OptimalSystemAgent.Orchestrator do
         # notifies the parent and reaps the run.
         result =
           try do
-            run_subagent(Map.put(config, :agent_id, subagent_id))
+            # `:background_dispatch` is FORCED to `true` here regardless of
+            # whatever `config[:background]` already held (delegate/handler.ex's
+            # own admission-posture default, which can be stale relative to
+            # this decision) — reaching this line only ever happens because
+            # `run_background/2` was called, which is itself the ground truth.
+            config
+            |> Map.put(:agent_id, subagent_id)
+            |> Map.put(:background_dispatch, true)
+            |> run_subagent()
           rescue
             e ->
               Logger.error(
@@ -1267,13 +1320,21 @@ defmodule OptimalSystemAgent.Orchestrator do
                 tool_count: final_run && final_run.tool_count
               })
 
+              # `response` is already the ResultSummarizer-bounded answer (the same
+              # value the FOREGROUND delegate path returns). The old 500-char slice
+              # here re-truncated it, so the CLI inline completion line and the Bus
+              # event lost everything past 500 chars — a teammate's real findings
+              # were silently dropped from the background path only. Carry the full
+              # answer, bounded at ResultSummarizer parity (`background_result_text/1`).
+              result_text = background_result_text(response)
+
               Bus.emit(:system_event, %{
                 event: :background_agent_completed,
                 session_id: parent_id,
                 agent_id: subagent_id,
                 display_name: display_name,
                 role: role,
-                result: String.slice(response, 0, 500),
+                result: result_text,
                 duration_ms: duration_ms,
                 task_completed: true
               })
@@ -1287,7 +1348,7 @@ defmodule OptimalSystemAgent.Orchestrator do
                    agent_id: subagent_id,
                    display_name: display_name,
                    role: role,
-                   result: String.slice(response, 0, 500),
+                   result: result_text,
                    duration_ms: duration_ms,
                    elapsed_ms: elapsed_ms,
                    usage: usage,
@@ -1906,7 +1967,14 @@ defmodule OptimalSystemAgent.Orchestrator do
       try do
         Loop.process_message(subagent_id, task,
           timeout: timeout_ms,
-          max_iterations: Keyword.get(opts, :max_iterations)
+          # Per-turn tool-call ceiling. An EXPLICIT per-agent cap (agent def /
+          # delegate call, e.g. `researcher` at 30) binds; otherwise a subagent
+          # falls back to the sane default instead of the effectively-unbounded
+          # global one, so a single turn cannot balloon into hundreds of tool
+          # round-trips (the per-turn token balloon). This complements the
+          # per-tier USD budget, which bounds COST across turns.
+          max_iterations:
+            Keyword.get(opts, :max_iterations) || subagent_per_turn_tool_ceiling()
         )
       rescue
         e ->
@@ -2018,51 +2086,102 @@ defmodule OptimalSystemAgent.Orchestrator do
          |> ResultSummarizer.summarize(child_messages)
          |> append_cost_note(subagent_id)}
 
-      {:error, reason} ->
-        structured =
-          failure_result(subagent_id, parent_id, role, reason,
-            duration_ms: duration_ms,
-            files_changed: files_changed,
-            commands_run: commands_run,
-            salvaged: salvage_text(child_messages),
-            tool_count: tool_uses,
-            tokens_used: tokens_used,
-            worktree: worktree_info,
-            resumed_from: resumed_from
+      {:error, reason} when is_binary(reason) ->
+        if resumable_cap_reason?(reason) do
+          # Item 8 — the child hit a turn/budget cap, it did NOT fail. Its work is
+          # durable (messages already saved above) and it can be CONTINUED with
+          # full context. Surface it as an explicit PARTIAL settled as :completed
+          # (so it is terminal and the boot resumer never treats it as an orphaned
+          # :running), flagged resumable, with a parent-facing message that says
+          # "resume with SendMessage to continue" — instead of the FAILED path,
+          # which invited redoing durable work (the task_wait/redo thrash pattern).
+          salvaged = salvage_text(child_messages)
+
+          structured =
+            structured_result(%{
+              agent_id: subagent_id,
+              parent_session_id: parent_id,
+              role: role,
+              status: :completed,
+              summary: salvaged || "",
+              files_changed: files_changed,
+              commands_run: commands_run,
+              tool_count: tool_uses,
+              tokens_used: tokens_used,
+              duration_ms: duration_ms,
+              worktree: worktree_info,
+              resumed_from: resumed_from
+            })
+            |> Map.merge(%{partial: true, resumable: true, stop_reason: reason})
+
+          RunStore.complete(subagent_id, structured)
+
+          Logger.info(
+            "[Orchestrator] Subagent #{subagent_id} hit a cap (#{reason}) — " <>
+              "returning PARTIAL (resumable via SendMessage) after #{duration_ms}ms"
           )
 
-        RunStore.complete(subagent_id, structured)
+          emit_event(parent_id, %{
+            event: "orchestrator_agent_completed",
+            agent_name: subagent_id,
+            display_name: display_name,
+            status: "completed",
+            partial: true,
+            resumable: true,
+            tool_uses: tool_uses,
+            tokens_used: tokens_used,
+            duration_ms: duration_ms,
+            batch_id: batch_id,
+            summary: completion_summary(structured),
+            result: structured
+          })
 
-        # A deliberate user cancel is NOT a failure. RunStore models `:cancelled`
-        # first-class and LATCHES terminal states, so the durable status must be
-        # stamped correctly here (see `terminal_status/1`), and the wire status
-        # must agree with it — the TUI agents panel already understands
-        # "cancelled" (components/agents/mod.rs).
-        wire_status = to_string(terminal_status(reason))
+          emit_agent_finished(
+            parent_id,
+            subagent_id,
+            display_name,
+            duration_ms,
+            batch_id,
+            :completed
+          )
 
-        emit_event(parent_id, %{
-          event: "orchestrator_agent_completed",
-          agent_name: subagent_id,
-          display_name: display_name,
-          status: wire_status,
-          error: to_string(reason),
-          summary: completion_summary(to_string(reason)),
-          tool_uses: tool_uses,
-          tokens_used: tokens_used,
-          duration_ms: duration_ms,
-          batch_id: batch_id
-        })
+          {:ok, resumable_partial_message(role, reason, salvaged, subagent_id)}
+        else
+          handle_failure_result(
+            subagent_id,
+            parent_id,
+            role,
+            reason,
+            duration_ms,
+            files_changed,
+            commands_run,
+            child_messages,
+            tool_uses,
+            tokens_used,
+            worktree_info,
+            resumed_from,
+            display_name,
+            batch_id
+          )
+        end
 
-        emit_agent_finished(
-          parent_id,
+      {:error, reason} ->
+        handle_failure_result(
           subagent_id,
-          display_name,
+          parent_id,
+          role,
+          reason,
           duration_ms,
-          batch_id,
-          terminal_status(reason)
+          files_changed,
+          commands_run,
+          child_messages,
+          tool_uses,
+          tokens_used,
+          worktree_info,
+          resumed_from,
+          display_name,
+          batch_id
         )
-
-        {:error, reason}
 
       other ->
         structured =
@@ -2464,25 +2583,42 @@ defmodule OptimalSystemAgent.Orchestrator do
   # with an honest summary — the SAME path `task_stop` takes — then emits a
   # `:background_agent_auto_stopped` event so the coordinator learns it is done
   # (and why) without having to poll or stop it by hand. Best-effort.
-  defp auto_stop_stalled(parent_id, subagent_id, display_name, role, phase, stalled_ms) do
-    minutes = div(stalled_ms, 60_000)
-
-    Logger.warning(
-      "[Orchestrator] Background subagent #{subagent_id} made NO progress for #{minutes}m in " <>
-        ":#{phase} even after a nudge — auto-stopping it as an unrecoverable hang"
-    )
-
-    Loop.cancel(subagent_id)
-
-    summary =
-      "Auto-stopped after #{minutes}m with no progress in :#{phase} (unrecoverable hang — " <>
-        "a hung tool or a stalled provider call that never resumed)."
-
+  #
+  # `@doc false` + public rather than `defp`, mirroring `watch_runner/5` above:
+  # its only production caller is `watch_for_stall/5`, but the idempotency
+  # guard below (re-read RunStore immediately before acting) is a race with
+  # the subagent's own concurrent completion and cannot be exercised
+  # deterministically through that caller's live polling loop. Calling this
+  # directly is how a test pins the guard down without depending on scheduler
+  # timing.
+  @doc false
+  @spec auto_stop_stalled(String.t(), String.t(), String.t(), String.t(), atom(), integer()) ::
+          :ok
+  def auto_stop_stalled(parent_id, subagent_id, display_name, role, phase, stalled_ms) do
+    # The caller (`watch_for_stall/5`) already matched `%{status: :running}`
+    # before deciding to call this — but that match and this call are two
+    # separate reads of RunStore, and the run can reach ITS OWN terminal state
+    # (success, failure, driver crash) anywhere in between. Re-read here, right
+    # before acting, so a run that finished in that window is left alone
+    # entirely: no cancel, no RunStore rewrite, no auto-stopped event. Without
+    # this a run that finishes at the exact moment its stall watcher decides
+    # it is a dead hang gets a phantom `:cancelled` outcome stamped over its
+    # real one.
     case RunStore.get(subagent_id) do
-      nil ->
-        :ok
+      %{status: :running} = run ->
+        minutes = div(stalled_ms, 60_000)
 
-      run ->
+        Logger.warning(
+          "[Orchestrator] Background subagent #{subagent_id} made NO progress for #{minutes}m " <>
+            "in :#{phase} even after a nudge — auto-stopping it as an unrecoverable hang"
+        )
+
+        Loop.cancel(subagent_id)
+
+        summary =
+          "Auto-stopped after #{minutes}m with no progress in :#{phase} (unrecoverable hang — " <>
+            "a hung tool or a stalled provider call that never resumed)."
+
         RunStore.complete(subagent_id, %{
           agent_id: subagent_id,
           parent_session_id: run.parent_session_id,
@@ -2499,28 +2635,31 @@ defmodule OptimalSystemAgent.Orchestrator do
           transcript_path: Map.get(run, :transcript_path),
           worktree: nil
         })
+
+        payload = %{
+          event: :background_agent_auto_stopped,
+          session_id: parent_id,
+          agent_id: subagent_id,
+          display_name: display_name,
+          role: role,
+          phase: phase,
+          stalled_ms: stalled_ms,
+          summary: summary
+        }
+
+        Bus.emit(:system_event, payload)
+
+        Phoenix.PubSub.broadcast(
+          OptimalSystemAgent.PubSub,
+          "osa:session:#{parent_id}",
+          {:osa_event, Map.put(payload, :type, :background_agent_auto_stopped)}
+        )
+
+        :ok
+
+      _ ->
+        :ok
     end
-
-    payload = %{
-      event: :background_agent_auto_stopped,
-      session_id: parent_id,
-      agent_id: subagent_id,
-      display_name: display_name,
-      role: role,
-      phase: phase,
-      stalled_ms: stalled_ms,
-      summary: summary
-    }
-
-    Bus.emit(:system_event, payload)
-
-    Phoenix.PubSub.broadcast(
-      OptimalSystemAgent.PubSub,
-      "osa:session:#{parent_id}",
-      {:osa_event, Map.put(payload, :type, :background_agent_auto_stopped)}
-    )
-
-    :ok
   rescue
     _ -> :ok
   catch
@@ -2612,6 +2751,23 @@ defmodule OptimalSystemAgent.Orchestrator do
   Returns `0.0` when the run has no recorded spend (free/local provider, or a
   sidecar that was never written).
   """
+  @doc """
+  Answer text a background completion carries into the parent channel (the Bus
+  `:background_agent_completed` event + the CLI inline print).
+
+  The child's `response` is already the ResultSummarizer-bounded answer — the same
+  value the foreground `delegate` path returns. This only applies a final safety
+  bound (`@background_result_max_chars`, ResultSummarizer parity) so a pathological
+  unsummarized result cannot blow up the event, and replaces the old 500-char
+  slice that silently dropped a teammate's real findings from the background path.
+  `String.slice/3` counts graphemes, so it never splits a UTF-8 codepoint.
+  """
+  @spec background_result_text(term()) :: String.t()
+  def background_result_text(response) when is_binary(response),
+    do: String.slice(response, 0, @background_result_max_chars)
+
+  def background_result_text(response), do: to_string(response)
+
   @spec run_cost_usd(String.t()) :: float()
   def run_cost_usd(agent_id) when is_binary(agent_id) do
     case OptimalSystemAgent.Agent.SessionPersistence.load_spend(agent_id) do
@@ -2746,6 +2902,107 @@ defmodule OptimalSystemAgent.Orchestrator do
       worktree: Keyword.get(opts, :worktree),
       resumed_from: Keyword.get(opts, :resumed_from)
     })
+  end
+
+  # Shared failure-completion path for a genuinely-failed subagent: durable
+  # RunStore transition, the parent-facing completion event, and the
+  # `{:error, reason}` return. Extracted so both the non-cap `{:error, binary}`
+  # branch and the non-binary `{:error, reason}` branch settle identically. A
+  # deliberate user cancel is NOT a failure — RunStore models `:cancelled`
+  # first-class and LATCHES terminal states, so the durable + wire status must
+  # agree (see `terminal_status/1`); the TUI agents panel understands both.
+  defp handle_failure_result(
+         subagent_id,
+         parent_id,
+         role,
+         reason,
+         duration_ms,
+         files_changed,
+         commands_run,
+         child_messages,
+         tool_uses,
+         tokens_used,
+         worktree_info,
+         resumed_from,
+         display_name,
+         batch_id
+       ) do
+    structured =
+      failure_result(subagent_id, parent_id, role, reason,
+        duration_ms: duration_ms,
+        files_changed: files_changed,
+        commands_run: commands_run,
+        salvaged: salvage_text(child_messages),
+        tool_count: tool_uses,
+        tokens_used: tokens_used,
+        worktree: worktree_info,
+        resumed_from: resumed_from
+      )
+
+    RunStore.complete(subagent_id, structured)
+
+    wire_status = to_string(terminal_status(reason))
+
+    emit_event(parent_id, %{
+      event: "orchestrator_agent_completed",
+      agent_name: subagent_id,
+      display_name: display_name,
+      status: wire_status,
+      error: to_string(reason),
+      summary: completion_summary(to_string(reason)),
+      tool_uses: tool_uses,
+      tokens_used: tokens_used,
+      duration_ms: duration_ms,
+      batch_id: batch_id
+    })
+
+    emit_agent_finished(
+      parent_id,
+      subagent_id,
+      display_name,
+      duration_ms,
+      batch_id,
+      terminal_status(reason)
+    )
+
+    {:error, reason}
+  end
+
+  # A cap-hit is not a failure — it is a bounded stop with more work possible.
+  # `max_turns` (cross-turn) and `max_budget_usd` (checked at turn entry) both
+  # surface as an `{:error, binary}` from `Loop.process_message` via
+  # `Loop.Limits.check/1`. Detect those two so the child is returned as a
+  # RESUMABLE PARTIAL (item 8) rather than routed through the FAILED path, which
+  # would tell the parent to redo work that is durable and resumable.
+  @doc false
+  @spec resumable_cap_reason?(term()) :: boolean()
+  def resumable_cap_reason?(reason) when is_binary(reason) do
+    String.contains?(reason, "Turn limit reached") or
+      String.contains?(reason, "Budget limit reached")
+  end
+
+  def resumable_cap_reason?(_), do: false
+
+  # Parent-facing message for a PARTIAL (cap-hit) result. Leads with the partial
+  # marker + resume affordance (so the collapsed delegate cell and the parent LLM
+  # both see it first, and the run never reads as finished), names the exact cap
+  # that stopped it, and carries the child's last progress so the parent can act
+  # without a re-read. The agent id is the resume handle: the parent continues the
+  # run by SendMessage to that id, which resumes it with its full context.
+  @doc false
+  @spec resumable_partial_message(String.t(), String.t(), String.t() | nil, String.t()) ::
+          String.t()
+  def resumable_partial_message(role, reason, salvaged, agent_id) do
+    progress =
+      case salvaged do
+        s when is_binary(s) and s != "" -> "\n\nProgress so far:\n#{s}"
+        _ -> "\n\n(No closing message was captured — read its transcript for detail.)"
+      end
+
+    "PARTIAL — the #{role} subagent stopped at a cap before finishing (#{reason}); " <>
+      "this is NOT its final result. Its work is durable and can be CONTINUED: " <>
+      "resume with SendMessage to \"#{agent_id}\" to continue — do NOT restart the " <>
+      "task from scratch." <> progress
   end
 
   # A subagent that fails at the END of its work has still DONE the work, and
@@ -3195,28 +3452,41 @@ defmodule OptimalSystemAgent.Orchestrator do
   end
 
   defp execution_event_fields(agent_id) do
-    case ExecutionControl.get(agent_id) do
-      nil ->
-        %{}
+    fields =
+      case ExecutionControl.get(agent_id) do
+        nil ->
+          %{}
 
-      control ->
-        control
-        |> Map.take([
-          :active_skills,
-          :model_reason,
-          :skill_reason,
-          :retry_count,
-          :failure_count,
-          :delivery_status,
-          # Live context-window utilization (percent) mirrored from this
-          # subagent's own telemetry, so the dashboard row can show real
-          # occupancy instead of a cumulative token count.
-          :context_percent
-        ])
-        |> Map.put(
-          :available_controls,
-          SubagentControl.available_controls(Map.get(control, :status, "unknown"))
-        )
+        control ->
+          control
+          |> Map.take([
+            :active_skills,
+            :model_reason,
+            :skill_reason,
+            :retry_count,
+            :failure_count,
+            :delivery_status,
+            # Live context-window utilization (percent) mirrored from this
+            # subagent's own telemetry, so the dashboard row can show real
+            # occupancy instead of a cumulative token count.
+            :context_percent
+          ])
+          |> Map.put(
+            :available_controls,
+            SubagentControl.available_controls(Map.get(control, :status, "unknown"))
+          )
+      end
+
+    # Item 10 — cumulative REAL (per-model cache-discounted) cost on EVERY progress
+    # frame, under `cost_usd` (the same field the terminal event and the TUI's
+    # set_agent_cost plumbing already use — zero new TUI surface). Read from the
+    # durable spend sidecar that Checkpoint mirrors each tool cycle, so it is LIVE
+    # and needs no blocking call into the child's busy Loop. This makes the roster
+    # headline show live $ instead of a raw, cache-inflated token count. `nil` when
+    # nobody measured the spend, so the TUI renders "—" rather than asserting $0.
+    case reported_cost_usd(agent_id) do
+      nil -> fields
+      cost -> Map.put(fields, :cost_usd, cost)
     end
   end
 

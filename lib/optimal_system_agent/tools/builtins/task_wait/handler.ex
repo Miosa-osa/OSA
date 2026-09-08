@@ -24,17 +24,35 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
   alias OptimalSystemAgent.Agent.Cancellation
   alias OptimalSystemAgent.Agent.RunStore
   alias OptimalSystemAgent.Tools.Builtins.TaskWait.Depth
+  alias OptimalSystemAgent.Tools.Builtins.TaskWait.RewaitGuard
   alias OptimalSystemAgent.Tools.UseContext
 
   @terminal_statuses [:completed, :failed, :cancelled]
   @poll_interval_ms 500
 
-  # Ceiling on the SYNCHRONOUS join wait — NOT the agents' lifetime, which stays
-  # days-scale via `default_timeout_ms/0`. A blocking task_wait must not freeze
-  # the turn for the days-scale backstop, so the effective wait is capped at
-  # 5 min; on cap-expiry (or a user cancel) the still-running agents are returned
-  # as the existing healthy, non-error result and keep running in the background.
-  @max_wait_ms 300_000
+  # Ceiling on the SYNCHRONOUS join wait — a BOUNDED "converge window", not the
+  # agents' lifetime. Two failure modes have to be avoided at once:
+  #
+  #   * too SHORT and the barrier times out while a healthy agent is still
+  #     running; a model that ignores "do NOT re-wait" then re-arms it turn after
+  #     turn (observed: a 37-min agent re-waited 4+ times across one session);
+  #   * too LONG (e.g. block-until-lifetime) and a single call FREEZES the parent
+  #     turn for the agent's whole run — 37 min with the user's channel offline —
+  #     which is worse UX than the async "you'll be notified, go do other work"
+  #     pattern the timeout return already advertises.
+  #
+  # So the wait is bounded (default 5 min: long enough to converge on a quick
+  # agent in one call, short enough not to freeze the turn), and the re-arm burn
+  # is closed separately by `RewaitGuard` — a second wait on the same
+  # still-running-and-already-warned set returns fast instead of re-arming.
+  # Configurable via `:task_wait_max_ms` / OSA_TASK_WAIT_MAX_MS.
+  @default_max_wait_ms 300_000
+  defp max_wait_ms do
+    case Application.get_env(:optimal_system_agent, :task_wait_max_ms) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @default_max_wait_ms
+    end
+  end
 
   # Default wait bound = the shared agent-LIFETIME backstop, which is measured in
   # DAYS (see Orchestrator.@default_subagent_timeout_ms / :subagent_join_timeout_ms).
@@ -97,7 +115,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
     # (the shared agent-lifetime backstop), but the blocking join is capped at
     # @max_wait_ms so the turn cannot freeze on it.
     requested_ms = parse_timeout_ms(Map.get(input, "timeout_ms")) || default_timeout_ms()
-    timeout_ms = min(requested_ms, @max_wait_ms)
+    timeout_ms = min(requested_ms, max_wait_ms())
     deadline = System.monotonic_time(:millisecond) + timeout_ms
 
     # The launch notice hands the model the full `agent:<parent>:<name>` id, but
@@ -111,13 +129,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
     children = RunStore.children_of(caller_id)
     resolved_ids = Enum.map(agent_ids, &resolve_id(&1, children))
 
-    Depth.enter(caller_id)
+    # Re-arm guard (item 6): if EVERY requested agent is still running AND was
+    # already warned this session ("healthy, do NOT re-wait"), don't arm another
+    # blocking ceiling — return fast so a model ignoring the guidance can't burn
+    # turn after turn. A finished agent is never guarded (its warning is cleared
+    # and the normal path returns its result instantly).
+    if rewait_guard_applies?(caller_id, resolved_ids) do
+      {:ok, already_waiting_message(resolved_ids, children)}
+    else
+      Depth.enter(caller_id)
 
-    try do
-      runs = poll(resolved_ids, require_all, deadline, caller_id)
-      {:ok, format_results(resolved_ids, runs, require_all, children)}
-    after
-      Depth.exit_wait(caller_id)
+      try do
+        runs = poll(resolved_ids, require_all, deadline, caller_id)
+        remember_still_running(caller_id, resolved_ids, runs)
+        {:ok, format_results(resolved_ids, runs, require_all, children)}
+      after
+        Depth.exit_wait(caller_id)
+      end
     end
   rescue
     e -> {:error, "task_wait failed: #{Exception.message(e)}"}
@@ -126,6 +154,47 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
   def execute(_input, _ctx), do: {:error, "Missing required parameter: agent_ids"}
 
   # ── Private ──────────────────────────────────────────────────────────────
+
+  # True when a re-armed wait must be short-circuited: a non-empty request whose
+  # EVERY agent is currently running AND was already warned this session. A single
+  # terminal or not-yet-warned agent (e.g. a genuinely new agent to join on) makes
+  # this false, so the normal path still runs.
+  defp rewait_guard_applies?(session_id, resolved_ids) do
+    resolved_ids != [] and
+      Enum.all?(resolved_ids, fn id ->
+        RewaitGuard.warned?(session_id, id) and running?(id)
+      end)
+  end
+
+  defp running?(id) do
+    match?(%{status: :running}, RunStore.get(id))
+  end
+
+  # After a wait ends, record every still-running requested agent as "warned" so a
+  # re-call fast-fails; clear the warning for any that finished so a later,
+  # legitimate wait on a REUSED name is not wrongly guarded.
+  defp remember_still_running(session_id, resolved_ids, runs) do
+    Enum.each(resolved_ids, fn id ->
+      if match?(%{status: :running}, Map.get(runs, id)),
+        do: RewaitGuard.mark_warned(session_id, [id]),
+        else: RewaitGuard.clear(session_id, id)
+    end)
+  end
+
+  # Fast return for a guarded re-wait — no ceiling armed. Names the agents, says
+  # they are healthy and delivered automatically, and to stop re-waiting.
+  defp already_waiting_message(resolved_ids, children) do
+    names = Enum.map_join(resolved_ids, ", ", &short_name/1)
+
+    header =
+      "Already waiting on #{length(resolved_ids)} still-running agent(s): #{names}. " <>
+        "You were already told these are healthy — their results are delivered to you " <>
+        "AUTOMATICALLY when they finish. Do NOT call task_wait on them again; continue " <>
+        "with other work now."
+
+    sections = Enum.map(resolved_ids, &format_one(&1, RunStore.get(&1), children))
+    Enum.join([header | sections], "\n\n")
+  end
 
   defp poll(agent_ids, require_all, deadline, session_id) do
     runs = Map.new(agent_ids, fn id -> {id, RunStore.get(id)} end)

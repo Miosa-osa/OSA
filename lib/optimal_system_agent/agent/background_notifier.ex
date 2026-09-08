@@ -23,6 +23,8 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
   use GenServer
   require Logger
 
+  alias OptimalSystemAgent.Agent.Orchestrator.ResultSummarizer
+  alias OptimalSystemAgent.Agent.RunStore
   alias OptimalSystemAgent.Agent.TaskNotifications
   alias OptimalSystemAgent.Shell.BackgroundManager
 
@@ -166,9 +168,7 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
     summary =
       case outcome do
         :completed ->
-          result = ev |> Map.get(:result, "") |> to_string() |> String.slice(0, 1000)
-
-          "Background agent @#{name} completed#{dur_str}: #{result}"
+          "Background agent @#{name} completed#{dur_str}: #{completed_result_text(agent_id, ev)}"
 
         :failed ->
           error = ev |> Map.get(:error, "unknown error") |> to_string() |> String.slice(0, 1000)
@@ -218,6 +218,32 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
   rescue
     e -> Logger.debug("[BackgroundNotifier] inject failed: #{Exception.message(e)}")
   end
+
+  # `ev[:result]` is a cheap wire preview — `Orchestrator.run_background/2`
+  # slices the child's response to a few hundred chars before it ever reaches
+  # PubSub, sized for the CLI's inline completion line, not for the account the
+  # parent model is about to act on. `RunStore` holds the SAME completion's full,
+  # untruncated response (written by `RunStore.complete/2` before that slice
+  # happens), so prefer it: run it through the identical `ResultSummarizer` the
+  # FOREGROUND `delegate` path already uses, so a background teammate's report
+  # gets the same up-to-10k-char, explicitly-marked-when-truncated account
+  # instead of being cut an order of magnitude smaller for no reason but having
+  # run in the background. Falls back to the event's own (short) preview when
+  # no row is found — an already-pruned run, or a completion event from a path
+  # that never wrote one — rather than dropping the account entirely.
+  defp completed_result_text(agent_id, ev) do
+    case RunStore.get(agent_id) do
+      %{result: result} when is_map(result) -> ResultSummarizer.summarize(result)
+      _ -> fallback_result_text(ev)
+    end
+  rescue
+    e ->
+      Logger.debug("[BackgroundNotifier] completed_result_text fell back: #{Exception.message(e)}")
+      fallback_result_text(ev)
+  end
+
+  defp fallback_result_text(ev),
+    do: ev |> Map.get(:result, "") |> to_string() |> String.slice(0, 1000)
 
   # Render whichever usage counters are actually present as `k=v` pairs, in a
   # fixed order. Returns nil for an empty/absent map so `to_xml/1` drops the

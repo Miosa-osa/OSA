@@ -163,6 +163,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
             pause_reason: OptimalSystemAgent.Agent.Loop.GoalTracker.pause_reason(),
             blocked_claims: non_neg_integer(),
             blocked_claim_turn: non_neg_integer() | nil,
+            completion_claim_turn: non_neg_integer() | nil,
             abandoned_count: non_neg_integer(),
             history: [String.t()],
             updated_at: DateTime.t() | nil
@@ -191,6 +192,16 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
               pause_reason: nil,
               blocked_claims: 0,
               blocked_claim_turn: nil,
+              # The turn `claim_complete/1` was called on, mirroring
+              # `blocked_claim_turn`'s shape. Lets `GoalVerifier` skip the cheap
+              # triage re-classification and go straight to the panel THIS turn —
+              # an explicit `update_goal(status: "complete")` call already IS the
+              # "this looks done" signal; asking triage to independently
+              # rediscover it from the same evidence is a redundant gate that can
+              # only delay a real completion, never make it more trustworthy.
+              # Cleared the moment a verdict actually lands (`apply_verdict/3`),
+              # so it never outlives the turn it was made on.
+              completion_claim_turn: nil,
               abandoned_count: 0,
               history: [],
               updated_at: nil
@@ -531,6 +542,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
         snap = %{
           snap
           | rounds_since_verify: max(snap.rounds_since_verify, reverify_after()),
+            completion_claim_turn: snap.turn_count,
             updated_at: DateTime.utc_now()
         }
 
@@ -542,6 +554,30 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
         {:error, :not_live}
     end
   end
+
+  @doc """
+  `true` when `claim_complete/1` was called on THIS still-current turn and no
+  verdict has landed for it yet.
+
+  `GoalVerifier` reads this to skip the cheap triage re-classification and go
+  straight to the panel: `update_goal(status: "complete")` is already an
+  explicit, structured "this looks done" signal, and asking a second cheap
+  classifier to independently rediscover it from the same evidence is a
+  redundant gate that can only delay a real completion, never make it more
+  trustworthy. Scoped to "this turn" (via `turn_count`, mirroring
+  `blocked_claim_turn`'s shape) so a claim made turns ago and never verified
+  since (session crashed mid-round, `/goal pause` intervened) does not force
+  a forever-jump-the-triage-queue on every future turn.
+  """
+  @spec completion_claimed_this_turn?(String.t()) :: boolean()
+  def completion_claimed_this_turn?(session_id) when is_binary(session_id) do
+    case get(session_id) do
+      %Snapshot{completion_claim_turn: turn, turn_count: turn} when is_integer(turn) -> true
+      _ -> false
+    end
+  end
+
+  def completion_claimed_this_turn?(_), do: false
 
   @doc """
   Record the model's claim that it is blocked.
@@ -765,6 +801,10 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
       snap
       | verify_run_count: snap.verify_run_count + 1,
         rounds_since_verify: 0,
+        # A verdict just landed — whatever completion claim was forcing this
+        # round (if any) has now been adjudicated one way or another. Clearing
+        # here, once, covers all three verdict branches below.
+        completion_claim_turn: nil,
         updated_at: DateTime.utc_now()
     }
 
@@ -1069,7 +1109,36 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
 
   # Only the user command/API path calls this. The model tool has no approval
   # field. Request identity prevents duplicate or stale approvals crossing goals.
-  def resolve_decision(sid, request_id, decision, note \\ "") do
+  @doc """
+  Approve or reject the goal's pending decision.
+
+  `request_id` may be `nil` — resolve WHICHEVER decision is currently pending
+  for `sid`. A session has at most one (`pending_decision` is a single map,
+  not a list), so requiring the caller to also know and retype its id was pure
+  ceremony: the id exists to guard against approving a STALE decision (one a
+  later request already superseded), and that guard still applies to explicit
+  ids — it was never a reason to make the common case ("answer what's
+  actually waiting") harder than it needed to be.
+
+  Returns `{:error, :no_pending_decision}` for `nil` when nothing is waiting —
+  distinct from `{:error, :stale_or_missing_request}`, which still means
+  "the id given does not match what's pending now".
+  """
+  @spec resolve_decision(String.t(), String.t() | nil, String.t(), String.t()) ::
+          {:ok, Snapshot.t()} | {:error, term()}
+  def resolve_decision(sid, request_id, decision, note \\ "")
+
+  def resolve_decision(sid, nil, decision, note) do
+    case get(sid) do
+      %Snapshot{pending_decision: %{"request_id" => current_id}} ->
+        resolve_decision(sid, current_id, decision, note)
+
+      _ ->
+        {:error, :no_pending_decision}
+    end
+  end
+
+  def resolve_decision(sid, request_id, decision, note) do
     transaction(sid, fn ->
       case get(sid) do
         %Snapshot{pending_decision: %{"request_id" => ^request_id} = pending} = snap
@@ -1124,10 +1193,15 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   def waiting_message(sid) do
     case get(sid) do
       %Snapshot{pending_decision: %{} = p} ->
+        # No id required: a session has at most one pending decision, so
+        # `/goal approve` / `/goal reject <changes>` (bare) already resolve
+        # THIS one — `resolve_decision/4` accepts `nil` and finds it. The id
+        # is still named, parenthetically, for anyone scripting against a
+        # specific request rather than "whatever is pending right now".
         "Waiting for your decision — not complete.\n\n#{p["question"]}\n" <>
           "Review: #{p["artifact"]}\n" <>
-          "/goal approve #{p["request_id"]} or /goal reject #{p["request_id"]} <changes>. " <>
-          "/goal clear stops and clears this goal."
+          "/goal approve or /goal reject <changes> answers this. " <>
+          "(reference: #{p["request_id"]}) /goal clear stops and clears this goal."
 
       _ ->
         "No pending decision."
@@ -1576,6 +1650,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
       "pause_reason" => snap.pause_reason && to_string(snap.pause_reason),
       "blocked_claims" => snap.blocked_claims,
       "blocked_claim_turn" => snap.blocked_claim_turn,
+      "completion_claim_turn" => snap.completion_claim_turn,
       "abandoned_count" => snap.abandoned_count,
       "history" => snap.history,
       "updated_at" => snap.updated_at && DateTime.to_iso8601(snap.updated_at)
@@ -1609,6 +1684,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
       pause_reason: known_atom(Map.get(map, "pause_reason"), @pause_reasons, nil),
       blocked_claims: non_neg_int(Map.get(map, "blocked_claims")),
       blocked_claim_turn: int_or_nil(Map.get(map, "blocked_claim_turn")),
+      completion_claim_turn: int_or_nil(Map.get(map, "completion_claim_turn")),
       abandoned_count: non_neg_int(Map.get(map, "abandoned_count")),
       history: string_list(Map.get(map, "history")),
       updated_at: decode_datetime(Map.get(map, "updated_at"))

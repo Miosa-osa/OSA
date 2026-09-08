@@ -186,6 +186,10 @@ pub enum BackendEvent {
         /// Live context-window utilization (percent) for this agent's session,
         /// or None from an older backend.
         context_percent: Option<u32>,
+        /// Cumulative REAL (per-model, cache-discounted) cost in USD for this
+        /// agent so far (backend item-10, on the progress frame). `None` from an
+        /// older backend. Drives the live per-worker `$cost` in the roster meter.
+        cost_usd: Option<f64>,
     },
     AgentControlResult {
         agent_id: String,
@@ -200,6 +204,10 @@ pub enum BackendEvent {
         /// Compact one-line preview of the worker's final result (<=~140 chars),
         /// surfaced under the finished row. `None` from older backends.
         summary: Option<String>,
+        /// A capped run that came back RESUMABLE (RunStore `:completed` with
+        /// `partial`/`resumable`). When true the row is surfaced as its own
+        /// "Partial · resumable" state rather than a clean "Done".
+        resumable: bool,
     },
     OrchestratorAgentFailed {
         agent_name: String,
@@ -208,6 +216,26 @@ pub enum BackendEvent {
         tokens_used: u32,
         /// Compact one-line error preview (<=~140 chars). `None` from older backends.
         summary: Option<String>,
+    },
+    // === Monitors / watch-tasks (C1b) ===
+    // Wire contract: {id (a.k.a. watch_id), label "<kind>:<target>", state, and
+    // parent_agent_id (subagent session id, else none → attach to main root)}.
+    MonitorStarted {
+        id: String,
+        label: String,
+        parent_agent_id: Option<String>,
+    },
+    MonitorEvent {
+        id: String,
+        /// A short line describing the edge that fired (or its detail).
+        detail: String,
+    },
+    MonitorDone {
+        id: String,
+        /// Wire `state`: "done" | "timeout" | "stopped".
+        state: String,
+        /// Optional verdict/detail carried on retirement.
+        detail: Option<String>,
     },
     OrchestratorWaveStarted {
         wave_number: u32,

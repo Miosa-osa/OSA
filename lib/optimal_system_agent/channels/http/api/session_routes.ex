@@ -598,8 +598,16 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
   delete "/:id" do
     session_id = conn.params["id"]
 
-    # Cancel active loop if running (ignore if already stopped)
-    SessionManager.cancel(session_id)
+    # `stop_session/1`, NOT `cancel/1`: this route permanently erases the
+    # session's transcript/DB rows below, so it is a real teardown, not an
+    # interrupt — it must cascade into every descendant, including a
+    # `background: true` one that an interrupt-style `cancel/1` now
+    # deliberately leaves running (see `Loop.descendant_session_ids/1`).
+    # `cancel/1` alone would leak any live background subagent's Loop the
+    # instant its parent session's own record disappears. Best-effort:
+    # `{:error, :not_found}` when the session has no live loop is expected
+    # and fine — `stop_children/1` inside it still ran regardless.
+    SessionManager.stop_session(session_id)
 
     # Remove the session's real on-disk files: the mutable transcript
     # (`<id>.json`) plus the immutable event log and its lock/quarantine

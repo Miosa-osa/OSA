@@ -77,9 +77,9 @@ defmodule OptimalSystemAgent.Agent.FleetTest do
   end
 
   describe "max_fleet_agents/0" do
-    test "defaults to 16 and is configurable" do
+    test "defaults to 24 and is configurable" do
       Application.delete_env(:optimal_system_agent, :max_fleet_agents)
-      assert Fleet.max_fleet_agents() == 16
+      assert Fleet.max_fleet_agents() == 24
 
       Application.put_env(:optimal_system_agent, :max_fleet_agents, 4)
       assert Fleet.max_fleet_agents() == 4

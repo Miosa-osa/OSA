@@ -11,6 +11,7 @@ defmodule OptimalSystemAgent.Agent.ScratchpadTest do
   """
   use ExUnit.Case, async: false
 
+  alias OptimalSystemAgent.Agent.Effort
   alias OptimalSystemAgent.Agent.Scratchpad
 
   # `inject?/1` consults `Ollama.reasoning_decision/2`, which honours the
@@ -30,6 +31,28 @@ defmodule OptimalSystemAgent.Agent.ScratchpadTest do
     Application.delete_env(:optimal_system_agent, :ollama_think)
     Application.delete_env(:optimal_system_agent, :scratchpad_enabled)
 
+    # The `:anthropic` cases below go through `native_thinking?/1`, which ALSO
+    # reads `:thinking_enabled`, the global effort ladder (`Effort.fast_mode?/0`)
+    # and `:anthropic_model` — three more process-global inputs this file never
+    # pinned. None of the tests here exercise fast mode, disabled thinking, or a
+    # non-default Anthropic model (that is `scratchpad_native_thinking_test.exs`'s
+    # job), so there is nothing for pinning them to distort: every assertion in
+    # this file is written against "thinking is on, effort is not fast, the
+    # model is whatever `AnthropicModels.default_model/0` names" — make that the
+    # state the test actually runs in, instead of assuming the rest of the suite
+    # left it there. `Effort.set/1` is the one owning module already uses to
+    # mutate the ladder, so restoring through it (not a raw ETS/app-env poke)
+    # keeps both halves — the `:osa_settings` session row and the app-env
+    # mirror — in sync on the way back out, exactly like
+    # `scratchpad_native_thinking_test.exs` does for the same ladder.
+    prev_thinking_enabled = Application.get_env(:optimal_system_agent, :thinking_enabled)
+    prev_anthropic_model = Application.get_env(:optimal_system_agent, :anthropic_model)
+    prev_effort = Effort.current()
+
+    Application.put_env(:optimal_system_agent, :thinking_enabled, true)
+    Application.delete_env(:optimal_system_agent, :anthropic_model)
+    Effort.set(:medium)
+
     on_exit(fn ->
       restore = fn
         key, nil -> Application.delete_env(:optimal_system_agent, key)
@@ -38,6 +61,9 @@ defmodule OptimalSystemAgent.Agent.ScratchpadTest do
 
       restore.(:ollama_think, prev_think)
       restore.(:scratchpad_enabled, prev_scratch)
+      restore.(:thinking_enabled, prev_thinking_enabled)
+      restore.(:anthropic_model, prev_anthropic_model)
+      Effort.set(prev_effort)
     end)
 
     :ok

@@ -54,6 +54,13 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
     # so it is retried like a timeout rather than surfaced as an empty turn.
     empty_response:
       "Provider returned an empty response · Usually transient — retries were attempted; try again, or run /model to switch models.",
+    # A tool call whose arguments were cut off mid-stream (the accumulated JSON
+    # is non-blank but will not decode). Common on an overloaded OpenAI-compatible
+    # gateway when a large tool-call payload is truncated. Retried like a timeout:
+    # a good attempt delivers the intact call — never surface it as a tool call
+    # with empty args.
+    partial_tool_call:
+      "Provider returned an incomplete tool call · The tool arguments were cut off mid-stream (common on an overloaded provider) — retries were attempted; try again, or run /model to switch models.",
     invalid_request:
       "The provider rejected the request (400) · Try rephrasing, or run /model to switch models.",
     # A malformed request OSA built, not anything the user did and not a model
@@ -252,6 +259,12 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
       # synthesises when a 200 carried no content, tool calls, or reasoning.
       empty_response?(down) ->
         :empty_response
+
+      # A tool call cut off mid-arguments (openai_compat synthesises the
+      # "incomplete tool call" reason). High-signal, specific phrase — safe to
+      # check early alongside the empty-response recovery.
+      partial_tool_call?(down) ->
+        :partial_tool_call
 
       String.contains?(down, "credit balance is too low") ->
         :credit_balance
@@ -525,6 +538,13 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
   defp empty_response?(down) do
     String.contains?(down, "stream completed without a result") or
       String.contains?(down, "empty response from provider")
+  end
+
+  # True when the reason describes a tool call whose arguments were cut off
+  # mid-stream — the "incomplete tool call" reason openai_compat synthesises when
+  # a non-blank `arguments_json` will not decode. Retried like an empty response.
+  defp partial_tool_call?(down) do
+    String.contains?(down, "incomplete tool call")
   end
 
   defp context_overflow?(down) do

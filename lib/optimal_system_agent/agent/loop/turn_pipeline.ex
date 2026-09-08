@@ -191,11 +191,34 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
   defp maybe_override(state, _key, nil), do: state
   defp maybe_override(state, key, value), do: Map.put(state, key, value)
 
-  defp clear_message_caches do
+  # Drop every per-message process-dictionary cache, including the frozen
+  # system-prompt cache (`react_loop.ex`'s `cached_context/1`, keyed on
+  # `{plan_mode, session_id, memory_version, channel}`).
+  #
+  # This is the guard that keeps "system prompt + tool list + agent context
+  # built exactly once" true PER TURN rather than per session: without it,
+  # turn 2 of a long-lived session would silently reuse turn 1's frozen
+  # system message (an identical cache key, since none of plan_mode/
+  # session_id/channel changed) instead of rebuilding against turn 2's
+  # current world state/tasks/memory. A genuinely new session — a fresh
+  # boot, a fork, a resume that starts a new `Agent.Loop` process — never
+  # needs this call to be safe: a fresh BEAM process has an empty process
+  # dictionary, so its first `cached_context/1` call misses regardless (see
+  # `TurnPipelineAnnouncementDedupTest` for why the system prompt can never
+  # end up duplicated in `state.messages` either way — it is never stored
+  # there to begin with).
+  #
+  # Public (not `defp`) + `@doc false` so this guard is directly
+  # unit-testable, same rationale as `compact_and_refresh_tokens/1` and
+  # `reset_per_turn_fields/1` above.
+  @doc false
+  @spec clear_message_caches() :: :ok
+  def clear_message_caches do
     Process.delete(:osa_git_info_cache)
     Process.delete(:osa_workspace_overview_cache)
     Process.delete(:osa_system_msg_cache)
     Process.put(:osa_memory_version, 0)
+    :ok
   end
 
   # Returns {message | nil, injected_context, block_reason | nil, state}.
