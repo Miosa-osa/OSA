@@ -1294,10 +1294,17 @@ defmodule OptimalSystemAgent.Onboarding do
            retry: false
          ) do
       {:ok, %{status: 200, body: %{"data" => models}}} when is_list(models) ->
-        {:ok,
-         models
-         |> Enum.map(&OptimalSystemAgent.Providers.SurplusModels.parse/1)
-         |> OptimalSystemAgent.Providers.SurplusModels.order_catalog()}
+        parsed = Enum.map(models, &OptimalSystemAgent.Providers.SurplusModels.parse/1)
+
+        # Surplus is a margin-charging reseller with DYNAMIC prices. The live
+        # catalog is the only place those prices exist, so capture them into the
+        # runtime rate card here — the one place they are parsed — for the
+        # authoritative billing path (`Pricing.qualify(model, :surplus)`).
+        # Previously the parsed prices were used only for the picker display and
+        # discarded, so every surplus turn mis-billed.
+        OptimalSystemAgent.Providers.SurplusModels.put_runtime_pricing(parsed)
+
+        {:ok, OptimalSystemAgent.Providers.SurplusModels.order_catalog(parsed)}
 
       {:ok, %{status: status}} ->
         {:error, "Surplus returned #{status}"}

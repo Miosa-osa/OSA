@@ -35,6 +35,101 @@ defmodule OptimalSystemAgent.Providers.SurplusModels do
 
   @featured_ids Enum.map(@featured, &elem(&1, 0))
 
+  # ── Runtime rate card ────────────────────────────────────────────────────
+  #
+  # Surplus is a margin-charging RESELLER: it relists other vendors' model ids
+  # (`gpt-6-astra`, `claude-opus-4.8`, `grok-4.6`) at its own price, and shares
+  # ids that name a completely different rate on the native vendor. `Pricing` is
+  # keyed by model id alone, so without a surplus-specific rate card every
+  # surplus turn either billed the upstream vendor's number at `:exact` (wrong
+  # vendor's rate) or, for an id no catalog carries (`kimi-k3`), billed $0.00 —
+  # blinding `max_budget_usd` to the spend entirely.
+  #
+  # Unlike `UncensoredModels`, surplus has no static card to transcribe: its
+  # prices are DYNAMIC, published only on the live `/v1/models` catalog, and
+  # there is no API key at build time. So the rate card is a RUNTIME map,
+  # populated from the parsed catalog (`put_runtime_pricing/1`) whenever the app
+  # fetches it, and consulted by `Pricing` for `surplus/<id>` keys. Until it is
+  # populated (fresh process, no catalog fetched yet), `Pricing` falls back to a
+  # conservative provider-level rate reported `:estimated` — never $0, never a
+  # native vendor's `:exact` row — so budget enforcement holds regardless.
+  #
+  # `:persistent_term` because this is written once per catalog fetch and read
+  # from the hot cost-accounting loop on every round-trip; a GenServer would be
+  # a bottleneck and an ETS table needs an owner process this data does not.
+  @runtime_key {__MODULE__, :runtime_pricing}
+  @prefix "surplus/"
+
+  @doc """
+  The pricing-key prefix that namespaces a bare surplus id, so a surplus turn
+  bills off surplus' own rate and never collides with the native vendor's row.
+  """
+  @spec prefix() :: String.t()
+  def prefix, do: @prefix
+
+  @doc """
+  Store the surplus rate card parsed from the live catalog.
+
+  Takes the output of `parse/1` (a list of model maps carrying `:cost`) and
+  keeps the namespaced `{"surplus/<id>" => {input, output}}` rows that have a
+  usable price. Rows with no price, or a `{0.0, 0.0}` price, are dropped so a
+  missing catalog price falls to the conservative `:estimated` fallback in
+  `Pricing` rather than being recorded as a real $0 rate.
+  """
+  @spec put_runtime_pricing([map()]) :: :ok
+  def put_runtime_pricing(models) when is_list(models) do
+    map =
+      Enum.reduce(models, %{}, fn model, acc ->
+        case pricing_tuple(model) do
+          nil -> acc
+          {_input, _output} = rate -> Map.put(acc, key(model.id), rate)
+        end
+      end)
+
+    :persistent_term.put(@runtime_key, map)
+    :ok
+  end
+
+  def put_runtime_pricing(_), do: :ok
+
+  @doc "The namespaced pricing key for a bare surplus id (downcased to match `Pricing`)."
+  @spec key(String.t() | atom()) :: String.t()
+  def key(id), do: @prefix <> String.downcase(to_string(id))
+
+  @doc "`%{\"surplus/<id>\" => {input, output}}` — the current runtime rate card."
+  @spec runtime_pricing() :: %{String.t() => {number(), number()}}
+  def runtime_pricing, do: :persistent_term.get(@runtime_key, %{})
+
+  @doc """
+  The `{input, output}` surplus rate for a NAMESPACED key, or nil when the
+  runtime card has no row for it (catalog not fetched, or the row carried no
+  price). Case-insensitive to match `Pricing`'s downcased lookups.
+  """
+  @spec runtime_rate(String.t() | nil) :: {number(), number()} | nil
+  def runtime_rate(namespaced_id) when is_binary(namespaced_id),
+    do: Map.get(runtime_pricing(), String.downcase(namespaced_id))
+
+  def runtime_rate(_), do: nil
+
+  @doc false
+  # Test seam — lets a test drive the empty-card fallback and a stubbed row
+  # without leaking either across examples.
+  @spec reset_runtime_pricing() :: :ok
+  def reset_runtime_pricing do
+    :persistent_term.put(@runtime_key, %{})
+    :ok
+  end
+
+  # A parsed model prices only when both legs are real, non-zero numbers. A
+  # partial or zero price is treated as "no price": billing a real $0 rate for
+  # a paid reseller model is the exact under-count the runtime card exists to
+  # prevent, so those fall through to the conservative estimate instead.
+  defp pricing_tuple(%{cost: %{input: input, output: output}})
+       when is_number(input) and is_number(output) and (input > 0 or output > 0),
+       do: {input, output}
+
+  defp pricing_tuple(_), do: nil
+
   @spec default_model() :: String.t()
   def default_model, do: "claude-fable-5.1"
 

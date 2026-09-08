@@ -80,6 +80,8 @@ defmodule OptimalSystemAgent.Agent.Pricing do
   """
   require Logger
 
+  alias OptimalSystemAgent.Providers.SurplusModels
+
   @cache_write_multiplier 1.25
   @cache_read_multiplier 0.1
 
@@ -215,7 +217,17 @@ defmodule OptimalSystemAgent.Agent.Pricing do
   # provider but one: a first-party endpoint charging its own vendor's published
   # rate needs no qualification, and adding one that does not resell would make
   # its models unpriceable.
-  @reseller_prefixes %{uncensored: "uncensored/"}
+  # `uncensored/` is a STATIC card (`UncensoredModels.pricing()` is merged into
+  # `@pricing` above and resolves through the normal `lookup_keys/1` ladder).
+  # `surplus/` is not: Surplus is a reseller whose prices are DYNAMIC, published
+  # only on its live catalog with no key at build time, so it has no row in
+  # `@pricing` and is answered from a RUNTIME map (`SurplusModels.runtime_rate/1`)
+  # in a dedicated branch of `rates/2` and `confidence/2`. Both live here so
+  # `qualify/2` namespaces a surplus id (`kimi-k3` → `surplus/kimi-k3`) — the
+  # step that stops a shared id like `gpt-6-astra` from exact-matching OpenAI's
+  # native row — and so `reseller_key?/1` keeps surplus keys out of the SSOT and
+  # free-local paths.
+  @reseller_prefixes %{uncensored: "uncensored/", surplus: "surplus/"}
 
   @doc """
   The pricing key for `model` as served by `provider`.
@@ -279,6 +291,14 @@ defmodule OptimalSystemAgent.Agent.Pricing do
       # Local Ollama-hosted models (e.g. "ollama/llama3", "qwen2.5:7b") are free.
       ollama_local?(key) ->
         {0.0, 0.0}
+
+      # Surplus is a reseller with a RUNTIME rate card (see @reseller_prefixes).
+      # Answered entirely here, before the generic ladder, so a shared id like
+      # `surplus/gpt-6-astra` can never strip its namespace and exact-match the
+      # native vendor's row. The runtime card is the gateway's own published
+      # price; an empty card falls to the conservative provider-level estimate.
+      surplus_key?(key) ->
+        surplus_rate(key)
 
       # Most specific clock first. A windowed rate supersedes both the schedule
       # and the exact table once its effective instant has passed.
@@ -387,6 +407,30 @@ defmodule OptimalSystemAgent.Agent.Pricing do
 
   defp reseller_key?(key) do
     Enum.any?(@reseller_prefixes, fn {_provider, prefix} -> String.starts_with?(key, prefix) end)
+  end
+
+  # ── Surplus: a reseller priced from a RUNTIME catalog ─────────────────────
+  #
+  # Surplus publishes no static card and its ids collide with native vendors, so
+  # it cannot ride the `@pricing`/`lookup_keys` ladder the way `uncensored/`
+  # does — a bare `gpt-6-astra` in that ladder would exact-match OpenAI's own
+  # {10, 50} at `:exact`, the wrong vendor's rate. Instead `surplus/<id>` keys
+  # are answered here, from `SurplusModels.runtime_rate/1` (the gateway's own
+  # published price, `:exact`) or, until the live catalog has been fetched into
+  # that map, a conservative provider-level fallback (`:estimated`).
+  @surplus_fallback_rate {2.0, 10.0}
+
+  defp surplus_key?(key), do: String.starts_with?(key, SurplusModels.prefix())
+
+  # The gateway's published rate when the runtime card carries one, otherwise
+  # the conservative provider-level estimate. Never $0 and never a native
+  # vendor's row, so `max_budget_usd` sees the spend either way.
+  #
+  # The fallback number mirrors `Agent.Budget`'s surplus provider rate
+  # ({2.0, 10.0}); it is reported `:estimated` by `confidence/2`, which keys off
+  # the same runtime lookup, so a fallback price is never labelled authoritative.
+  defp surplus_rate(key) do
+    SurplusModels.runtime_rate(key) || @surplus_fallback_rate
   end
 
   # The same guard `exact_rate/1` carries, for the mechanisms that are checked
@@ -849,6 +893,12 @@ defmodule OptimalSystemAgent.Agent.Pricing do
     cond do
       ollama_local?(key) ->
         :exact
+
+      # A surplus runtime rate IS the gateway's own published price, so it is
+      # `:exact`; the conservative provider-level fallback, used until the live
+      # catalog is fetched, is a guess and is `:estimated`.
+      surplus_key?(key) ->
+        if SurplusModels.runtime_rate(key), do: :exact, else: :estimated
 
       # A windowed rate is published on both tiers; it is only a guess when the
       # caller could not say which tier the request fell in.
