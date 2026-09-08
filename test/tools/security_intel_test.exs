@@ -490,6 +490,39 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntelTest do
 
     test "accepts content/entry at the top level (not nested under whitebox)", %{ctx: ctx} do
       # A bare {action, entry, content} call must scan, not dead-end on nesting.
+      # `do_whitebox_analyze/2` -> `CallChainAnalyzer.analyze/1` has no test-side
+      # hook to stub its LLM `:runner` (that injection point exists in the
+      # analyzer, but `SecurityIntel.execute/2` never threads a way to reach it
+      # from the tool call this test makes), so it goes through
+      # `Providers.Registry.chat/2`'s real `default_provider()` resolution. On a
+      # machine with a genuinely configured provider that is a REAL network
+      # call — this test only cares that the response is well-formed, not what
+      # a live model says, so force the resolution onto an address nothing
+      # listens on (an immediate refused-connection, not a slow real round
+      # trip) rather than let the assertion's timing depend on whichever
+      # credentials happen to be live on the host running this suite.
+      prev_provider_env = System.get_env("OSA_DEFAULT_PROVIDER")
+      prev_default_provider = Application.get_env(:optimal_system_agent, :default_provider)
+      prev_ollama_url = Application.get_env(:optimal_system_agent, :ollama_url)
+      System.delete_env("OSA_DEFAULT_PROVIDER")
+      Application.put_env(:optimal_system_agent, :default_provider, :ollama)
+      Application.put_env(:optimal_system_agent, :ollama_url, "http://127.0.0.1:1")
+
+      on_exit(fn ->
+        if prev_provider_env,
+          do: System.put_env("OSA_DEFAULT_PROVIDER", prev_provider_env),
+          else: System.delete_env("OSA_DEFAULT_PROVIDER")
+
+        if prev_default_provider,
+          do:
+            Application.put_env(:optimal_system_agent, :default_provider, prev_default_provider),
+          else: Application.delete_env(:optimal_system_agent, :default_provider)
+
+        if prev_ollama_url,
+          do: Application.put_env(:optimal_system_agent, :ollama_url, prev_ollama_url),
+          else: Application.delete_env(:optimal_system_agent, :ollama_url)
+      end)
+
       result = run("whitebox_scan", ctx, %{"entry" => "x.ex", "content" => "def f(x), do: x"})
 
       case result do

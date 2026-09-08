@@ -17,7 +17,11 @@ defmodule OptimalSystemAgent.OnboardingAuthModesTest do
   promised could not happen.
   """
 
-  use ExUnit.Case, async: true
+  # "when sign-in is not available in this build" below touches both
+  # `:copilot_client_id` (Application env) and `OSA_COPILOT_CLIENT_ID` (a
+  # process-wide OS env var) — unsafe under `async: true` if any other
+  # concurrently-running test reads either while this one has them cleared.
+  use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Onboarding
 

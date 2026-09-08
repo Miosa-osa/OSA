@@ -35,7 +35,36 @@ defmodule OptimalSystemAgent.Soul.LeanPromptTest do
       Soul.invalidate_static_base()
     end)
 
+    # `with_flag/2` below rebuilds `Soul.static_base(:native_tools)` twice —
+    # once lean, once long — and every input `build_base/1` reads (the live
+    # tool registry AND every bundled rule file `rules_content/0` reads fresh
+    # off disk) can change at any point in a session's life. Either one moving
+    # in the gap between those two builds shrinks BOTH by the same amount and
+    # collapses the "long is substantially bigger" delta this file exists to
+    # pin — the inputs moved, not the flag. Same fix as
+    # `static_base_fingerprint_test.exs`: wait for an ACTUAL rebuild (with the
+    # flags held at a fixed, known value) to return the same bytes twice in a
+    # row before either real build starts.
+    await_stable_build()
     :ok
+  end
+
+  defp await_stable_build(prev \\ nil, tries \\ 80)
+
+  defp await_stable_build(_prev, 0), do: :ok
+
+  defp await_stable_build(prev, tries) do
+    Application.put_env(:optimal_system_agent, :lean_prompt, false)
+    Application.put_env(:optimal_system_agent, :lean_system_prompt, false)
+    Soul.invalidate_static_base()
+    current = Soul.static_base(:native_tools)
+
+    if current == prev do
+      :ok
+    else
+      Process.sleep(25)
+      await_stable_build(current, tries - 1)
+    end
   end
 
   defp with_flag(value, fun) do

@@ -101,7 +101,15 @@ defmodule OptimalSystemAgent.Providers.FallbackCostGateTest do
 
       FallbackChain.cost_gated_chain(@builtin -- [:ollama], :ollama)
 
-      assert_receive {:bus, %{event: :provider_cost_warning, message: message}}, 2_000
+      # `Bus.emit/3` dispatches to handlers via `Task.Supervisor.start_child` —
+      # genuinely async, not a synchronous call — so delivery time depends on
+      # scheduler pressure from whatever else is running in this BEAM at the
+      # moment, which in an 11k-test full-suite run is not bounded by anything
+      # this test controls. 2s was tight enough to occasionally time out under
+      # load with the message already in flight; 10s is still a hard ceiling
+      # (a real regression that stops emitting still fails, just not on a
+      # scheduler hiccup) while giving a loaded Task.Supervisor room to drain.
+      assert_receive {:bus, %{event: :provider_cost_warning, message: message}}, 10_000
       assert message =~ "fallback_allow_paid"
     end
   end
