@@ -122,6 +122,30 @@ defmodule OptimalSystemAgent.Providers.RetryClassifierTest do
     end
   end
 
+  describe "classify/4 — empty-response is retryable (flaky-provider guard)" do
+    test "an empty SSE stream (\"stream completed without a result\") is retried" do
+      err = "SSE recovery: stream completed without a result"
+      assert {:retry_with_client_rebuild, _} = RC.classify(err, 0, @max)
+      # And backs off on the second attempt like any other transient error.
+      assert {:retry, _} = RC.classify(err, 1, @max)
+    end
+
+    test "the Anthropic empty-stream recovery string is retried too" do
+      err = "Anthropic SSE recovery: stream completed without a result. Original body: {...}"
+      assert {:retry_with_client_rebuild, _} = RC.classify(err, 0, @max)
+    end
+
+    test "a synthesised empty-200 response is retried" do
+      err = "Empty response from provider (HTTP 200 with no content, tool calls, or reasoning)"
+      assert {:retry_with_client_rebuild, _} = RC.classify(err, 0, @max)
+    end
+
+    test "empty-response becomes fatal once the retry budget is exhausted (bounded)" do
+      err = "Empty response from provider (HTTP 200 with no content, tool calls, or reasoning)"
+      assert {:fatal, ^err} = RC.classify(err, @max - 1, @max)
+    end
+  end
+
   describe "classify/4 — :fail_fast_categories override (P1: local-provider connection refusal)" do
     test "connection refused is normally retryable" do
       err = "econnrefused"

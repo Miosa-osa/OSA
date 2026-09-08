@@ -803,11 +803,62 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatTest do
       assert result.usage.estimated == true
     end
 
-    test "estimate fallback with empty content/messages still returns a map with zero, not a crash" do
+    test "a stream that closes with no content/tool_calls/reasoning is a retryable empty-response error" do
+      # Previously this finalized as a zero-usage result map. A cleanly-closed
+      # stream that produced nothing is a transient failure for the flaky
+      # gateways this module talks to, so it now surfaces as a retryable
+      # :empty_response error instead of being delivered as an empty turn (which
+      # would count toward the ReasoningOnly doom guard).
       chunks = ["data: [DONE]\n\n"]
-      result = OpenAICompat.stream_from_sse_chunks(chunks, "gpt-4o", [])
-      assert result.usage.input_tokens == 0
-      assert result.usage.output_tokens == 0
+      assert {:error, reason} = OpenAICompat.stream_from_sse_chunks(chunks, "gpt-4o", [])
+
+      assert OptimalSystemAgent.Providers.ErrorCatalog.classify(reason) == :empty_response
+
+      assert match?(
+               {:retry_with_client_rebuild, _},
+               OptimalSystemAgent.Providers.RetryClassifier.classify(reason, 0, 3)
+             )
+    end
+
+    test "a stream with tool_calls but empty content is NOT empty (delivers the result)" do
+      chunks = [
+        sse(%{
+          "choices" => [
+            %{
+              "delta" => %{
+                "tool_calls" => [
+                  %{
+                    "index" => 0,
+                    "id" => "call_1",
+                    "function" => %{"name" => "file_read", "arguments" => "{}"}
+                  }
+                ]
+              }
+            }
+          ]
+        }),
+        sse(%{"choices" => [%{"delta" => %{}, "finish_reason" => "tool_calls"}]}),
+        "data: [DONE]\n\n"
+      ]
+
+      result = OpenAICompat.stream_from_sse_chunks(chunks)
+
+      refute match?({:error, _}, result), "a turn that is a tool call is not an empty turn"
+      assert [%{name: "file_read"}] = result.tool_calls
+      assert result.content == ""
+    end
+
+    test "a stream with reasoning but empty content is NOT empty (delivers the result)" do
+      chunks = [
+        sse(%{"choices" => [%{"delta" => %{"reasoning" => "let me think"}}]}),
+        sse(%{"choices" => [%{"delta" => %{}, "finish_reason" => "stop"}]}),
+        "data: [DONE]\n\n"
+      ]
+
+      result = OpenAICompat.stream_from_sse_chunks(chunks)
+
+      refute match?({:error, _}, result)
+      assert result.reasoning == "let me think"
     end
   end
 

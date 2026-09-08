@@ -47,6 +47,13 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
       "Provider overloaded (529) · Retries were exhausted — wait a moment and try again, or run /model to switch models.",
     server_error:
       "Provider server error (5xx) · Usually transient — try again; if it persists run /model to switch models.",
+    # A 200 (or an SSE stream that closed cleanly) that carried no content, no
+    # tool calls, and no reasoning — nothing to deliver. For the flaky
+    # OpenAI-compatible gateways this class of provider ships (504-with-empty-body,
+    # empty-200), it is a transient transport failure, not a real empty answer,
+    # so it is retried like a timeout rather than surfaced as an empty turn.
+    empty_response:
+      "Provider returned an empty response · Usually transient — retries were attempted; try again, or run /model to switch models.",
     invalid_request:
       "The provider rejected the request (400) · Try rephrasing, or run /model to switch models.",
     # A malformed request OSA built, not anything the user did and not a model
@@ -236,6 +243,15 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
     cond do
       context_overflow?(down) ->
         :context_overflow
+
+      # An empty/no-result response from a flaky OpenAI-compatible gateway.
+      # High-signal, specific phrases — no collision with the status/keyword
+      # sniffing below — so it is safe to check early. Covers both the SSE
+      # empty-stream recovery strings (openai_compat / anthropic
+      # "stream completed without a result") and the empty-200 body OSA
+      # synthesises when a 200 carried no content, tool calls, or reasoning.
+      empty_response?(down) ->
+        :empty_response
 
       String.contains?(down, "credit balance is too low") ->
         :credit_balance
@@ -497,6 +513,19 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
   defp humanize_provider("COHERE"), do: "Cohere"
   defp humanize_provider("MISTRAL"), do: "Mistral"
   defp humanize_provider(other), do: other |> String.downcase() |> String.capitalize()
+
+  # True when the reason describes a response that closed cleanly but carried
+  # nothing to deliver. Two shapes, both from OpenAI-compatible gateways under
+  # transient stress:
+  #   * the SSE recovery strings ("stream completed without a result") emitted by
+  #     openai_compat.ex / anthropic.ex when a re-issued stream produced no result
+  #   * the "empty response from provider" reason OSA synthesises for a 200
+  #     (sync or stream-finalized) whose content, tool_calls and reasoning were
+  #     all empty
+  defp empty_response?(down) do
+    String.contains?(down, "stream completed without a result") or
+      String.contains?(down, "empty response from provider")
+  end
 
   defp context_overflow?(down) do
     String.contains?(down, "prompt is too long") or String.contains?(down, "context_length") or

@@ -176,6 +176,27 @@ defmodule OptimalSystemAgent.Providers.ReasoningContentTest do
       refute Map.has_key?(result, :reasoning)
       assert result.content == "the answer"
     end
+
+    test "a 200 with empty content, no tool calls, no reasoning is a retryable provider error",
+         %{agent: a, base: base} do
+      # Flaky-gateway shape: HTTP 200 but nothing to deliver. It must NOT come
+      # back as {:ok, %{content: ""}} — that success reaches the ReactLoop's
+      # empty-generation path and, three in a row, trips the ReasoningOnly doom
+      # guard ("reasoning-only spin"). Surfaced as a retryable :empty_response
+      # error instead, it rides the same-provider retry budget and, if that is
+      # exhausted, is reported honestly as a provider failure.
+      Agent.update(a, fn _ -> %{"content" => ""} end)
+
+      assert {:error, reason} = OpenAICompat.chat(base, "sk-not-real", "m", msgs(), [])
+
+      assert OptimalSystemAgent.Providers.ErrorCatalog.classify(reason) == :empty_response
+
+      # The user-facing message is a provider-error, not doom-guard advice.
+      msg = OptimalSystemAgent.Providers.ErrorCatalog.user_message(reason)
+      assert msg =~ "empty response"
+      refute msg =~ "reasoning-only"
+      refute msg =~ "decompose"
+    end
   end
 
   # ── The wire contract ─────────────────────────────────────────────────────
