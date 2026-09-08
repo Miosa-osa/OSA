@@ -352,6 +352,49 @@ defmodule OptimalSystemAgent.Agent.Tier do
     end
   end
 
+  @doc """
+  Default per-subagent USD spend cap by tier.
+
+  This is the REAL runaway bound. The turn caps (`max_iterations/1`, 120/60/25)
+  are a generous backstop, but a high turn cap on a big model with NO budget is
+  exactly how one delegation ran ~32.5M tokens in our own runs (budget was off).
+  Every delegated child now inherits its tier's cap and self-aborts once its
+  accumulated spend crosses it (`Loop.Limits.budget_exceeded?`), so a 120-turn
+  subagent cannot run away.
+
+  A model-supplied `max_budget_usd` still overrides (see the delegate handler and
+  `Orchestrator.run_subagent`). Overridable via config
+  `:subagent_max_budget_usd` (a per-tier map, `OSA_SUBAGENT_MAX_BUDGET_USD_*`)
+  or the flat `:subagent_default_budget_usd` (`OSA_SUBAGENT_MAX_BUDGET_USD`),
+  which acts as a single-number global override for every tier.
+  """
+  @spec max_budget_usd(tier()) :: float()
+  def max_budget_usd(:elite), do: budget(:elite, 8.0)
+  def max_budget_usd(:specialist), do: budget(:specialist, 4.0)
+  def max_budget_usd(:utility), do: budget(:utility, 1.5)
+
+  # Precedence: per-tier map override (most specific) > flat global override >
+  # built-in per-tier default. Mirrors `iters/2` for the turn cap.
+  defp budget(tier, default) do
+    case Application.get_env(:optimal_system_agent, :subagent_max_budget_usd) do
+      %{} = m ->
+        case Map.get(m, tier) do
+          n when is_number(n) and n > 0 -> n * 1.0
+          _ -> flat_budget_or(default)
+        end
+
+      _ ->
+        flat_budget_or(default)
+    end
+  end
+
+  defp flat_budget_or(default) do
+    case Application.get_env(:optimal_system_agent, :subagent_default_budget_usd) do
+      n when is_number(n) and n > 0 -> n * 1.0
+      _ -> default
+    end
+  end
+
   @doc "Get tier display info."
   @spec tier_info(tier()) :: map()
   def tier_info(tier) do
@@ -360,6 +403,7 @@ defmodule OptimalSystemAgent.Agent.Tier do
       budget: budget_for(tier),
       max_agents: max_agents(tier),
       max_iterations: max_iterations(tier),
+      max_budget_usd: max_budget_usd(tier),
       temperature: temperature(tier),
       max_response_tokens: max_response_tokens(tier)
     }

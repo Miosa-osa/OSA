@@ -51,9 +51,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ContextWindow do
   """
   @spec resolve(map() | nil) :: {:ok, pos_integer()} | :unknown
   def resolve(state) when is_map(state) do
-    case Map.get(state, :model) do
+    provider = normalize_provider(Map.get(state, :provider))
+
+    case window_model(state, provider) do
       model when is_binary(model) and model != "" ->
-        case normalize_provider(Map.get(state, :provider)) do
+        case provider do
           nil -> normalize(Registry.context_window_info(model))
           provider -> normalize(Registry.effective_context_window_info(model, provider))
         end
@@ -66,6 +68,35 @@ defmodule OptimalSystemAgent.Agent.Loop.ContextWindow do
   end
 
   def resolve(_), do: :unknown
+
+  # The model to size the window against. The session's named model when it has
+  # one; otherwise, on a headless/serve/benchmark session where `state.model` is
+  # nil, the provider's own default — the model the request is ACTUALLY served by
+  # (`OpenAICompat` fills the same default in downstream). Without this, a 1M
+  # Claude session started via `serve` sized its window at the
+  # `CompactionThresholds.fallback_window/0` and either metered ignorance or
+  # compacted at the wrong occupancy, exactly the drift `Registry.resolved_model/2`
+  # closes for the caching gate.
+  #
+  # DENOMINATOR-ONLY, never a routing input: this value feeds the window lookup
+  # and nothing that selects which model runs. It is read here and discarded.
+  defp window_model(state, provider) do
+    case Map.get(state, :model) do
+      model when is_binary(model) and model != "" -> model
+      _ -> provider && Registry.provider_default_model(provider_target(provider))
+    end
+  end
+
+  # `state.provider` is a bare atom; `Registry.provider_default_model/1` keys on
+  # the dispatch target, so a compat provider must be wrapped back into its
+  # `{:compat, _}` tuple. A provider the registry does not route (or a native
+  # module name) is passed through untouched and answered best-effort.
+  defp provider_target(provider) do
+    case Registry.provider_target(provider) do
+      nil -> provider
+      target -> target
+    end
+  end
 
   defp normalize({:ok, n}) when is_integer(n) and n > 0, do: {:ok, n}
   defp normalize(_), do: :unknown

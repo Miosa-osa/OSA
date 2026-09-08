@@ -1,6 +1,7 @@
 defmodule OptimalSystemAgent.Tools.Builtins.TaskStopTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
+  alias OptimalSystemAgent.Agent.RunStore
   alias OptimalSystemAgent.Tools.Builtins.TaskStop
   alias OptimalSystemAgent.Tools.Builtins.TaskStop.{Constants, Handler, Prompt, Tool, UI}
   alias OptimalSystemAgent.Tools.UseContext
@@ -128,6 +129,49 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskStopTest do
     test "returns error for missing agent_id" do
       assert {:error, msg} = Handler.execute(%{}, @ctx)
       assert msg =~ "agent_id"
+    end
+
+    test "does not re-cancel a run that already reached its own terminal state" do
+      agent_id = "task-stop-already-done-#{System.unique_integer([:positive])}"
+
+      RunStore.start_run(%{
+        agent_id: agent_id,
+        parent_session_id: "test-task-stop",
+        role: "tester",
+        task: "already finished"
+      })
+
+      RunStore.complete(agent_id, %{status: :completed, summary: "finished for real"})
+
+      # A live `SessionRegistry` entry that outlives the run's own completion
+      # (the "lingering loop" case called out in `complete_cancelled/1`) — the
+      # test process stands in for it.
+      {:ok, _} = Registry.register(OptimalSystemAgent.SessionRegistry, agent_id, nil)
+
+      assert {:ok, msg} = Handler.execute(%{"agent_id" => agent_id}, @ctx)
+      assert msg =~ "not found or already completed",
+             "the tool must not tell the model it cancelled a run that had already finished"
+
+      assert %{status: :completed, result: %{summary: "finished for real"}} =
+               RunStore.get(agent_id),
+             "an already-terminal run's real outcome must survive a task_stop call"
+    end
+
+    test "still cancels a genuinely running agent" do
+      agent_id = "task-stop-live-#{System.unique_integer([:positive])}"
+
+      RunStore.start_run(%{
+        agent_id: agent_id,
+        parent_session_id: "test-task-stop",
+        role: "tester",
+        task: "still going"
+      })
+
+      {:ok, _} = Registry.register(OptimalSystemAgent.SessionRegistry, agent_id, nil)
+
+      assert {:ok, msg} = Handler.execute(%{"agent_id" => agent_id}, @ctx)
+      assert msg =~ "cancelled"
+      assert %{status: :cancelled} = RunStore.get(agent_id)
     end
   end
 

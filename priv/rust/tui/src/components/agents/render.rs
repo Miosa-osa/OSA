@@ -2,7 +2,9 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use super::entry::{AgentEntry, AgentStatus, BgTerminalRow, SwarmStatus, SynthesisState};
+use super::entry::{
+    AgentEntry, AgentStatus, BgTerminalRow, MonitorNode, MonitorState, SwarmStatus, SynthesisState,
+};
 use super::Agents;
 
 /// Braille spinner frames for running agents.
@@ -40,7 +42,7 @@ impl Agents {
         // ── Background-terminals summary ─────────────────────────────────────
         // Ctrl+B'd turns + running background shell commands aren't tree entries,
         // so surface them as a one-line "N background terminals · ↓ to manage"
-        // header (matching Claude Code). Rendered even when no agents are active.
+        // header (the reference shape). Rendered even when no agents are active.
         if self.bg_summary > 0 && y < area.y + area.height {
             let line = format!(
                 "\u{21e3} {} background terminal{} \u{00b7} \u{2193} to manage",
@@ -79,7 +81,7 @@ impl Agents {
                 .count();
             let total = self.entries.len();
 
-            // DETAIL-PER-SURFACE (Codex placement rule): three surfaces used to
+            // DETAIL-PER-SURFACE: three surfaces used to
             // state "a turn is in progress" at once — the activity spinner line
             // (`model ∙ ⠸ verb… (1m02s · esc to interrupt)`), this header
             // (`Running 2 agents…`) and the `main` roster row (`Working…`). Each
@@ -137,7 +139,7 @@ impl Agents {
             // the accent budget of the live region is already spent on the two
             // things that are genuinely live and changing: the activity line's
             // verb and the plan's in-progress step. Painting the header in the
-            // same accent made three surfaces shout at once (Codex hides the
+            // same accent made three surfaces shout at once (the reference hides the
             // status row outright while a second live indicator is on screen; we
             // cannot hide the roster, so we demote it instead).
             //
@@ -239,7 +241,7 @@ impl Agents {
             return;
         }
 
-        // ── `main` root row (CC FleetView) ──────────────────────────────────
+        // ── `main` root row (roster root) ────────────────────────────────────
         // Always roster index 0, rendered GREEN (● + `main`). Synthesized by the
         // App from live session state (top-level action, turn elapsed, session
         // tokens). Selecting it + Enter detaches back to the main transcript.
@@ -261,7 +263,14 @@ impl Agents {
                 //
                 // The full-screen dashboard is a different surface — there no
                 // activity line exists, so `draw_dashboard` still shows elapsed.
-                let meta = fmt_cc_tokens(main.tokens);
+                //
+                // TRUTHFUL gauge: when the session's context-window occupancy is
+                // known it is the root's meta (`N% ctx`, + real cost when known),
+                // never the raw session token total — that headline folds cache
+                // reads at full weight and reads as runaway spend. Tokens remain
+                // only as the fallback for an older session frame that has not
+                // reported occupancy yet.
+                let meta = fmt_main_meta(main);
                 // Right-align the meta flush to the pane edge so the `main` root
                 // shares the roster's meta column with every worker row below.
                 let line = roster_row_line(
@@ -285,7 +294,7 @@ impl Agents {
         // 30+ node fleet never blows past the panel. The full-screen dashboard
         // still lists every node.
         let groups = self.grouped_entries();
-        // A separator rule must EARN its row (Codex `FinalMessageSeparator`: a
+        // A separator rule must EARN its row (a
         // divider is only emitted when it divides something, and it carries a
         // label so it is never pure decoration).
         //
@@ -297,7 +306,11 @@ impl Agents {
         let mut agents_shown = 0usize;
 
         'groups: for (group_idx, group) in groups.iter().enumerate() {
-            if y + 1 >= area.y + area.height {
+            // Stop once the reserved area is full. `y >=` (not `y + 1 >=`) so the
+            // LAST reserved row is usable — a tight reservation (e.g. a single
+            // collapsed node: header + one head row) must draw its final row, not
+            // drop it into the "+N more" overflow.
+            if y >= area.y + area.height {
                 break;
             }
 
@@ -345,7 +358,9 @@ impl Agents {
 
             let group_len = group.entries.len();
             for (pos, &idx) in group.entries.iter().enumerate() {
-                if y + 1 >= area.y + area.height {
+                // `y >=` so the final reserved row can hold an agent head (see the
+                // group-loop guard above).
+                if y >= area.y + area.height {
                     break;
                 }
                 // Cap the inline roster; the remainder is summarized below.
@@ -359,23 +374,51 @@ impl Agents {
                 let connector = if is_last { "└─ " } else { "├─ " };
                 let continuation = if is_last { "   " } else { "│  " };
 
-                // Row 1: connector + CC roster layout —
+                // Per-node expand/collapse (C1a). A node's children are its trail
+                // rows plus its nested monitors; `entry_block_rows` is the single
+                // source of truth `height()` also uses, so the caret, the skip and
+                // the reservation always agree. Caret: ▸ collapsed, ▾ expanded
+                // (with children), blank when there is nothing to fold.
+                let node_collapsed = self.is_node_collapsed(&entry.name);
+                let cap = self.trail_cap();
+                let child_rows = (Self::entry_rows_capped(entry, cap) as usize).saturating_sub(1)
+                    + self.monitor_children(&entry.name).len();
+                let has_children = child_rows > 0;
+                let caret = if !has_children {
+                    "  "
+                } else if node_collapsed {
+                    "\u{25b8} " // ▸
+                } else {
+                    "\u{25be} " // ▾
+                };
+
+                // Row 1: connector + roster layout —
                 //   <glyph> <agent-type>  <live-activity…>  <elapsed> · ↓<tokens>
                 // Glyph ● when this row is the selected/attached node (roster
                 // index == entry index + 1), ◯ otherwise. agent-type is the
                 // node's role identity (the custom-agent it was spawned as),
                 // falling back to its name. Activity is the live current action.
                 let selected = self.roster_selected == Some(idx + 1);
-                let glyph = if selected { '\u{25cf}' } else { '\u{25cb}' };
-                // Unselected node markers are STRUCTURE (they say "a row starts
-                // here"), so they sit in the quietest tier with the connectors.
-                // Only the selected node is colour-marked — colour is rationed to
-                // identity, and here the identity that matters is "this is the one
-                // Enter will attach to".
-                let glyph_style = if selected {
-                    theme.agent_main()
+                // The node marker encodes SELECTION first, then STATE:
+                //   * selected → ● in the accent tone (this is the row Enter
+                //     attaches to — colour is rationed to that identity);
+                //   * a healthy live worker → the hollow ○ in the quiet
+                //     structural tier (the animated header + activity tone
+                //     already say "running", so the marker stays calm);
+                //   * every other state → its one distinct glyph+colour from
+                //     `state_glyph` (⏸ blocked, ⏳ stalled, ✓ done, ◐ partial,
+                //     ✗ failed, ? unknown), so a stuck/finished/capped worker is
+                //     obvious at a glance without reading its trail — and the
+                //     dashboard uses the SAME mapping, so a state never renders
+                //     two different ways.
+                let (glyph, glyph_style) = if selected {
+                    ('\u{25cf}', theme.agent_main())
+                } else if matches!(entry.status, AgentStatus::Running | AgentStatus::Spawning)
+                    && !super::is_blocked_waiting(entry)
+                {
+                    ('\u{25cb}', theme.recede())
                 } else {
-                    theme.recede()
+                    state_glyph(entry)
                 };
                 let mut agent_type = if !entry.role.is_empty() {
                     entry.role.clone()
@@ -393,11 +436,27 @@ impl Agents {
                     theme.agent_name()
                 };
                 // Live activity: current action, or the subject as a fallback.
-                let activity = super::row_activity(entry).to_string();
-                // Per-agent age. This is the one duration a worker row may carry:
-                // it is that agent's OWN lifetime (not the turn clock), and the
-                // delegate line in the activity feed no longer restates it.
-                let meta = fmt_cc_meta(entry.elapsed_secs(), entry.tokens_used);
+                // A collapsed node appends "(+N)" so the reader knows how much is
+                // folded away without expanding it.
+                let activity = if node_collapsed && has_children {
+                    format!("{} (+{})", super::row_activity(entry).trim(), child_rows)
+                } else {
+                    super::row_activity(entry).to_string()
+                };
+                // Activity tone encodes STATE so a stuck or failed worker is
+                // obvious at a glance without stealing the selection glyph: red
+                // for a failed row, amber for one that is queued/blocked waiting
+                // on a model (see `is_blocked_waiting`), default faint otherwise.
+                let activity_style = if entry.status == AgentStatus::Failed {
+                    theme.error_text()
+                } else if super::is_blocked_waiting(entry) {
+                    theme.warning()
+                } else {
+                    theme.faint()
+                };
+                // Truthful per-agent meta: elapsed + context% + cost, never the
+                // cache-inflated cumulative token total (see `fmt_worker_meta`).
+                let meta = fmt_worker_meta(entry);
 
                 // Right-align the meta flush to the pane edge (display-width
                 // aware, so wide connector/glyph/name chars don't misalign the
@@ -406,12 +465,13 @@ impl Agents {
                 let row1 = roster_row_line(
                     vec![
                         Span::styled(connector.to_string(), theme.recede()),
+                        Span::styled(caret.to_string(), theme.recede()),
                         Span::styled(format!("{} ", glyph), glyph_style),
                     ],
                     &agent_type,
                     type_style,
                     &activity,
-                    theme.faint(),
+                    activity_style,
                     &meta,
                     theme.faint(),
                     area.width as usize,
@@ -419,13 +479,21 @@ impl Agents {
                 frame.render_widget(Paragraph::new(row1), Rect::new(area.x, y, area.width, 1));
                 y += 1;
 
+                // Individually collapsed: head row only. Its trail, result
+                // summary and nested monitors are folded away (the "+N" on the
+                // head row says how many rows that is). MUST match the `1` that
+                // `entry_block_rows` reserved for a collapsed node.
+                if node_collapsed {
+                    continue;
+                }
+
                 // Rows 2+: action trail. Running agents show the last up-to-3
                 // recent actions (oldest first) preceded by a "+N more tool
-                // uses" counter (CC AgentTool UI parity); terminal agents keep
+                // uses" counter; terminal agents keep
                 // a single Done/Failed row. Row count MUST match
                 // `Agents::entry_rows` or the layout desyncs.
                 let trail: Vec<(String, Style)> = match entry.status {
-                    // CC's finished line: `Done · 15m 5s`. Elapsed is frozen at
+                    // The finished line: `Done · 15m 5s`. Elapsed is frozen at
                     // `finished_at` (via `elapsed_secs()`) and formatted with the
                     // shared compact formatter, so a completed node shows how long
                     // it ran, not just that it finished.
@@ -446,6 +514,18 @@ impl Agents {
                         };
                         vec![(msg, theme.error_text())]
                     }
+                    // A capped run: terminal, but resumable and unfinished. The
+                    // amber caution tone + the explicit word "resumable" keep it
+                    // from ever reading as a clean "Done · …".
+                    AgentStatus::Partial => vec![(
+                        format!(
+                            "Partial \u{00b7} resumable \u{00b7} {}",
+                            crate::components::status_bar::fmt_elapsed_compact(
+                                entry.elapsed_secs()
+                            ),
+                        ),
+                        theme.warning(),
+                    )],
                     // A quiet agent. What we say depends on whether the BACKEND
                     // ever told us what it was doing.
                     //
@@ -581,15 +661,16 @@ impl Agents {
                 // Result-summary line: a dim, single truncated `⎿ <summary>` under
                 // a FINISHED worker so the panel shows WHAT it produced, not just
                 // that it finished. Only for terminal rows carrying a summary;
-                // running rows are untouched. Failed rows use the error color.
+                // running rows are untouched. Failed rows use the error color, a
+                // capped (partial) run the amber caution color.
                 // MUST stay in lockstep with `Agents::entry_rows`.
-                if matches!(entry.status, AgentStatus::Completed | AgentStatus::Failed) {
+                if entry.status.is_terminal() {
                     if let Some(summary) = entry.result_summary.as_deref() {
                         if y < area.y + area.height {
-                            let style = if entry.status == AgentStatus::Failed {
-                                theme.error_text()
-                            } else {
-                                theme.faint()
+                            let style = match entry.status {
+                                AgentStatus::Failed => theme.error_text(),
+                                AgentStatus::Partial => theme.warning(),
+                                _ => theme.faint(),
                             };
                             // Display-width for the `│  ` box-glyph continuation
                             // (see the trail rows above), so the summary isn't
@@ -610,6 +691,59 @@ impl Agents {
                             y += 1;
                         }
                     }
+                }
+
+                // Nested monitors (C1b): watch tasks bound to THIS agent render
+                // as child nodes under its row (start / event / done-verdict).
+                // MUST match the monitor count `entry_block_rows` reserved.
+                for m in self.monitor_children(&entry.name) {
+                    if y >= area.y + area.height {
+                        break;
+                    }
+                    let (mg, ms) = monitor_glyph(m);
+                    let max = (area.width as usize)
+                        .saturating_sub(UnicodeWidthStr::width(continuation) + 4)
+                        .max(8);
+                    let text = truncate_display(&monitor_line_text(m), max);
+                    let row = Line::from(vec![
+                        Span::styled(continuation, theme.recede()),
+                        Span::styled(format!("{} ", mg), ms),
+                        Span::styled(text, theme.faint()),
+                    ]);
+                    frame.render_widget(Paragraph::new(row), Rect::new(area.x, y, area.width, 1));
+                    y += 1;
+                }
+            }
+        }
+
+        // ── Fleet-root monitors ──────────────────────────────────────────────
+        // Watch tasks with no parent agent hang at the tree root, under a compact
+        // header, so a session-wide monitor is visible without attaching to any
+        // one agent. MUST match `root_monitor_lines` in `height()`.
+        {
+            let root = self.root_monitors();
+            if !root.is_empty() && y < area.y + area.height {
+                let n = root.len();
+                let header = format!("Monitors \u{00b7} {}", n);
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(header, theme.faint()))),
+                    Rect::new(area.x, y, area.width, 1),
+                );
+                y += 1;
+                for m in root {
+                    if y >= area.y + area.height {
+                        break;
+                    }
+                    let (mg, ms) = monitor_glyph(m);
+                    let max = (area.width as usize).saturating_sub(4).max(8);
+                    let text = truncate_display(&monitor_line_text(m), max);
+                    let row = Line::from(vec![
+                        Span::styled("  ", theme.recede()),
+                        Span::styled(format!("{} ", mg), ms),
+                        Span::styled(text, theme.faint()),
+                    ]);
+                    frame.render_widget(Paragraph::new(row), Rect::new(area.x, y, area.width, 1));
+                    y += 1;
                 }
             }
         }
@@ -792,7 +926,7 @@ impl Agents {
 
         let mut lines: Vec<Line> = Vec::new();
 
-        // ── `main` root row (CC FleetView) — always selection index 0, GREEN.
+        // ── `main` root row (roster root) — always selection index 0, GREEN.
         // Selecting it + Enter detaches back to the main transcript; it is never
         // cancellable. Synthesized from live session state by the App.
         {
@@ -834,7 +968,7 @@ impl Agents {
         // The groups MUST cover every AgentStatus: an entry matched by no
         // predicate is silently absent from the dashboard while still occupying
         // a selection index, so the cursor lands on an invisible row.
-        let groups: [(&str, &dyn Fn(&AgentEntry) -> bool); 6] = [
+        let groups: [(&str, &dyn Fn(&AgentEntry) -> bool); 7] = [
             ("Working", &|e: &AgentEntry| {
                 e.status == AgentStatus::Running
             }),
@@ -849,6 +983,11 @@ impl Agents {
             ("Quiet", &|e: &AgentEntry| e.status == AgentStatus::Unknown),
             ("Completed", &|e: &AgentEntry| {
                 e.status == AgentStatus::Completed
+            }),
+            // Capped runs the user can pick back up — kept separate from
+            // "Completed" so a resumable partial is never mistaken for done.
+            ("Resumable (partial)", &|e: &AgentEntry| {
+                e.status == AgentStatus::Partial
             }),
             ("Failed", &|e: &AgentEntry| e.status == AgentStatus::Failed),
         ];
@@ -1028,22 +1167,80 @@ impl Agents {
     }
 
     /// Return (icon_char, style) for an agent entry based on status.
+    ///
+    /// A live spinner is the ONE state that must animate, so it is resolved here
+    /// (it needs `self.tick`); every non-animated state defers to
+    /// [`state_glyph`] so the dashboard and the inline roster agree on exactly
+    /// one glyph+colour per state (see the fleet-consistency guard).
     fn agent_icon(&self, entry: &AgentEntry) -> (char, Style) {
         let theme = crate::style::theme();
-        match entry.status {
-            AgentStatus::Spawning => ('⚡', theme.task_pending()),
-            AgentStatus::Running => {
-                let frame = SPINNER[self.tick as usize % SPINNER.len()];
-                (frame, theme.spinner())
-            }
-            // Neither a tick nor a cross: nothing has been decided about these
-            // two. A question mark for "we lost the signal", a pause bar for
-            // "the backend says it is not moving".
-            AgentStatus::Unknown => ('?', theme.faint()),
-            AgentStatus::Stalled => ('\u{23f8}', theme.faint()),
-            AgentStatus::Completed => ('✓', theme.task_done()),
-            AgentStatus::Failed => ('✗', theme.error_text()),
+        // A healthy running agent animates; a running agent the backend says is
+        // queued/blocked-waiting is NOT progressing, so it takes the static
+        // blocked glyph instead of a spinner that would imply work.
+        if matches!(entry.status, AgentStatus::Running) && !super::is_blocked_waiting(entry) {
+            let frame = SPINNER[self.tick as usize % SPINNER.len()];
+            return (frame, theme.spinner());
         }
+        state_glyph(entry)
+    }
+}
+
+/// Glyph + colour for a monitor / watch-task node's lifecycle state (C1b): a
+/// watching monitor takes the spinner tone, a passing verdict green, a failing
+/// one red, a plain informational done the quiet tone — mirroring the intent of
+/// the agent state glyphs so the whole tree reads with one visual language.
+fn monitor_glyph(m: &MonitorNode) -> (char, Style) {
+    let theme = crate::style::theme();
+    match m.state {
+        MonitorState::Watching => ('\u{25c9}', theme.spinner()), // ◉ watching
+        MonitorState::Done => ('\u{2713}', theme.task_done()),   // ✓ fired to completion
+        MonitorState::Timeout => ('\u{23f3}', theme.warning()),  // ⏳ deadline (amber)
+        MonitorState::Stopped => ('\u{25cb}', theme.faint()),    // ○ stopped (neutral)
+    }
+}
+
+/// One monitor node's row text: label · state · latest event/verdict (when any).
+fn monitor_line_text(m: &MonitorNode) -> String {
+    let state = match m.state {
+        MonitorState::Watching => "watching",
+        MonitorState::Done => "done",
+        MonitorState::Timeout => "timeout",
+        MonitorState::Stopped => "stopped",
+    };
+    let label = if m.label.trim().is_empty() {
+        m.id.as_str()
+    } else {
+        m.label.trim()
+    };
+    match m.last_event.as_deref() {
+        Some(ev) => format!("{} \u{00b7} {} \u{00b7} {}", label, state, ev),
+        None => format!("{} \u{00b7} {}", label, state),
+    }
+}
+
+/// The single source of truth for a non-animated state's glyph + colour, shared
+/// by the dashboard ([`Agents::agent_icon`]) and the inline roster so one agent
+/// can never appear in two different glyph/colour combinations for the same
+/// state across surfaces or frames. Each state maps to exactly one pair:
+/// spawning → ⚡ pending; blocked-waiting → ⏸ amber (queued / awaiting a model,
+/// not progressing); running → ○ spinner tone (a static fallback; the animated
+/// spinner is resolved in `agent_icon`, which owns `tick`); unknown → ? faint
+/// (signal lost); stalled → ⏳ faint (backend measured no progress); completed →
+/// ✓ success; partial → ◐ amber (capped, RESUMABLE — never a clean tick);
+/// failed → ✗ error.
+fn state_glyph(entry: &AgentEntry) -> (char, Style) {
+    let theme = crate::style::theme();
+    if super::is_blocked_waiting(entry) {
+        return ('\u{23f8}', theme.warning()); // ⏸ amber
+    }
+    match entry.status {
+        AgentStatus::Spawning => ('\u{26a1}', theme.task_pending()), // ⚡
+        AgentStatus::Running => ('\u{25cb}', theme.spinner()),       // ○
+        AgentStatus::Unknown => ('?', theme.faint()),
+        AgentStatus::Stalled => ('\u{23f3}', theme.faint()), // ⏳
+        AgentStatus::Completed => ('\u{2713}', theme.task_done()), // ✓
+        AgentStatus::Partial => ('\u{25d0}', theme.warning()), // ◐ amber
+        AgentStatus::Failed => ('\u{2717}', theme.error_text()), // ✗
     }
 }
 
@@ -1131,7 +1328,7 @@ fn token_bar(tokens: u32, max_tokens: u32) -> String {
 }
 
 /// Format token count as a compact k/M-scaled string: 4213 → "4.2k",
-/// 117_500 → "117.5k", 1_200_000 → "1.2M" (CC FleetView roster style).
+/// 117_500 → "117.5k", 1_200_000 → "1.2M" (roster style).
 fn fmt_tokens(n: u32) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
@@ -1142,7 +1339,7 @@ fn fmt_tokens(n: u32) -> String {
     }
 }
 
-/// The CC roster row's right-hand meta column: `<elapsed> · <tokens> tok`, e.g.
+/// The roster row's right-hand meta column: `<elapsed> · <tokens> tok`, e.g.
 /// `10m 25s · 107.3k tok`. Reuses the shared compact elapsed formatter and the
 /// k/M token scaler so every roster surface renders identically.
 fn fmt_cc_meta(elapsed_secs: u64, tokens: u32) -> String {
@@ -1151,6 +1348,59 @@ fn fmt_cc_meta(elapsed_secs: u64, tokens: u32) -> String {
         crate::components::status_bar::fmt_elapsed_compact(elapsed_secs),
         fmt_cc_tokens(tokens),
     )
+}
+
+/// The TRUTHFUL right-hand meta for a worker row.
+///
+/// It answers the two questions that actually matter about a live agent — "how
+/// long has it run?" and "is it healthy / how expensive is it?" — WITHOUT ever
+/// rendering the raw cumulative token total. That total re-counts cache reads at
+/// full weight on every turn, so it climbs into the millions for a perfectly
+/// cheap agent and reads as runaway spend. Context-window occupancy (share of
+/// the model's window) and real billed cost are the honest gauges instead.
+///
+/// Fields appear only when the backend has reported them, so the column never
+/// fabricates a measurement:
+///   * always: elapsed (the one duration a worker row may carry);
+///   * `context_percent`, when the agent's telemetry has sent it → `N% ctx`;
+///   * `cost_usd`, when a spend figure is known → `$…`;
+///   * as a floor, when neither gauge is known yet: the tool-call count, which
+///     is a truthful measure of effort and never the cache-inflated token sum.
+fn fmt_worker_meta(entry: &AgentEntry) -> String {
+    let mut parts = vec![crate::components::status_bar::fmt_elapsed_compact(
+        entry.elapsed_secs(),
+    )];
+    if let Some(pct) = entry.context_percent {
+        parts.push(format!("{}% ctx", pct));
+    }
+    if let Some(cost) = entry.cost_usd {
+        parts.push(fmt_cost(cost));
+    }
+    // No occupancy and no cost yet — say something true about effort rather than
+    // fall back to the token total we are deliberately not showing.
+    if entry.context_percent.is_none() && entry.cost_usd.is_none() {
+        parts.push(format!(
+            "{} tool{}",
+            entry.tool_uses,
+            if entry.tool_uses == 1 { "" } else { "s" }
+        ));
+    }
+    parts.join(" \u{00b7} ")
+}
+
+/// The `main` root row's meta. Prefers the truthful session gauge —
+/// context-window occupancy (share of the model window) plus real cost when
+/// known — and falls back to the session token total ONLY when occupancy has
+/// not been reported yet. See [`fmt_worker_meta`] for why the token total is a
+/// last resort rather than the headline.
+fn fmt_main_meta(main: &super::entry::MainRow) -> String {
+    match main.context_percent {
+        Some(pct) => match main.cost_usd {
+            Some(cost) => format!("{}% ctx \u{00b7} {}", pct, fmt_cost(cost)),
+            None => format!("{}% ctx", pct),
+        },
+        None => fmt_cc_tokens(main.tokens),
+    }
 }
 
 /// The meta column WITHOUT a duration: `<tokens> tok`. Used by the inline
@@ -1199,10 +1449,10 @@ fn truncate_display(s: &str, max_w: usize) -> String {
     crate::util::fit_cols(s, max_w)
 }
 
-/// Assemble one FleetView roster row with the `<elapsed> · ↓<tokens>` meta column
+/// Assemble one roster row with the `<elapsed> · ↓<tokens>` meta column
 /// **right-aligned flush to the pane edge** (`width` columns) so the meta forms a
 /// clean vertical column across every row — the `main` root, worker rows — instead
-/// of left-flowing right after each agent's activity (Claude Code FleetView parity).
+/// of left-flowing right after each agent's activity (the reference roster shape).
 ///
 /// Layout: `[prefix][name]  [activity…]<pad><meta>` where `<pad>` is the spacer
 /// that pushes `meta` against column `width`. All widths are DISPLAY widths

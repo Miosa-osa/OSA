@@ -158,6 +158,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
           # name a cache that never warmed at all. Diagnostics only — cannot
           # fail the request (see CacheAttribution).
           observe_cache(cache_fp, usage, opts)
+          probe_tool_schema_cache(usage, opts, model)
 
           # The sync path had NO reasoning handling of any kind — not even the
           # `reasoning_content` clause the streaming path had. Same normaliser,
@@ -261,6 +262,82 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   end
 
   defp reported_usage?(_), do: false
+
+  @doc false
+  # DIAGNOSTIC ONLY — measures whether the tool-schema array is inside the cached
+  # prefix on a WARM turn of a Claude-family compat route (OpenRouter/Surplus →
+  # Anthropic), or is being re-sent as fresh input (~8k tokens) at full rate
+  # every turn. Places no cache hint: it exists so a real warm capture can decide
+  # whether `maybe_add_tools/2` needs a `cache_control` breakpoint on the last
+  # tool definition.
+  #
+  # The signal: on OpenAI-shaped usage `input_tokens` is INCLUSIVE of the cached
+  # slices, so the genuinely fresh tokens are `input - cache_read - cache_creation`.
+  # In a warm agentic loop the fresh slice should be just the new user/tool
+  # message; if it is as large as the tool array, the tools are not in the cached
+  # prefix. Telemetry fires every warm turn (for aggregation); the human-readable
+  # line logs once per process.
+  def probe_tool_schema_cache(usage, opts, model) do
+    with true <- reported_usage?(usage),
+         tools when is_list(tools) and tools != [] <- Keyword.get(opts, :tools),
+         true <- OptimalSystemAgent.Providers.Registry.anthropic_family_model?(model),
+         cache_read when cache_read > 0 <- Map.get(usage, :cache_read_input_tokens, 0) do
+      tool_tokens =
+        tools
+        |> format_tools()
+        |> Jason.encode!()
+        |> byte_size()
+        |> OptimalSystemAgent.Providers.PromptCache.approx_tokens()
+
+      cache_creation = Map.get(usage, :cache_creation_input_tokens, 0)
+      total_in = Map.get(usage, :input_tokens, 0)
+      fresh = max(total_in - cache_read - cache_creation, 0)
+      tools_cached? = fresh < round(tool_tokens * 0.5)
+
+      :telemetry.execute(
+        [:osa, :prompt_cache, :tool_schema_probe],
+        %{
+          tool_tokens: tool_tokens,
+          fresh_input: fresh,
+          cache_read: cache_read,
+          cache_creation: cache_creation,
+          total_input: total_in
+        },
+        %{model: model, tools_cached: tools_cached?}
+      )
+
+      if probe_once?() do
+        verdict =
+          if tools_cached?,
+            do: "INSIDE the cached prefix (no action needed)",
+            else:
+              "UNCACHED — re-sent at full rate each turn; add a cache_control breakpoint on the " <>
+                "last tool def in maybe_add_tools/2 for this route"
+
+        Logger.info(
+          "[PromptCache] TOOL-SCHEMA CACHE PROBE (#{model}): tool_schema≈#{tool_tokens} tok, " <>
+            "fresh_input=#{fresh} tok, cache_read=#{cache_read}, cache_creation=#{cache_creation}, " <>
+            "total_input=#{total_in} → tool array appears #{verdict}"
+        )
+      end
+
+      :ok
+    else
+      _ -> :ok
+    end
+  rescue
+    # A diagnostic on the hot path must never fail the request.
+    _ -> :ok
+  end
+
+  defp probe_once? do
+    if Process.get(:osa_tool_schema_probed) == true do
+      false
+    else
+      Process.put(:osa_tool_schema_probed, true)
+      true
+    end
+  end
 
   # An SSE payload, not JSON: OpenAI-compatible streams are `data: {...}` lines
   # and terminate with `data: [DONE]`.
@@ -451,6 +528,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
           # `estimate_usage_fallback/3` may substitute an estimate — the
           # attributor must only ever see a real measurement.
           observe_cache(cache_fp, Map.get(acc, :usage, %{}), opts)
+          probe_tool_schema_cache(Map.get(acc, :usage, %{}), opts, model)
           finalize_sse_stream(acc, callback, model, messages)
 
         {:error, reason} ->

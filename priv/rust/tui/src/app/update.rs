@@ -742,6 +742,16 @@ impl App {
                 // index 0 → detach_to_main); on a worker it opens its transcript.
                 self.view_selected_dashboard_item();
             }
+            (KeyCode::Char('o'), KeyModifiers::NONE) | (KeyCode::Char(' '), KeyModifiers::NONE) => {
+                // Per-node expand/collapse of the highlighted roster row (C1a).
+                // Ctrl+O still folds the WHOLE panel; this folds just this node's
+                // children (trail + nested monitors). Sync the component's cursor
+                // to the app's authoritative selection first so it targets the
+                // highlighted row.
+                self.agents
+                    .set_roster_selected(Some(self.agents_dashboard_selected));
+                self.agents.toggle_selected_node_collapse();
+            }
             (KeyCode::Char('x'), KeyModifiers::NONE) | (KeyCode::Char('c'), KeyModifiers::NONE) => {
                 self.stop_selected_dashboard_item();
             }

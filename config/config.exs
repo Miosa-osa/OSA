@@ -207,6 +207,18 @@ config :optimal_system_agent,
   # the other axis.
   max_tool_output_bytes: 16_384,
 
+  # Output caps that were formerly hardcoded module constants (gap #1), now
+  # runtime-configurable with their original values as defaults. Kept coherent
+  # with `:max_tool_output_bytes` above (the loop-transcript per-result cap):
+  #   * :bash_output_max_bytes        — shell_execute's own capture bound (100 KB)
+  #   * :terminal_output_max_chars    — terminal output save-to-file threshold (8 KB)
+  #   * :summary_tool_output_max_chars — per-tool cap inside a summarization prompt,
+  #     deliberately the tightest since it only needs a gist of an already-capped
+  #     result; must stay <= max_tool_output_bytes so the two never fight.
+  bash_output_max_bytes: 102_400,
+  terminal_output_max_chars: 8_000,
+  summary_tool_output_max_chars: 2_000,
+
   # Context compaction thresholds (3-tier)
   compaction_warn: 0.80,
   compaction_aggressive: 0.85,

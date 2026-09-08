@@ -236,6 +236,43 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
   defp paused?(_), do: false
 
+  # A goal is `:paused` for one of several reasons — a cross-turn stall
+  # (identical gaps, no work landing), a spent lifetime verification-run cap,
+  # a spent token budget, or simply the user asking for it (a manual `/goal
+  # pause`, or the TUI's own interrupt-driven pause). A turn that walks into
+  # an already-paused goal must say which one — a single hardcoded "no
+  # measurable progress" string here used to claim a stall on EVERY pause,
+  # including ones the user caused themselves (self-contradictory when
+  # `reason` is `:user`, and simply wrong for `:run_cap` / `:usage_limits`,
+  # neither of which is a stall). Mirrors the TUI's own reason-branching in
+  # `continue_goal_from` (`handle_actions.rs`) so both surfaces agree.
+  @spec goal_pause_halt_message(GoalTracker.pause_reason()) :: String.t()
+  defp goal_pause_halt_message(:no_progress) do
+    "Goal auto-paused: no measurable progress across turns (the same gap(s) kept " <>
+      "coming back with no new work landing). Review the goal and resume, refine it, " <>
+      "or send a new instruction."
+  end
+
+  defp goal_pause_halt_message(:run_cap) do
+    "Goal auto-paused: hit its lifetime verification-run cap while still incomplete. " <>
+      "The goal is kept — resume it, refine it, or send a new instruction."
+  end
+
+  defp goal_pause_halt_message(:usage_limits) do
+    "Goal auto-paused: spent its token budget before the panel verified it complete. " <>
+      "The goal is kept — resume it, refine it, or send a new instruction."
+  end
+
+  defp goal_pause_halt_message(:user) do
+    "Goal paused (by you, or an interrupt) — not a stall. Resume it, refine it, or " <>
+      "send a new instruction."
+  end
+
+  defp goal_pause_halt_message(reason) do
+    "Goal auto-paused (#{reason}). Review the goal and resume, refine it, or send a " <>
+      "new instruction."
+  end
+
   @doc """
   Run the agent loop for the given state.
 
@@ -313,8 +350,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         )
 
       # Goal auto-pause: the cross-turn GoalTracker tripped stall detection
-      # (identical gap fingerprints) or the run cap — stop burning budget on a
-      # goal that isn't making measurable progress instead of looping forever.
+      # (identical gap fingerprints), the run cap, the token budget, or the
+      # goal was paused by the user (a manual `/goal pause`, or the TUI's own
+      # interrupt-driven pause) — a fresh turn that walks into an
+      # already-paused goal must not run, but it must also not lie about why.
       GoalTracker.enabled?(state) and GoalTracker.paused?(sid) ->
         snap = GoalTracker.snapshot(sid)
         reason = Map.get(snap || %{}, :pause_reason, :no_progress)
@@ -327,12 +366,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           reason: reason
         })
 
-        TerminalSource.halt(
-          "Goal auto-paused (#{reason}): no measurable progress across turns. " <>
-            "Review the goal and resume, refine it, or send a new instruction.",
-          state,
-          :control
-        )
+        TerminalSource.halt(goal_pause_halt_message(reason), state, :control)
 
       # Real budget cap (primitive #29) — abort a single runaway turn mid-loop,
       # not just at the next turn boundary. Only fires when a caller set

@@ -94,6 +94,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   alias OptimalSystemAgent.Agent.Loop.VerificationEvidence
   alias OptimalSystemAgent.Agent.PermissionMode
   alias OptimalSystemAgent.Agent.ProgressLedger
+  alias OptimalSystemAgent.Agent.RunStore
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Orchestrator
   alias OptimalSystemAgent.Providers.Registry, as: Providers
@@ -429,14 +430,61 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
 
   # `skip_reason/1` minus the two size heuristics. `:no_session`,
   # `:goal_inactive` and `:no_goal` are already decided by the tracker guard in
-  # `maybe_wait_for_user/2`, so what is left is the pair of spend guards: the
-  # per-turn verification run cap and the stall early-exit.
+  # `maybe_wait_for_user/2`, so what is left is the pair of spend guards (the
+  # per-turn verification run cap and the stall early-exit) plus the
+  # background-work guard below.
   defp wait_skip_reason(state) do
     cond do
       Map.get(state, :goal_verifier_runs, 0) >= max_runs() -> :run_cap
       stalled?(state) -> :stalled
+      awaiting_background_work?(state) -> :awaiting_background_work
       true -> nil
     end
+  end
+
+  @doc """
+  `true` when this session has a delegated background agent still `:running`
+  — real, uncompleted work in flight OUTSIDE this turn's own tool calls.
+
+  This gate exists for the tool-call-free path (`maybe_wait_for_user/2` is
+  called from `handle_result`'s `tool_calls: []` clause). `run_gate/1`, the
+  sibling path for a turn that DID call a tool, never needs it: any tool call
+  this turn already moves `state.total_tool_calls`, and
+  `GoalTracker.advance_if_current/4`'s own `work_landed?/2` check already
+  vetoes a stall on that.
+
+  A turn with NO tool calls of its own is different: real, uncompleted work
+  can be running entirely OUTSIDE it — a background agent this session
+  delegated to and has not yet heard back from. OSA's own background-dispatch
+  design tells the model NOT to poll (completion is injected automatically),
+  so the honest, correctly-behaving answer for round after round is plain
+  text ("still waiting on the security scan") with zero tool calls of its own
+  — which is indistinguishable from a genuine stall on tool-call-count grounds
+  alone. Skipping verification (and therefore any stall bookkeeping) entirely
+  while this is `true` means real background work is demonstrably still in
+  flight; the gate lifts the instant nothing is running, and nothing upstream
+  can even begin to think it saw a stall in the meantime.
+  """
+  @spec awaiting_background_work?(map()) :: boolean()
+  def awaiting_background_work?(state) when is_map(state) do
+    sid = Map.get(state, :session_id)
+    is_binary(sid) and has_running_descendant?(sid)
+  end
+
+  def awaiting_background_work?(_), do: false
+
+  defp has_running_descendant?(session_id) do
+    session_id
+    |> RunStore.children_of()
+    |> Enum.any?(&running_descendant?/1)
+  rescue
+    _ -> false
+  end
+
+  defp running_descendant?(agent_id) do
+    match?(%{status: :running}, RunStore.get(agent_id))
+  rescue
+    _ -> false
   end
 
   defp wait_triage(state, content, sid) do
@@ -477,9 +525,27 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   end
 
   defp run_gate(state) do
-    expected = GoalTracker.verification_token(Map.get(state, :session_id))
+    sid = Map.get(state, :session_id)
+    expected = GoalTracker.verification_token(sid)
 
-    case triage(state) do
+    # An explicit `update_goal(status: "complete")` THIS turn already IS the
+    # "this looks done" signal triage exists to detect. Skip re-asking a cheap
+    # classifier to independently rediscover it from the same evidence — that
+    # is a redundant gate that can only delay a real completion (and cost an
+    # extra round trip) if it happens to answer differently, never make the
+    # eventual panel verdict any more trustworthy. Every other triage verdict
+    # (`blocked`, `awaiting_user`, an unresolved claim from a stale/earlier
+    # turn) is unaffected — this only ever substitutes for `candidate_complete`.
+    forced_by_claim? = is_binary(sid) and GoalTracker.completion_claimed_this_turn?(sid)
+
+    triage_result =
+      if forced_by_claim? do
+        {:candidate_complete, %{reason: "update_goal(status: \"complete\") claimed this turn"}}
+      else
+        triage(state)
+      end
+
+    case triage_result do
       {:awaiting_user, meta} ->
         sid = Map.get(state, :session_id)
 

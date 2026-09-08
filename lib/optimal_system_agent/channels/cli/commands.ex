@@ -2674,23 +2674,22 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       "status" ->
         print_goal_status(session_id)
 
-      verb when verb in ["end", "approve", "reject"] ->
+      "end" ->
         IO.puts(
-          "  Use /goal clear to stop, or /goal approve|reject <request_id> to answer a pending decision."
+          "  Use /goal clear to stop, or /goal approve|reject to answer a pending decision."
         )
 
-      text ->
-        case String.split(text, " ", parts: 3, trim: true) do
-          [decision, id | notes] when decision in ["approve", "reject"] ->
-            case GoalTracker.resolve_decision(session_id, id, decision, Enum.join(notes, " ")) do
-              {:ok, _} ->
-                IO.puts(
-                  "  Decision recorded. Send a message to continue; completion still requires verification."
-                )
+      verb when verb in ["approve", "reject"] ->
+        # Bare, no id, no notes — resolve WHATEVER is currently pending. A
+        # session has at most one pending decision, so there was never a real
+        # choice to disambiguate; the id was ceremony, not a safeguard.
+        resolve_goal_decision(session_id, verb, nil, "")
 
-              {:error, reason} ->
-                IO.puts("  Decision not accepted: #{inspect(reason)}")
-            end
+      text ->
+        case String.split(text, " ", parts: 2, trim: true) do
+          [decision, rest] when decision in ["approve", "reject"] ->
+            {id, notes} = split_decision_id_and_notes(rest)
+            resolve_goal_decision(session_id, decision, id, notes)
 
           _ ->
             anchor_goal_command(text, session_id)
@@ -2703,6 +2702,48 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     e ->
       IO.puts("  #{@yellow}error: could not update goal (#{Exception.message(e)})#{@reset}\n")
       session_id
+  end
+
+  # `rest` is everything typed after `approve`/`reject`. The old parser always
+  # took its FIRST WORD as the request id ("/goal reject the button is still
+  # broken" resolved "the" as an id and failed with a confusing
+  # `stale_or_missing_request` for a rejection that never mentioned an id at
+  # all). `request_decision/2` always mints ids as `"decision-" <> base64` —
+  # so a first word wearing that shape IS an explicit id (old, still-supported
+  # form for scripts/automation that copy-paste one); anything else is free-form
+  # notes for whatever is currently pending, resolved implicitly.
+  defp split_decision_id_and_notes(rest) do
+    case String.split(rest, " ", parts: 2, trim: true) do
+      [maybe_id, notes] ->
+        if String.starts_with?(maybe_id, "decision-"),
+          do: {maybe_id, notes},
+          else: {nil, rest}
+
+      [maybe_id] ->
+        if String.starts_with?(maybe_id, "decision-"),
+          do: {maybe_id, ""},
+          else: {nil, rest}
+
+      [] ->
+        {nil, ""}
+    end
+  end
+
+  defp resolve_goal_decision(session_id, decision, id, notes) do
+    alias OptimalSystemAgent.Agent.Loop.GoalTracker
+
+    case GoalTracker.resolve_decision(session_id, id, decision, notes) do
+      {:ok, _} ->
+        IO.puts(
+          "  Decision recorded. Send a message to continue; completion still requires verification."
+        )
+
+      {:error, :no_pending_decision} ->
+        IO.puts("  #{@dim}No pending decision to #{decision}.#{@reset}")
+
+      {:error, reason} ->
+        IO.puts("  Decision not accepted: #{inspect(reason)}")
+    end
   end
 
   # `<goal> :: <criteria>` — the separator is doubled so ordinary goal prose
@@ -2760,11 +2801,21 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     end
   end
 
+  # Terminal states get a banner and, below the usual detail, a work overview —
+  # the "come back to a finished job" experience: goal statement, verdict,
+  # acceptance criteria, and what actually got touched, in one screen instead
+  # of scattered across a scrollback nobody re-reads. `:paused`/`:awaiting_user`
+  # are NOT terminal (`/goal resume` still applies to them) and get none of
+  # this — only a status a resume can no longer undo.
+  @terminal_goal_statuses [:completed, :blocked, :abandoned]
+
   defp print_goal_status(session_id) do
     alias OptimalSystemAgent.Agent.Loop.GoalTracker
 
     case GoalTracker.snapshot(session_id) do
       %{goal: goal} = snap when is_binary(goal) and goal != "" ->
+        if snap.status in @terminal_goal_statuses, do: print_goal_banner(snap)
+
         IO.puts("  #{@bold}Goal#{@reset} #{@dim}(#{snap.goal_id})#{@reset}")
         IO.puts("  #{goal}")
         IO.puts("")
@@ -2802,6 +2853,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
           _ -> :ok
         end
 
+        if snap.status in @terminal_goal_statuses, do: print_goal_overview(session_id)
+
       _ ->
         IO.puts("  #{@dim}No goal anchored. Set one with /goal <text>.#{@reset}")
 
@@ -2811,6 +2864,56 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
         IO.puts("  #{@dim}judges it complete, it stalls, or it hits its run cap.#{@reset}")
     end
+  end
+
+  defp print_goal_banner(%{status: :completed}) do
+    IO.puts("  #{@green}#{@bold}✓ GOAL COMPLETED#{@reset}")
+    IO.puts("")
+  end
+
+  defp print_goal_banner(%{status: :blocked}) do
+    IO.puts("  #{@yellow}#{@bold}⛔ GOAL BLOCKED#{@reset}")
+    IO.puts("")
+  end
+
+  defp print_goal_banner(%{status: :abandoned}) do
+    IO.puts("  #{@yellow}#{@bold}GOAL ABANDONED#{@reset}")
+    IO.puts("")
+  end
+
+  defp print_goal_banner(_), do: :ok
+
+  # "What actually got touched" — the one thing `/goal status` never showed
+  # even at the finish line: `turns`/`verification rounds` say HOW LONG it
+  # ran, `latest` says WHAT THE PANEL DECIDED, neither says WHAT CHANGED.
+  # Reuses `VerificationEvidence`'s own ledger — the SAME evidence the
+  # completion panel itself was judged against — so this is not a second,
+  # possibly-disagreeing account of the work.
+  defp print_goal_overview(session_id) do
+    alias OptimalSystemAgent.Agent.Loop.VerificationEvidence, as: Ledger
+
+    paths =
+      Ledger.entries(session_id)
+      |> Enum.filter(&(Map.get(&1, :kind) == :write and Map.get(&1, :success) == true))
+      |> Enum.flat_map(fn e -> List.wrap(Map.get(e, :paths)) end)
+      |> Enum.reject(&(is_nil(&1) or &1 == ""))
+      |> Enum.map(&to_string/1)
+      |> Enum.uniq()
+
+    IO.puts("")
+    IO.puts("  #{@bold}Work overview#{@reset}")
+
+    case paths do
+      [] ->
+        IO.puts("  #{@dim}No file writes recorded for this session.#{@reset}")
+
+      _ ->
+        IO.puts("  #{@dim}#{length(paths)} file(s) touched:#{@reset}")
+        Enum.each(Enum.take(paths, 20), &IO.puts("    #{@dim}•#{@reset} #{&1}"))
+        if length(paths) > 20, do: IO.puts("    #{@dim}… and #{length(paths) - 20} more#{@reset}")
+    end
+  rescue
+    _ -> :ok
   end
 
   def cmd_sessions(_args, session_id) do

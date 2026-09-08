@@ -10,6 +10,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
 
   alias OptimalSystemAgent.Agent.Loop.GoalTracker
   alias OptimalSystemAgent.Agent.Loop.GoalVerifier
+  alias OptimalSystemAgent.Agent.RunStore
   alias OptimalSystemAgent.Agent.Loop.VerificationEvidence, as: Ledger
 
   # The lifetime verification-round cap is OFF by default: counting rounds
@@ -131,6 +132,96 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
 
       state = base_state(sid) |> Map.put(:goal_verifier_stall_count, 2)
       refute GoalVerifier.needs_verification?(state)
+    end
+  end
+
+  # ── Waiting on background agents must never look like a stall ───────────
+  #
+  # Reported: an orchestrator that correctly stops polling and just reports
+  # "still waiting on the background agent" (per OSA's own design — completion
+  # is injected automatically, the model is told NOT to poll) made zero tool
+  # calls of its own for round after round, which used to be indistinguishable
+  # from a genuine stall on tool-call-count grounds alone.
+  describe "awaiting_background_work?/1" do
+    test "false with no session_id" do
+      refute GoalVerifier.awaiting_background_work?(%{})
+    end
+
+    test "false when nothing was ever delegated", %{session_id: sid} do
+      refute GoalVerifier.awaiting_background_work?(base_state(sid))
+    end
+
+    test "true while a delegated background agent is still :running", %{session_id: sid} do
+      child = "agent:#{sid}:1"
+      RunStore.start_run(%{agent_id: child, parent_session_id: sid, role: "worker"})
+
+      assert GoalVerifier.awaiting_background_work?(base_state(sid))
+    end
+
+    test "false again once every delegated background agent has finished", %{session_id: sid} do
+      child = "agent:#{sid}:1"
+      RunStore.start_run(%{agent_id: child, parent_session_id: sid, role: "worker"})
+      assert GoalVerifier.awaiting_background_work?(base_state(sid))
+
+      RunStore.complete(child, %{status: :completed, summary: "done"})
+      refute GoalVerifier.awaiting_background_work?(base_state(sid))
+    end
+
+    test "an unrelated session's background agent does not leak in", %{session_id: sid} do
+      other_parent = "goal-verifier-test-other-#{System.unique_integer([:positive])}"
+
+      RunStore.start_run(%{
+        agent_id: "agent:#{other_parent}:1",
+        parent_session_id: other_parent,
+        role: "worker"
+      })
+
+      refute GoalVerifier.awaiting_background_work?(base_state(sid))
+    end
+  end
+
+  # ── The gate actually stops verification from running ────────────────────
+  describe "a running background agent skips the verification round entirely" do
+    test "identical-gap, tool-call-free rounds do NOT stall while background work is running",
+         %{session_id: sid} do
+      GoalTracker.start(sid, "run the security scan and report back")
+      child = "agent:#{sid}:1"
+      RunStore.start_run(%{agent_id: child, parent_session_id: sid, role: "worker"})
+
+      # Force every round past triage into the (expensive) panel, and have the
+      # panel refute with the SAME gap every time. Absent the background-work
+      # gate, this is exactly the shape that trips the stall detector: an
+      # unchanged fingerprint with a `total_tool_calls` that never moves.
+      Application.put_env(
+        :optimal_system_agent,
+        :goal_verifier_triage_runner,
+        fn _state -> {:ok, ~s({"status": "candidate_complete"})} end
+      )
+
+      stub_runner(fn _sid, configs ->
+        Enum.map(configs, fn _ -> json_result(true, reason: "still waiting on the scan") end)
+      end)
+
+      state =
+        base_state(sid)
+        |> Map.put(:goal_verifier_runs, 0)
+        |> Map.put(:total_tool_calls, 7)
+
+      for _ <- 1..4 do
+        GoalVerifier.maybe_wait_for_user(state, "Still waiting on the security scan.")
+      end
+
+      snap = GoalTracker.snapshot(sid)
+
+      assert snap.verify_run_count == 0,
+             "the panel must never even RUN while real background work is in flight"
+
+      assert snap.status == :active,
+             "a session legitimately waiting on running background work must never auto-pause"
+
+      RunStore.complete(child, %{status: :completed, summary: "done"})
+      Application.delete_env(:optimal_system_agent, :goal_verifier_triage_runner)
+      GoalTracker.reset(sid)
     end
   end
 
@@ -1322,6 +1413,53 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
 
       GoalVerifier.maybe_gate(state)
       assert_received :panel_ran
+    end
+
+    # ── Auto-completion detection: an explicit claim forces the panel ───────
+    #
+    # Reported: does completion detection reliably CONCLUDE, or can it just
+    # keep auto-continuing? `update_goal(status: "complete")` is a crystal
+    # clear, structured signal — the model explicitly claiming the objective
+    # is met — but the old wiring STILL asked the cheap triage classifier to
+    # independently rediscover that from the same evidence before the panel
+    # would run at all. A transient triage misfire on the very turn the model
+    # claimed completion cost a full extra auto-continue cycle for nothing.
+    test "claim_complete/1 bypasses triage, runs the panel THIS round, and consumes the claim",
+         %{session_id: sid} do
+      state = complex_state(sid)
+
+      stub_triage(fn _ ->
+        flunk("triage must be bypassed when completion was explicitly claimed this turn")
+      end)
+
+      {:ok, _} = GoalTracker.claim_complete(sid)
+      assert GoalTracker.completion_claimed_this_turn?(sid)
+
+      out = GoalVerifier.maybe_gate(state)
+
+      assert_received :panel_ran
+      assert out.goal_verifier_runs == 1
+      assert GoalTracker.status(sid) == :completed
+
+      # Consumed by the round that just ran — a leftover flag would force
+      # every future round straight to the panel too, forever.
+      refute GoalTracker.completion_claimed_this_turn?(sid)
+    end
+
+    test "a stale claim from an earlier turn no longer forces the panel", %{session_id: sid} do
+      GoalTracker.start(sid, "ship the widget exporter")
+      {:ok, claimed} = GoalTracker.claim_complete(sid)
+      assert claimed.turn_count == 0
+      assert GoalTracker.completion_claimed_this_turn?(sid)
+
+      # A new top-level turn begins (mirrors `tick_turn/1`, called once at the
+      # very start of every fresh turn) without the claim ever having been
+      # verified — e.g. the session crashed mid-round, or `/goal pause`
+      # intervened before the tool-result boundary was reached.
+      GoalTracker.tick_turn(sid)
+
+      refute GoalTracker.completion_claimed_this_turn?(sid),
+             "a claim from an earlier turn must not force every future round to the panel"
     end
 
     # ── Cost shape ─────────────────────────────────────────────────────────

@@ -1,15 +1,15 @@
 pub mod alt_screen;
-pub mod exit_dump;
 pub mod assistant_stream;
 pub mod attachment;
 pub mod commands;
 pub mod event_loop;
+pub mod exit_dump;
 pub mod focus;
 pub mod frame_size;
-pub mod inline_backend;
 mod handle_actions;
 mod handle_backend;
 mod handle_dialogs;
+pub mod inline_backend;
 pub mod key_normalize;
 mod keymap_dispatch;
 pub mod keys;
@@ -656,8 +656,8 @@ impl App {
             .unwrap_or_default();
 
         // Initialize theme
-        let theme = crate::style::themes::by_name(&config.theme)
-            .unwrap_or_else(crate::style::themes::dark);
+        let theme =
+            crate::style::themes::by_name(&config.theme).unwrap_or_else(crate::style::themes::dark);
         crate::style::set_theme(theme);
 
         // Use actual terminal size instead of hardcoded 80x24
@@ -940,11 +940,11 @@ impl App {
     /// meter (status bar, mirrored to the sidebar so both surfaces agree). Cheap
     /// char/4 estimate; never mutates the committed context value.
     pub(crate) fn refresh_pending_input_tokens(&mut self) {
-        let pending =
-            crate::components::status_bar::estimate_tokens(self.input.value());
+        let pending = crate::components::status_bar::estimate_tokens(self.input.value());
         self.status.set_pending_input_tokens(pending);
         // Mirror the combined (committed + pending) ratio into the sidebar meter.
-        self.sidebar.set_context(self.status.display_context_ratio());
+        self.sidebar
+            .set_context(self.status.display_context_ratio());
     }
 
     /// Transition to a new state with validation
@@ -1295,6 +1295,14 @@ impl App {
             };
             let tokens = self.status.output_tokens().min(u32::MAX as u64) as u32;
             self.agents.set_main_row(activity, elapsed, tokens);
+            // Truthful root-row gauge: the session's committed context-window
+            // occupancy (share of the model window), NOT the composer-inflated
+            // display ratio and NOT the raw token total. Only once the window is
+            // actually being tracked (ratio > 0), so an un-seeded session falls
+            // back to the token count rather than claiming "0% ctx".
+            let ctx = self.status.context_ratio();
+            let ctx_pct = (ctx > 0.0).then(|| (ctx * 100.0).round().clamp(0.0, 100.0) as u32);
+            self.agents.set_main_context(ctx_pct, None);
         } else {
             self.status.set_subagents(0, None);
         }
@@ -1540,10 +1548,7 @@ mod turn_active_tests {
 
     #[test]
     fn overlay_over_idle_is_not_active() {
-        assert!(!turn_active(
-            AppState::ContextBreakdown,
-            &[AppState::Idle]
-        ));
+        assert!(!turn_active(AppState::ContextBreakdown, &[AppState::Idle]));
     }
 
     #[test]
@@ -1596,8 +1601,14 @@ mod goal_indicator_tests {
         // non-zero, compact-formatted elapsed (Codex "Working on: <goal> · Nm Ss").
         let label = compose_goal_label("ship the release", 220);
         assert!(label.starts_with("Working on: ship the release"));
-        assert!(label.contains("3m 40s"), "non-zero elapsed must show, got: {label:?}");
-        assert!(!label.contains(" 0s "), "activated goal is not frozen at zero");
+        assert!(
+            label.contains("3m 40s"),
+            "non-zero elapsed must show, got: {label:?}"
+        );
+        assert!(
+            !label.contains(" 0s "),
+            "activated goal is not frozen at zero"
+        );
     }
 
     #[test]

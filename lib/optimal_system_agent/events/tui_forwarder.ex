@@ -33,7 +33,8 @@ defmodule OptimalSystemAgent.Events.TuiForwarder do
     progress_ledger
     steer_injected
     monitor_started
-    monitor_fired
+    monitor_event
+    monitor_done
     push_notification
     subscribe_pr_registered
     goal_verifier_round

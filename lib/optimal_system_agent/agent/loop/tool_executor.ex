@@ -25,6 +25,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   alias OptimalSystemAgent.Tools.Registry, as: Tools
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Observability
+  alias OptimalSystemAgent.Utils.Text
 
   # Tools allowed in :read_only mode (no side-effects, no writes)
   @read_only_tools ~w(
@@ -1404,8 +1405,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   # (image content blocks or truncated text). Returns the {tool_msg, result_str}
   # contract expected by callers.
   defp finalize_result(tool_call, tool_result, state, arg_hint, start_time_tool) do
-    max_tool_output_bytes =
-      Application.get_env(:optimal_system_agent, :max_tool_output_bytes, 10_240)
+    # The LAST-cut budget for a single tool result before it enters the loop
+    # transcript. This used to default to 10_240 while the earlier
+    # `ToolResultStorage.apply_budget/4` pass used the configured cap (16_384) —
+    # so a result between the two was re-cut here, head-only, amputating
+    # apply_budget's head+tail preview AND the file reference it appended. Now it
+    # reads the SAME `:max_tool_output_bytes` knob so the two layers agree, and
+    # keeps head+tail like apply_budget does. This is the biggest lever on
+    # subagent context runaway: an unbounded pytest/file_read/bash dump injected
+    # whole is then re-sent on EVERY later turn. Overridable via
+    # OSA_TOOL_OUTPUT_MAX_CHARS (runtime.exs -> :max_tool_output_bytes).
+    max_tool_output_bytes = tool_output_cap()
 
     tool_duration_ms = System.monotonic_time(:millisecond) - start_time_tool
 
@@ -1650,95 +1660,96 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     {tool_msg, result_str}
   end
 
-  @doc """
-  Cap a tool result at `limit` bytes WITHOUT losing the tail.
-
-  This is the LAST cut before the result becomes a context message, and it was
-  the only one with no way back: everything past `limit` was dropped and the
-  model was told solely how many bytes it would never see.
-
-  `ToolResultStorage.apply_budget/4` runs earlier and does offload-with-a-
-  reference, but it does not cover this cut. It is bypassed or outrun whenever:
-
-    * `verbose` is set — `apply_budget/4` returns the full result untouched by
-      design, and this cut then amputated it anyway;
-    * a `post_tool_use` hook rewrites or appends to the result AFTER the budget
-      pass, so the message can exceed `limit` without the storage layer ever
-      seeing the final bytes;
-    * the offload write itself fails, in which case `apply_budget/4` falls back
-      to its own head-only truncation with no file behind it;
-    * the two read the same `:max_tool_output_bytes` key but fall back to
-      DIFFERENT defaults (`10_240` here vs `51_200` there), so any deployment
-      that leaves the key unset amputates everything between the two.
-
-  Now the full result is spilled to a content-hashed file and the model is
-  handed a ready-to-run `file_read` call positioned at the first line it has
-  not seen. Truncation becomes a pointer instead of a dead end.
-
-  Content-hashed naming makes the spill idempotent: the same output re-spilled
-  (retry, replay) reuses one file instead of accumulating duplicates. Files land
-  in the same `tool-results/` directory `ToolResultStorage.cleanup/1` sweeps by
-  age, so they do not leak.
-
-  Returns `result_str` unchanged when it is within `limit`. Never raises: a
-  failed spill degrades to the previous head-only truncation, which is no worse
-  than the old behaviour.
-  """
-  # Bytes held back from the head slice for the truncation footer.
+  # Bytes held back from the head+tail slices for the elision marker.
   @overflow_footer_reserve 600
 
+  # Sentinel that every elision marker below carries. `spill_or_truncate/3` is
+  # idempotent: a result that already contains it (a replay, a post_tool_use
+  # hook that re-ran the pass, apply_budget's own reference note) is returned
+  # untouched rather than cut a second time — a re-cut would drop the tail and
+  # the file reference the first cut just added.
+  @elision_sentinel "[Output truncated —"
+
+  @doc """
+  Cap a single tool result at `limit` bytes, keeping the HEAD and the TAIL.
+
+  The tail matters: for a build or a test run the end of the output is the part
+  that says whether it passed — the single most likely reason the tool was
+  called at all. A head-only cut threw that away. So we keep a head slice and a
+  tail slice, elide the middle, and spill the COMPLETE output to a content-
+  hashed file the model can `file_read`/grep on demand — a pointer, not a dead
+  end.
+
+  Idempotent (an already-elided result is returned unchanged) and never splits a
+  UTF-8 codepoint (`Utils.Text.utf8_head/2` + `utf8_tail/2`). Returns the input
+  unchanged when it is within `limit`, and degrades to an inline head+tail cut
+  (no file) if the spill write fails — no worse than the old behaviour.
+  """
   @spec spill_or_truncate(String.t(), pos_integer(), map()) :: String.t()
   def spill_or_truncate(result_str, limit, tool_call)
       when is_binary(result_str) and is_integer(limit) and limit > 0 do
-    if byte_size(result_str) > limit do
-      # Reserve room for the footer so the pointer itself is never the thing
-      # that pushes the message back over the limit.
-      head_limit = max(limit - @overflow_footer_reserve, div(limit, 2))
-      head = safe_head(result_str, head_limit)
-      shown_lines = count_lines(head)
+    cond do
+      byte_size(result_str) <= limit ->
+        result_str
 
-      case spill_overflow(result_str, tool_call) do
-        {:ok, path, total_lines} ->
-          head <>
-            "\n\n[Output truncated — showing #{byte_size(head)} of #{byte_size(result_str)} bytes " <>
-            "(#{shown_lines} of #{total_lines} lines).\n" <>
-            "The COMPLETE output is saved at #{path}.\n" <>
-            "Next step: read the rest with file_read " <>
-            ~s({"path": "#{path}", "offset": #{shown_lines + 1}, "limit": 200}) <>
-            " — repeat with a higher offset to page further.]"
+      # Idempotency: don't re-truncate a result that was already elided (by an
+      # earlier pass, a replay, or apply_budget's offload reference).
+      String.contains?(result_str, @elision_sentinel) ->
+        result_str
 
-        :error ->
-          head <>
-            "\n\n[Output truncated — #{byte_size(result_str)} bytes total, showing first " <>
-            "#{byte_size(head)} bytes. The overflow could not be saved to disk.\n" <>
-            "Next step: re-run this tool with a narrower query (a more specific pattern, " <>
-            "path, or line range) so the result fits.]"
-      end
-    else
-      result_str
+      true ->
+        # Reserve room for the marker so it is never the thing that pushes the
+        # message back over the limit, then split the remaining budget ~2/3 head,
+        # ~1/3 tail — the head shows what the command did, the tail how it ended.
+        budget = max(limit - @overflow_footer_reserve, div(limit, 2))
+        head_budget = div(budget * 2, 3)
+        tail_budget = max(budget - head_budget, 0)
+
+        head = Text.utf8_head(result_str, head_budget)
+        tail = Text.utf8_tail(result_str, tail_budget)
+
+        shown_lines = count_lines(head) + count_lines(tail)
+
+        marker =
+          case spill_overflow(result_str, tool_call) do
+            {:ok, path, total_lines} ->
+              "\n\n#{@elision_sentinel} showing the first #{byte_size(head)} and last " <>
+                "#{byte_size(tail)} of #{byte_size(result_str)} bytes " <>
+                "(~#{max(total_lines - shown_lines, 0)} of #{total_lines} lines omitted from the " <>
+                "middle).\nThe COMPLETE output is saved at #{path}.\n" <>
+                "Next step: read any part with file_read " <>
+                ~s({"path": "#{path}", "offset": 1, "limit": 200}) <>
+                " (raise offset to page), or grep it for what you need.]\n\n"
+
+            :error ->
+              "\n\n#{@elision_sentinel} #{byte_size(result_str)} bytes total, showing the first " <>
+                "#{byte_size(head)} and last #{byte_size(tail)} bytes. The overflow could not be " <>
+                "saved to disk.\nNext step: re-run this tool with a narrower query (a more " <>
+                "specific pattern, path, or line range) so the result fits.]\n\n"
+          end
+
+        head <> marker <> tail
     end
   end
 
   def spill_or_truncate(result_str, _limit, _tool_call), do: result_str
 
-  # binary_part/3 can split a multi-byte grapheme and produce invalid UTF-8,
-  # which some providers reject outright. Trim back to a valid boundary.
-  defp safe_head(bin, limit) do
-    head = binary_part(bin, 0, min(limit, byte_size(bin)))
-
-    if String.valid?(head) do
-      head
-    else
-      trim_to_valid(head)
+  # The per-tool-result output cap (bytes). One knob for both this last cut and
+  # `ToolResultStorage.apply_budget/4`, so a result between the two is never
+  # re-cut. The SHIPPED value is `config.exs`'s deliberate 16_384 (an evidenced
+  # anti-runaway choice: at 50KB a single result is ~12.8k tokens, and a real
+  # session sat at 370.5k input tokens before reasoning). This fallback only
+  # fires if the key is stripped. Raise per-deployment via
+  # OSA_TOOL_OUTPUT_MAX_CHARS (runtime.exs). Named "chars" for operators — for
+  # the mostly-ASCII tool output this bounds, chars ≈ bytes.
+  @default_tool_output_cap 16_384
+  @doc false
+  @spec tool_output_cap() :: pos_integer()
+  def tool_output_cap do
+    case Application.get_env(:optimal_system_agent, :max_tool_output_bytes) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @default_tool_output_cap
     end
-  end
-
-  defp trim_to_valid(<<>>), do: <<>>
-
-  defp trim_to_valid(bin) do
-    size = byte_size(bin)
-    shorter = binary_part(bin, 0, size - 1)
-    if String.valid?(shorter), do: shorter, else: trim_to_valid(shorter)
   end
 
   defp count_lines(""), do: 0

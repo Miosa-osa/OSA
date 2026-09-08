@@ -11,9 +11,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.WebSearch.Prompt do
   value that changes into the STATIC prompt prefix — the block the provider
   prompt-cache keys on — so the cache was guaranteed to miss on the first
   request of every month, for a fact the model already has: `Agent.Context`
-  emits `Today's date: <iso8601>` in the per-session environment block, which
+  emits `Today's date: <iso8601>` in the per-turn Runtime Context block, which
   is outside the cached prefix and correct to the day rather than the month.
-  One copy, in the place where a changing value belongs.
+  One copy, in the place where a changing value belongs. (It lived in the
+  cached environment block until that was found to bust the prefix once per UTC
+  midnight; it now sits in the volatile runtime block with the clock.)
   """
 
   @doc """
@@ -34,7 +36,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.WebSearch.Prompt do
     """
     Searches the web using DuckDuckGo; returns titles, URLs, and snippets for
     information beyond your knowledge cutoff. Use the CURRENT year in
-    time-sensitive queries — "Today's date" in your environment block has it.
+    time-sensitive queries — "Today's date" in your Runtime Context block has it.
     Use `#{web_fetch_name}` to read promising URLs in full, and end your answer with
     a "Sources:" section listing the URLs used, as
     `- [Title](https://example.com/page)`.

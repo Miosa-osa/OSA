@@ -158,6 +158,15 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
          model_context_window: model_window,
          context_window_clamped: max_tok < model_window,
          utilization: utilization,
+         # Item 10 — the session/main row's honest headline: context% of window +
+         # real $ cost, so the ROOT row stops presenting a raw, cache-inflated
+         # cumulative token count as if it were spend. `context_percent` mirrors
+         # `utilization` but is ROUNDED to an integer — the TUI decodes this field
+         # as u32 and would drop the whole frame on a float (same contract as the
+         # per-agent mirror in ExecutionControl). `cost_usd` is this session's real
+         # (per-model cache-discounted) spend, read straight off the loop state.
+         context_percent: round(utilization),
+         cost_usd: Map.get(state, :session_cost_usd, 0.0),
          percent_left: warning.percent_left,
          context_low: warning.above_warning,
          above_compact: warning.above_compact,

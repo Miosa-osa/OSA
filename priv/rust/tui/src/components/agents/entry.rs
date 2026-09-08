@@ -25,15 +25,29 @@ pub enum AgentStatus {
     /// agent can recover, and only a terminal event may end it.
     Stalled,
     Completed,
+    /// A capped run that came back RESUMABLE: the backend stopped it at a limit
+    /// (RunStore `:completed` with `partial: true` / `resumable: true`) instead
+    /// of letting it run to a natural end.
+    ///
+    /// It is terminal for lifecycle purposes — the run is not executing, and a
+    /// late progress frame must not revert it — but it is emphatically NOT
+    /// "Done": the work is unfinished and the user can resume it. So it carries
+    /// its own glyph, colour and label everywhere, and a capped run is never
+    /// rendered as a clean completion (the mistake this state exists to prevent).
+    Partial,
     Failed,
 }
 
 impl AgentStatus {
     /// Terminal states are the ONLY ones a completion event may produce. Used
     /// by the roster/footer counters (a finished agent is not "running") and by
-    /// the retain-window reaper.
+    /// the retain-window reaper. `Partial` is terminal: the run has stopped, it
+    /// just stopped resumable rather than complete.
     pub fn is_terminal(self) -> bool {
-        matches!(self, AgentStatus::Completed | AgentStatus::Failed)
+        matches!(
+            self,
+            AgentStatus::Completed | AgentStatus::Failed | AgentStatus::Partial
+        )
     }
 }
 
@@ -252,8 +266,66 @@ pub struct MainRow {
     pub activity: String,
     /// Turn elapsed in seconds (frozen at 0 when idle).
     pub elapsed_secs: u64,
-    /// Cumulative session output tokens.
+    /// Cumulative session output tokens. Kept as a FALLBACK only: when the
+    /// session's context-window occupancy is known (`context_percent`), the root
+    /// row shows that truthful gauge instead, because a headline token total
+    /// folds cache reads at full weight and reads as runaway spend.
     pub tokens: u32,
+    /// The main session's context-window occupancy (share of the model window),
+    /// mirrored from the session frame. `None` until reported; when set it is the
+    /// root row's meta instead of the raw token total.
+    pub context_percent: Option<u32>,
+    /// The main session's real (cache-discounted) cost so far, when reported.
+    /// Shown alongside `context_percent` on the root row.
+    pub cost_usd: Option<f64>,
+}
+
+/// Lifecycle state of a monitor / watch-task node, matching the producer's wire
+/// `state` field on the `monitor_started` / `monitor_event` / `monitor_done`
+/// frames: `running` while watching, then one of three retirement reasons.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MonitorState {
+    /// Registered and watching (`"running"`); the state of `started` + `event`.
+    Watching,
+    /// Retired having fired to completion (`"done"`) — the healthy outcome.
+    Done,
+    /// Retired on its deadline without firing (`"timeout"`) — a caution.
+    Timeout,
+    /// Retired because it was manually stopped (`"stopped"`) — neutral.
+    Stopped,
+}
+
+impl MonitorState {
+    /// Parse the wire `state` string; unknown values fall back to `Watching`
+    /// (a live-but-unclassified monitor, never a fabricated verdict).
+    pub fn from_wire(s: &str) -> Self {
+        match s {
+            "done" => MonitorState::Done,
+            "timeout" => MonitorState::Timeout,
+            "stopped" => MonitorState::Stopped,
+            _ => MonitorState::Watching,
+        }
+    }
+}
+
+/// A monitor / watch-task node rendered in the agent tree. Built from the
+/// `monitor_started` / `monitor_event` / `monitor_done` frames and nested under
+/// its `parent_agent_id` when one is set (else shown at the fleet root), so a
+/// watch task's start → events → done-verdict read inline alongside the agents
+/// they watch rather than only in the transcript.
+#[derive(Debug, Clone)]
+pub struct MonitorNode {
+    /// Stable backend id (dedupe key + update target).
+    pub id: String,
+    /// Human label for the row (what is being watched).
+    pub label: String,
+    /// Current lifecycle state.
+    pub state: MonitorState,
+    /// The agent this monitor is attached to, if any; when set the node nests
+    /// under that agent's row, otherwise it renders at the fleet root.
+    pub parent_agent_id: Option<String>,
+    /// The most recent event line the monitor reported (shown as its detail).
+    pub last_event: Option<String>,
 }
 
 #[derive(Debug, Clone)]

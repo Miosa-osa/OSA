@@ -1450,10 +1450,7 @@ impl App {
                     // Keep occupancy. Zeroing used tokens on switch made the
                     // bar lie: the transcript is still in the session, only
                     // the ceiling changed (and may have been compacted).
-                    let used = resp
-                        .tokens_after
-                        .or(resp.tokens_before)
-                        .unwrap_or(0);
+                    let used = resp.tokens_after.or(resp.tokens_before).unwrap_or(0);
                     if let Some(ctx) = resp.context_window {
                         let ratio = if ctx > 0 {
                             used as f64 / ctx as f64
@@ -1481,10 +1478,8 @@ impl App {
                     self.toasts.push(toast, level);
                     if let Some(w) = resp.warning.clone() {
                         if !w.is_empty() {
-                            self.toasts.push(
-                                w,
-                                crate::components::toast::ToastLevel::Warning,
-                            );
+                            self.toasts
+                                .push(w, crate::components::toast::ToastLevel::Warning);
                         }
                     }
                 }
@@ -1835,8 +1830,14 @@ impl App {
             }
             BackendEvent::LocalModelRemoved(result) => {
                 let msg = match &result {
-                    Ok(tag) => Some((format!("Removed {}", tag), crate::components::toast::ToastLevel::Info)),
-                    Err(e) => Some((format!("Remove failed: {}", e), crate::components::toast::ToastLevel::Error)),
+                    Ok(tag) => Some((
+                        format!("Removed {}", tag),
+                        crate::components::toast::ToastLevel::Info,
+                    )),
+                    Err(e) => Some((
+                        format!("Remove failed: {}", e),
+                        crate::components::toast::ToastLevel::Error,
+                    )),
                 };
                 if let Some(picker) = self.model_picker.as_mut() {
                     picker.set_local_removed(result);
@@ -1981,6 +1982,7 @@ impl App {
                 delivery_status,
                 available_controls,
                 context_percent,
+                cost_usd,
             } => {
                 self.agents.agent_progress(
                     &agent_name,
@@ -1992,6 +1994,9 @@ impl App {
                     elapsed_ms,
                 );
                 self.agents.set_agent_context(&agent_name, context_percent);
+                // Live per-worker cost (item-10): the truthful $ meter reads this,
+                // never the raw token total. `None` leaves the last value intact.
+                self.agents.set_agent_cost(&agent_name, cost_usd);
                 self.agents.agent_runtime(
                     &agent_name,
                     active_skills,
@@ -2024,6 +2029,28 @@ impl App {
                 // Trail length can change the panel height — keep layout in sync.
                 self.recompute_layout();
             }
+            // Monitors / watch-tasks (C1b): render as nodes in the agent tree,
+            // nested under their parent agent (or the root). Layout can change, so
+            // recompute after each.
+            BackendEvent::MonitorStarted {
+                id,
+                label,
+                parent_agent_id,
+            } => {
+                self.agents.monitor_started(&id, &label, parent_agent_id);
+                self.recompute_layout();
+            }
+            BackendEvent::MonitorEvent { id, detail } => {
+                self.agents.monitor_event(&id, &detail);
+            }
+            BackendEvent::MonitorDone { id, state, detail } => {
+                self.agents.monitor_done(
+                    &id,
+                    crate::components::agents::MonitorState::from_wire(&state),
+                    detail,
+                );
+                self.recompute_layout();
+            }
             BackendEvent::AgentControlResult {
                 agent_id,
                 action,
@@ -2052,17 +2079,28 @@ impl App {
                 tool_uses,
                 tokens_used,
                 summary,
+                resumable,
                 ..
             } => {
                 // The orchestrator frame always carries both counters, so they
                 // are authoritative here (unlike the background path, whose
-                // `usage` map may be absent entirely).
-                self.agents.agent_completed(
-                    &agent_name,
-                    Some(tool_uses),
-                    Some(tokens_used),
-                    summary,
-                );
+                // `usage` map may be absent entirely). A capped run is surfaced
+                // as its own resumable-partial state, never a clean "Done".
+                if resumable {
+                    self.agents.agent_partial(
+                        &agent_name,
+                        Some(tool_uses),
+                        Some(tokens_used),
+                        summary,
+                    );
+                } else {
+                    self.agents.agent_completed(
+                        &agent_name,
+                        Some(tool_uses),
+                        Some(tokens_used),
+                        summary,
+                    );
+                }
                 self.sidebar.set_current_agent("");
                 // Clear the stale "@agent: subject" spinner label set on every
                 // progress tick — otherwise the leader spinner keeps naming a

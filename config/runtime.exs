@@ -817,10 +817,87 @@ if v = System.get_env("OSA_MAX_FLEET_AGENTS") do
   end
 end
 
+# Flat single-number global default USD cap for EVERY subagent tier. Acts as a
+# global override of the per-tier defaults in `Tier.max_budget_usd/1`.
 if v = System.get_env("OSA_SUBAGENT_MAX_BUDGET_USD") do
   case Float.parse(v) do
     {f, _} when f > 0.0 -> config :optimal_system_agent, subagent_default_budget_usd: f
     _ -> :ok
+  end
+end
+
+# Per-tier default USD cap overrides (more specific than the flat knob above).
+# Unset tiers keep their built-in default (elite $8 / specialist $4 / utility $1.50).
+subagent_budget_overrides =
+  [
+    elite: "OSA_SUBAGENT_MAX_BUDGET_USD_ELITE",
+    specialist: "OSA_SUBAGENT_MAX_BUDGET_USD_SPECIALIST",
+    utility: "OSA_SUBAGENT_MAX_BUDGET_USD_UTILITY"
+  ]
+  |> Enum.reduce(%{}, fn {tier, var}, acc ->
+    case System.get_env(var) do
+      nil ->
+        acc
+
+      s ->
+        case Float.parse(s) do
+          {f, _} when f > 0.0 -> Map.put(acc, tier, f)
+          _ -> acc
+        end
+    end
+  end)
+
+if map_size(subagent_budget_overrides) > 0 do
+  config :optimal_system_agent, subagent_max_budget_usd: subagent_budget_overrides
+end
+
+# Per-turn tool-call ceiling for subagents (complements the USD budget: bounds
+# tool round-trips WITHIN a single turn). Default 50; only affects subagents.
+if v = System.get_env("OSA_SUBAGENT_MAX_TOOL_CALLS_PER_TURN") do
+  case Integer.parse(v) do
+    {n, _} when n > 0 -> config :optimal_system_agent, subagent_max_tool_calls_per_turn: n
+    _ -> :ok
+  end
+end
+
+# Upper bound on a single synchronous `task_wait` join — a bounded "converge
+# window" (default 5 min) so one call never freezes the parent turn for an
+# agent's whole lifetime. Re-arm burn (a model that re-waits on the same
+# still-running agent) is closed separately by TaskWait.RewaitGuard.
+if v = System.get_env("OSA_TASK_WAIT_MAX_MS") do
+  case Integer.parse(v) do
+    {n, _} when n > 0 -> config :optimal_system_agent, task_wait_max_ms: n
+    _ -> :ok
+  end
+end
+
+# Per-tool-result output cap (bytes) before a result enters the loop transcript.
+# The single biggest lever on subagent context runaway: a fat pytest / file_read
+# / bash dump injected whole is re-sent on EVERY later turn. Over the cap, the
+# result keeps head+tail with the middle spilled to a temp file and referenced.
+# Governs both the last cut (ToolExecutor) and the earlier offload
+# (ToolResultStorage). Shipped default is the deliberate 16_384 (config.exs);
+# raise it here per deployment. chars ≈ bytes for the mostly-ASCII output this
+# bounds.
+if v = System.get_env("OSA_TOOL_OUTPUT_MAX_CHARS") do
+  case Integer.parse(v) do
+    {n, _} when n > 0 -> config :optimal_system_agent, max_tool_output_bytes: n
+    _ -> :ok
+  end
+end
+
+# Formerly-hardcoded output caps, now env-overridable (gap #1). Defaults live in
+# config.exs (values unchanged); these only override when set.
+for {var, key} <- [
+      {"OSA_BASH_OUTPUT_MAX_BYTES", :bash_output_max_bytes},
+      {"OSA_TERMINAL_OUTPUT_MAX_CHARS", :terminal_output_max_chars},
+      {"OSA_SUMMARY_TOOL_OUTPUT_MAX_CHARS", :summary_tool_output_max_chars}
+    ] do
+  if v = System.get_env(var) do
+    case Integer.parse(v) do
+      {n, _} when n > 0 -> config :optimal_system_agent, [{key, n}]
+      _ -> :ok
+    end
   end
 end
 

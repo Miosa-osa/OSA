@@ -180,6 +180,18 @@ defmodule OptimalSystemAgent.Providers.Registry do
   @spec list_providers() :: list(atom())
   def list_providers, do: Map.keys(@providers)
 
+  @doc """
+  The dispatch target for a provider atom — `{:compat, atom}` for an
+  OpenAI-compatible gateway, a provider MODULE for a native transport, or `nil`
+  when the atom is not registered. This is the same `atom → target` map `chat/2`
+  routes through, exposed so capability code (context-window sizing, the cache
+  gate) can wrap a bare `state.provider` atom back into the tuple those
+  predicates key on without restating the table.
+  """
+  @spec provider_target(atom()) :: atom() | {:compat, atom()} | nil
+  def provider_target(provider) when is_atom(provider), do: Map.get(@providers, provider)
+  def provider_target(_), do: nil
+
   @compat_providers @providers
                     |> Enum.filter(&match?({_, {:compat, _}}, &1))
                     |> Enum.map(&elem(&1, 0))
@@ -879,22 +891,81 @@ defmodule OptimalSystemAgent.Providers.Registry do
   uncached rate on a ~30k-token prefix that never changed. That is the 0% cache
   hit rate; it was never the timestamp.
 
-  Deliberately narrow. `cache_control` is an Anthropic wire field, and an
-  OpenAI-compatible gateway is only obliged to forward it when the upstream is
-  Anthropic. Gating on the model prefix as well as the provider means a
-  `openai/*` or `google/*` model routed through the same gateway keeps the
-  exact bytes it has today, so this cannot regress a non-Claude route.
+  ## Capability-keyed, not route-allowlisted
+
+  This is deliberately answered from TWO orthogonal capabilities, not a list of
+  blessed routes. The route-allowlist form it used to have —
+  `provider in [:openrouter, {:compat, :openrouter}]` — is exactly how a live
+  dead-cache defect slipped in twice: OpenRouter was recognised, but every
+  OTHER OpenAI-compatible gateway that relists Claude (Surplus under bare dotted
+  ids like `claude-opus-4.8`, api.uncensored.com whose DEFAULT model is
+  `claude-opus-5`) fell to the `false` clause and sent its ~30k static prefix
+  uncached on every turn. Anthropic performs NO automatic prefix caching;
+  `cache_control` is the only mechanism, so an unrecognised Claude route is a
+  silent 0%-hit-rate, full-uncached-rate bill. A new reseller added to the
+  registry would inherit the same bug the day it ships.
+
+  So the two questions are asked directly:
+
+    1. **Does the ROUTE forward request-body content-part fields verbatim to an
+       Anthropic upstream?** Native Anthropic does (it defines the field). Every
+       `{:compat, _}` gateway does — a gateway that fronts Claude MUST accept
+       `cache_control`, because it is Claude's only cache mechanism, and one
+       that fronts something else never sees a Claude id to trigger question 2.
+       Bedrock is NOT here: it fronts Anthropic but over the Converse API with
+       `cachePoint`, not `cache_control`, and marks its own boundaries in
+       `Bedrock.put_cache_points/3` — a separate path that must not be
+       double-handled here.
+    2. **Is the MODEL an Anthropic (Claude) family id?** Decided by the id
+       carrying `claude`, the one token every Anthropic id shares
+       (`claude-opus-4.8`, `anthropic/claude-opus-5`, `claude-fable-5.1`,
+       `claude-sonnet-4.5`) and no non-Anthropic id does. This is what keeps a
+       gateway's `openai/*`, `glm-*`, `grok-*` ids byte-identical: they are not
+       Claude, so they never carry an Anthropic-only field.
+
+  Both true ⇒ honour `cache_control`. Adding a provider changes nothing: if it
+  can serve Claude, it caches correctly the day it lands; if it cannot, it is
+  untouched.
   """
   @spec anthropic_prompt_cache?(atom() | {:compat, atom()}, String.t() | nil) :: boolean()
   def anthropic_prompt_cache?(target, model \\ nil)
   def anthropic_prompt_cache?(:anthropic, _model), do: true
   def anthropic_prompt_cache?(Providers.Anthropic, _model), do: true
 
-  def anthropic_prompt_cache?(provider, model)
-      when provider in [:openrouter, {:compat, :openrouter}] and is_binary(model),
-      do: String.starts_with?(model, "anthropic/")
+  def anthropic_prompt_cache?(target, model) when is_binary(model),
+    do: cache_control_forwarding_route?(target) and anthropic_family_model?(model)
 
   def anthropic_prompt_cache?(_target, _model), do: false
+
+  # An OpenAI-compatible gateway forwards content-part fields verbatim; native
+  # Anthropic is handled by the head clauses above. Everything else (native
+  # Google/Cohere/Bedrock/Ollama transports) either has no cache_control wire or
+  # its own caching path, so it must not be handed one here.
+  #
+  # BOTH argument shapes must resolve: the EMISSION side (`Agent.Context`) calls
+  # with the bare `state.provider` atom (`:surplus`), the PRESERVATION side (the
+  # flatten gate below) calls with the dispatch tuple (`{:compat, :surplus}`).
+  # A bare atom is mapped through `provider_target/1` — the same table `chat/2`
+  # routes on — so `:surplus`, `:uncensored`, and any other compat atom resolve
+  # to their `{:compat, _}` target, while `:bedrock`/`:google`/`:ollama` resolve
+  # to native modules and are correctly excluded.
+  defp cache_control_forwarding_route?({:compat, _}), do: true
+
+  defp cache_control_forwarding_route?(provider) when is_atom(provider) and not is_nil(provider),
+    do: match?({:compat, _}, provider_target(provider))
+
+  defp cache_control_forwarding_route?(_), do: false
+
+  # The one token every Anthropic id carries and no other vendor's does. Used
+  # instead of `AnthropicModels.resolve/1` because the ids arrive in gateway
+  # spellings that catalog does not key (`anthropic/…` prefix, dotted versions),
+  # and the question here is capability, not the exact catalog row.
+  @doc false
+  @spec anthropic_family_model?(String.t() | nil) :: boolean()
+  def anthropic_family_model?(model) when is_binary(model),
+    do: String.contains?(String.downcase(model), "claude")
+
+  def anthropic_family_model?(_), do: false
 
   @doc """
   True for providers whose prompt cache is a plain **byte-prefix** match of the
@@ -938,11 +1009,29 @@ defmodule OptimalSystemAgent.Providers.Registry do
   it silently re-opened the defect that doc was written about, for every
   headless session.
 
-  Resolution is the same cascade `Agent.Context` uses: the named model, else the
-  provider's configured model. Deliberately scoped to the cache decision — the
-  sibling image gate on the line above reads `opts[:model]` too, but it already
-  fails OPEN on nil, so widening it there is a behaviour change with no defect
-  behind it.
+  Resolution is a three-step cascade: the named model, else the provider's
+  app-env override (`:"<provider>_model"`), else the provider's own hardcoded
+  default. The last step closes the headless gap: on `serve`/HTTP/benchmark with
+  no `:model` in opts AND no app-env override, this used to return `nil`, so a
+  Surplus/Uncensored/OpenRouter session whose default is a Claude model was
+  classed as a non-caching route and ran cold for its whole life. The default is
+  what the request is ACTUALLY served by (`OpenAICompat` fills the same value in
+  downstream), so consulting it here answers "what is being served?" honestly.
+
+  > #### Capability-only — never a routing input {: .warning}
+  >
+  > This function is consumed only by the prompt-cache capability decision
+  > (`anthropic_prompt_cache?/2` at the flatten gate, and `Providers.PromptCache`)
+  > and by context-window resolution. It is NEVER read by the code that chooses
+  > which model runs a request: `OpenAICompat.do_chat/5` takes its `model`
+  > argument straight from the caller and independently fills the provider
+  > default (refusing outright if neither is present), so the fallback added here
+  > cannot change which model executes — only whether an already-chosen Claude
+  > turn is allowed to cache. Keep it that way.
+
+  Deliberately scoped to that decision — the sibling image gate reads
+  `opts[:model]` too, but it already fails OPEN on nil, so widening it there is a
+  behaviour change with no defect behind it.
   """
   @spec resolved_model(atom() | {:compat, atom()}, keyword()) :: String.t() | nil
   def resolved_model(target, opts) do
@@ -955,10 +1044,42 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
         case Application.get_env(:optimal_system_agent, key) do
           model when is_binary(model) and model != "" -> model
-          _ -> nil
+          _ -> provider_default_model(target)
         end
     end
   end
+
+  @doc """
+  A provider's own hardcoded default model, best-effort — the last fallback for
+  CAPABILITY resolution when a headless session named no model and set no
+  app-env override. `nil` when the provider exposes no discoverable default.
+
+  Capability-only, exactly like `resolved_model/2`: this feeds cache and
+  context-window decisions, never model routing.
+  """
+  @spec provider_default_model(atom() | {:compat, atom()}) :: String.t() | nil
+  def provider_default_model({:compat, provider}) do
+    OptimalSystemAgent.Providers.OpenAICompatProvider.default_model(provider)
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
+  def provider_default_model(module) when is_atom(module) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :default_model, 0) do
+      case module.default_model() do
+        m when is_binary(m) and m != "" -> m
+        _ -> nil
+      end
+    end
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
+  def provider_default_model(_), do: nil
 
   # `{:compat, _}` is served by `OpenAICompat`, whose `encode_content/1` emits
   # OpenAI `image_url` parts. Every other target is asked directly; a module
@@ -1820,6 +1941,25 @@ defmodule OptimalSystemAgent.Providers.Registry do
   end
 
   defp ssot_context_window(model) do
+    raw_ssot_context_window(model) ||
+      case dotted_version_to_dashed(model) do
+        ^model -> nil
+        dashed -> raw_ssot_context_window(dashed)
+      end
+  end
+
+  # A reselling gateway spells a model VERSION with a dot where the vendor
+  # catalog spells it with a dash: Surplus relists Anthropic's `claude-opus-4-8`
+  # as `claude-opus-4.8`, and `AnthropicModels.resolve/1` prefix-matches on the
+  # bare id, so the dotted spelling matched no catalog id and fell through to the
+  # 128k default instead of the real 1M window — mis-stating context% and firing
+  # compaction at the wrong point on exactly the Claude models this repo ships
+  # through Surplus. Retried only when the literal spelling misses, so nothing
+  # that resolves today can move. Mirrors `Agent.Pricing.dotted_version_to_dashed/1`,
+  # which closed the identical gap for the rate card.
+  defp dotted_version_to_dashed(model), do: String.replace(model, ~r/(\d)\.(\d)/, "\\1-\\2")
+
+  defp raw_ssot_context_window(model) do
     case OptimalSystemAgent.Providers.AnthropicModels.resolve(model) do
       %{ctx: ctx} ->
         ctx

@@ -3,6 +3,26 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
 
   alias OptimalSystemAgent.Agent.{Context, Compactor, Tasks}
 
+  # A message's `content` is a BINARY on routes that flatten to a plain string,
+  # and a LIST of `%{type: "text", text: ...}` blocks on routes that honour
+  # `cache_control` (Anthropic-family, incl. Claude via Surplus/OpenRouter) — the
+  # correct shape for a cache-enabled route. These assertions verify the TEXT is
+  # present/absent regardless of which shape the resolved provider produced, so
+  # they keep guarding content, not container type.
+  defp content_text(content) when is_binary(content), do: content
+
+  defp content_text(content) when is_list(content) do
+    content
+    |> Enum.map(fn
+      %{text: t} when is_binary(t) -> t
+      %{"text" => t} when is_binary(t) -> t
+      other -> to_string(other)
+    end)
+    |> Enum.join("\n")
+  end
+
+  defp content_text(other), do: to_string(other)
+
   # The compactor has NO hardcoded context-window default any more — an
   # unresolvable window is `:unknown` and compaction is DEFERRED. Tests that
   # assert a compaction/utilization outcome must state their window.
@@ -33,8 +53,10 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
       assert system_msg.role == "system"
 
       # Identity block always present (via Soul module)
-      assert String.contains?(system_msg.content, "Optimal System Agent") or
-               String.contains?(system_msg.content, "OSA")
+      system_text = content_text(system_msg.content)
+
+      assert String.contains?(system_text, "Optimal System Agent") or
+               String.contains?(system_text, "OSA")
 
       # The static base is present and substantial. This used to assert the
       # literal words BUILD / EXECUTE / ANALYZE — Signal Theory mode names that
@@ -43,7 +65,7 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
       # prompt *wording* from an integration test makes every prompt edit look
       # like a regression; the contract being guarded here is "a system message
       # comes first and carries the static base", which is what is asserted now.
-      assert byte_size(system_msg.content) > 2_000
+      assert byte_size(system_text) > 2_000
     end
 
     test "context includes the channel name in runtime block" do
@@ -61,7 +83,7 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
       # provider is a plain-prefix KV cache (ollama/lmstudio/llamacpp), and
       # inline in the system message otherwise. Either way it must be present
       # exactly once in the assembled prompt.
-      all_content = Enum.map_join(context.messages, "\n", & &1.content)
+      all_content = Enum.map_join(context.messages, "\n", &content_text(&1.content))
       assert String.contains?(all_content, "telegram")
     end
 
@@ -76,7 +98,7 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
       }
 
       context = Context.build(state, nil)
-      all_content = Enum.map_join(context.messages, "\n", & &1.content)
+      all_content = Enum.map_join(context.messages, "\n", &content_text(&1.content))
 
       assert String.contains?(all_content, session_id)
     end
@@ -153,7 +175,7 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
       [system_msg | _] = context.messages
 
       # Without a signal, signal overlay section is absent
-      refute String.contains?(system_msg.content, "Active Signal:")
+      refute String.contains?(content_text(system_msg.content), "Active Signal:")
     end
 
     test "build without signal — LLM self-classifies via SYSTEM.md" do
@@ -167,12 +189,13 @@ defmodule OptimalSystemAgent.Integration.ConversationTest do
       # No signal is injected — signal calibration instructions are in the static SYSTEM.md prompt
       context = Context.build(state, nil)
       [system_msg | _] = context.messages
+      system_text = content_text(system_msg.content)
 
-      refute String.contains?(system_msg.content, "Active Signal:")
+      refute String.contains?(system_text, "Active Signal:")
       # Signal-aware depth guidance is in the static base (SYSTEM.md communication section)
-      assert String.contains?(system_msg.content, "Signal-Aware Depth") or
-               String.contains?(system_msg.content, "Signal Theory") or
-               String.contains?(system_msg.content, "signal")
+      assert String.contains?(system_text, "Signal-Aware Depth") or
+               String.contains?(system_text, "Signal Theory") or
+               String.contains?(system_text, "signal")
     end
   end
 

@@ -448,5 +448,26 @@ defmodule OptimalSystemAgent.Agent.Loop.AccountingTest do
       assert snap.completed_tasks == 0
       assert snap.cost_per_task_usd == 0.0
     end
+
+    # Item 10 — the fresh-input vs cache-read split must stay available (raw, for
+    # the dashboard/telemetry); the honest HEADLINE is the $ cost, not a token sum.
+    test "keeps the fresh-input / cache-read split intact for the dashboard" do
+      state = %{
+        base_state()
+        | session_cost_usd: 1.23,
+          session_input_tokens: 1_000_000,
+          session_output_tokens: 200_000,
+          session_cache_read_tokens: 9_000_000
+      }
+
+      snap = Accounting.snapshot(state)
+
+      assert snap.input_tokens == 1_000_000
+      assert snap.cache_read_tokens == 9_000_000
+      assert snap.output_tokens == 200_000
+      # The real, per-model cache-discounted cost (from Accounting's priced ledger)
+      # is the honest headline figure — not the cache-inflated raw token sum.
+      assert snap.cost_usd == 1.23
+    end
   end
 end

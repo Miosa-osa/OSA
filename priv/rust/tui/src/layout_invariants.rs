@@ -168,11 +168,7 @@ mod activity_invariants {
     }
 
     fn screen(act: &Activity, rows: u16) -> String {
-        snapshot_buffer(&render_to_buffer(
-            |f| act.draw(f, f.area()),
-            W,
-            rows.max(1),
-        ))
+        snapshot_buffer(&render_to_buffer(|f| act.draw(f, f.area()), W, rows.max(1)))
     }
 
     /// **Clipping half of the invariant.** `app::event_loop::draw_inline` hands the
@@ -222,7 +218,8 @@ mod activity_invariants {
             let declared = act.height();
             let overdrawn = drawn(&act, declared + 4);
             assert_eq!(
-                overdrawn, declared,
+                overdrawn,
+                declared,
                 "{verbosity:?}: handed {} rows, inked {overdrawn}, reserved {declared} — \
                  the band is painting into rows it does not own.\n{}",
                 declared + 4,
@@ -243,7 +240,8 @@ mod activity_invariants {
                 let declared = act.height();
                 let drawn = drawn(&act, declared);
                 assert_eq!(
-                    drawn, declared,
+                    drawn,
+                    declared,
                     "{verbosity:?} (a11y={a11y}): height() says {declared} rows, draw() inked \
                      {drawn} — {} rows of dead space.\n{}",
                     declared as i32 - drawn as i32,
@@ -277,7 +275,8 @@ mod activity_invariants {
                 let declared = act.height();
                 let drawn = drawn(&act, declared);
                 assert_eq!(
-                    drawn, declared,
+                    drawn,
+                    declared,
                     "{verbosity:?} (a11y={a11y}, empty feed): height() says {declared} rows, \
                      draw() inked {drawn}.\n{}",
                     screen(&act, declared)
@@ -323,7 +322,8 @@ mod activity_invariants {
             let declared = act.height();
             let painted = drawn(&act, declared);
             assert_eq!(
-                painted, declared,
+                painted,
+                declared,
                 "details(max_lines={lines}): reserved {declared}, drew {painted}.\n{}",
                 screen(&act, declared)
             );
@@ -376,7 +376,8 @@ mod activity_invariants {
         // Panics today: the second details row is written at y=3 of a 3-row rect.
         let painted = drawn(&act, declared);
         assert_eq!(
-            painted, declared,
+            painted,
+            declared,
             "details rows must be consecutive.\n{}",
             screen(&act, declared)
         );
@@ -402,7 +403,8 @@ mod activity_invariants {
             let declared = act.height();
             let drawn = drawn(&act, declared);
             assert_eq!(
-                drawn, declared,
+                drawn,
+                declared,
                 "{verbosity:?}: declared {declared} rows, live tail + feed inked {drawn}.\n{}",
                 screen(&act, declared)
             );
@@ -433,7 +435,8 @@ mod activity_invariants {
                             .next()
                             .map(|c| c.is_ascii_digit())
                             .unwrap_or(false)
-                        && t.chars().all(|c| c.is_ascii_digit() || matches!(c, 'm' | 's' | '.'))
+                        && t.chars()
+                            .all(|c| c.is_ascii_digit() || matches!(c, 'm' | 's' | '.'))
                 })
                 .count();
             assert!(
@@ -469,7 +472,8 @@ mod panel_invariants {
             let reserved = cl.height();
             let drawn = drawn_row_extent(|f| cl.draw(f, f.area()), W, reserved);
             assert_eq!(
-                drawn, reserved,
+                drawn,
+                reserved,
                 "{n} items: reserved {reserved} rows, drew {drawn}.\n{}",
                 snapshot_buffer(&render_to_buffer(|f| cl.draw(f, f.area()), W, reserved))
             );
@@ -489,9 +493,7 @@ mod panel_invariants {
             let area_h = reserved + 5;
             let buf = render_to_buffer(|f| cl.draw(f, f.area()), W, area_h);
             let first_inked = (0..area_h)
-                .find(|&y| {
-                    (0..W).any(|x| !super::is_blank(buf[(x, y)].symbol()))
-                })
+                .find(|&y| (0..W).any(|x| !super::is_blank(buf[(x, y)].symbol())))
                 .unwrap_or(area_h);
             let used = area_h - first_inked;
             assert!(
@@ -526,7 +528,11 @@ mod panel_invariants {
             for n in 1usize..=15 {
                 let mut cl = TaskChecklist::new();
                 for i in 0..n {
-                    cl.add(format!("t{i}"), subjects[i % subjects.len()].to_string(), None);
+                    cl.add(
+                        format!("t{i}"),
+                        subjects[i % subjects.len()].to_string(),
+                        None,
+                    );
                 }
                 cl.update("t0", ChecklistStatus::InProgress);
                 if n > 1 {
@@ -535,7 +541,8 @@ mod panel_invariants {
                 let reserved = cl.height();
                 let drawn = drawn_row_extent(|f| cl.draw(f, f.area()), width, reserved);
                 assert_eq!(
-                    drawn, reserved,
+                    drawn,
+                    reserved,
                     "w={width}, {n} wide items: reserved {reserved} rows, drew {drawn}.\n{}",
                     snapshot_buffer(&render_to_buffer(|f| cl.draw(f, f.area()), width, reserved))
                 );
@@ -601,7 +608,8 @@ mod panel_invariants {
             let reserved = cl.height();
             let drawn = drawn_row_extent(|f| cl.draw(f, f.area()), W, reserved);
             assert_eq!(
-                drawn, reserved,
+                drawn,
+                reserved,
                 "{n} items: reserved {reserved} rows, drew {drawn}.\n{}",
                 snapshot_buffer(&render_to_buffer(|f| cl.draw(f, f.area()), W, reserved))
             );
@@ -650,7 +658,11 @@ mod panel_invariants {
             cl.add(format!("t{i}"), format!("step {i}"), None);
             cl.update(&format!("t{i}"), ChecklistStatus::Completed);
         }
-        assert_eq!(cl.desired_height(W), 0, "a finished list must free its band");
+        assert_eq!(
+            cl.desired_height(W),
+            0,
+            "a finished list must free its band"
+        );
         let drawn = drawn_row_extent(|f| cl.draw(f, f.area()), W, 8);
         assert_eq!(drawn, 0, "and must paint nothing at all");
     }
@@ -662,9 +674,7 @@ mod panel_invariants {
     /// must keep the two disjoint at every size.
     #[test]
     fn checklist_band_never_shares_a_row_with_the_stream_band() {
-        use crate::app::event_loop::{
-            fit_bands, inline_split, Bands, ROW_CHECKLIST, ROW_STREAM,
-        };
+        use crate::app::event_loop::{fit_bands, inline_split, Bands, ROW_CHECKLIST, ROW_STREAM};
         use ratatui::layout::Rect;
 
         for area_h in 8u16..=40 {
@@ -712,7 +722,8 @@ mod panel_invariants {
                 if want.capped().reserved() + crate::app::event_loop::STREAM_FLOOR <= area_h {
                     assert_eq!(
                         list.height,
-                        cl.height().min(crate::app::event_loop::CHECKLIST_INLINE_CAP),
+                        cl.height()
+                            .min(crate::app::event_loop::CHECKLIST_INLINE_CAP),
                         "h={area_h}, {n} items: the plan band was shed with room to spare"
                     );
                 }
@@ -724,9 +735,7 @@ mod panel_invariants {
     /// its own band, and the stream band's content must come out untouched.
     #[test]
     fn drawing_the_checklist_does_not_erase_the_stream_band() {
-        use crate::app::event_loop::{
-            fit_bands, inline_split, Bands, ROW_CHECKLIST, ROW_STREAM,
-        };
+        use crate::app::event_loop::{fit_bands, inline_split, Bands, ROW_CHECKLIST, ROW_STREAM};
         use ratatui::layout::Rect;
         use ratatui::widgets::Paragraph;
 
@@ -775,7 +784,11 @@ mod panel_invariants {
         }
         // …and the checklist really did paint into its own band.
         let list_text = buffer_row_text(&buf, rows[ROW_CHECKLIST].y);
-        assert!(list_text.starts_with("Plan"), "got {list_text:?}\n{}", snapshot_buffer(&buf));
+        assert!(
+            list_text.starts_with("Plan"),
+            "got {list_text:?}\n{}",
+            snapshot_buffer(&buf)
+        );
     }
 
     /// **The turn-completion defect.** With a plan on screen, the FINAL response
@@ -792,7 +805,7 @@ mod panel_invariants {
     #[test]
     fn a_visible_plan_never_steals_rows_from_the_streaming_reply() {
         use crate::app::event_loop::{
-            fit_bands, inline_split, Bands, streaming_inline_height, ROW_STREAM,
+            fit_bands, inline_split, streaming_inline_height, Bands, ROW_STREAM,
             STREAM_PREVIEW_ROWS,
         };
         use ratatui::layout::Rect;
@@ -852,8 +865,7 @@ mod panel_invariants {
     #[test]
     fn a_committed_final_block_survives_beside_the_plan_band() {
         use crate::app::event_loop::{
-            fit_bands, inline_split, Bands, streaming_inline_height, ROW_CHECKLIST,
-            ROW_STREAM,
+            fit_bands, inline_split, streaming_inline_height, Bands, ROW_CHECKLIST, ROW_STREAM,
         };
         use ratatui::layout::Rect;
         use ratatui::widgets::Paragraph;
@@ -933,7 +945,9 @@ mod panel_invariants {
                 "researcher",
                 "",
                 &format!("scan module {i}"),
-                None, None,);
+                None,
+                None,
+            );
         }
         a
     }
@@ -1014,7 +1028,8 @@ mod panel_invariants {
             !t.is_empty()
                 && t.ends_with(|c| matches!(c, 's' | 'm' | 'h'))
                 && t.starts_with(|c: char| c.is_ascii_digit())
-                && t.chars().all(|c| c.is_ascii_digit() || matches!(c, 'h' | 'm' | 's' | '.'))
+                && t.chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, 'h' | 'm' | 's' | '.'))
         }
         let toks: Vec<&str> = row.split_whitespace().collect();
         let mut out: Vec<String> = Vec::new();
@@ -1045,7 +1060,9 @@ mod panel_invariants {
                 "explorer",
                 "",
                 &format!("scan module {i}"),
-                None, None,);
+                None,
+                None,
+            );
             a.agent_progress(
                 &format!("agent:session-1785539672538-b5473d40b767:osa-explorer-{i}"),
                 "dir_list",
@@ -1057,7 +1074,9 @@ mod panel_invariants {
                     "dir_list".into(),
                     "file_glob: /w/codex".into(),
                     "dir_list: /w/codex".into(),
-                ], None,);
+                ],
+                None,
+            );
         }
         a
     }
@@ -1135,6 +1154,330 @@ mod panel_invariants {
         );
     }
 
+    /// Adaptive trail density (bandwidth-matching): a SMALL fleet can afford the
+    /// richer multi-action child list, but once more than
+    /// `FLEET_DENSE_THRESHOLD` agents are live at once every agent's trail
+    /// collapses to a single most-recent line so the inline roster reads as one
+    /// status line per agent — OSA's running-agents view — instead of a
+    /// wall of tool calls. Each `running_fleet` agent has two distinct detailed
+    /// actions, so the small fleet shows two trail rows per agent and the dense
+    /// fleet shows exactly one.
+    #[test]
+    fn fleet_view_collapses_the_trail_to_one_line_per_agent_when_dense() {
+        use crate::components::agents::FLEET_DENSE_THRESHOLD;
+
+        // Child trail rows only: lines carrying a `└─ ` whose next glyph is NOT a
+        // `○`/`●` node marker (those are the agents' own connector rows).
+        fn child_trail_rows(screen: &str) -> Vec<String> {
+            screen
+                .lines()
+                .filter_map(|l| l.split_once("\u{2514}\u{2500} "))
+                .map(|(_, rest)| rest.trim().to_string())
+                // Exclude agent HEAD rows: their `└─` connector is followed by a
+                // per-node expand/collapse caret (▾/▸) and then the node glyph
+                // (○/●). A real child trail row starts with its text.
+                .filter(|s| {
+                    !s.is_empty()
+                        && !s.starts_with('\u{25cb}') // ○
+                        && !s.starts_with('\u{25cf}') // ●
+                        && !s.starts_with('\u{25be}') // ▾
+                        && !s.starts_with('\u{25b8}') // ▸
+                })
+                .collect()
+        }
+
+        // Small fleet (at the threshold, not over it): the fuller trail survives.
+        let small = running_fleet(FLEET_DENSE_THRESHOLD, 30);
+        let small_screen = snapshot_buffer(&render_to_buffer(
+            |f| small.draw(f, f.area()),
+            W,
+            small.height().max(1),
+        ));
+        let small_rows = child_trail_rows(&small_screen);
+        assert_eq!(
+            small_rows.len(),
+            FLEET_DENSE_THRESHOLD * 2,
+            "a small fleet should keep the multi-action trail (2 rows/agent):\n{small_screen}"
+        );
+
+        // Dense fleet (one over the threshold): one trail row per agent, and that
+        // single row carries the "+N earlier" rollup for everything it folded.
+        let dense = running_fleet(FLEET_DENSE_THRESHOLD + 1, 30);
+        let dense_screen = snapshot_buffer(&render_to_buffer(
+            |f| dense.draw(f, f.area()),
+            W,
+            dense.height().max(1),
+        ));
+        let dense_rows = child_trail_rows(&dense_screen);
+        assert_eq!(
+            dense_rows.len(),
+            FLEET_DENSE_THRESHOLD + 1,
+            "a dense fleet must show exactly one trail row per agent:\n{dense_screen}"
+        );
+        assert!(
+            dense_rows.iter().all(|t| t.contains("earlier")),
+            "each collapsed row must keep the '+N earlier' rollup:\n{dense_screen}"
+        );
+    }
+
+    /// GAP #6 (fleet-state consistency): a terminal outcome is FINAL. Once an
+    /// agent has failed, a late/stale progress frame — a reorder, a replay, or a
+    /// frame that lost the race with the failure event — must not revert it to a
+    /// running/pending appearance. The row stays failed across frames, in the
+    /// data and on screen. This is the stale-snapshot flicker the fleet view can
+    /// never show, and it is the same guard `agent_phase` already has.
+    #[test]
+    fn a_failed_agent_never_flickers_back_to_running_on_a_late_progress_frame() {
+        let mut a = Agents::new();
+        a.agent_started("w1", "coder", "", "building the crate", None, None);
+        a.agent_failed(
+            "w1",
+            "compile error in render.rs",
+            Some(3),
+            Some(900),
+            Some("build failed".into()),
+        );
+        // A stale progress frame arrives AFTER the failure.
+        a.agent_progress(
+            "w1",
+            "still compiling",
+            9,
+            5_000,
+            "",
+            vec!["file_read: /x".into()],
+            None,
+        );
+
+        // The failed outcome holds on screen; the stale action never reaches it.
+        // (The data-level guard is unit-tested in the agents module, where the
+        // private entry fields are visible.)
+        let screen = snapshot_buffer(&render_to_buffer(
+            |f| a.draw(f, f.area()),
+            W,
+            a.height().max(1),
+        ));
+        assert!(
+            screen.contains("compile error"),
+            "the failed row lost its outcome:\n{screen}"
+        );
+        assert!(
+            !screen.contains("still compiling"),
+            "a stale action reached the screen:\n{screen}"
+        );
+    }
+
+    /// A capped run is surfaced as its OWN resumable state, never a clean "Done"
+    /// (C6 / the resumable-partial requirement). It reads "Partial · resumable"
+    /// and keeps its produced summary.
+    #[test]
+    fn a_partial_run_renders_as_resumable_never_done() {
+        let mut a = Agents::new();
+        a.agent_started("w1", "researcher", "", "deep scan", None, None);
+        a.agent_partial(
+            "w1",
+            Some(12),
+            Some(40_000),
+            Some("scanned 40 of 120 files".into()),
+        );
+
+        let screen = snapshot_buffer(&render_to_buffer(
+            |f| a.draw(f, f.area()),
+            W,
+            a.height().max(1),
+        ));
+        assert!(
+            screen.contains("Partial") && screen.contains("resumable"),
+            "a capped run must read as a resumable partial:\n{screen}"
+        );
+        assert!(
+            !screen.contains("Done"),
+            "a partial run must never read as Done:\n{screen}"
+        );
+        assert!(
+            screen.contains("scanned 40 of 120 files"),
+            "the partial run's produced summary is missing:\n{screen}"
+        );
+    }
+
+    /// C3 root-row rawness fix: once the session's context-window occupancy is
+    /// known, the `main` root shows it (`N% ctx`) instead of the raw session
+    /// token total — the headline number that folds cache reads at full weight.
+    /// Before occupancy is reported, the token total is still shown as a fallback.
+    #[test]
+    fn the_main_root_shows_context_percent_not_a_raw_token_headline() {
+        let mut a = Agents::new();
+        // A live worker activates the panel so the root row is drawn.
+        a.agent_started("w1", "researcher", "", "scanning", None, None);
+        a.set_main_row("orchestrating the fleet", 40, 250_000);
+
+        // Fallback before occupancy is known: the token total is shown.
+        let before = snapshot_buffer(&render_to_buffer(
+            |f| a.draw(f, f.area()),
+            W,
+            a.height().max(1),
+        ));
+        let main_before = before
+            .lines()
+            .find(|l| l.contains("main"))
+            .unwrap()
+            .to_string();
+        assert!(
+            main_before.contains("tok"),
+            "before ctx% is known the root falls back to the token total: {main_before:?}"
+        );
+
+        // Once occupancy arrives, the root switches to the truthful gauge.
+        a.set_main_context(Some(37), Some(0.42));
+        let after = snapshot_buffer(&render_to_buffer(
+            |f| a.draw(f, f.area()),
+            W,
+            a.height().max(1),
+        ));
+        let main_after = after
+            .lines()
+            .find(|l| l.contains("main"))
+            .unwrap()
+            .to_string();
+        assert!(
+            main_after.contains("37% ctx"),
+            "the root must show context% once known: {main_after:?}"
+        );
+        assert!(
+            main_after.contains("$0.42"),
+            "the root shows real cost alongside ctx%: {main_after:?}"
+        );
+        assert!(
+            !main_after.contains("tok"),
+            "the root must not show a raw token headline once ctx% is known: {main_after:?}"
+        );
+    }
+
+    /// C1(a) per-node expand/collapse: collapsing one node hides ONLY its own
+    /// children (trail + monitors), leaving a head row that advertises how many
+    /// rows it folded ("+N"); toggling again restores them. The rest of the tree
+    /// is untouched.
+    #[test]
+    fn a_collapsed_node_hides_its_children_and_a_second_toggle_restores_them() {
+        let mut a = Agents::new();
+        a.agent_started("w1", "researcher", "", "scanning", None, None);
+        a.agent_progress(
+            "w1",
+            "reading entry.rs",
+            4,
+            900,
+            "",
+            vec!["file_glob: /w/x.rs".into()],
+            None,
+        );
+
+        let expanded = snapshot_buffer(&render_to_buffer(
+            |f| a.draw(f, f.area()),
+            W,
+            a.height().max(1),
+        ));
+        assert!(
+            expanded.contains("file_glob: /w/x.rs"),
+            "an expanded node shows its trail:\n{expanded}"
+        );
+
+        a.toggle_node_collapse("w1");
+        let collapsed = snapshot_buffer(&render_to_buffer(
+            |f| a.draw(f, f.area()),
+            W,
+            a.height().max(1),
+        ));
+        assert!(
+            !collapsed.contains("file_glob"),
+            "a collapsed node hides its trail:\n{collapsed}"
+        );
+        assert!(
+            collapsed.contains("(+"),
+            "a collapsed node advertises a +N folded count:\n{collapsed}"
+        );
+
+        a.toggle_node_collapse("w1");
+        let restored = snapshot_buffer(&render_to_buffer(
+            |f| a.draw(f, f.area()),
+            W,
+            a.height().max(1),
+        ));
+        assert!(
+            restored.contains("file_glob"),
+            "toggling again restores the trail:\n{restored}"
+        );
+    }
+
+    /// C1(b) monitor consumer: monitors render as nodes in the SAME tree — nested
+    /// under their `parent_agent_id` (start → event) and at the fleet root under a
+    /// "Monitors" header (with a done verdict) when they have no parent.
+    #[test]
+    fn monitors_render_as_nodes_nested_under_parent_and_at_root() {
+        use crate::components::agents::MonitorState;
+        let mut a = Agents::new();
+        a.agent_started("w1", "researcher", "", "scanning", None, None);
+        a.monitor_started("m1", "watch build", Some("w1".into()));
+        a.monitor_event("m1", "compiling render.rs");
+        a.monitor_started("m2", "session budget", None); // fleet-root
+        a.monitor_done("m2", MonitorState::Done, Some("under budget".into()));
+
+        let screen = snapshot_buffer(&render_to_buffer(
+            |f| a.draw(f, f.area()),
+            W,
+            a.height().max(1),
+        ));
+        assert!(
+            screen.contains("watch build") && screen.contains("compiling render.rs"),
+            "a nested monitor shows its label and latest event:\n{screen}"
+        );
+        assert!(
+            screen.contains("Monitors"),
+            "fleet-root monitors sit under a Monitors header:\n{screen}"
+        );
+        assert!(
+            screen.contains("session budget") && screen.contains("done"),
+            "a root monitor shows its verdict:\n{screen}"
+        );
+    }
+
+    /// Reservation holds with the new tree machinery in play: nested monitors and
+    /// individually-collapsed nodes across a width sweep never draw past what
+    /// `height()` reserved (the `entry_block_rows` single-source-of-truth keeps
+    /// paint and reservation in lockstep).
+    #[test]
+    fn tree_with_monitors_and_collapsed_nodes_never_draws_past_reservation() {
+        for collapse in [false, true] {
+            let mut a = Agents::new();
+            a.set_main_row("orchestrating the fleet", 10, 500);
+            for i in 0..5 {
+                let n = format!("w{i}");
+                a.agent_started(&n, "role", "", format!("subj{i}"), None, None);
+                a.agent_progress(
+                    &n,
+                    "acting",
+                    3,
+                    100,
+                    "",
+                    vec![format!("file_read: /x/{i}.rs")],
+                    None,
+                );
+                a.monitor_started(&format!("m{i}"), &format!("watch {i}"), Some(n.clone()));
+                a.monitor_event(&format!("m{i}"), "tick");
+            }
+            a.monitor_started("root-m", "session watch", None);
+            if collapse {
+                a.toggle_node_collapse("w2");
+            }
+            for w in [10u16, 20, 40, 80, 200] {
+                let reserved = a.height();
+                let drawn = drawn_row_extent(|f| a.draw(f, f.area()), w, reserved + 6);
+                assert!(
+                    drawn <= reserved,
+                    "collapse={collapse} w={w}: drew into {drawn} rows, reserved {reserved}"
+                );
+            }
+        }
+    }
+
     /// Reserved-vs-drawn across the same agent-count sweep, with the trail and
     /// `main` row populated — the shape the capture actually showed (the existing
     /// sweep uses bare `agent_started` rows with no progress trail).
@@ -1185,7 +1528,14 @@ mod panel_invariants {
         a.set_main_row("shipping the fleet view", 40, 678);
         for i in 0..2 {
             let name = format!("agent:session-1785550977551-3f4a8179a573:osa-verifier-{i}");
-            a.agent_started(&name, "goal-verifier-skeptic", "", "verify the goal", Some(batch.to_string()), None);
+            a.agent_started(
+                &name,
+                "goal-verifier-skeptic",
+                "",
+                "verify the goal",
+                Some(batch.to_string()),
+                None,
+            );
             a.agent_progress(
                 &name,
                 "dir_list: /Users/rhl/.osa/workspace/src",
@@ -1196,7 +1546,9 @@ mod panel_invariants {
                     "dir_list".into(),
                     "file_read".into(),
                     "file_read: /Users/rhl/.osa/backend.log".into(),
-                ], None,);
+                ],
+                None,
+            );
         }
         a
     }
@@ -1214,7 +1566,9 @@ mod panel_invariants {
                     "goal-verifier-skeptic",
                     "",
                     "verify the goal",
-                    Some((*batch).to_string()), None,);
+                    Some((*batch).to_string()),
+                    None,
+                );
             }
         }
         a
@@ -1261,7 +1615,9 @@ mod panel_invariants {
     /// restates its own heading is pure width, so the ordinal must stand alone.
     #[test]
     fn fleet_view_batch_header_drops_a_label_that_only_restates_the_heading() {
-        for noise in ["batch", "team", "group", "run", "task", "session", "Batch", "TEAM"] {
+        for noise in [
+            "batch", "team", "group", "run", "task", "session", "Batch", "TEAM",
+        ] {
             let id = format!("{noise}:session-1785550977551-3f4a8179a573:207491");
             let a = multi_batch_fleet(&[&id, "alpha"]);
             let screen = snapshot_buffer(&render_to_buffer(
@@ -1441,7 +1797,14 @@ mod panel_invariants {
         a.set_main_row("", 231, 2_800);
         for i in 0..2 {
             let name = format!("agent:session-1785539672538-b5473d40b767:osa-explorer-{i}");
-            a.agent_started(&name, "explorer", "", "compare the two agents", Some("batch:207491".into()), None);
+            a.agent_started(
+                &name,
+                "explorer",
+                "",
+                "compare the two agents",
+                Some("batch:207491".into()),
+                None,
+            );
             a.agent_progress(
                 &name,
                 "dir_list",
@@ -1452,7 +1815,9 @@ mod panel_invariants {
                     "dir_list: /Users/rhl/.osa/workspace/codex/codex-rs/exec-server".into(),
                     "dir_list: /Users/rhl/.osa/workspace/codex/codex-rs/sandboxing".into(),
                     "dir_list: /Users/rhl/.osa/workspace/codex/codex-rs/hooks".into(),
-                ], None,);
+                ],
+                None,
+            );
         }
         a
     }
@@ -1522,7 +1887,9 @@ mod panel_invariants {
         // `main` earns no row here: no goal, not selected. Its one fact (session
         // tokens) moved onto the header.
         assert!(
-            !screen.lines().any(|l| l.trim_start().starts_with("\u{25cf} main")),
+            !screen
+                .lines()
+                .any(|l| l.trim_start().starts_with("\u{25cf} main")),
             "the empty `main` row is back:\n{screen}"
         );
         assert!(
@@ -1556,7 +1923,9 @@ mod panel_invariants {
             let reserved = a.height().max(1);
             let screen = snapshot_buffer(&render_to_buffer(|f| a.draw(f, f.area()), W, reserved));
             assert!(
-                screen.lines().any(|l| l.trim_start().starts_with("\u{25cf} main")),
+                screen
+                    .lines()
+                    .any(|l| l.trim_start().starts_with("\u{25cf} main")),
                 "{label}: the `main` row must be drawn:\n{screen}"
             );
             // Reservation follows the same rule, both ways.
@@ -1614,7 +1983,9 @@ mod panel_invariants {
             vec![
                 "dir_list: /Users/rhl/projects/osa/\u{6f22}\u{5b57}\u{1f600}dir/beta".into(),
                 "dir_list: /Users/rhl/projects/osa/\u{6f22}\u{5b57}\u{1f600}dir/alpha".into(),
-            ], None,);
+            ],
+            None,
+        );
         for w in [48u16, 72, 100] {
             let reserved = a.height().max(1);
             let buf = render_to_buffer(|f| a.draw(f, f.area()), w, reserved);
@@ -1671,9 +2042,9 @@ mod width_sweep {
     use crate::util::{cols, fit_cols};
 
     const FIXTURES: &[&str] = &[
-        "\u{6a21}\u{578b}",                     // 模型
-        "\u{1f469}\u{200d}\u{1f4bb}",           // 👩‍💻
-        "\u{ff76}\u{ff9e}",                     // ｶﾞ
+        "\u{6a21}\u{578b}",           // 模型
+        "\u{1f469}\u{200d}\u{1f4bb}", // 👩‍💻
+        "\u{ff76}\u{ff9e}",           // ｶﾞ
         "\u{6a21}\u{578b} \u{1f469}\u{200d}\u{1f4bb} \u{ff76}\u{ff9e}",
         "\u{6a21}\u{578b}-sonnet-4.5",
         "Working \u{6a21}\u{578b} 2m31s \u{1f469}\u{200d}\u{1f4bb}",
@@ -1689,8 +2060,8 @@ mod width_sweep {
     /// [`activity_status_line_survives_every_narrow_width`], which only asserts
     /// properties that hold either way.
     const DETERMINISTIC_FIXTURES: &[&str] = &[
-        "\u{6a21}\u{578b}",         // 模型
-        "\u{ff76}\u{ff9e}",         // ｶﾞ
+        "\u{6a21}\u{578b}", // 模型
+        "\u{ff76}\u{ff9e}", // ｶﾞ
         "\u{6a21}\u{578b}-sonnet-4.5",
         "\u{6a21}\u{578b} \u{ff76}\u{ff9e} ok",
     ];
@@ -1830,7 +2201,11 @@ mod width_sweep {
             // Both hint widths: the armed form ("esc again to interrupt") is the
             // widest the reservation ever has to hold.
             for armed in [false, true] {
-                let hint = if armed { "esc again to interrupt" } else { HINT };
+                let hint = if armed {
+                    "esc again to interrupt"
+                } else {
+                    HINT
+                };
                 for w in 60u16..=140 {
                     let mut act = Activity::new();
                     act.start();
@@ -2205,7 +2580,8 @@ mod table_invariants {
         // CJK only: how many columns a ZWJ emoji advances is genuinely
         // terminal-dependent, so a strict round-trip on it would assert an
         // opinion rather than a bug.
-        let src = "| 模型 | 説明 |\n|---|---|\n| 模型模型 | ｶﾞｶﾞ ok |\n| plain | 日本語のテキスト |\n";
+        let src =
+            "| 模型 | 説明 |\n|---|---|\n| 模型模型 | ｶﾞｶﾞ ok |\n| plain | 日本語のテキスト |\n";
 
         for w in [24u16, 32, 48, 64, 96] {
             let text = render_markdown(src, w);
@@ -2319,13 +2695,21 @@ mod table_invariants {
     fn table_is_a_closed_grid_with_a_rule_between_every_row() {
         let rendered = lines_at(DEFECT_TABLE, 100);
         let grid: Vec<&String> = rendered.iter().filter(|l| is_grid_line(l)).collect();
-        assert!(grid[0].starts_with('┌') && grid[0].ends_with('┐'), "{:?}", grid[0]);
+        assert!(
+            grid[0].starts_with('┌') && grid[0].ends_with('┐'),
+            "{:?}",
+            grid[0]
+        );
         let last = grid[grid.len() - 1];
         assert!(last.starts_with('└') && last.ends_with('┘'), "{last:?}");
         // DEFECT_TABLE: 1 header + 5 data rows → 5 interior rules.
         let rules = grid.iter().filter(|l| l.starts_with('├')).count();
-        assert_eq!(rules, 5, "want a rule under the header and between every data row\n{}",
-            rendered.join("\n"));
+        assert_eq!(
+            rules,
+            5,
+            "want a rule under the header and between every data row\n{}",
+            rendered.join("\n")
+        );
     }
 
     /// The header row is the accent colour and bold; NO data row is. (The old
@@ -2367,7 +2751,10 @@ mod table_invariants {
                 }
             }
         }
-        assert!(saw_header && saw_data, "fixture did not produce both row kinds");
+        assert!(
+            saw_header && saw_data,
+            "fixture did not produce both row kinds"
+        );
     }
 
     /// The `▼` continues-below marker is TRUTHFUL: absent whenever the whole
@@ -2392,7 +2779,10 @@ mod table_invariants {
         // At a comfortable width nothing is dropped, so neither appears.
         for src in [DEFECT_TABLE, WRAPPING_TABLE] {
             let flat = lines_at(src, 120).join("\n");
-            assert!(!flat.contains('\u{25bc}'), "w=120: nothing was clipped\n{flat}");
+            assert!(
+                !flat.contains('\u{25bc}'),
+                "w=120: nothing was clipped\n{flat}"
+            );
         }
         // A cell far taller than the per-cell cap: content IS being dropped.
         let runaway = format!("| A | B |\n|---|---|\n| {} | y |\n", "word ".repeat(80));
@@ -2477,7 +2867,10 @@ mod survey_invariants {
                 "Rewrite the parser end to end so every escaping edge case dies at once",
                 "removes the whole class of escaping bugs but takes a week of work",
             ),
-            ("日本語のラベルはここにあります", "説明も日本語で書かれています"),
+            (
+                "日本語のラベルはここにあります",
+                "説明も日本語で書かれています",
+            ),
             ("🚀 Ship it 🎉", "emoji labels advance two columns each"),
             ("Patch in place", "faster but the bug class stays"),
         ];
@@ -2842,7 +3235,10 @@ mod survey_invariants {
             );
         }
         // Numbered gutter + radio glyphs, per the reference design.
-        assert!(screen.contains('\u{25c9}') || screen.contains('\u{25cb}'), "no radio glyph:\n{screen}");
+        assert!(
+            screen.contains('\u{25c9}') || screen.contains('\u{25cb}'),
+            "no radio glyph:\n{screen}"
+        );
         assert!(screen.contains(" 1 "), "no numbered gutter:\n{screen}");
         assert!(screen.contains(" z "), "no free-text gutter:\n{screen}");
     }
@@ -2857,7 +3253,10 @@ mod survey_invariants {
         let screen = snapshot_buffer(&buf);
         let rec = screen.find("Rewrite the parser").expect("recommended row");
         let other = screen.find("Patch in place").expect("second row");
-        assert!(rec < other, "recommended option must render first:\n{screen}");
+        assert!(
+            rec < other,
+            "recommended option must render first:\n{screen}"
+        );
     }
 
     /// Descriptions degrade before labels do: at a width where both cannot fit,
@@ -2911,7 +3310,10 @@ mod survey_invariants {
             Some(SurveyAction::Submit(result)) => {
                 assert_eq!(result.survey_id, "sv-1");
                 assert_eq!(result.answers.len(), 1);
-                assert_eq!(result.answers[0].selected, vec!["Patch in place".to_string()]);
+                assert_eq!(
+                    result.answers[0].selected,
+                    vec!["Patch in place".to_string()]
+                );
             }
             other => panic!("expected Submit, got {other:?}"),
         }
@@ -3066,7 +3468,11 @@ mod survey_invariants {
             ))
         };
         assert!(screen(&d).contains("[1/3]"), "{}", screen(&d));
-        assert!(screen(&d).contains("Which visual direction?"), "{}", screen(&d));
+        assert!(
+            screen(&d).contains("Which visual direction?"),
+            "{}",
+            screen(&d)
+        );
 
         // Answer Q1 with option 2 → auto-advance to Q2.
         assert!(d.handle_key(key(KeyCode::Char('2'))).is_none());
@@ -3086,7 +3492,10 @@ mod survey_invariants {
             s.contains("answered: Bold & expressive"),
             "an answered question must show its answer:\n{s}"
         );
-        assert!(s.contains('\u{25c9}'), "the chosen option's radio must be filled:\n{s}");
+        assert!(
+            s.contains('\u{25c9}'),
+            "the chosen option's radio must be filled:\n{s}"
+        );
 
         // ← on the first question is a no-op, not an underflow.
         assert!(d.handle_key(key(KeyCode::Left)).is_none());
@@ -3102,7 +3511,10 @@ mod survey_invariants {
         match d.handle_key(key(KeyCode::Enter)) {
             Some(SurveyAction::Submit(r)) => {
                 assert_eq!(r.answers.len(), 3, "every question must be reported");
-                assert_eq!(r.answers[0].selected, vec!["Minimal & terminal-native".to_string()]);
+                assert_eq!(
+                    r.answers[0].selected,
+                    vec!["Minimal & terminal-native".to_string()]
+                );
                 assert_eq!(r.answers[2].selected, vec!["Yes".to_string()]);
             }
             other => panic!("expected Submit, got {other:?}"),
@@ -3193,13 +3605,18 @@ mod survey_invariants {
     #[test]
     fn a_degenerate_band_draws_nothing() {
         let d = dialog();
-        assert_eq!(drawn_row_extent(|f| d.draw_inline(f, Rect::new(0, 0, W, 0)), W, 4), 0);
-        assert_eq!(drawn_row_extent(|f| d.draw_inline(f, Rect::new(0, 0, 0, 4)), 4, 4), 0);
+        assert_eq!(
+            drawn_row_extent(|f| d.draw_inline(f, Rect::new(0, 0, W, 0)), W, 4),
+            0
+        );
+        assert_eq!(
+            drawn_row_extent(|f| d.draw_inline(f, Rect::new(0, 0, 0, 4)), 4, 4),
+            0
+        );
         // A 1-row band draws only its header and stops.
         assert!(drawn_row_extent(|f| d.draw_inline(f, Rect::new(0, 0, W, 1)), W, 4) <= 1);
     }
 }
-
 
 /// **Turn-completion invariants.**
 ///
@@ -3219,10 +3636,9 @@ mod turn_completion_invariants {
     use crate::app::assistant_stream::{commit_assistant_block, AssistantStream, Finalize};
     use crate::app::event_loop::{
         fit_bands, inline_split, settle_working_chrome, stream_preview_ceiling,
-        Bands,
-        stream_preview_rows, streaming_inline_height, DampedSlot, ROW_AGENTS,
-        ROW_CHECKLIST, ROW_INPUT, ROW_STREAM, ROW_SURVEY, ROW_THINK, STREAM_PREVIEW_MAX,
-        STREAM_PREVIEW_ROWS, SLOT_SHRINK_HOLD, STREAM_PREVIEW_STEP,
+        stream_preview_rows, streaming_inline_height, Bands, DampedSlot, ROW_AGENTS, ROW_CHECKLIST,
+        ROW_INPUT, ROW_STREAM, ROW_SURVEY, ROW_THINK, SLOT_SHRINK_HOLD, STREAM_PREVIEW_MAX,
+        STREAM_PREVIEW_ROWS, STREAM_PREVIEW_STEP,
     };
     use crate::components::chat::Chat;
     use crate::components::task_checklist::TaskChecklist;
@@ -3334,12 +3750,18 @@ mod turn_completion_invariants {
     fn the_preview_ceiling_never_takes_more_than_half_the_terminal() {
         for term_rows in 4u16..=300 {
             let c = stream_preview_ceiling(term_rows);
-            assert!(c <= STREAM_PREVIEW_MAX, "term_rows={term_rows}: ceiling {c} > cap");
+            assert!(
+                c <= STREAM_PREVIEW_MAX,
+                "term_rows={term_rows}: ceiling {c} > cap"
+            );
             assert!(
                 c <= (term_rows / 2).max(STREAM_PREVIEW_ROWS),
                 "term_rows={term_rows}: ceiling {c} takes more than half the screen"
             );
-            assert!(c >= STREAM_PREVIEW_ROWS, "term_rows={term_rows}: ceiling {c} below floor");
+            assert!(
+                c >= STREAM_PREVIEW_ROWS,
+                "term_rows={term_rows}: ceiling {c} below floor"
+            );
         }
     }
 
@@ -3412,7 +3834,10 @@ mod turn_completion_invariants {
                         "{ctx}: the reply got {} rows, not the {preview} reserved",
                         rows[ROW_STREAM].height
                     );
-                    assert!(rows[ROW_INPUT].height >= 1, "{ctx}: composer starved to 0 rows");
+                    assert!(
+                        rows[ROW_INPUT].height >= 1,
+                        "{ctx}: composer starved to 0 rows"
+                    );
                     // No two components share a row — the invariant a growing
                     // stream band must not be allowed to break.
                     let bands_rects = [
@@ -3477,7 +3902,11 @@ mod turn_completion_invariants {
 
         settle_working_chrome(&mut act, &mut agents, &mut tb);
 
-        assert_eq!(act.height(), 0, "the spinner / tool feed still reserves rows");
+        assert_eq!(
+            act.height(),
+            0,
+            "the spinner / tool feed still reserves rows"
+        );
         assert_eq!(act.max_height(), 0, "the activity slot is still reserved");
         assert_eq!(agents.height(), 0, "the agent roster still reserves rows");
         assert!(tb.is_empty(), "the reasoning box still reserves rows");
@@ -3543,9 +3972,7 @@ mod turn_completion_invariants {
         // …then complete it, as `handle_agent_response` does.
         chat.clear_streaming();
         match stream.finalize(Some("m1"), answer.to_string()) {
-            Finalize::Emit(text) => {
-                commit_assistant_block(&mut chat, &mut header, &text, None)
-            }
+            Finalize::Emit(text) => commit_assistant_block(&mut chat, &mut header, &text, None),
             Finalize::Duplicate => panic!("the first finalization must render"),
         }
 
@@ -3559,9 +3986,16 @@ mod turn_completion_invariants {
         // …and the answer is in scrollback exactly once, byte-identical to what
         // streamed.
         let blocks = chat.agent_blocks();
-        assert_eq!(blocks, vec![answer.to_string()], "committed text is not verbatim");
         assert_eq!(
-            blocks.join("\n").matches("Both paths now go through").count(),
+            blocks,
+            vec![answer.to_string()],
+            "committed text is not verbatim"
+        );
+        assert_eq!(
+            blocks
+                .join("\n")
+                .matches("Both paths now go through")
+                .count(),
             1,
             "the answer was rendered more than once"
         );
@@ -3576,14 +4010,20 @@ mod turn_completion_invariants {
         let mut stream = AssistantStream::new();
         let mut header = false;
 
-        for (id, text) in [("m1", "First pass at the answer."), ("m2", "Second, better pass.")] {
+        for (id, text) in [
+            ("m1", "First pass at the answer."),
+            ("m2", "Second, better pass."),
+        ] {
             if let Some(superseded) = stream.push(Some(id), text) {
                 chat.clear_streaming();
                 commit_assistant_block(&mut chat, &mut header, &superseded, None);
             }
             chat.update_streaming(stream.text());
             // Mid-turn the preview is live — teardown must NOT have fired here.
-            assert!(chat.streaming_height(W) > 0, "the preview died mid-turn at {id}");
+            assert!(
+                chat.streaming_height(W) > 0,
+                "the preview died mid-turn at {id}"
+            );
         }
 
         chat.clear_streaming();
@@ -3693,8 +4133,8 @@ mod turn_completion_invariants {
 mod popup_and_toast_invariants {
     use super::*;
     use crate::app::event_loop::{
-        fit_bands, inline_split, Bands, ROW_HINT, ROW_INPUT, ROW_POPUP,
-        ROW_STREAM, ROW_TOAST, TOAST_INLINE_CAP,
+        fit_bands, inline_split, Bands, ROW_HINT, ROW_INPUT, ROW_POPUP, ROW_STREAM, ROW_TOAST,
+        TOAST_INLINE_CAP,
     };
     use crate::components::input::{InputComponent, MENTION_POPUP_ROWS};
     use crate::components::toast::{ToastLevel, Toasts, MAX_VISIBLE};
@@ -3807,9 +4247,8 @@ mod popup_and_toast_invariants {
                         reserved, MENTION_POPUP_ROWS,
                         "w={w} n={n}: an open dropdown must reserve a CONSTANT slot"
                     );
-                    let stray = ink_outside_band(w, 4, reserved, 4, |f, band| {
-                        input.draw_popup(f, band)
-                    });
+                    let stray =
+                        ink_outside_band(w, 4, reserved, 4, |f, band| input.draw_popup(f, band));
                     assert!(
                         stray.is_empty(),
                         "w={w} n={n} sel={sel}: the dropdown painted outside its \
@@ -3827,7 +4266,10 @@ mod popup_and_toast_invariants {
         let input = InputComponent::new();
         assert_eq!(input.mention_popup_height(), 0);
         let stray = ink_outside_band(W, 2, 0, 6, |f, band| input.draw_popup(f, band));
-        assert!(stray.is_empty(), "a closed dropdown painted something: {stray:?}");
+        assert!(
+            stray.is_empty(),
+            "a closed dropdown painted something: {stray:?}"
+        );
     }
 
     /// **Rebuild budget.** The dropdown re-filters on every keystroke of a
@@ -3873,7 +4315,11 @@ mod popup_and_toast_invariants {
                 let bands = fit_bands(wanted, area_h);
                 let area = Rect::new(0, 0, W, area_h);
                 let rows = inline_split(area, bands);
-                for (name, idx) in [("hint", ROW_HINT), ("composer", ROW_INPUT), ("stream", ROW_STREAM)] {
+                for (name, idx) in [
+                    ("hint", ROW_HINT),
+                    ("composer", ROW_INPUT),
+                    ("stream", ROW_STREAM),
+                ] {
                     assert_eq!(
                         rows[ROW_POPUP].intersection(rows[idx]).height,
                         0,
@@ -3968,11 +4414,7 @@ mod popup_and_toast_invariants {
             let mut input = dropdown(5, 0);
             input.set_width(w);
             let h = input.mention_popup_height();
-            let buf = render_to_buffer(
-                |f| input.draw_popup(f, Rect::new(0, 0, w, h)),
-                w,
-                h,
-            );
+            let buf = render_to_buffer(|f| input.draw_popup(f, Rect::new(0, 0, w, h)), w, h);
             for y in 0..h {
                 let text = buffer_row_text(&buf, y);
                 assert!(
@@ -3995,21 +4437,26 @@ mod popup_and_toast_invariants {
             let mut input = dropdown(n, sel);
             input.set_width(W);
             let h = input.mention_popup_height();
-            let buf =
-                render_to_buffer(|f| input.draw_popup(f, Rect::new(0, 0, W, h)), W, h);
+            let buf = render_to_buffer(|f| input.draw_popup(f, Rect::new(0, 0, W, h)), W, h);
             // Reconstructed the way a terminal shows them — `buffer_row_text`
             // skips the placeholder cells a wide glyph occupies, so a CJK path
             // is not spuriously spaced out.
             let lines: Vec<String> = (0..h).map(|y| buffer_row_text(&buf, y)).collect();
             let screen = lines.join("\n");
             let marked = lines.iter().find(|l| l.contains('\u{25b8}'));
-            let marked = marked.unwrap_or_else(|| {
-                panic!("sel={sel}: no selection marker on screen\n{screen}")
-            });
+            let marked = marked
+                .unwrap_or_else(|| panic!("sel={sel}: no selection marker on screen\n{screen}"));
             // The selected candidate's leaf name must be on the MARKED row (the
             // path is middle-ellipsized, so match on the tail).
             let leaf = paths[sel].rsplit('/').next().unwrap().to_string();
-            let tail: String = leaf.chars().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
+            let tail: String = leaf
+                .chars()
+                .rev()
+                .take(6)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
             assert!(
                 marked.contains(&tail),
                 "sel={sel}: selected candidate {leaf:?} is not the highlighted row\n{screen}"
@@ -4024,8 +4471,7 @@ mod popup_and_toast_invariants {
             let input = slash_popup(w);
             let reserved = input.completions_popup_height();
             assert!(reserved >= 3, "w={w}: an open `/` popup should want rows");
-            let stray =
-                ink_outside_band(w, 5, reserved, 5, |f, band| input.draw_popup(f, band));
+            let stray = ink_outside_band(w, 5, reserved, 5, |f, band| input.draw_popup(f, band));
             assert!(
                 stray.is_empty(),
                 "w={w}: the `/` popup painted outside its {reserved}-row band: {stray:?}"
@@ -4039,7 +4485,9 @@ mod popup_and_toast_invariants {
     fn only_one_popup_ever_paints_into_the_band() {
         let mut input = slash_popup(W);
         input.seed_mention_dropdown(&["src/main.rs", "src/app/mod.rs"], 0);
-        let h = input.completions_popup_height().max(input.mention_popup_height());
+        let h = input
+            .completions_popup_height()
+            .max(input.mention_popup_height());
         let buf = render_to_buffer(|f| input.draw_popup(f, Rect::new(0, 0, W, h)), W, h);
         let screen = snapshot_buffer(&buf);
         assert!(
@@ -4222,8 +4670,15 @@ mod popup_and_toast_invariants {
         // Dwell elapses (errors linger longest at 6s).
         t.age_all(Duration::from_secs(30));
         t.tick();
-        assert!(!t.has_toasts(), "the dwell elapsed; no toast should be live");
-        assert_eq!(t.live_count(), 0, "an expired toast must give its rows back");
+        assert!(
+            !t.has_toasts(),
+            "the dwell elapsed; no toast should be live"
+        );
+        assert_eq!(
+            t.live_count(),
+            0,
+            "an expired toast must give its rows back"
+        );
 
         let area = Rect::new(0, 0, W, area_h);
         let after = inline_split(area, live_bands(t.live_count()));
@@ -4456,7 +4911,8 @@ That is the whole change.";
     /// render when that generation is flushed.
     #[test]
     fn several_generations_each_commit_once_with_settling() {
-        let gen1 = "First pass at the answer.\n\nWith a second paragraph.\n\nAnd a trailing thought";
+        let gen1 =
+            "First pass at the answer.\n\nWith a second paragraph.\n\nAnd a trailing thought";
         let gen2 = "Second, better pass.\n\nAlso in two paragraphs.\n\nDone";
 
         let mut chat = Chat::new();
@@ -4714,7 +5170,10 @@ That is the whole change.";
                 commit_assistant_chunk(&mut chat, &mut header, &b, None);
             }
         }
-        assert_eq!(blocks, BLOCKS, "each paragraph should have settled separately");
+        assert_eq!(
+            blocks, BLOCKS,
+            "each paragraph should have settled separately"
+        );
         let heights: Vec<u16> = chat
             .drain_scrollback()
             .iter()
@@ -4743,7 +5202,6 @@ That is the whole change.";
         assert_eq!(rebuilds(&[1, 1, 1], TERM_ROWS), 1);
     }
 }
-
 
 // ─────────────────── resize / reflow invariants ───────────────────
 //
@@ -4825,7 +5283,12 @@ Beta is the one I would pick.
 
     /// The event loop's resize step, end to end: the emulator reflows, the
     /// screen is erased, the inline viewport is rebuilt fresh at the new size.
-    fn resize_step(term: Terminal<VT100Backend>, w: u16, h: u16, inline_h: u16) -> Terminal<VT100Backend> {
+    fn resize_step(
+        term: Terminal<VT100Backend>,
+        w: u16,
+        h: u16,
+        inline_h: u16,
+    ) -> Terminal<VT100Backend> {
         let mut backend = term.backend().fork();
         drop(term);
         backend.resize(w, h);
@@ -4913,7 +5376,10 @@ Beta is the one I would pick.
             "/clear emitted ED2 after ED3; on VTE that re-deposits the visible \
              screen into the history it just purged. Emitted: {seq:?}"
         );
-        assert!(ed3_follows_an_erase(&seq), "the visible screen must be erased BEFORE the purge; emitted {seq:?}");
+        assert!(
+            ed3_follows_an_erase(&seq),
+            "the visible screen must be erased BEFORE the purge; emitted {seq:?}"
+        );
     }
 
     // ── the resize-clear GATE ───────────────────────────────────────
@@ -4965,7 +5431,13 @@ Beta is the one I would pick.
     /// libvte passes either way and so votes for neither.
     #[test]
     fn ordinary_terminals_take_the_full_wipe() {
-        for term in ["xterm-256color", "wezterm", "xterm-ghostty", "alacritty", ""] {
+        for term in [
+            "xterm-256color",
+            "wezterm",
+            "xterm-ghostty",
+            "alacritty",
+            "",
+        ] {
             assert_eq!(
                 resize_clear_strategy(&ident(None, false, term)),
                 ResizeClear::FullScreen,
@@ -5033,9 +5505,7 @@ Beta is the one I would pick.
             Some(i) => i,
             None => return false,
         };
-        ED0.iter()
-            .filter_map(|e| seq.find(e))
-            .any(|i| i < purge)
+        ED0.iter().filter_map(|e| seq.find(e)).any(|i| i < purge)
     }
 
     // ── committed blocks are committed once ─────────────────────────
@@ -5054,13 +5524,19 @@ Beta is the one I would pick.
         let (w0, h0) = (72u16, 10u16);
         let mut term = Terminal::with_options(
             VT100Backend::with_scrollback(w0, h0, 4000),
-            TerminalOptions { viewport: Viewport::Inline(4) },
+            TerminalOptions {
+                viewport: Viewport::Inline(4),
+            },
         )
         .unwrap();
 
         commit_all(
             &mut term,
-            vec![Message::new(MessageType::Agent, TABLE_REPLY.to_string(), None)],
+            vec![Message::new(
+                MessageType::Agent,
+                TABLE_REPLY.to_string(),
+                None,
+            )],
         );
         assert_eq!(
             copies_reachable(term.backend(), TABLE_CORNER),
@@ -5070,11 +5546,21 @@ Beta is the one I would pick.
 
         // width-only ↓, width-only ↑, height-only, both, and a rapid drag.
         let sweep: Vec<(u16, u16)> = vec![
-            (71, 10), (70, 10), (69, 10), (68, 10),      // the drag that regressed
-            (68, 14), (68, 9),                            // height-only
-            (100, 9), (40, 9),                            // width jumps
-            (40, 24), (120, 30), (60, 12),                // both
-            (61, 12), (60, 12), (61, 12), (60, 12),       // alternation
+            (71, 10),
+            (70, 10),
+            (69, 10),
+            (68, 10), // the drag that regressed
+            (68, 14),
+            (68, 9), // height-only
+            (100, 9),
+            (40, 9), // width jumps
+            (40, 24),
+            (120, 30),
+            (60, 12), // both
+            (61, 12),
+            (60, 12),
+            (61, 12),
+            (60, 12), // alternation
         ];
         for (w, h) in sweep {
             term = resize_step(term, w, h, 4);
@@ -5104,7 +5590,9 @@ Beta is the one I would pick.
     fn a_resize_mid_stream_neither_duplicates_settled_blocks_nor_commits_the_tail() {
         let mut term = Terminal::with_options(
             VT100Backend::with_scrollback(72, 10, 4000),
-            TerminalOptions { viewport: Viewport::Inline(4) },
+            TerminalOptions {
+                viewport: Viewport::Inline(4),
+            },
         )
         .unwrap();
 
@@ -5175,7 +5663,10 @@ Beta is the one I would pick.
         }
 
         let drained = chat.drain_scrollback();
-        assert!(!drained.is_empty(), "sanity: something must have been queued");
+        assert!(
+            !drained.is_empty(),
+            "sanity: something must have been queued"
+        );
         assert!(!chat.has_pending_scrollback());
 
         for w in (20u16..=200).step_by(3) {
@@ -5334,7 +5825,9 @@ Beta is the one I would pick.
             let backend = VT100Backend::with_scrollback(w, h, 8000);
             let term = Terminal::with_options(
                 backend,
-                TerminalOptions { viewport: Viewport::Inline(inline_h) },
+                TerminalOptions {
+                    viewport: Viewport::Inline(inline_h),
+                },
             )
             .unwrap();
             Self {
@@ -5470,9 +5963,7 @@ Beta is the one I would pick.
                     crossterm::execute!(
                         out,
                         crossterm::cursor::MoveTo(0, new_top.min(max_row)),
-                        crossterm::terminal::Clear(
-                            crossterm::terminal::ClearType::FromCursorDown
-                        ),
+                        crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown),
                     )
                     .unwrap();
                 }
@@ -5487,7 +5978,9 @@ Beta is the one I would pick.
                 self.term = Some(
                     Terminal::with_options(
                         backend,
-                        TerminalOptions { viewport: Viewport::Inline(desired) },
+                        TerminalOptions {
+                            viewport: Viewport::Inline(desired),
+                        },
                     )
                     .unwrap(),
                 );
@@ -5563,9 +6056,7 @@ Beta is the one I would pick.
         /// The loop must adopt the size the moment the ioctl reports it, not
         /// when the crossterm event eventually arrives.
         fn assert_no_frame_used_a_stale_width(&self, ctx: &str) {
-            if let Some((laid_out, real)) =
-                self.drawn_at.iter().copied().find(|(a, b)| a != b)
-            {
+            if let Some((laid_out, real)) = self.drawn_at.iter().copied().find(|(a, b)| a != b) {
                 panic!(
                     "{ctx}: a frame was laid out at {laid_out} columns while the \
                      terminal was {real} columns wide. The kernel changed the size \
@@ -5668,7 +6159,10 @@ Beta is the one I would pick.
                     "{rows} rows / composer wants {input_needed}: live region \
                      reserved {h} rows and would overflow the terminal"
                 );
-                assert!(h >= 3, "{rows} rows: reserved {h} rows, too few for composer + status");
+                assert!(
+                    h >= 3,
+                    "{rows} rows: reserved {h} rows, too few for composer + status"
+                );
             }
             let mut m = LoopModel::new(80, rows, BANDS.len());
             m.queue_output("An answer that was already on screen.\n");
@@ -5842,7 +6336,11 @@ Beta is the one I would pick.
                 "{ctx}: {} chrome row(s) were scrolled into native scrollback, \
                  where nothing can erase them:\n{}",
                 stuck.len(),
-                stuck.iter().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n"),
+                stuck
+                    .iter()
+                    .map(|l| format!("  {l}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
             );
         }
 
@@ -5890,7 +6388,8 @@ Beta is the one I would pick.
                 let overflow = (before_top + after_h).saturating_sub(rows);
                 let allowed = before_top.saturating_sub(overflow);
                 assert_eq!(
-                    after_top, allowed,
+                    after_top,
+                    allowed,
                     "{w}x{rows}: the region was at row {before_top} ({before_h} rows) \
                      and a change to {after_h} rows moved it to {after_top}; it may \
                      only move to {allowed} (the {overflow} rows it had to make).\n\
@@ -6024,8 +6523,7 @@ Beta is the one I would pick.
     #[test]
     fn the_streaming_preview_draws_every_row_it_reserves() {
         use crate::app::event_loop::{
-            stream_preview_ceiling, stream_preview_rows, DampedSlot,
-            SLOT_SHRINK_HOLD,
+            stream_preview_ceiling, stream_preview_rows, DampedSlot, SLOT_SHRINK_HOLD,
         };
         use crate::components::chat::Chat;
         use crate::layout_invariants::{render_to_buffer, snapshot_buffer};
@@ -6068,8 +6566,7 @@ Beta is the one I would pick.
                     // at this height arms the pending shrink, a later one past
                     // the hold window commits it.
                     let _ = stream_preview_rows(content_h, &mut slot, ceiling, t0);
-                    let reserved =
-                        stream_preview_rows(content_h, &mut slot, ceiling, settled);
+                    let reserved = stream_preview_rows(content_h, &mut slot, ceiling, settled);
 
                     assert!(
                         reserved >= content_h.min(ceiling),
@@ -6097,9 +6594,8 @@ Beta is the one I would pick.
                         reserved,
                     );
                     for y in 0..reserved {
-                        let row: String = (0..width)
-                            .map(|x| buf[(x, y)].symbol())
-                            .collect::<String>();
+                        let row: String =
+                            (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>();
                         assert!(
                             !row.trim().is_empty() || body.contains("\n\n"),
                             "{width}x{term_rows} {body:?}: reserved {reserved} rows \
@@ -6125,9 +6621,7 @@ Beta is the one I would pick.
     /// does not exist is the same defect at zero content.
     #[test]
     fn an_idle_stream_reserves_nothing() {
-        use crate::app::event_loop::{
-            stream_preview_ceiling, stream_preview_rows, DampedSlot,
-        };
+        use crate::app::event_loop::{stream_preview_ceiling, stream_preview_rows, DampedSlot};
         let now = std::time::Instant::now();
         for term_rows in [12u16, 24, 30, 50, 80] {
             let mut slot = DampedSlot::default();
@@ -6245,8 +6739,7 @@ mod relayout_invariants {
         let after_drag = rows_at(&mut dragged, 60);
 
         assert_eq!(
-            direct,
-            after_drag,
+            direct, after_drag,
             "a table laid out at 60 after a drag differs from one laid out at 60 \
              directly — the damage in the user's report is cumulative, and this \
              is where that would come from"
