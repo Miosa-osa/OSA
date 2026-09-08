@@ -19,6 +19,13 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   alias OptimalSystemAgent.Providers.ToolCallParsers
   alias OptimalSystemAgent.Utils.Text
 
+  # Reason string for a 200 (sync) or cleanly-closed SSE stream that carried no
+  # content, no tool calls, and no reasoning — nothing to deliver. Kept in one
+  # place so both the sync and stream paths emit the identical text, which
+  # `ErrorCatalog.classify/1` recognises as `:empty_response` (retryable). See
+  # `empty_result?/1`.
+  @empty_response_reason "Empty response from provider (HTTP 200 with no content, tool calls, or reasoning)"
+
   @doc """
   Execute a chat completion against any OpenAI-compatible endpoint.
 
@@ -145,14 +152,28 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
           # `reasoning_content` clause the streaming path had. Same normaliser,
           # same separate key, so the two branches cannot drift again (the
           # `cached_tokens` bug lived for months on exactly that asymmetry).
-          {:ok,
-           %{
-             content: content,
-             tool_calls: tool_calls,
-             usage: usage,
-             stop_reason: choice["finish_reason"]
-           }
-           |> ReasoningContent.put_result(ReasoningContent.extract(msg))}
+          result =
+            %{
+              content: content,
+              tool_calls: tool_calls,
+              usage: usage,
+              stop_reason: choice["finish_reason"]
+            }
+            |> ReasoningContent.put_result(ReasoningContent.extract(msg))
+
+          # A 200 with no content, no tool calls, and no reasoning is nothing to
+          # deliver. For the flaky gateways this module talks to it is a
+          # transient failure, not a real empty answer, so surface it as a
+          # retryable error (ErrorCatalog → :empty_response) instead of handing
+          # an empty turn to the agent loop, where three in a row trip the
+          # ReasoningOnly doom guard. A 200 that carries tool_calls with empty
+          # content is NOT empty and passes straight through.
+          if empty_result?(result) do
+            Logger.warning("OpenAI-compat HTTP 200 with an empty response — retrying")
+            {:error, @empty_response_reason}
+          else
+            {:ok, result}
+          end
 
         {:ok, %{status: 429, body: resp_body, headers: resp_headers}} ->
           retry_after = parse_retry_after(resp_headers)
@@ -446,12 +467,19 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     acc =
       Enum.reduce(data_chunks, init_acc, fn data, a -> handle_sse_chunk(data, callback, a) end)
 
-    finalize_sse_stream(acc, callback, model, messages)
+    # An empty stream now finalizes as `{:error, _}` WITHOUT a `{:done}`
+    # callback (the retryable empty-response path), so return that error
+    # directly rather than blocking on a `{:done}` that will never arrive.
+    case finalize_sse_stream(acc, callback, model, messages) do
+      {:error, _reason} = err ->
+        err
 
-    receive do
-      {:sse_test_callback, {:done, result}} -> result
-    after
-      1_000 -> raise "stream_from_sse_chunks/3: no :done callback received"
+      :ok ->
+        receive do
+          {:sse_test_callback, {:done, result}} -> result
+        after
+          1_000 -> raise "stream_from_sse_chunks/3: no :done callback received"
+        end
     end
   end
 
@@ -682,9 +710,35 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       # is the double-count `reconcile_prompt_slices/2` exists to prevent.
       |> ReasoningContent.put_result(Map.get(acc, :reasoning, ""))
 
-    callback.({:done, result})
-    :ok
+    # A stream that closed cleanly but produced no content, no tool calls, and
+    # no reasoning is nothing to deliver. Do NOT fire `{:done, result}`: that
+    # would hand the empty turn to the caller (llm_client forwards it as
+    # `{:llm_stream_done, _}`), and any retry would then be ignored because the
+    # caller already consumed a terminal result. Instead return a retryable
+    # error so `Resilience.with_retry/2` re-requests it — no text/thinking delta
+    # was emitted for an empty stream, so the one-way-door
+    # (`mark_output_observed/0`) is not tripped and a retry duplicates nothing.
+    if empty_result?(result) do
+      Logger.warning("OpenAI-compat stream closed with an empty response — retrying")
+      {:error, @empty_response_reason}
+    else
+      callback.({:done, result})
+      :ok
+    end
   end
+
+  # True when a finalized result carries nothing to deliver: no content, no tool
+  # calls, and no reasoning. A result with tool_calls (even with empty content)
+  # is NOT empty — the tool call IS the turn — so it passes through untouched.
+  defp empty_result?(result) when is_map(result) do
+    blank?(Map.get(result, :content)) and
+      (Map.get(result, :tool_calls) || []) == [] and
+      blank?(Map.get(result, :reasoning))
+  end
+
+  defp blank?(nil), do: true
+  defp blank?(s) when is_binary(s), do: String.trim(s) == ""
+  defp blank?(_), do: false
 
   defp estimate_usage_fallback(usage, messages, content) when is_map(usage) do
     input = Map.get(usage, :input_tokens, 0)

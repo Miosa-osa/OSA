@@ -102,12 +102,21 @@ defmodule OptimalSystemAgent.Providers.RetryClassifier do
   ]
 
   # Transient categories worth retrying against the same provider.
+  #
+  # `:empty_response` is here on purpose: a 200/clean-close that carried no
+  # content, tool calls, or reasoning is, for the flaky OpenAI-compatible
+  # gateways OSA talks to (504-with-empty-body, empty-200, empty SSE stream), a
+  # transient transport failure — re-requesting usually yields the real answer.
+  # Retrying it (bounded by the same budget/backoff as any other transient
+  # error) keeps a stray empty from ever reaching the agent loop as a counted
+  # "empty generation", which is what trips the ReasoningOnly doom guard.
   @retryable_categories [
     :server_error,
     :server_overload,
     :rate_limit,
     :timeout,
-    :connection_error
+    :connection_error,
+    :empty_response
   ]
 
   @doc "The consecutive-429 retry cap."
