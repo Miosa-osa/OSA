@@ -110,6 +110,11 @@ defmodule OptimalSystemAgent.Agent.Tier do
       specialist: "anthropic/claude-sonnet-5",
       utility: "anthropic/claude-haiku-4.5"
     },
+    surplus: %{
+      elite: "claude-fable-5.1",
+      specialist: "gpt-6-astra",
+      utility: "kimi-k3"
+    },
     perplexity: %{
       elite: "sonar-pro",
       specialist: "sonar-pro",

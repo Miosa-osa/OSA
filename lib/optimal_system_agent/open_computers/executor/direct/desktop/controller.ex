@@ -70,6 +70,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
 
   @impl true
   def init(opts) when is_list(opts) do
+    Process.flag(:trap_exit, true)
     # sessions: %{session_id => %{vnc_socket, vnc_pid, queued_bytes}}
     # vnc_port_override: integer — ONLY honoured together with vnc_start_fn, i.e.
     #   in tests that point at a fake VNC server they started themselves. There
@@ -100,6 +101,8 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
       "[Desktop.Controller] desktop_start_request session=#{session_id} #{width}x#{height}"
     )
 
+    state = close_session(state, session_id, :replaced)
+
     case start_session(session_id, %{width: width, height: height}, state) do
       {:ok, session_state} ->
         new_sessions = Map.put(state.sessions, session_id, session_state)
@@ -120,7 +123,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
         {:noreply, %{state | sessions: new_sessions}}
 
       {:error, reason} ->
-        Logger.warning("[Desktop.Controller] failed to start session=#{session_id}: #{reason}")
+        Logger.warning(
+          "[Desktop.Controller] failed to start session=#{session_id}: #{inspect(reason)}"
+        )
 
         send_frame_via_router(
           {:desktop_error,
@@ -154,7 +159,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
 
           {:error, reason} ->
             Logger.warning(
-              "[Desktop.Controller] TCP send failed session=#{session_id}: #{reason}"
+              "[Desktop.Controller] TCP send failed session=#{session_id}: #{inspect(reason)}"
             )
 
             {:noreply, close_session(state, session_id, :tcp_error)}
@@ -227,7 +232,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
   def handle_info({:tcp_error, socket, reason}, state) do
     case find_session_by_socket(state.sessions, socket) do
       {session_id, _} ->
-        Logger.warning("[Desktop.Controller] TCP error session=#{session_id}: #{reason}")
+        Logger.warning("[Desktop.Controller] TCP error session=#{session_id}: #{inspect(reason)}")
 
         send_frame_via_router(
           {:desktop_error, %{session_id: session_id, reason: :failed_to_start}},
@@ -241,29 +246,62 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
     end
   end
 
+  def handle_info({port, {:exit_status, _status}}, state) when is_port(port) do
+    sessions =
+      Enum.filter(state.sessions, fn {_id, session} ->
+        match?(%{port_ref: ^port}, session.vnc_pid)
+      end)
+
+    {:noreply,
+     Enum.reduce(sessions, state, fn {id, _}, acc ->
+       send_frame_via_router({:desktop_stop, %{session_id: id}}, acc)
+       close_session(acc, id, :helper_exited)
+     end)}
+  end
+
   def handle_info(_msg, state), do: {:noreply, state}
+
+  @impl true
+  def terminate(_reason, state) do
+    Enum.each(state.sessions, fn {id, _} -> close_session(state, id, :shutdown) end)
+    :ok
+  end
 
   # ── Private — session lifecycle ───────────────────────────────────────────────
 
   defp start_session(session_id, _opts, controller_state) do
-    with {:ok, vnc_handle} <- start_vnc(controller_state),
-         # Give x11vnc a moment to bind its port (skip in tests via vnc_start_fn)
-         :ok <- maybe_sleep(controller_state),
-         {:ok, vnc_port} <- resolve_vnc_port(vnc_handle, controller_state),
-         {:ok, socket} <- connect_vnc(vnc_port) do
-      session = %{
-        vnc_socket: socket,
-        vnc_pid: vnc_handle,
-        vnc_port: vnc_port,
-        vnc_secret: vnc_secret(vnc_handle),
-        queued_bytes: 0
-      }
+    with {:ok, vnc_handle} <- start_vnc(controller_state) do
+      try do
+        result =
+          with :ok <- maybe_sleep(controller_state),
+               {:ok, vnc_port} <- resolve_vnc_port(vnc_handle, controller_state),
+               {:ok, socket} <- connect_vnc(vnc_port) do
+            :inet.setopts(socket, active: :once)
 
-      # Arm socket for async reads
-      :inet.setopts(socket, active: :once)
+            {:ok,
+             %{
+               vnc_socket: socket,
+               vnc_pid: vnc_handle,
+               vnc_port: vnc_port,
+               vnc_secret: vnc_secret(vnc_handle),
+               queued_bytes: 0
+             }}
+          end
 
-      Logger.info("[Desktop.Controller] session=#{session_id} started")
-      {:ok, session}
+        case result do
+          {:ok, session} ->
+            Logger.info("[Desktop.Controller] session=#{session_id} started")
+            {:ok, session}
+
+          error ->
+            stop_vnc(vnc_handle)
+            error
+        end
+      catch
+        kind, reason ->
+          stop_vnc(vnc_handle)
+          :erlang.raise(kind, reason, __STACKTRACE__)
+      end
     end
   end
 
@@ -280,7 +318,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
 
   # Skip the startup sleep when a test hook is provided (fast tests)
   defp maybe_sleep(%{vnc_start_fn: fun}) when is_function(fun, 0), do: :ok
-  defp maybe_sleep(_), do: :timer.sleep(500) |> elem(0) |> then(fn _ -> :ok end)
+  defp maybe_sleep(_), do: :timer.sleep(500)
 
   @doc false
   # The RFB port must come from the server this controller actually started.
@@ -307,9 +345,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
 
   # Stop whichever VNC backend was used — the ref type tells us which adapter.
   # x11vnc returns an integer OS pid; macOS/Windows return a Port reference.
-  defp stop_vnc(%{os_pid: os_pid}) when is_integer(os_pid), do: X11vnc.stop(os_pid)
-
   defp stop_vnc(%{port_ref: port_ref}) when is_port(port_ref), do: stop_native(port_ref)
+
+  defp stop_vnc(%{os_pid: os_pid}) when is_integer(os_pid), do: X11vnc.stop(os_pid)
 
   defp stop_vnc(pid_or_port) when is_integer(pid_or_port), do: X11vnc.stop(pid_or_port)
 

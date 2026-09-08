@@ -171,6 +171,7 @@ provider_map = %{
   "openai" => :openai,
   "groq" => :groq,
   "openrouter" => :openrouter,
+  "surplus" => :surplus,
   "together" => :together,
   "fireworks" => :fireworks,
   "deepseek" => :deepseek,
@@ -225,6 +226,7 @@ default_provider =
     System.get_env("OPENAI_API_KEY") -> :openai
     System.get_env("GROQ_API_KEY") -> :groq
     System.get_env("OPENROUTER_API_KEY") -> :openrouter
+    System.get_env("SURPLUS_API_KEY") -> :surplus
     true -> :ollama
   end
 
@@ -234,6 +236,7 @@ config :optimal_system_agent,
   openai_api_key: System.get_env("OPENAI_API_KEY"),
   groq_api_key: System.get_env("GROQ_API_KEY"),
   openrouter_api_key: System.get_env("OPENROUTER_API_KEY"),
+  surplus_api_key: System.get_env("SURPLUS_API_KEY"),
   google_api_key: System.get_env("GOOGLE_API_KEY"),
   deepseek_api_key: System.get_env("DEEPSEEK_API_KEY"),
   mistral_api_key: System.get_env("MISTRAL_API_KEY"),
@@ -480,6 +483,9 @@ config :optimal_system_agent,
          :openrouter ->
            System.get_env("OPENROUTER_MODEL")
 
+         :surplus ->
+           System.get_env("SURPLUS_MODEL") || "claude-fable-5.1"
+
          :deepseek ->
            System.get_env("DEEPSEEK_MODEL")
 
@@ -610,6 +616,7 @@ config :optimal_system_agent,
            {:openai, System.get_env("OPENAI_API_KEY")},
            {:groq, System.get_env("GROQ_API_KEY")},
            {:openrouter, System.get_env("OPENROUTER_API_KEY")},
+           {:surplus, System.get_env("SURPLUS_API_KEY")},
            {:deepseek, System.get_env("DEEPSEEK_API_KEY")},
            {:together, System.get_env("TOGETHER_API_KEY")},
            {:fireworks, System.get_env("FIREWORKS_API_KEY")},
@@ -758,6 +765,12 @@ openrouter_base_url = System.get_env("OPENROUTER_BASE_URL")
 
 if is_binary(openrouter_base_url) and openrouter_base_url != "" do
   config :optimal_system_agent, openrouter_url: openrouter_base_url
+end
+
+surplus_base_url = System.get_env("SURPLUS_BASE_URL")
+
+if is_binary(surplus_base_url) and surplus_base_url != "" do
+  config :optimal_system_agent, surplus_url: surplus_base_url
 end
 
 # ── Compaction window ceiling ────────────────────────────────────────────

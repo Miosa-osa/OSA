@@ -1,0 +1,25 @@
+name: Native capture lifecycle
+
+on:
+  pull_request:
+    paths:
+      - 'native/macos/ScreenShare/**'
+      - 'scripts/capture_watchdog.py'
+      - 'priv/helpers/osa-screen-capture-darwin'
+      - '.github/workflows/native-capture.yml'
+      - '.github/workflows/release.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'native/macos/ScreenShare/**'
+      - 'scripts/capture_watchdog.py'
+      - '.github/workflows/native-capture.yml'
+
+jobs:
+  native-capture:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build and exercise native lifecycle, frame pipeline and resource limits
+        run: sh native/macos/ScreenShare/test.sh

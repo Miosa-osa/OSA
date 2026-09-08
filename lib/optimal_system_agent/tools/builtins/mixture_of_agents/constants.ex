@@ -17,6 +17,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.MixtureOfAgents.Constants do
     :groq,
     :together,
     :openrouter,
+    :surplus,
     :google,
     :cohere,
     :ollama

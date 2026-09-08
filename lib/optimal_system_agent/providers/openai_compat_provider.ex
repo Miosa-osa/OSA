@@ -6,7 +6,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   configs and dispatches to OpenAICompat.chat/5 with the correct URL, API key, and model.
 
   Covers: openai, groq, deepseek, together, fireworks, perplexity, mistral,
-  openrouter, qwen, moonshot, zhipu, volcengine, baichuan.
+  openrouter, surplus, qwen, moonshot, zhipu, volcengine, baichuan.
   """
 
   alias OptimalSystemAgent.Providers.ConfiguredModel
@@ -106,6 +106,11 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
         {"HTTP-Referer", "https://github.com/Miosa-osa/OSA"},
         {"X-Title", "OSA"}
       ]
+    },
+    surplus: %{
+      default_url: "https://api.surplusintelligence.ai/v1",
+      default_model: OptimalSystemAgent.Providers.SurplusModels.default_model(),
+      available_models: {OptimalSystemAgent.Providers.SurplusModels, :ids}
     },
     qwen: %{
       default_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",

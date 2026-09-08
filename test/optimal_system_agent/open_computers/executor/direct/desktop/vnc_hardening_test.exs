@@ -61,19 +61,18 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.VncHardeningT
       {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
       {:ok, {_addr, port}} = :inet.sockname(listener)
 
-      {:ok, router} = FakeRouter.start_link()
+      router = start_supervised!(FakeRouter)
 
-      {:ok, controller} =
-        Controller.start_link(
-          name: nil,
-          # No vnc_port_override: the port must come from the handle alone.
-          vnc_start_fn: fn -> {:ok, %{os_pid: 4242, vnc_port: port, secret: "s3cr3tpw"}} end,
-          frame_router_pid: router
-        )
+      controller =
+        start_supervised!({Controller,
+         [
+           name: nil,
+           # No vnc_port_override: the port must come from the handle alone.
+           vnc_start_fn: fn -> {:ok, %{vnc_port: port, secret: "s3cr3tpw"}} end,
+           frame_router_pid: router
+         ]})
 
       on_exit(fn ->
-        if Process.alive?(controller), do: GenServer.stop(controller)
-        if Process.alive?(router), do: GenServer.stop(router)
         :gen_tcp.close(listener)
       end)
 
@@ -90,19 +89,17 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.VncHardeningT
     end
 
     test "reports an error instead of connecting when the port is unknown" do
-      {:ok, router} = FakeRouter.start_link()
+      router = start_supervised!(FakeRouter)
 
-      {:ok, controller} =
-        Controller.start_link(
-          name: nil,
-          vnc_start_fn: fn -> {:ok, :legacy_pid_only} end,
-          frame_router_pid: router
+      controller =
+        start_supervised!(
+          {Controller,
+           [
+             name: nil,
+             vnc_start_fn: fn -> {:ok, :legacy_pid_only} end,
+             frame_router_pid: router
+           ]}
         )
-
-      on_exit(fn ->
-        if Process.alive?(controller), do: GenServer.stop(controller)
-        if Process.alive?(router), do: GenServer.stop(router)
-      end)
 
       session_id = "vnc-#{System.unique_integer([:positive])}"
       GenServer.cast(controller, {:frame, {:desktop_start_request, %{session_id: session_id}}})
@@ -184,7 +181,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.VncHardeningT
     @moduledoc false
     use GenServer
 
-    def start_link, do: GenServer.start_link(__MODULE__, self())
+    def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, self())
 
     def await_frame(pid, timeout \\ 3_000) do
       GenServer.call(pid, :await, timeout)
