@@ -1304,6 +1304,11 @@ defmodule OptimalSystemAgent.Onboarding do
         # discarded, so every surplus turn mis-billed.
         OptimalSystemAgent.Providers.SurplusModels.put_runtime_pricing(parsed)
 
+        # Attach each row's measured tok/s (from real turns — see `ModelSpeed`),
+        # if any. `nil` for a model no one has used yet; the picker shows no
+        # badge for those rather than inventing a number.
+        parsed = Enum.map(parsed, &OptimalSystemAgent.Providers.SurplusModels.with_speed/1)
+
         {:ok, OptimalSystemAgent.Providers.SurplusModels.order_catalog(parsed)}
 
       {:ok, %{status: status}} ->

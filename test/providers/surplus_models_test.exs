@@ -70,4 +70,30 @@ defmodule OptimalSystemAgent.Providers.SurplusModelsTest do
              "zeta"
            ]
   end
+
+  describe "with_speed/1" do
+    # Globally-unique ids, and no `ModelSpeed.reset/0` call here — this file
+    # runs async, so it must never touch keys any other test might depend on.
+    # Uniqueness alone is what makes concurrent access to the same underlying
+    # persistent_term-backed store safe.
+    test "attaches nil when the model has never been measured" do
+      row = %{
+        id: "surplus-models-test-with-speed-unmeasured-#{System.unique_integer([:positive])}"
+      }
+
+      assert SurplusModels.with_speed(row).tok_s == nil
+    end
+
+    test "attaches the measured tok/s from ModelSpeed when a real turn has recorded one" do
+      id = "surplus-models-test-with-speed-measured-#{System.unique_integer([:positive])}"
+      OptimalSystemAgent.Providers.ModelSpeed.record(:surplus, id, 123.4)
+
+      assert SurplusModels.with_speed(%{id: id}).tok_s == 123.4
+    end
+
+    test "picker_models/0 rows carry a :tok_s key (nil until measured)" do
+      [row | _] = SurplusModels.picker_models()
+      assert Map.has_key?(row, :tok_s)
+    end
+  end
 end

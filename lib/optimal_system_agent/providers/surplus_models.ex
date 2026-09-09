@@ -181,7 +181,25 @@ defmodule OptimalSystemAgent.Providers.SurplusModels do
   def picker_models do
     Enum.map(@featured, fn {id, name} ->
       %{id: id, name: name, ctx: 0, tools: true, recommended: true}
+      |> with_speed()
     end)
+  end
+
+  @doc """
+  Attach the measured tok/s for this row's model id, if any real turn has ever
+  produced one (`OptimalSystemAgent.Providers.ModelSpeed`). `nil` — not the key
+  absent — when unmeasured, so the picker can tell "no data yet" apart from a
+  server payload that predates this field.
+
+  Deliberately NOT folded into `parse/1`: `parse/1` stays a pure projection of
+  one raw catalog entry, exactly like it was before this field existed; a
+  stateful cache read is a separate enrichment step, same as how
+  `put_runtime_pricing/1` attaches the live rate card as its own pass rather
+  than reaching into `parse/1`.
+  """
+  @spec with_speed(map()) :: map()
+  def with_speed(%{id: id} = model) do
+    Map.put(model, :tok_s, OptimalSystemAgent.Providers.ModelSpeed.get(:surplus, id))
   end
 
   @spec featured?(String.t()) :: boolean()
