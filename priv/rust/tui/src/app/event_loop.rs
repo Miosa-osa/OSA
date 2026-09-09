@@ -1329,15 +1329,13 @@ impl App {
                             _ => None,
                         };
                         if let Some(top) = surgical_top {
-                            let max_row = size.rows.saturating_sub(1);
                             let top = surgical_clear_top(top, new_top);
-                            let _ = execute!(
-                                std::io::stdout(),
-                                crossterm::cursor::MoveTo(0, top.min(max_row)),
-                                crossterm::terminal::Clear(
-                                    crossterm::terminal::ClearType::FromCursorDown
-                                ),
-                            );
+                            // Per-row EL, not a single whole-screen ED0 — see
+                            // `erase_rows_in_place`. `top` is frequently 0 here
+                            // (every erase that follows a `/clear`, which
+                            // always leaves the region pinned at row 0), which
+                            // is exactly the tmux 3.6a case ED0 gets wrong.
+                            let _ = erase_rows_in_place(&mut std::io::stdout(), top, size.rows);
                         } else {
                             let _ = clear_screen_for_resize(&mut std::io::stdout());
                         }
@@ -1379,14 +1377,17 @@ impl App {
                         // with everything else). Erasing from there down takes
                         // exactly the old chrome and the rows below it, and never
                         // reaches a transcript row.
-                        let max_row = size.rows.saturating_sub(1);
-                        let _ = execute!(
-                            out,
-                            crossterm::cursor::MoveTo(0, new_top.min(max_row)),
-                            crossterm::terminal::Clear(
-                                crossterm::terminal::ClearType::FromCursorDown
-                            ),
-                        );
+                        //
+                        // Per-row EL (`erase_rows_in_place`), not a single
+                        // whole-screen ED0: `new_top` is 0 every time this
+                        // branch fires right after a `/clear` (which always
+                        // rebuilds pinned at row 0), and a whole-screen ED0
+                        // from row 0 is the exact case tmux 3.6a deposits into
+                        // real, permanent pane history instead of erasing —
+                        // the confirmed mechanism behind the fossil chrome
+                        // this branch used to leave behind a few seconds after
+                        // every `/clear`. See `erase_rows_in_place`.
+                        let _ = erase_rows_in_place(&mut out, new_top, size.rows);
                     }
 
                     // Put the cursor on `new_top`: `Viewport::Inline` anchors
@@ -1749,14 +1750,20 @@ impl App {
         // scrollback above it.
         // Teardown runs after the last frame, so this is a fresh sample of its
         // own rather than a frame's threaded size.
+        //
+        // `term_rows.saturating_sub(cur_inline_h)` clamps to row 0 whenever the
+        // chrome region is as tall as, or taller than, the terminal (a small
+        // pane, or a tall splash/toast stack right before exit) — exactly the
+        // row-0 case `erase_rows_in_place` exists for. Using the old bare
+        // `MoveTo(0, top) + Clear(FromCursorDown)` here left this graceful-exit
+        // path vulnerable to the same tmux 3.6a quirk fixed at the other three
+        // call sites: it would silently deposit the chrome into the pane's real
+        // scrollback on the way out, one fossil per such exit, in a shell pane
+        // that otherwise runs on for days across many osagent invocations.
         let term_rows = crate::app::frame_size::probe().rows;
         if let Some(top) = clamp_inline_top(Some(term_rows.saturating_sub(cur_inline_h)), term_rows)
         {
-            let _ = execute!(
-                std::io::stdout(),
-                crossterm::cursor::MoveTo(0, top),
-                crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown)
-            );
+            let _ = erase_rows_in_place(&mut std::io::stdout(), top, term_rows);
         }
         if let Some(cancel) = self.sse_cancel.take() {
             cancel.cancel();
@@ -2806,6 +2813,67 @@ pub(crate) fn surgical_clear_top(last_inline_top: u16, rebuild_top: u16) -> u16 
     last_inline_top.min(rebuild_top)
 }
 
+/// Erase every row from `top` through the bottom of the screen, IN PLACE,
+/// without depositing the erased content into the terminal's real scrollback
+/// history — the property every surgical clear in this file relies on and
+/// which `Clear(ClearType::FromCursorDown)` (ED0) does NOT have on tmux 3.6a
+/// whenever `top` is 0.
+///
+/// ED0 is documented, and correctly implemented by VTE, xterm, kitty and
+/// Alacritty, as an in-place erase that never touches scroll history — which
+/// is why every other erase in this file (including this one, for any `top`
+/// other than 0) can just issue it directly. tmux 3.6a's OWN terminal
+/// emulation of ED0 does not honor that when the erase targets the entire
+/// visible screen, i.e. when the cursor row at the time of the erase is row
+/// 0: it silently deposits the screen's prior contents into the pane's real,
+/// permanent history buffer instead of erasing in place, functionally
+/// identical to a natural scroll. An erase from any OTHER row is unaffected —
+/// this is specific to erasing the whole screen from its top edge.
+///
+/// Confirmed with a minimal, OSA-free synthetic reproduction against a real
+/// tmux 3.6a server: a 100x10 pane prints 8 lines, then receives ONLY
+/// `printf '\033[1;1H\033[J'` (MoveTo(0,0) + ED0) with no redraw at all — the
+/// visible screen (`capture-pane -p`) is correctly blank, but the full
+/// scrollback (`capture-pane -p -S -50`) still contains all 8 lines. Erasing
+/// the same screen from row 5 instead (a genuinely partial erase) leaves no
+/// such fossil, isolating the quirk to the top-of-screen case.
+///
+/// This is exactly the geometry every "chrome anchored at the top" erase
+/// hits — a fresh boot before the first commit pushes it down, and,
+/// decisively, the very next height-only rebuild after a `/clear` (which
+/// always leaves the live region pinned at row 0, so the following turn's
+/// toast-driven resize erases from there).
+///
+/// `Clear(ClearType::CurrentLine)` (EL, `ESC[2K`) does not carry the quirk at
+/// any row, including row 0 — confirmed with the same synthetic harness:
+/// looping it per-row from the erase's start row to the bottom of the screen
+/// leaves both the visible screen and the full scrollback clean. That is
+/// what this function does in place of a single whole-screen ED0, at the
+/// call sites where the start row can be 0 (`clear_screen_for_resize` is not
+/// one of them — tmux and screen are always routed to the surgical strategy
+/// instead, so it is never reached on a terminal where this quirk is known
+/// to exist, and its exact emitted bytes are pinned by
+/// `resize_clear_erases_in_place_and_never_scrolls_into_history`).
+///
+/// Clamps `top` to the last row first so a start row at or past the bottom
+/// still erases that one row, matching the clamping every caller used to do
+/// itself before a single `MoveTo` + `Clear(FromCursorDown)`.
+pub(crate) fn erase_rows_in_place(
+    out: &mut impl std::io::Write,
+    top: u16,
+    rows_total: u16,
+) -> Result<()> {
+    let top = top.min(rows_total.saturating_sub(1));
+    for row in top..rows_total {
+        execute!(
+            out,
+            crossterm::cursor::MoveTo(0, row),
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
+        )?;
+    }
+    Ok(())
+}
+
 /// Blank rows [`replay_scrollback`] emits AHEAD of a replayed transcript so the
 /// live region still lands on the screen's last `inline_h` rows.
 ///
@@ -2862,11 +2930,12 @@ fn switch_to_inline(
     let term_rows = size.rows;
     let placed = clamp_inline_top(prev_inline_top, term_rows);
     if let Some(top) = placed {
-        let _ = execute!(
-            std::io::stdout(),
-            crossterm::cursor::MoveTo(0, top),
-            crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown),
-        );
+        // Per-row EL (`erase_rows_in_place`), not a single whole-screen ED0:
+        // `top` can be 0 here (a splash/dialog that opened while the inline
+        // chrome sat at the absolute top of the screen), which on tmux 3.6a
+        // is the case a whole-screen ED0 deposits into real, permanent pane
+        // history instead of erasing.
+        let _ = erase_rows_in_place(&mut std::io::stdout(), top, term_rows);
     }
 
     // When the old top was remembered, the `MoveTo` above just PUT the cursor
@@ -3238,7 +3307,10 @@ pub(crate) fn clear_screen_for_resize(out: &mut impl std::io::Write) -> Result<(
 pub(crate) enum ResizeClear {
     /// Clear from the remembered live-region top downward, leaving the
     /// transcript above it untouched. The old chrome is overwritten in place
-    /// and never becomes scroll history.
+    /// and never becomes scroll history — via `erase_rows_in_place`'s per-row
+    /// EL, not a whole-screen ED0, precisely because that top is frequently
+    /// row 0, which is the one case tmux 3.6a's own ED0 does not erase in
+    /// place (see `erase_rows_in_place` for the confirmed mechanism).
     Surgical,
     /// Wipe the whole screen (ED0 from home) and rebuild from nothing.
     FullScreen,
