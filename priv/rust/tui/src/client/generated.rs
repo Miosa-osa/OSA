@@ -12,6 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
+
 // === Health — GET /health ===
 
 #[derive(Debug, Clone, Deserialize)]
@@ -45,10 +46,10 @@ pub struct HealthResponse {
 
 /// Update-availability signal carried on `GET /health`. Understated, never
 /// auto-installs (Codex parity).
-///
+/// 
 /// Three outcomes, and `latest_version` is what separates the two negative
 /// ones — they are NOT the same fact and a caller must not merge them:
-///
+/// 
 ///   * update available — `available: true`, `latest_version` = the new version.
 ///   * up to date — `available: false`, `latest_version` = the CURRENT version.
 ///   * could not check — `available: false`, `latest_version` = `null`. The
