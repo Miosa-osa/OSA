@@ -9,6 +9,7 @@ defmodule OptimalSystemAgent.MCP.Client.PaginationTest do
 
   alias OptimalSystemAgent.MCP.Client.ServerSession
   alias OptimalSystemAgent.MCP.Config.Server
+  alias OptimalSystemAgent.Test.MCPSessionCleanup
 
   # A transport that returns tools/list in pages. The first page (no cursor)
   # yields `tool_a` + nextCursor "c1"; the "c1" page yields `tool_b` and repeats
@@ -83,9 +84,12 @@ defmodule OptimalSystemAgent.MCP.Client.PaginationTest do
     server = %Server{name: name, transport: :stdio, command: "irrelevant"}
 
     {:ok, pid} = ServerSession.start_link(server)
-    # The session traps exits and is linked to this (transient) test process,
-    # so it may already be terminating by cleanup time; kill tolerantly.
-    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+    # The session reports "tool_a"/"tool_b" to the singleton MCP.Client.Manager
+    # (report_tools/2), which keeps them in its own GenServer state independent
+    # of this pid — killing the session does not remove them. Without the
+    # reload below they leak into the GLOBAL `{Registry, :mcp_tools}`
+    # persistent_term for every later test (see MCPSessionCleanup's @moduledoc).
+    on_exit(fn -> MCPSessionCleanup.kill_and_reload(pid) end)
 
     assert wait_until(fn -> ServerSession.status(name) == :ready end)
     assert wait_until(fn -> length(ServerSession.list_tools(name)) == 2 end)
