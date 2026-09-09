@@ -2659,16 +2659,25 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         end
 
       verb when verb in ["clear", "off", "reset", "cancel"] ->
-        case GoalTracker.clear(session_id) do
-          {:ok, _} ->
-            Loop.cancel(session_id)
+        snap = GoalTracker.snapshot(session_id)
 
-            IO.puts(
-              "  #{@green}✓#{@reset} Goal cleared, not completed. Auto-continue toward it stops."
-            )
+        live_goal? =
+          is_map(snap) and snap.status != :cleared and is_binary(snap.goal) and snap.goal != ""
 
-          {:error, reason} ->
-            IO.puts("  Could not durably clear goal: #{inspect(reason)}")
+        if live_goal? do
+          case GoalTracker.clear(session_id) do
+            {:ok, _} ->
+              Loop.cancel(session_id)
+
+              IO.puts(
+                "  #{@green}✓#{@reset} Goal cleared, not completed. Auto-continue toward it stops."
+              )
+
+            {:error, reason} ->
+              IO.puts("  Could not durably clear goal: #{inspect(reason)}")
+          end
+        else
+          IO.puts("  #{@dim}No active goal to clear.#{@reset}")
         end
 
       "status" ->
@@ -2871,6 +2880,17 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     alias OptimalSystemAgent.Agent.Loop.GoalTracker
 
     case GoalTracker.snapshot(session_id) do
+      # A user-cleared goal is GONE, not a fourth terminal state to render in
+      # full: `clear/1` leaves the record's `goal`/`history` text in place (the
+      # sidecar ledger keeps it for audit), but showing that back here read as
+      # the goal still being tracked — full objective, acceptance criteria,
+      # and a stale "latest: ... INCOMPLETE round N" verdict from BEFORE the
+      # clear, with no way to tell it was ever cleared at all. Short-circuit
+      # before the general branch below so `/goal` reports the same clean
+      # "no goal" state a session that never anchored one gets.
+      %{status: :cleared} ->
+        print_no_goal_message()
+
       %{goal: goal} = snap when is_binary(goal) and goal != "" ->
         if snap.status in @terminal_goal_statuses, do: print_goal_banner(snap)
 
@@ -2923,14 +2943,18 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         if snap.status in @terminal_goal_statuses, do: print_goal_overview(session_id)
 
       _ ->
-        IO.puts("  #{@dim}No goal anchored. Set one with /goal <text>.#{@reset}")
-
-        IO.puts(
-          "  #{@dim}An anchored goal is pursued across turns until an independent panel#{@reset}"
-        )
-
-        IO.puts("  #{@dim}judges it complete, it stalls, or it hits its run cap.#{@reset}")
+        print_no_goal_message()
     end
+  end
+
+  defp print_no_goal_message do
+    IO.puts("  #{@dim}No active goal. Set one with /goal <text>.#{@reset}")
+
+    IO.puts(
+      "  #{@dim}An anchored goal is pursued across turns until an independent panel#{@reset}"
+    )
+
+    IO.puts("  #{@dim}judges it complete, it stalls, or it hits its run cap.#{@reset}")
   end
 
   defp print_goal_banner(%{status: :completed}) do
