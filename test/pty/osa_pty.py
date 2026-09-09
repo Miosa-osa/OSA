@@ -74,6 +74,42 @@ _DSR = re.compile(rb"\x1b\[6n")
 # anything above ~1s is comfortably past both.
 SETTLE = 1.0
 
+# How long `_reap` polls for a SIGKILLed child before giving up on it. A
+# bare blocking `os.waitpid(pid, 0)` here has taken down the whole suite: on
+# macOS a SIGKILLed child can wedge in process state `?Es` ("trying to
+# exit") behind the crash-reporter pipeline (ReportCrash / spindump /
+# diagnosticd) — 0 RSS, 0% CPU, and the kernel never finishes reaping it.
+# A few seconds is far more than a healthy reap ever needs.
+_REAP_TIMEOUT = 5.0
+_REAP_POLL = 0.05
+
+
+def _reap(pid: int) -> None:
+    """Wait for `pid` to be reaped, but never longer than `_REAP_TIMEOUT`.
+
+    Bounded replacement for `os.waitpid(pid, 0)`. On timeout the child is
+    leaked (it is already dead — it was SIGKILLed before this is called —
+    just stuck in the kernel's exit path) rather than hanging the caller
+    forever. Leaking an already-dead pid is strictly better than wedging
+    the entire test suite.
+    """
+    deadline = time.time() + _REAP_TIMEOUT
+    while time.time() < deadline:
+        try:
+            reaped_pid, _ = os.waitpid(pid, os.WNOHANG)
+        except (ChildProcessError, ProcessLookupError):
+            return  # already reaped by someone else (e.g. a SIGCHLD handler)
+        if reaped_pid == pid:
+            return
+        time.sleep(_REAP_POLL)
+    print(
+        f"osa_pty: child {pid} did not reap within {_REAP_TIMEOUT}s of "
+        "SIGKILL; leaking it rather than hanging the suite. This is the "
+        "macOS `?Es` / crash-reporter interaction described in "
+        "PtySession.close — see test/pty/osa_pty.py.",
+        file=sys.stderr,
+    )
+
 
 class PtySession:
     """A running `osagent` on a PTY, with a `pyte` screen tracking its output."""
@@ -151,12 +187,13 @@ class PtySession:
 
     def close(self) -> None:
         if self.pid is not None:
-            try:
-                os.kill(self.pid, signal.SIGKILL)
-                os.waitpid(self.pid, 0)
-            except (ProcessLookupError, ChildProcessError):
-                pass
+            pid = self.pid
             self.pid = None
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            _reap(pid)
         if self.fd is not None:
             try:
                 os.close(self.fd)
