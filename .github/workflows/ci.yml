@@ -237,6 +237,8 @@ jobs:
         working-directory: priv/rust/tui
         run: cargo fmt --check
 
+      # (Windows coverage is a separate job below — see `rust-windows`.)
+
       # Doc-rot check: fails if a comment in priv/rust/tui/src cites a
       # `assert_*`/`test_*` Rust symbol that does not actually exist anywhere
       # in the tree. Exists because event_loop.rs cited a test named
@@ -261,20 +263,59 @@ jobs:
         working-directory: priv/rust/tui
         run: cargo test --release
 
+  # Windows compiles ONLY in release.yml, i.e. AFTER a tag exists. That gap
+  # shipped a broken v1.0.191: a SIGTERM/SIGHUP/SIGQUIT handler used
+  # `tokio::signal::unix` and `libc` unconditionally, passed the Linux `rust`
+  # job, then failed `build-windows-x64` — so the asset gate published NOTHING
+  # and the tag had to be burned for a v1.0.192 respin.
+  #
+  # This job closes that gap on the PR. It must run on a real Windows runner,
+  # not `--target x86_64-pc-windows-msvc` from Linux: the TUI's C dependencies
+  # (onig_sys, zstd-sys, bzip2-sys, lzma-sys) need an MSVC toolchain, so a
+  # cross-check from Linux dies in those build scripts before it ever reaches
+  # the Rust code we actually want type-checked.
+  #
+  # `cargo check` (not `build`/`test`) keeps it cheap — the full Windows build
+  # still happens in release.yml. A missing `#[cfg(unix)]` is a hard error here.
+  rust-windows:
+    name: Rust TUI (Windows compile)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            priv/rust/tui/target
+          key: windows-latest-cargo-check-${{ hashFiles('priv/rust/tui/Cargo.lock') }}
+          restore-keys: windows-latest-cargo-check-
+
+      - name: Check the TUI compiles on Windows
+        working-directory: priv/rust/tui
+        run: cargo check --bins
+
   # A single required-status target, so branch protection has one check to
   # point at instead of a list that must be edited whenever a job is added.
   ci:
     name: CI
     runs-on: ubuntu-24.04
-    needs: [elixir, rust]
+    needs: [elixir, rust, rust-windows]
     if: always()
     steps:
-      - name: Verify both suites passed
+      - name: Verify every suite passed
         run: |
-          echo "elixir: ${{ needs.elixir.result }}"
-          echo "rust:   ${{ needs.rust.result }}"
+          echo "elixir:       ${{ needs.elixir.result }}"
+          echo "rust:         ${{ needs.rust.result }}"
+          echo "rust-windows: ${{ needs.rust-windows.result }}"
           if [ "${{ needs.elixir.result }}" != "success" ] || \
-             [ "${{ needs.rust.result }}" != "success" ]; then
+             [ "${{ needs.rust.result }}" != "success" ] || \
+             [ "${{ needs.rust-windows.result }}" != "success" ]; then
             echo "::error::a test suite did not pass"
             exit 1
           fi
