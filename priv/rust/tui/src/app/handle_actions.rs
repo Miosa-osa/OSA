@@ -2306,6 +2306,12 @@ impl App {
                 if !output.is_empty() {
                     self.chat.add_system_message(output, "info");
                 }
+                // A fresh goal owes nothing to whatever stop notice the LAST
+                // one left behind — otherwise a new goal that happens to stop
+                // for the same reason (e.g. another `awaiting_user`) as the
+                // previous one would have its first, genuinely new notice
+                // wrongly collapsed as a "repeat".
+                self.last_goal_stop_notice = None;
                 // Anchoring alone does not start work — `GoalTracker.start/2`
                 // writes state, it does not run a turn — so the TUI starts the
                 // first one, exactly as the old client-side loop did.
@@ -2347,7 +2353,19 @@ impl App {
                 output,
             );
 
-            self.chat.add_system_message(&msg, "info");
+            // Collapse a repeat of the SAME stop notice instead of printing it
+            // again. `self.goal` clears the moment a `TurnEnd` poll first learns
+            // the goal is inactive, so `maybe_continue_goal` stops asking — but
+            // the backend fix for the awaiting-decision lockout (a fresh
+            // top-level turn now runs instead of being swallowed) means a
+            // session can legitimately walk BACK into this same dormant
+            // "waiting"/"paused" state turn after turn (an ordinary user message
+            // answered, the goal is exactly as stopped as before). Printing the
+            // identical notice again after every such turn was noise, not news.
+            if !goal_stop_notice_repeats(self.last_goal_stop_notice.as_deref(), &msg) {
+                self.chat.add_system_message(&msg, "info");
+            }
+            self.last_goal_stop_notice = Some(msg);
             self.goal_cycle = 0;
             self.refresh_goal_status();
             return false;
@@ -2464,6 +2482,14 @@ fn goal_continue_must_defer(turn_already_active: bool) -> bool {
     turn_already_active
 }
 
+/// Whether a freshly computed `goal_stopped_message` is a REPEAT of the last
+/// one this session actually printed — i.e. whether printing it again would
+/// be noise rather than news. `last` is `None` on a fresh anchor (nothing to
+/// repeat yet) and reset there for exactly that reason.
+fn goal_stop_notice_repeats(last: Option<&str>, new: &str) -> bool {
+    last.is_some_and(|prev| prev == new)
+}
+
 /// Item #3 pull-path gate: whether a `/goal` response's `status` names a
 /// completion outcome the session has NOT already surfaced.
 ///
@@ -2530,6 +2556,14 @@ fn goal_stopped_message(
             .to_string(),
         (Some("paused"), Some("no_progress")) => "Goal paused — the backend saw the same gaps \
              on consecutive rounds and stopped rather than loop. /goal resume to continue."
+            .to_string(),
+        (Some("paused"), Some("blocked_on_human")) => "Goal paused — the same blocker repeated \
+             across consecutive turns and it needs something only you can do. Do that, then \
+             /goal resume to continue."
+            .to_string(),
+        (Some("paused"), Some("verification_unavailable")) => "Goal paused — the review panel \
+             could not return a verdict (a provider failure, not a finding about your work). \
+             /goal resume to continue."
             .to_string(),
         (Some("paused"), _) => {
             "Goal paused. /goal resume to continue, /goal off to forget it.".to_string()
@@ -3443,6 +3477,55 @@ mod goal_stopped_message_tests {
         let manual = goal_stopped_message(Some("paused"), Some("user"), 9, "");
         assert!(!manual.contains("verification-run cap"));
         assert!(!manual.contains("same gaps"));
+
+        // The two new auto-pause reasons — the durable cross-turn blocker
+        // streak (`GoalTracker.record_blocker/3`) and the empty-panel circuit
+        // breaker — get their own distinguishing text too, not the generic
+        // "Goal paused." fallback.
+        let blocked_on_human =
+            goal_stopped_message(Some("paused"), Some("blocked_on_human"), 9, "");
+        assert!(blocked_on_human.contains("only you can do"));
+        assert!(!blocked_on_human.contains("verification-run cap"));
+        assert!(!blocked_on_human.contains("same gaps"));
+
+        let verification_unavailable =
+            goal_stopped_message(Some("paused"), Some("verification_unavailable"), 9, "");
+        assert!(verification_unavailable.contains("could not return a verdict"));
+        assert!(!verification_unavailable.contains("same gaps"));
+    }
+}
+
+// ── collapsing a repeated goal-stop notice (item #3: re-arm de-dup) ─────────
+//
+// Reported: once the awaiting-decision/paused lockout above was fixed (a
+// fresh top-level turn now runs instead of being swallowed), a session could
+// legitimately walk back into the SAME dormant stop reason turn after turn —
+// each ordinary user message answered, the goal exactly as stopped as
+// before. Printing the identical "waiting for your decision"/"paused" notice
+// again after every such turn was noise, not news.
+#[cfg(test)]
+mod goal_stop_notice_dedup_tests {
+    use super::goal_stop_notice_repeats;
+
+    #[test]
+    fn nothing_shown_yet_never_repeats() {
+        assert!(!goal_stop_notice_repeats(
+            None,
+            "Goal paused. /goal resume to continue."
+        ));
+    }
+
+    #[test]
+    fn the_identical_notice_again_is_a_repeat() {
+        let msg = "Waiting for your decision — not complete.\n\nApprove draft v1?";
+        assert!(goal_stop_notice_repeats(Some(msg), msg));
+    }
+
+    #[test]
+    fn a_materially_different_notice_is_not_a_repeat() {
+        let first = "Goal paused. /goal resume to continue, /goal off to forget it.";
+        let second = "Waiting for your decision — not complete.\n\nApprove draft v2?";
+        assert!(!goal_stop_notice_repeats(Some(first), second));
     }
 }
 

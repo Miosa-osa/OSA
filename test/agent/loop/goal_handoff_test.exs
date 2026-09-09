@@ -253,7 +253,14 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalHandoffTest do
   } do
     {:ok, snap} = GoalTracker.request_decision(sid, r)
     assert snap.status == :awaiting_user
-    {reply, _state} = ReactLoop.run(%{session_id: sid, iteration: 0, messages: []})
+
+    # `iteration: 1`, not `0`: this halt is for the model's OWN mid-turn
+    # continuation past the decision it just asked for (a turn already past
+    # its first model call), never for a brand-new top-level turn — that
+    # would swallow a genuine user message too (see
+    # "a fresh top-level turn ... reaches the model instead of being
+    # swallowed" below, and the `iter > 0` guard in `ReactLoop.run/1`).
+    {reply, _state} = ReactLoop.run(%{session_id: sid, iteration: 1, messages: []})
     assert reply =~ "Waiting for your decision"
     assert reply =~ snap.pending_decision["request_id"]
     refute GoalTracker.continue?(sid)
@@ -262,6 +269,65 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalHandoffTest do
     assert {:error, {:goal_active, _}} = GoalTracker.anchor_new(sid, "easier objective")
     assert {:error, :not_live} = GoalTracker.claim_complete(sid)
     assert GoalTracker.resume(sid).status == :awaiting_user
+  end
+
+  # Reported live: an anchored goal asked a decision question, and every
+  # ordinary message the user typed afterward — not `/goal approve` or
+  # `/goal reject`, just normal chat — came back with nothing but the same
+  # static "waiting for your decision" notice, with no way to redirect the
+  # agent short of clearing the goal outright. The old guard halted on
+  # `GoalTracker.awaiting_user?(sid)` alone, with no `iteration` check, so it
+  # caught brand-new top-level turns exactly as readily as the model's own
+  # mid-turn continuation.
+  test "a fresh top-level turn while awaiting a decision reaches the model instead of being swallowed",
+       %{sid: sid, request: r} do
+    keys = [:default_provider, :mock_provider_final_text, :max_iterations]
+    previous = Map.new(keys, &{&1, Application.fetch_env(:optimal_system_agent, &1)})
+
+    on_exit(fn ->
+      for {key, value} <- previous do
+        case value do
+          {:ok, v} -> Application.put_env(:optimal_system_agent, key, v)
+          :error -> Application.delete_env(:optimal_system_agent, key)
+        end
+      end
+    end)
+
+    {:ok, snap} = GoalTracker.request_decision(sid, r)
+    assert snap.status == :awaiting_user
+
+    answer = "Go ahead and treat both PRs as pre-approved — merge them."
+    Application.put_env(:optimal_system_agent, :default_provider, :mock)
+    Application.put_env(:optimal_system_agent, :mock_provider_final_text, answer)
+    Application.put_env(:optimal_system_agent, :max_iterations, 12)
+
+    state =
+      Map.from_struct(%OptimalSystemAgent.Agent.Loop{
+        session_id: sid,
+        provider: :mock,
+        model: "mock-model-1.0",
+        iteration: 0,
+        auto_continues: 0,
+        messages: [%{role: "user", content: "just merge them, I trust you"}],
+        tools: [],
+        permission_mode: :ask,
+        permission_tier: :full,
+        working_dir: File.cwd!()
+      })
+
+    OptimalSystemAgent.Test.MockProvider.reset_round_trips()
+    {reply, _final} = ReactLoop.run(state)
+
+    refute reply =~ "Waiting for your decision",
+           "a genuine new user message must reach the model, not be swallowed by the pending " <>
+             "decision halt"
+
+    assert reply == answer
+    assert OptimalSystemAgent.Test.MockProvider.round_trips() == 1
+
+    # The decision is still exactly as pending as before — a chat reply is
+    # not `/goal approve`/`/goal reject`, so it must not silently resolve it.
+    assert GoalTracker.awaiting_user?(sid)
   end
 
   test "request, budget and approval survive cache loss", %{sid: sid, request: r} do

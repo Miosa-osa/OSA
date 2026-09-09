@@ -109,9 +109,24 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
             reason: String.t(),
             refuted_count: non_neg_integer(),
             total: non_neg_integer(),
-            gaps: [String.t()]
+            gaps: [String.t()],
+            verification_available: boolean()
           }
-    defstruct verdict: :incomplete, reason: "", refuted_count: 0, total: 0, gaps: []
+    # `verification_available` defaults to `true` deliberately: every
+    # hand-built `%Result{}` fixture across the test suite (constructed
+    # directly, bypassing `aggregate/1`/`verify/1` entirely, to simulate "the
+    # panel said X") implicitly means "a real verdict happened" and must keep
+    # meaning that without having to set a field it never needed before this
+    # one was added. Only `verify/1` — the ONE real caller that actually talks
+    # to `aggregate/1` — ever sets it to `false`, and only when `aggregate/1`
+    # reports `total == 0` (every skeptic failed to return a verdict). See
+    # `GoalTracker.apply_verdict/3`'s dedicated clause for what that gates.
+    defstruct verdict: :incomplete,
+              reason: "",
+              refuted_count: 0,
+              total: 0,
+              gaps: [],
+              verification_available: true
   end
 
   # ── Config (env-overridable, mirrors grok's GROK_GOAL_VERIFIER_N /
@@ -170,10 +185,14 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   Resolution precedence (highest first — operator override always wins):
 
     1. explicit `config :optimal_system_agent, goal_verifier_enabled: true` or
-       `false` — returned verbatim regardless of posture.
-    2. `:auto` (the default) — ON when the turn is autonomous/long-running,
-       per `autonomous_posture?/1`; OFF otherwise (the common short
-       interactive turn).
+       `false` — returned verbatim regardless of posture (an operator/test
+       knob, not the user-facing one below).
+    2. `:auto` (the default) — OFF outright when the user has turned
+       autonomous goal pursuit off (`GoalTracker.auto_enabled?/0` — see its
+       moduledoc for why this is independent of overdrive/permission mode);
+       otherwise ON when the turn is autonomous/long-running, per
+       `autonomous_posture?/1`; OFF otherwise (the common short interactive
+       turn).
 
   This replaces the old blanket off-by-default: finishing-correctly matters
   for autonomous/long work, so verification turns itself on there, while a
@@ -187,7 +206,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
     case Application.get_env(:optimal_system_agent, :goal_verifier_enabled, :auto) do
       true -> true
       false -> false
-      _auto -> autonomous_posture?(state)
+      _auto -> GoalTracker.auto_enabled?() and autonomous_posture?(state)
     end
   end
 
@@ -573,11 +592,25 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
             )
           end
 
-        case {applied, result.verdict} do
-          {{:error, :stale_verification}, _} ->
+        case {applied, result.verdict, result.verification_available} do
+          {{:error, :stale_verification}, _, _} ->
             state
 
-          {_, :complete} ->
+          {_, :complete, _} ->
+            state
+
+          # `verification_available: false` means every skeptic failed to
+          # return a real verdict this round (every one flagged `internal:
+          # true` — crashed or timed out; see `verify/1`) — an infrastructure
+          # failure, not a finding about the work. `GoalTracker.apply_verdict/3`
+          # already durably pauses the goal the instant this happens
+          # (`pause_reason: :verification_unavailable`, no stall-count wait —
+          # nothing was ever judged, so there is nothing to retry blindly
+          # against). Appending the ordinary `:incomplete` "keep going"
+          # directive here on top of that would tell the model to keep
+          # working a turn the loop is about to halt anyway — a stale,
+          # contradictory nudge for state already handled above.
+          {_, _, false} ->
             state
 
           _ ->
@@ -952,6 +985,19 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
     prev = Map.get(state, :goal_verifier_blocker_key)
     streak = if prev == key, do: Map.get(state, :goal_verifier_blocker_streak, 0) + 1, else: 1
 
+    # Advance the DURABLE, cross-turn twin of this same streak — see
+    # `GoalTracker.record_blocker/3`'s moduledoc for why the ephemeral count
+    # kept on `state` (below) can only ever count blocked rounds WITHIN one
+    # top-level turn, never across the goal loop's own separate
+    # auto-continuation turns, which is exactly the case this exists for.
+    case Map.get(state, :session_id) do
+      sid when is_binary(sid) ->
+        GoalTracker.record_blocker(sid, key, meta[:reason] || "blocked")
+
+      _ ->
+        :ok
+    end
+
     state =
       state
       |> Map.put(:goal_verifier_blocker_key, key)
@@ -996,6 +1042,11 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   end
 
   defp clear_blocker(state) do
+    case Map.get(state, :session_id) do
+      sid when is_binary(sid) -> GoalTracker.clear_blocker_streak(sid)
+      _ -> :ok
+    end
+
     state
     |> Map.put(:goal_verifier_blocker_key, nil)
     |> Map.put(:goal_verifier_blocker_streak, 0)
@@ -1113,6 +1164,15 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
     skeptic_results = spawn_panel(session_id, goal, diff, state)
     {refuted_count, total, verdict, reason, gaps} = aggregate(skeptic_results)
 
+    # Whether ANY skeptic returned a real verdict this round — distinct from
+    # `total`, which (see `aggregate/1`'s `votes == []` clause) reports
+    # `length(skeptic_results)` — the ATTEMPT count — rather than 0 when every
+    # attempt failed/timed out. A round where every skeptic crashed is an
+    # infrastructure failure, not a finding that the goal is unfinished; see
+    # `GoalTracker.apply_verdict/3`'s dedicated `verification_available: false`
+    # clause for what this gates.
+    verification_available? = Enum.any?(skeptic_results, &(&1[:internal] != true))
+
     # C2 — a completion claim must not pass verification while the gate itself
     # is RED. The skeptic panel judges the GOAL; it is not asked to re-run the
     # project's own build/test suite (a fresh read-only session re-running the
@@ -1164,7 +1224,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
       reason: reason,
       refuted_count: refuted_count,
       total: total,
-      gaps: gaps
+      gaps: gaps,
+      verification_available: verification_available?
     }
 
     state =
@@ -2374,7 +2435,14 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
     )
   end
 
-  defp blocker_streak_threshold do
+  @doc """
+  Consecutive identical Tier-1 `:blocked` blocker keys required before the
+  goal auto-pauses. Public: `GoalTracker.record_blocker/3` reads it too, since
+  the actual cross-turn pause decision now lives there (see that function's
+  moduledoc for why the count kept here alone can never trip it).
+  """
+  @spec blocker_streak_threshold() :: pos_integer()
+  def blocker_streak_threshold do
     Application.get_env(
       :optimal_system_agent,
       :goal_verifier_blocker_streak_threshold,

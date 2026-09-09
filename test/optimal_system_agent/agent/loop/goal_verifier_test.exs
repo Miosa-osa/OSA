@@ -1616,6 +1616,132 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       assert s2.goal_verifier_blocker_key == nil
     end
 
+    # ── DURABLE blocker streak (cross-turn — the missing sibling to
+    #    off-track/no-progress termination) ─────────────────────────────────
+    #
+    # Reported: an agent finished all agent-doable work and the only
+    # remaining acceptance criteria needed a human (merge two PRs, run a
+    # manual MFA test, rotate secrets, sign vendor BAAs). The SAME blocker
+    # kept getting cited across FIVE SEPARATE goal-continuation turns, and
+    # the goal never auto-paused — it just kept re-arming.
+    #
+    # Root cause: `TurnPipeline` resets `goal_verifier_blocker_key`/
+    # `goal_verifier_blocker_streak` to `nil`/`0` at the start of EVERY new
+    # top-level turn (correct for a genuine fresh user message — see that
+    # module's own comment — but the goal loop's OWN auto-continuation turns
+    # are NOT a fresh chance, they are the same goal talking to itself, and
+    # they arrive at the backend indistinguishable from real user input). So
+    # the EPHEMERAL streak `handle_blocked/2` kept on the turn `state` map
+    # could never count past 1 across separate turns, and
+    # `@blocker_streak_threshold` (3) could never trip.
+    #
+    # `GoalTracker.record_blocker/3` is the durable, cross-turn twin: each
+    # call below uses a FRESH `state` (no `goal_verifier_blocker_*` carried
+    # over) — exactly what a real new top-level turn looks like — yet the
+    # DURABLE streak still accumulates and pauses the goal on the 3rd round.
+    test "the same blocker across SEPARATE top-level turns durably pauses the goal, " <>
+           "even though the ephemeral in-turn latch never trips",
+         %{session_id: sid} do
+      state = complex_state(sid)
+
+      stub_triage(fn _ ->
+        triage_json("blocked",
+          blocker_key: "requires_human_signature",
+          reason: "vendor BAA needs a human signature"
+        )
+      end)
+
+      s1 = GoalVerifier.maybe_gate(state)
+      assert s1.goal_verifier_blocker_streak == 1
+      refute s1.goal_verifier_paused
+      refute GoalTracker.paused?(sid)
+      assert GoalTracker.snapshot(sid).blocker_streak == 1
+
+      # A FRESH `state` each round (not chained from `s1`/`s2`) simulates the
+      # per-turn reset — the ephemeral streak is streak-of-one EVERY time.
+      s2 = GoalVerifier.maybe_gate(state)
+      assert s2.goal_verifier_blocker_streak == 1
+      refute s2.goal_verifier_paused
+      refute GoalTracker.paused?(sid), "not yet — only 2 durable rounds so far"
+      assert GoalTracker.snapshot(sid).blocker_streak == 2
+
+      s3 = GoalVerifier.maybe_gate(state)
+      assert s3.goal_verifier_blocker_streak == 1
+      refute s3.goal_verifier_paused, "the ephemeral latch alone never reaches its own threshold"
+
+      # But the DURABLE goal is now genuinely paused — the fix.
+      assert GoalTracker.paused?(sid)
+      snap = GoalTracker.snapshot(sid)
+      assert snap.blocker_streak == 3
+      assert snap.pause_reason == :blocked_on_human
+      assert snap.last_gaps == ["vendor BAA needs a human signature"]
+      refute GoalTracker.continue?(sid)
+
+      # And it stays surfaced ONCE, not re-asked every subsequent boundary —
+      # `skip_reason/1` skips a `:paused` goal before triage even runs again,
+      # so `maybe_gate/1` is now a total no-op (no directive, no fresh triage
+      # call) rather than re-pausing an already-paused goal.
+      s4 = GoalVerifier.maybe_gate(state)
+      assert s4.messages == state.messages
+      assert GoalTracker.snapshot(sid).blocker_streak == 3
+      assert GoalTracker.paused?(sid)
+    end
+
+    test "a DIFFERENT blocker key resets the DURABLE streak too", %{session_id: sid} do
+      state = complex_state(sid)
+
+      stub_triage(fn _ -> triage_json("blocked", blocker_key: "missing_api_key") end)
+      GoalVerifier.maybe_gate(state)
+      GoalVerifier.maybe_gate(state)
+      assert GoalTracker.snapshot(sid).blocker_streak == 2
+
+      stub_triage(fn _ -> triage_json("blocked", blocker_key: "port_in_use") end)
+      GoalVerifier.maybe_gate(state)
+      snap = GoalTracker.snapshot(sid)
+      assert snap.blocker_streak == 1
+      assert snap.blocker_key == "port_in_use"
+      refute GoalTracker.paused?(sid)
+    end
+
+    test "a non-blocked triage clears the DURABLE blocker streak too", %{session_id: sid} do
+      state = complex_state(sid)
+
+      stub_triage(fn _ -> triage_json("blocked", blocker_key: "missing_api_key") end)
+      GoalVerifier.maybe_gate(state)
+      assert GoalTracker.snapshot(sid).blocker_streak == 1
+
+      stub_triage(fn _ -> triage_json("continue") end)
+      GoalVerifier.maybe_gate(state)
+      snap = GoalTracker.snapshot(sid)
+      assert snap.blocker_streak == 0
+      assert snap.blocker_key == nil
+    end
+
+    # ── Empty-panel circuit breaker (the missing "no verdict, don't re-arm") ─
+    #
+    # Reported: an independent review panel finished with NO verdict (every
+    # skeptic crashed/timed out), yet the goal still re-armed for another
+    # turn as if the panel had said "incomplete, keep going". A round where
+    # NOTHING was ever judged is not evidence the goal is unfinished — it is
+    # an infrastructure failure, and must not drive further auto-continuation.
+    test "every skeptic failing to return a verdict pauses the goal instead of re-arming it", %{
+      session_id: sid
+    } do
+      state = complex_state(sid)
+      stub_triage(fn _ -> triage_json("candidate_complete") end)
+      stub_runner(fn _sid, configs -> Enum.map(configs, fn _ -> {:error, :timeout} end) end)
+
+      out = GoalVerifier.maybe_gate(state)
+
+      assert out.messages == state.messages,
+             "an empty panel must not inject a keep-going nudge on top of the pause"
+
+      assert GoalTracker.paused?(sid)
+      snap = GoalTracker.snapshot(sid)
+      assert snap.pause_reason == :verification_unavailable
+      refute GoalTracker.continue?(sid)
+    end
+
     # ── Triage failure — FAIL-OPEN (defer), never fail-closed (panel) ───────
     #
     # A triage that cannot run means the provider that just drove the turn is

@@ -120,6 +120,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   alias OptimalSystemAgent.Agent.TaskBrief
   alias OptimalSystemAgent.ConfigFile
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Settings
   alias OptimalSystemAgent.System.AtomicFile
 
   @table :osa_goal_tracker
@@ -142,6 +143,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
           | :user
           | :blocked
           | :abandoned
+          | :blocked_on_human
+          | :verification_unavailable
           | nil
 
   defmodule Snapshot do
@@ -168,6 +171,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
             blocked_claim_turn: non_neg_integer() | nil,
             completion_claim_turn: non_neg_integer() | nil,
             abandoned_count: non_neg_integer(),
+            blocker_key: String.t() | nil,
+            blocker_streak: non_neg_integer(),
             history: [String.t()],
             updated_at: DateTime.t() | nil
           }
@@ -212,6 +217,12 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
               # so it never outlives the turn it was made on.
               completion_claim_turn: nil,
               abandoned_count: 0,
+              # Tier-1 triage `:blocked` streak — DURABLE, cross-turn twin of
+              # `GoalVerifier.handle_blocked/2`'s own per-turn latch. See
+              # `record_blocker/3` for why the ephemeral one alone cannot ever
+              # trip its own auto-pause across separate goal-continuation turns.
+              blocker_key: nil,
+              blocker_streak: 0,
               history: [],
               updated_at: nil
   end
@@ -270,22 +281,65 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   evaluate `paused?/1` against a tracker that was never opted in):
 
     1. explicit `config :optimal_system_agent, goal_tracker_enabled: true` or
-       `false` — returned verbatim (operator override wins).
-    2. `:auto` (the default) — ON when the turn is autonomous/long-running
-       per the shared `GoalVerifier.autonomous_posture?/1` predicate
-       (overdrive/bypass mode, an anchored goal loop, or a long turn), OFF for
-       ordinary short interactive turns.
+       `false` — returned verbatim (operator override wins; this is an
+       operator/test knob, not the user-facing one below).
+    2. `:auto` (the default) — OFF outright when the user has turned
+       autonomous goal pursuit off (`auto_enabled?/0`); otherwise ON when the
+       turn is autonomous/long-running per the shared
+       `GoalVerifier.autonomous_posture?/1` predicate (overdrive/bypass mode,
+       an anchored goal loop, or a long turn), OFF for ordinary short
+       interactive turns.
   """
   @spec enabled?(map()) :: boolean()
   def enabled?(state) when is_map(state) do
     case Application.get_env(:optimal_system_agent, :goal_tracker_enabled, :auto) do
       true -> true
       false -> false
-      _auto -> GoalVerifier.autonomous_posture?(state)
+      _auto -> auto_enabled?() and GoalVerifier.autonomous_posture?(state)
     end
   end
 
   def enabled?(_), do: false
+
+  @doc """
+  Whether autonomous goal pursuit is allowed at all — a user-controlled,
+  persistent kill switch. Toggled via `/goal auto on|off`
+  (`Channels.CLI.Commands.cmd_goal/2`) and persisted the same way the MCP
+  server allow-list is (`Settings.set_user/2` → `~/.osa/settings.json`), so
+  it survives across turns AND across sessions. Default `true` (unset means
+  the pre-existing behavior).
+
+  Deliberately INDEPENDENT of `permission_mode`/overdrive: full-auto TOOL
+  execution (no per-tool approval) and autonomous GOAL pursuit are two
+  different questions a user can answer differently, and coupling them was
+  never asked for — a user who wants overdrive's "don't ask me before every
+  tool call" but NOT "keep chasing a goal after I thought the task was done"
+  has no way to get that otherwise. `GoalVerifier.autonomous_posture?/1`
+  (checked below in `enabled?/1`, and by `GoalVerifier.activated?/1`) is the
+  ONLY thing that reads permission mode for goal-activation purposes; this
+  function reads none of it.
+
+  When `false`:
+    * `Tools.Builtins.Goal.Handler.validate_create/2` refuses the model's own
+      `create_goal` call outright — the model cannot spontaneously start a
+      goal from an ordinary request.
+    * `enabled?/1` and `GoalVerifier.activated?/1` both resolve `false`
+      before ever consulting `autonomous_posture?/1` — no goal, new or
+      already anchored, auto-continues, auto-re-arms, or gets a verification
+      panel run against it.
+
+  An EXPLICIT `/goal <text>` still anchors a goal regardless of this switch —
+  it is about the harness deciding to pursue something on its OWN initiative,
+  not about removing the feature (`Channels.CLI.Commands.anchor_goal_command/2`
+  calls `start/2` directly and does not consult this).
+  """
+  @spec auto_enabled?() :: boolean()
+  def auto_enabled? do
+    case Settings.get("goal_auto", true) do
+      false -> false
+      _ -> true
+    end
+  end
 
   @doc """
   `true` when this session is an explicitly-anchored, still-live goal loop —
@@ -890,6 +944,28 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
     end
   end
 
+  # `verification_available: false` means every skeptic in the round failed
+  # to return a real verdict — crashed, timed out, or the panel could not
+  # even be spawned (`GoalVerifier.verify/1`'s `verification_available?`) —
+  # NOT a real judgment that the goal is unfinished. Before this clause,
+  # that fell through to the ordinary `:incomplete` handling below, which —
+  # absent two CONSECUTIVE identical-gap rounds — reads as ordinary "keep
+  # going", so a broken/rate-limited verification provider silently re-armed
+  # the goal loop turn after turn against NOTHING ever having been reviewed.
+  # Pause immediately: one truly empty round is reason enough (there is no
+  # "consecutive" bar to clear when nothing was ever judged either way), and
+  # `/goal resume` remains available exactly like any other auto-pause once
+  # the provider recovers.
+  defp apply_verdict(
+         snap,
+         %GoalVerifier.Result{verdict: :incomplete, verification_available: false} = result,
+         _work
+       ) do
+    snap
+    |> Map.merge(%{status: :paused, pause_reason: :verification_unavailable, last_gaps: []})
+    |> transition("goal PAUSED (verification_unavailable) — #{result.reason}")
+  end
+
   defp apply_verdict(snap, %GoalVerifier.Result{verdict: :incomplete} = result, work_marker) do
     fingerprint = gap_fingerprint(result.gaps)
     {stall_count, stalled?} = advance_stall(snap, fingerprint, work_marker)
@@ -1185,12 +1261,103 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
           # goal re-block on the first claim after the user asked for more work.
           blocked_claims: 0,
           blocked_claim_turn: nil,
+          # Same "fresh chance" reasoning as `blocked_claims` above, extended to
+          # the durable blocker streak `record_blocker/3` advances: the user has
+          # now seen the blocked handoff and may have cleared it, so a resume
+          # must not restart 2/3 of the way into a stale streak.
+          blocker_key: nil,
+          blocker_streak: 0,
           updated_at: DateTime.utc_now()
       }
 
       put(snap)
       transition(snap, "goal RESUMED")
     end
+  end
+
+  @doc """
+  Record a Tier-1 triage `:blocked` classification (`GoalVerifier.handle_blocked/2`)
+  against the DURABLE, cross-turn blocker streak — the sibling `apply_verdict/3`'s
+  `:off_track`/`:no_progress` stall counters already have.
+
+  This exists because the streak `GoalVerifier` kept before this lived entirely
+  on the per-turn loop `state` map, and `TurnPipeline` resets that map's
+  `goal_verifier_blocker_key`/`goal_verifier_blocker_streak` to `nil`/`0` at the
+  start of EVERY new top-level turn — deliberately, so a genuine fresh user
+  message gets a fresh chance rather than resuming 2/3 of the way into a stale
+  blocker. But the goal loop's OWN auto-continuation turns (the TUI resubmitting
+  `GOAL_WORK_PROMPT`) are NOT a fresh chance at all — they are the SAME goal
+  talking to itself — and they arrive at the backend as ordinary new top-level
+  turns indistinguishable from real user input. The practical effect: a blocker
+  that genuinely persisted across five separate auto-continue turns still
+  measured as streak-of-one every single time, because each turn's ephemeral
+  counter was wiped before the triage call that would have incremented it past
+  1 ever ran again — `@blocker_streak_threshold` (default 3) could never trip,
+  and a goal blocked on something only a human can do circled forever instead
+  of ever surfacing that once.
+
+  Returns `{streak, paused?}`. `paused?` is `true` exactly when `key` has now
+  repeated `GoalVerifier.blocker_streak_threshold/0` consecutive DURABLE
+  rounds, at which point the snapshot is ALSO paused
+  (`pause_reason: :blocked_on_human`, `last_gaps: [reason]`, mirroring how
+  `:off_track`/`:no_progress` pause themselves) — the loop's existing
+  `paused?/1` halt (`react_loop.ex`) picks it up on the very next iteration,
+  same as any other auto-pause.
+  """
+  @spec record_blocker(String.t(), String.t(), String.t()) :: {pos_integer(), boolean()}
+  def record_blocker(session_id, key, reason)
+      when is_binary(session_id) and is_binary(key) and is_binary(reason) do
+    transaction(session_id, fn -> do_record_blocker(session_id, key, reason) end)
+  end
+
+  defp do_record_blocker(session_id, key, reason) do
+    snap = ensure(session_id)
+    streak = if snap.blocker_key == key, do: snap.blocker_streak + 1, else: 1
+
+    if streak >= GoalVerifier.blocker_streak_threshold() do
+      snap =
+        snap
+        |> Map.merge(%{
+          blocker_key: key,
+          blocker_streak: streak,
+          status: :paused,
+          pause_reason: :blocked_on_human,
+          last_gaps: [reason]
+        })
+
+      put(snap)
+
+      transition(
+        snap,
+        "goal PAUSED (blocked_on_human) — the same blocker (`#{key}`) stopped progress for " <>
+          "#{streak} consecutive rounds: #{reason}"
+      )
+
+      {streak, true}
+    else
+      snap = %{snap | blocker_key: key, blocker_streak: streak}
+      put(snap)
+      {streak, false}
+    end
+  end
+
+  @doc """
+  Clear the durable blocker streak `record_blocker/3` advances — a `:continue`
+  or `:candidate_complete` triage classification means whatever was stopping
+  progress no longer is, so the next `:blocked` round (if any) starts fresh
+  rather than inheriting an unrelated blocker's streak.
+  """
+  @spec clear_blocker_streak(String.t()) :: :ok
+  def clear_blocker_streak(session_id) when is_binary(session_id) do
+    transaction(session_id, fn ->
+      snap = ensure(session_id)
+
+      if snap.blocker_key != nil or snap.blocker_streak != 0 do
+        put(%{snap | blocker_key: nil, blocker_streak: 0})
+      end
+
+      :ok
+    end)
   end
 
   # Control changes and verification commits share a lock. A panel runs outside
@@ -1797,7 +1964,23 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
     :cleared
   ]
   @phases [:idle, :planning, :executing]
-  @pause_reasons [:no_progress, :run_cap, :off_track, :user, :blocked, :abandoned]
+  # `:usage_limits` was declared in `@type pause_reason` and assigned by
+  # `note_usage/2` but never added to this whitelist — a session paused for
+  # spending its token budget silently lost that reason (decoded back to
+  # `nil`) on the next process restart / durable reload. `:blocked_on_human`
+  # and `:verification_unavailable` are new; see `record_blocker/3` and
+  # `GoalVerifier.run_gate/1`'s empty-panel branch respectively.
+  @pause_reasons [
+    :no_progress,
+    :run_cap,
+    :off_track,
+    :user,
+    :blocked,
+    :abandoned,
+    :usage_limits,
+    :blocked_on_human,
+    :verification_unavailable
+  ]
 
   defp encode(%Snapshot{} = snap) do
     %{
@@ -1824,6 +2007,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
       "blocked_claim_turn" => snap.blocked_claim_turn,
       "completion_claim_turn" => snap.completion_claim_turn,
       "abandoned_count" => snap.abandoned_count,
+      "blocker_key" => snap.blocker_key,
+      "blocker_streak" => snap.blocker_streak,
       "history" => snap.history,
       "updated_at" => snap.updated_at && DateTime.to_iso8601(snap.updated_at)
     }
@@ -1859,6 +2044,8 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
       blocked_claim_turn: int_or_nil(Map.get(map, "blocked_claim_turn")),
       completion_claim_turn: int_or_nil(Map.get(map, "completion_claim_turn")),
       abandoned_count: non_neg_int(Map.get(map, "abandoned_count")),
+      blocker_key: string_or_nil(Map.get(map, "blocker_key")),
+      blocker_streak: non_neg_int(Map.get(map, "blocker_streak")),
       history: string_list(Map.get(map, "history")),
       updated_at: decode_datetime(Map.get(map, "updated_at"))
     }
