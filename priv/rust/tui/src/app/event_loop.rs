@@ -112,6 +112,35 @@ fn spawn_animation_timer(
     })
 }
 
+/// Forward one OS signal (SIGTERM/SIGHUP/SIGQUIT) into the event channel as
+/// `Event::TerminateSignal(signum)`.
+///
+/// `tokio::signal::unix::signal` does the only part that actually needs to be
+/// async-signal-safe (a self-pipe under the hood), so everything on this side
+/// — including `signum`, passed through as a plain value rather than read back
+/// out of the signal machinery — runs as ordinary async Rust. One task per
+/// signal, exactly like `spawn_tick_timer` / `spawn_animation_timer` above:
+/// each event source in this file owns its own small spawn, rather than one
+/// task juggling all of them.
+///
+/// Exits quietly (no event sent) if the OS refuses to let us listen for this
+/// signal at all, which does not happen in practice for SIGTERM/SIGHUP/SIGQUIT
+/// on any platform this binary ships for.
+fn spawn_signal_listener(
+    tx: tokio::sync::mpsc::UnboundedSender<Event>,
+    kind: tokio::signal::unix::SignalKind,
+    signum: i32,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let Ok(mut stream) = tokio::signal::unix::signal(kind) else {
+            return;
+        };
+        if stream.recv().await.is_some() {
+            let _ = tx.send(Event::TerminateSignal(signum));
+        }
+    })
+}
+
 type Term = Terminal<crate::app::inline_backend::InlineBackend<std::io::Stdout>>;
 
 use crate::app::inline_backend::InlineBackend;
@@ -791,6 +820,29 @@ impl App {
         // while this one carries no state at all — see `Event::AnimationFrame`.
         let animating = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let anim_handle = spawn_animation_timer(self.event_tx.clone(), animating.clone());
+
+        // Listen for SIGTERM/SIGHUP/SIGQUIT — a plain `kill`, the terminal
+        // window closing, or Ctrl+\. All three are interceptable (unlike
+        // SIGKILL/-9/OOM-kill, which reaches no user code at all and stays a
+        // documented, accepted limitation — see the module doc on
+        // `Event::TerminateSignal`). Left running for the app's whole
+        // lifetime; there is nothing to pause them around the way the
+        // terminal reader gets paused for a viewport rebuild.
+        let sigterm_handle = spawn_signal_listener(
+            self.event_tx.clone(),
+            tokio::signal::unix::SignalKind::terminate(),
+            libc::SIGTERM,
+        );
+        let sighup_handle = spawn_signal_listener(
+            self.event_tx.clone(),
+            tokio::signal::unix::SignalKind::hangup(),
+            libc::SIGHUP,
+        );
+        let sigquit_handle = spawn_signal_listener(
+            self.event_tx.clone(),
+            tokio::signal::unix::SignalKind::quit(),
+            libc::SIGQUIT,
+        );
 
         // Seed screen-reader (plain-text) mode from persisted config, or auto-detect
         // from the environment (NO_COLOR / accessibility hints) on first run.
@@ -1732,6 +1784,9 @@ impl App {
         tick_handle.abort();
         anim_handle.abort();
         term_handle.abort();
+        sigterm_handle.abort();
+        sighup_handle.abort();
+        sigquit_handle.abort();
 
         // If a dialog still owned the full/alternate screen when the loop broke
         // (quitting through the `/quit` confirm does exactly this), come back to
@@ -1769,6 +1824,17 @@ impl App {
             cancel.cancel();
         }
 
+        // SIGTERM/SIGHUP/SIGQUIT: the chrome is already erased above (the same
+        // path every other exit takes), so all that is left is telling `main`
+        // which signal to re-raise once it has also restored the terminal.
+        // Checked before `fatal_exit`: a signal arriving mid-launch-failure is
+        // still, first and foremost, a signal — the process's exit status
+        // should say so.
+        if let Some(sig) = self.pending_signal.take() {
+            info!("App exiting: caught signal {}", sig);
+            return Ok(crate::app::resume::ExitOutcome::TerminatedBySignal(sig));
+        }
+
         // A launch-time resume that could not be resolved leaves through the
         // LOUD arm: stderr + exit 2, never a blank conversation that reads as a
         // normal fresh session.
@@ -1801,6 +1867,16 @@ impl App {
     /// input while open, toggles from the plain chat surface, and records keypress
     /// activity for the completion-notification idle heuristic.
     fn dispatch_event(&mut self, event: Event) -> bool {
+        // SIGTERM/SIGHUP/SIGQUIT: quit through the SAME cleanup path as every
+        // other exit (the chrome erase a few dozen lines below, in `run`'s own
+        // teardown) rather than doing anything terminal-touching here — by
+        // this point `tokio::signal::unix`'s self-pipe has already gotten us
+        // back into ordinary async Rust, so there is no async-signal-safety
+        // constraint on THIS code, only on the machinery that woke it up.
+        if let Event::TerminateSignal(sig) = event {
+            self.pending_signal = Some(sig);
+            return true;
+        }
         // U-T11 — fold terminal focus transitions (DECSET 1004 FocusGained/Lost,
         // enabled in main.rs) into the process-global focus flag so the
         // turn-complete notifier can gate on real "user is away" state. A no-op

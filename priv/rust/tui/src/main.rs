@@ -112,6 +112,29 @@ fn main() -> Result<()> {
             let _ = io::stderr().flush();
             std::process::exit(2);
         }
+        // SIGTERM/SIGHUP/SIGQUIT: the chrome is already erased (event_loop's own
+        // teardown) and the terminal is already restored (`restore_terminal()?`
+        // above). Re-raise the SAME signal with its DEFAULT disposition rather
+        // than translating it into `Ok(())` (a laundered exit 0) or a made-up
+        // exit code — a supervisor, `$?`, or `set -e` should see the real cause
+        // of death, exactly as if this handler did not exist. Genuine SIGKILL
+        // is not, and cannot be, handled this way: no signal number ever
+        // reaches user code for it, so there is nothing to re-raise — an
+        // accepted, documented limitation, not a gap in this handler.
+        Ok(app::resume::ExitOutcome::TerminatedBySignal(sig)) => {
+            unsafe {
+                libc::signal(sig, libc::SIG_DFL);
+            }
+            unsafe {
+                libc::raise(sig);
+            }
+            // The re-raised signal's default disposition terminates the
+            // process before execution returns here for SIGTERM/SIGHUP/SIGQUIT
+            // on every platform this binary ships for. Kept as an honest,
+            // non-zero fallback rather than falling through to `Ok(())`, in
+            // case that ever stops being true.
+            std::process::exit(128 + sig);
+        }
         Err(e) => Err(e),
     }
 }

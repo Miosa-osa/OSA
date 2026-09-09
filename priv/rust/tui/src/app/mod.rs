@@ -198,6 +198,13 @@ pub struct App {
     /// switched to the bad id, got an empty transcript back, and looked like a
     /// perfectly normal fresh session.
     pub fatal_exit: Option<String>,
+    /// Raw signal number when the event loop is quitting because SIGTERM,
+    /// SIGHUP or SIGQUIT arrived (see `Event::TerminateSignal`), so `run`'s
+    /// cleanup can report `ExitOutcome::TerminatedBySignal` and `main` can
+    /// re-raise the same signal, with its default disposition, once the
+    /// terminal is restored — the process's exit status stays honest instead
+    /// of being laundered into a plain `exit(0)`.
+    pub pending_signal: Option<i32>,
     /// `--model <name>` / `--provider <name>`: a one-shot, SESSION-SCOPED model
     /// override applied the moment the launch session id is known.
     ///
@@ -793,6 +800,7 @@ impl App {
             startup_resume: cli.resume.clone(),
             launch_mode: self::resume::LaunchMode::from_cli(&cli),
             fatal_exit: None,
+            pending_signal: None,
             // `--provider` alone (no `--model`) still needs a model to swap to;
             // the backend resolves the provider's default when model is "".
             startup_model: match (cli.model.clone(), cli.provider.clone()) {

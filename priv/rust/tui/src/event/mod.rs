@@ -54,4 +54,15 @@ pub enum Event {
     AnimationFrame,
     /// Health retry
     HealthRetry,
+    /// SIGTERM, SIGHUP or SIGQUIT arrived (raw signal number, e.g. `libc::SIGTERM`).
+    ///
+    /// Routed through the normal event channel rather than acted on inside the
+    /// OS signal handler itself: `tokio::signal::unix` already does the
+    /// async-signal-safe part (a self-pipe wakes this up), so by the time this
+    /// variant reaches `dispatch_event` we are back in ordinary async Rust,
+    /// free to do real terminal I/O. `dispatch_event` sets `App::pending_signal`
+    /// and quits through the SAME cleanup path every other exit uses — see its
+    /// handling there and `ExitOutcome::TerminatedBySignal`. SIGKILL is not, and
+    /// cannot be, represented here: no signal number reaches user code for it.
+    TerminateSignal(i32),
 }
