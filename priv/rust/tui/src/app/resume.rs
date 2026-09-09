@@ -113,6 +113,13 @@ pub enum ExitOutcome {
     /// Today this is only "the session id you asked to resume does not exist",
     /// which previously degraded into a blank conversation that looked fine.
     Failed(String),
+    /// The event loop quit because SIGTERM, SIGHUP or SIGQUIT arrived (see
+    /// `Event::TerminateSignal`). The chrome is already erased and the
+    /// terminal already restored by the time `main` sees this — carried out
+    /// only so `main` can re-raise the SAME raw signal number with its
+    /// default disposition, so a supervisor or `$?` sees the real cause of
+    /// death instead of a laundered clean exit.
+    TerminatedBySignal(i32),
 }
 
 impl ExitOutcome {
