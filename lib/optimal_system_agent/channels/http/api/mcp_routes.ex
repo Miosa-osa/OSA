@@ -22,8 +22,20 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.MCPRoutes do
               "status": "connected",
               "tool_count": 7
             }
-          ]
+          ],
+          "mcp_context": {
+            "tool_count": 47,
+            "server_count": 12,
+            "virtualized": true,
+            "estimated_tokens": 417
+          }
         }
+
+      `mcp_context` is `MCP.Virtualization.cost_estimate/0` — an ESTIMATE
+      (heuristic, not the provider's real tokenizer) of what MCP tools
+      currently cost the prompt, so a client can show something like
+      "12 MCP · ~417 tok" instead of leaving the operator to guess whether a
+      dozen connected servers are cheap or expensive.
   """
 
   use Plug.Router
@@ -48,7 +60,18 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.MCPRoutes do
         :exit, _ -> []
       end
 
-    json(conn, 200, %{servers: loaded ++ offered(loaded)})
+    json(conn, 200, %{servers: loaded ++ offered(loaded), mcp_context: cost_estimate()})
+  end
+
+  # `MCP.Virtualization.cost_estimate/0` already fails closed to an all-zero
+  # map internally; this rescue is defence in depth so a future change there
+  # can never turn a cost estimate into a 500 on the whole `/mcp` route.
+  defp cost_estimate do
+    OptimalSystemAgent.MCP.Virtualization.cost_estimate()
+  rescue
+    _ -> %{tool_count: 0, server_count: 0, virtualized: false, estimated_tokens: 0}
+  catch
+    :exit, _ -> %{tool_count: 0, server_count: 0, virtualized: false, estimated_tokens: 0}
   end
 
   # ── POST /:name/toggle — turn a discovered server on or off ──────────
