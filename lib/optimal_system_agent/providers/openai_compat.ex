@@ -341,6 +341,48 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     end
   end
 
+  @doc false
+  # METRIC ONLY — records this turn's visible-content throughput (tok/s) for
+  # the model picker's "~N tok/s" badge (see `ModelSpeed`'s moduledoc for why
+  # this is measured from real turns instead of a synthetic probe). Public so
+  # it is directly testable without a live HTTP stream — same reason
+  # `observe_cache/3` is public.
+  #
+  # Records nothing unless ALL of:
+  #
+  #   * a visible-generation window exists at all (`gen_first_ts` set) — a
+  #     turn that emitted no visible `{:text_delta, _}` (a reasoning model
+  #     that spent its whole token budget "thinking") has neither timestamp,
+  #     so this is a bogus-number guard, not a rounding nicety.
+  #   * that window has positive duration — a single-chunk answer would
+  #     otherwise divide by ~0 and report an absurd rate.
+  #   * usage was actually REPORTED by the server (`reported_usage?/1`) — an
+  #     `estimate_usage_fallback/3` substitute is not real token evidence.
+  #   * the visible-token estimate (`output_tokens` minus any
+  #     `reasoning_tokens` — a SUBSET per `ReasoningContent`'s "Accounting"
+  #     section) is positive — a turn that was ALL reasoning even though it
+  #     also streamed a stray visible byte would otherwise floor to 0/positive
+  #     duration and report a rate for content that was not really there.
+  @spec record_model_speed(map(), map(), String.t(), keyword()) :: :ok
+  def record_model_speed(acc, usage, model, opts) do
+    with first when is_integer(first) <- Map.get(acc, :gen_first_ts),
+         last when is_integer(last) <- Map.get(acc, :gen_last_ts),
+         gen_ms when gen_ms > 0 <- last - first,
+         true <- reported_usage?(usage),
+         visible_tokens when visible_tokens > 0 <-
+           max(Map.get(usage, :output_tokens, 0) - Map.get(usage, :reasoning_tokens, 0), 0) do
+      provider = Keyword.get(opts, :provider) || :openai_compatible
+      tok_s = visible_tokens / (gen_ms / 1000)
+      OptimalSystemAgent.Providers.ModelSpeed.record(provider, model, tok_s)
+      :ok
+    else
+      _ -> :ok
+    end
+  rescue
+    # A metric on the hot path must never fail the turn.
+    _ -> :ok
+  end
+
   # An SSE payload, not JSON: OpenAI-compatible streams are `data: {...}` lines
   # and terminate with `data: [DONE]`.
   defp sse_body?(body) do
@@ -495,7 +537,13 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       # `reasoning_details`), kept separate from `content` for the whole stream.
       reasoning: "",
       # Streaming splitter for inline <think>…</think> reasoning tags (GLM et al.)
-      think: ThinkStreamParser.new()
+      think: ThinkStreamParser.new(),
+      # Monotonic timestamps (ms) of the first/last VISIBLE `{:text_delta, _}`
+      # chunk — never set for a turn that emits none. Bounds the window
+      # `record_model_speed/3` measures tok/s over; see its moduledoc for why
+      # this must stay visible-content-only.
+      gen_first_ts: nil,
+      gen_last_ts: nil
     })
 
     into = fn {:data, data}, {req, resp} ->
@@ -531,6 +579,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
           # attributor must only ever see a real measurement.
           observe_cache(cache_fp, Map.get(acc, :usage, %{}), opts)
           probe_tool_schema_cache(Map.get(acc, :usage, %{}), opts, model)
+          record_model_speed(acc, Map.get(acc, :usage, %{}), model, opts)
           finalize_sse_stream(acc, callback, model, messages)
 
         {:error, reason} ->
@@ -544,6 +593,36 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
         Logger.error("OpenAI-compat stream error: #{Exception.message(e)}")
         {:error, "Stream error: #{Exception.message(e)}"}
     end
+  end
+
+  @doc false
+  # Test seam: drive the same SSE-chunk accumulation `stream_from_sse_chunks/3`
+  # does, but return the raw visible-generation window (`gen_first_ts`,
+  # `gen_last_ts`) instead of finalizing a result. Lets a test assert the
+  # actual stamping in `process_delta/3` (`stamp_visible_gen/2`) — that
+  # invisible reasoning/tool-call-markup chunks leave both `nil`, and only a
+  # visible `{:text_delta, _}` chunk sets them — without hand-constructing a
+  # synthetic accumulator for `record_model_speed/4`.
+  @spec debug_gen_window([String.t()]) :: {integer() | nil, integer() | nil}
+  def debug_gen_window(data_chunks) when is_list(data_chunks) do
+    callback = fn _ -> :ok end
+
+    init_acc = %{
+      buffer: "",
+      content: "",
+      tool_calls: %{},
+      usage: %{},
+      finish_reason: nil,
+      reasoning: "",
+      think: ThinkStreamParser.new(),
+      gen_first_ts: nil,
+      gen_last_ts: nil
+    }
+
+    acc =
+      Enum.reduce(data_chunks, init_acc, fn data, a -> handle_sse_chunk(data, callback, a) end)
+
+    {acc.gen_first_ts, acc.gen_last_ts}
   end
 
   @doc """
@@ -565,7 +644,9 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       usage: %{},
       finish_reason: nil,
       reasoning: "",
-      think: ThinkStreamParser.new()
+      think: ThinkStreamParser.new(),
+      gen_first_ts: nil,
+      gen_last_ts: nil
     }
 
     acc =
@@ -678,6 +759,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
             # dialect the backend speaks.
             %{acc | content: full, think: think_state}
             |> Map.put(:reasoning, Map.get(acc, :reasoning, "") <> thinking)
+            |> stamp_visible_gen(visible)
           end
 
         _ ->
@@ -725,6 +807,20 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       _ ->
         acc
     end
+  end
+
+  # Stamp the visible-generation window used by `record_model_speed/4`: the
+  # first and most recent VISIBLE `{:text_delta, _}` chunk. A chunk with no
+  # visible text (invisible reasoning, or content suppressed as tool-call
+  # markup) never calls this, so a turn that emits nothing visible — a
+  # reasoning model that spends its whole budget "thinking" — leaves both
+  # timestamps `nil` and contributes no speed sample at all.
+  defp stamp_visible_gen(acc, ""), do: acc
+
+  defp stamp_visible_gen(acc, _visible) do
+    now = System.monotonic_time(:millisecond)
+    first = if is_nil(Map.get(acc, :gen_first_ts)), do: now, else: acc.gen_first_ts
+    %{acc | gen_first_ts: first, gen_last_ts: now}
   end
 
   defp maybe_set_id(tc, %{"id" => id}) when is_binary(id), do: %{tc | id: id}
@@ -2028,9 +2124,20 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       input_tokens: inp,
       output_tokens: out,
       cache_read_input_tokens: cached_input(u),
-      cache_creation_input_tokens: cache_written(u)
+      cache_creation_input_tokens: cache_written(u),
+      # A SUBSET of `output_tokens`, per `ReasoningContent`'s "Accounting"
+      # section — collected and never summed into anything billed. Used only
+      # by `record_model_speed/4` to keep an invisible reasoning burst out of
+      # the visible-tok/s estimate for a turn that also produced real content.
+      reasoning_tokens: reasoning_tokens(u)
     }
   end
+
+  defp reasoning_tokens(%{"completion_tokens_details" => %{"reasoning_tokens" => n}})
+       when is_integer(n),
+       do: n
+
+  defp reasoning_tokens(_), do: 0
 
   defp cached_input(%{"prompt_tokens_details" => %{"cached_tokens" => n}}) when is_integer(n),
     do: n
