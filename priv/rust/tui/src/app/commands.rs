@@ -205,6 +205,27 @@ impl App {
                 // CC commands/clear/conversation.ts parity. Failure surfaces
                 // as a CommandResult error toast so the user knows the model
                 // may still remember.
+                //
+                // Close the same gate `create_session` uses. `self.session_id`
+                // still names the OLD session until `SessionCreated` lands —
+                // and the backend clear is not instant: it cancels the old
+                // turn, saves its transcript, tombstones it, THEN swaps.
+                // Anything typed in that window used to fall straight through
+                // to `submit_prompt`, which POSTs to the (still-named) old id.
+                // The backend's `/:id/orchestrate` route calls
+                // `ensure_loop/2` for whatever id it's given, and an old id
+                // with no live loop restarts one — `Loop.init/1` finds no
+                // checkpoint (the clear's own auto-save just cleared it at the
+                // turn boundary) and falls back to `load_persisted_messages/1`,
+                // which reloads the transcript `/clear` just asked to discard.
+                // That is the "/clear doesn't work" report: not a failure to
+                // clear, but a resurrection triggered by the very next message.
+                // Gating on `session_creation_pending` reuses the existing
+                // queue-and-drain machinery (`submit_input`'s
+                // `startup_session_pending` check, drained on `SseConnected`)
+                // so a message typed mid-swap waits for the real new id
+                // instead of reviving the old one.
+                self.session_creation_pending = true;
                 let client = self.client.clone();
                 let tx = self.event_tx.clone();
                 let sid = self.session_id.clone();
