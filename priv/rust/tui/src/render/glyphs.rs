@@ -136,9 +136,9 @@ pub fn token_arrow() -> &'static str {
 /// index clamps to the nearest end.
 pub fn effort_dot(level: u8) -> &'static str {
     match level {
-        0 => pick("\u{25cb}", "."),      // ○ -> .
-        1 => pick("\u{25d0}", "o"),      // ◐ -> o
-        _ => pick("\u{25c9}", "O"),      // ◉ -> O
+        0 => pick("\u{25cb}", "."), // ○ -> .
+        1 => pick("\u{25d0}", "o"), // ◐ -> o
+        _ => pick("\u{25c9}", "O"), // ◉ -> O
     }
 }
 
@@ -180,17 +180,17 @@ mod tests {
     #[test]
     fn primary_and_fallback_widths_match() {
         let pairs: &[(&str, &str)] = &[
-            ("\u{23bf}", "\\"),   // result_branch
-            ("\u{25cf}", "*"),    // bullet
-            ("\u{25c6}", "*"),    // diamond
+            ("\u{23bf}", "\\"),       // result_branch
+            ("\u{25cf}", "*"),        // bullet
+            ("\u{25c6}", "*"),        // diamond
             ("\u{2503}", "\u{2502}"), // heavy_rail
-            ("\u{2713}", "+"),    // check
-            ("\u{2717}", "x"),    // cross
+            ("\u{2713}", "+"),        // check
+            ("\u{2717}", "x"),        // cross
             ("\u{2026}", "\u{2026}"), // ellipsis
-            ("\u{21e3}", "v"),    // token_arrow
-            ("\u{25cb}", "."),    // effort 0
-            ("\u{25d0}", "o"),    // effort 1
-            ("\u{25c9}", "O"),    // effort 2
+            ("\u{21e3}", "v"),        // token_arrow
+            ("\u{25cb}", "."),        // effort 0
+            ("\u{25d0}", "o"),        // effort 1
+            ("\u{25c9}", "O"),        // effort 2
         ];
         for (primary, fallback) in pairs {
             assert_eq!(
@@ -208,8 +208,8 @@ mod tests {
     #[test]
     fn spinner_frames_are_uniform_width() {
         let unicode: &[&str] = &[
-            "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}",
-            "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
+            "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}",
+            "\u{2827}",
         ];
         let legacy: &[&str] = &["|", "/", "-", "\\", "|", "/", "-", "\\"];
         assert_eq!(unicode.len(), legacy.len());

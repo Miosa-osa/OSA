@@ -435,14 +435,23 @@ impl Agents {
                 } else {
                     theme.agent_name()
                 };
-                // Live activity: current action, or the subject as a fallback.
-                // A collapsed node appends "(+N)" so the reader knows how much is
-                // folded away without expanding it.
-                let activity = if node_collapsed && has_children {
-                    format!("{} (+{})", super::row_activity(entry).trim(), child_rows)
+                // Live activity: current action (with any raw tool-id verb
+                // mapped to a human label — 2b), or the subject as a
+                // fallback. A BLOCKED row (⏸ — queued behind the concurrency
+                // cap, or awaiting the model) instead states what it is
+                // blocked ON: its last real action plus the backend's phase
+                // detail (2c), so the amber tone is not the only clue
+                // something is stalled. A collapsed node appends "(+N)" so
+                // the reader knows how much is folded away without expanding
+                // it, regardless of which of the two the row is showing.
+                let mut activity = if super::is_blocked_waiting(entry) {
+                    super::blocked_activity_detail(entry)
                 } else {
-                    super::row_activity(entry).to_string()
+                    super::row_activity_display(entry)
                 };
+                if node_collapsed && has_children {
+                    activity = format!("{activity} (+{child_rows})");
+                }
                 // Activity tone encodes STATE so a stuck or failed worker is
                 // obvious at a glance without stealing the selection glyph: red
                 // for a failed row, amber for one that is queued/blocked waiting
@@ -1057,7 +1066,7 @@ impl Agents {
                     if entry.tool_uses == 1 { "" } else { "s" },
                     fmt_tokens(entry.tokens_used),
                     ctx,
-                    fmt_cost_opt(entry.cost_usd),
+                    fmt_cost_opt_with_cap(entry.cost_usd, entry.budget_cap_usd),
                 );
 
                 let mut spans = vec![
@@ -1309,6 +1318,18 @@ pub(super) fn fmt_cost_opt(usd: Option<f64>) -> String {
     }
 }
 
+/// [`fmt_cost_opt`], but pairs a known cost with its budget cap when the
+/// backend has reported one (2e — `"$2.48 / $4.00"`), so the full-screen
+/// dashboard shows the same live-cost-vs-ceiling the inline roster meter does
+/// (see `fmt_worker_meta`). A cost with no known cap still renders alone,
+/// exactly as `fmt_cost_opt` always has.
+pub(super) fn fmt_cost_opt_with_cap(usd: Option<f64>, cap_usd: Option<f64>) -> String {
+    match (usd, cap_usd) {
+        (Some(c), Some(cap)) if cap > 0.0 => format!("{} / {}", fmt_cost(c), fmt_cost(cap)),
+        _ => fmt_cost_opt(usd),
+    }
+}
+
 /// Five-cell token-usage micro-bar visualizing this agent's token count relative
 /// to the busiest agent. This is a real proportion of observed tokens (the only
 /// per-agent progress signal available) — not a fabricated completion percent.
@@ -1374,7 +1395,15 @@ fn fmt_worker_meta(entry: &AgentEntry) -> String {
         parts.push(format!("{}% ctx", pct));
     }
     if let Some(cost) = entry.cost_usd {
-        parts.push(fmt_cost(cost));
+        // 2e: the per-agent budget cap was otherwise invisible — a row showed
+        // live spend with no sense of how close it was to its ceiling. Pair
+        // it with the cap whenever the backend has reported one
+        // (`$2.48 / $4.00`); unknown to the same "—" degrade every other cost
+        // reading already uses.
+        parts.push(match entry.budget_cap_usd {
+            Some(cap) if cap > 0.0 => format!("{} / {}", fmt_cost(cost), fmt_cost(cap)),
+            _ => fmt_cost(cost),
+        });
     }
     // No occupancy and no cost yet — say something true about effort rather than
     // fall back to the token total we are deliberately not showing.
@@ -1540,7 +1569,7 @@ fn truncate_str(s: &str, max_cols: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::fmt_fleet_gauge;
+    use super::{fmt_cost_opt_with_cap, fmt_fleet_gauge};
 
     #[test]
     fn fleet_gauge_normal_case() {
@@ -1559,5 +1588,29 @@ mod tests {
         assert_eq!(fmt_fleet_gauge(0, 0), "0 agents");
         assert_eq!(fmt_fleet_gauge(1, 0), "1 agent");
         assert_eq!(fmt_fleet_gauge(5, 0), "5 agents");
+    }
+
+    // ── 2e: per-agent budget cap shown alongside live cost ─────────────────
+
+    #[test]
+    fn cost_with_cap_pairs_both_figures() {
+        assert_eq!(
+            fmt_cost_opt_with_cap(Some(2.48), Some(4.0)),
+            "$2.48 / $4.00"
+        );
+    }
+
+    #[test]
+    fn cost_with_no_known_cap_falls_back_to_the_bare_figure() {
+        assert_eq!(fmt_cost_opt_with_cap(Some(2.48), None), "$2.48");
+        // A zero/negative cap is not a real ceiling — never divide-by-zero
+        // shaped output like "$2.48 / $0.00".
+        assert_eq!(fmt_cost_opt_with_cap(Some(2.48), Some(0.0)), "$2.48");
+    }
+
+    #[test]
+    fn no_known_cost_still_renders_the_dash_regardless_of_the_cap() {
+        assert_eq!(fmt_cost_opt_with_cap(None, Some(4.0)), "\u{2014}");
+        assert_eq!(fmt_cost_opt_with_cap(None, None), "\u{2014}");
     }
 }

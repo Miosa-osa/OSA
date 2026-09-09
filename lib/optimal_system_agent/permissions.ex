@@ -80,7 +80,7 @@ defmodule OptimalSystemAgent.Permissions do
   # touch `.git/config` or a shell rc file without the bypass-immune prompt the
   # other write tools raise.
   @file_mutating_tools ~w(file_write file_edit file_transform multi_file_edit
-                          file_create file_delete file_move)
+                          structural_edit file_create file_delete file_move)
 
   # Shell startup files — writes here are bypass-immune safety asks.
   @shell_rc_files ~w(.bashrc .zshrc .profile .bash_profile .bash_login .bash_logout .zshenv .zprofile .zlogin)
@@ -1124,13 +1124,26 @@ defmodule OptimalSystemAgent.Permissions do
   # one; `multi_file_edit`'s `%{"edits" => [%{"path" => ...}, ...]}` shape has
   # no top-level path, so its edit list is walked explicitly — otherwise a
   # multi-file batch would never be scope/safety checked at all.
-  defp file_paths_of(%{"edits" => edits}) when is_list(edits) do
-    edits
-    |> Enum.map(fn
-      %{"path" => p} when is_binary(p) and p != "" -> p
-      _ -> nil
-    end)
-    |> Enum.filter(&is_binary/1)
+  defp file_paths_of(%{"edits" => edits} = args) when is_list(edits) do
+    from_edits =
+      edits
+      |> Enum.map(fn
+        %{"path" => p} when is_binary(p) and p != "" -> p
+        _ -> nil
+      end)
+      |> Enum.filter(&is_binary/1)
+
+    from_edits ++ file_paths_of(Map.delete(args, "edits"))
+  end
+
+  # `structural_edit`'s `pattern` shape has no top-level `path` and its
+  # targets live under `pattern.paths`, not `edits` — without this clause a
+  # `structural_edit` call built ONLY from `pattern` (no `edits` at all) had
+  # every target invisible to `out_of_scope_write/2` and `bypass_immune_ask/2`,
+  # exactly the gap the `edits` clause above exists to close for
+  # `multi_file_edit`.
+  defp file_paths_of(%{"pattern" => %{"paths" => paths}}) when is_list(paths) do
+    Enum.filter(paths, &(is_binary(&1) and &1 != ""))
   end
 
   defp file_paths_of(args) do

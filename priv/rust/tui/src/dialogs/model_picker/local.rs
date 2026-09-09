@@ -143,7 +143,9 @@ impl ModelPicker {
                 }
             }
             if !l.catalog.is_empty() {
-                rows.push(LocalRow::Header("Available — curated abliterated / uncensored"));
+                rows.push(LocalRow::Header(
+                    "Available — curated abliterated / uncensored",
+                ));
                 for i in 0..l.catalog.len() {
                     rows.push(LocalRow::Catalog(i));
                 }
@@ -215,7 +217,10 @@ impl ModelPicker {
     }
 
     pub(super) fn handle_local_catalog_key(&mut self, key: KeyEvent) -> Option<ModelPickerAction> {
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return None;
         }
         let rows = self.local_rows();
@@ -274,7 +279,10 @@ impl ModelPicker {
     }
 
     pub(super) fn handle_local_detail_key(&mut self, key: KeyEvent) -> Option<ModelPickerAction> {
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return None;
         }
         let info = self.local_info.clone()?;
@@ -305,8 +313,10 @@ impl ModelPicker {
                 let quant = info.quants.get(self.local_quant_cursor).cloned();
                 if let Some(q) = quant.as_ref() {
                     if q.fit.as_ref().map(|f| f.verdict.as_str()) == Some("no") {
-                        self.local_error =
-                            Some(format!("{} won't fit this machine — pick a smaller quant", q.quant));
+                        self.local_error = Some(format!(
+                            "{} won't fit this machine — pick a smaller quant",
+                            q.quant
+                        ));
                         return None;
                     }
                 }
@@ -324,7 +334,10 @@ impl ModelPicker {
         None
     }
 
-    pub(super) fn handle_local_installing_key(&mut self, key: KeyEvent) -> Option<ModelPickerAction> {
+    pub(super) fn handle_local_installing_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> Option<ModelPickerAction> {
         let job = self.local_job.clone();
         match key.code {
             KeyCode::Esc => {
@@ -350,10 +363,15 @@ impl ModelPicker {
 
     // ── drawing ──────────────────────────────────────────────────────────────
 
-    fn fit_badge(fit: Option<&crate::client::types::LocalFit>, theme: &crate::style::Theme) -> Span<'static> {
+    fn fit_badge(
+        fit: Option<&crate::client::types::LocalFit>,
+        theme: &crate::style::Theme,
+    ) -> Span<'static> {
         match fit.map(|f| f.verdict.as_str()) {
             Some("fits") => Span::styled("✓", Style::default().fg(theme.colors.success)),
-            Some("partial") | Some("cpu") => Span::styled("⚠", Style::default().fg(theme.colors.warning)),
+            Some("partial") | Some("cpu") => {
+                Span::styled("⚠", Style::default().fg(theme.colors.warning))
+            }
             Some("no") => Span::styled("✗", Style::default().fg(theme.colors.error)),
             _ => Span::styled("·", Style::default().fg(theme.colors.dim)),
         }
@@ -399,7 +417,13 @@ impl ModelPicker {
         parts.join(" · ")
     }
 
-    fn draw_local_title(&self, frame: &mut Frame, inner: Rect, theme: &crate::style::Theme, title: &str) -> u16 {
+    fn draw_local_title(
+        &self,
+        frame: &mut Frame,
+        inner: Rect,
+        theme: &crate::style::Theme,
+        title: &str,
+    ) -> u16 {
         let mut cy = inner.y;
         frame.render_widget(
             Paragraph::new(title.to_string())
@@ -447,7 +471,12 @@ impl ModelPicker {
         }
     }
 
-    pub(super) fn draw_local_loading(&self, frame: &mut Frame, inner: Rect, theme: &crate::style::Theme) {
+    pub(super) fn draw_local_loading(
+        &self,
+        frame: &mut Frame,
+        inner: Rect,
+        theme: &crate::style::Theme,
+    ) {
         let cy = self.draw_local_title(frame, inner, theme, "Local models");
         let body_h = inner.height.saturating_sub(cy - inner.y + 1);
         frame.render_widget(
@@ -461,7 +490,12 @@ impl ModelPicker {
         self.draw_help(frame, inner, theme, &[("Esc", "back")]);
     }
 
-    pub(super) fn draw_local_catalog(&self, frame: &mut Frame, inner: Rect, theme: &crate::style::Theme) {
+    pub(super) fn draw_local_catalog(
+        &self,
+        frame: &mut Frame,
+        inner: Rect,
+        theme: &crate::style::Theme,
+    ) {
         let cy = self.draw_local_title(frame, inner, theme, "Local models");
         let rows = self.local_rows();
         // Two lines per model row (name, then summary) so the summary never
@@ -470,7 +504,11 @@ impl ModelPicker {
         let per_row = 2usize;
         let visible_rows = (list_h / per_row).max(1);
         self.list_viewport.set(visible_rows);
-        let scroll = super::super::clamp_scroll_to_cursor(self.local_scroll, self.local_cursor, visible_rows);
+        let scroll = super::super::clamp_scroll_to_cursor(
+            self.local_scroll,
+            self.local_cursor,
+            visible_rows,
+        );
 
         if rows.is_empty() {
             let msg = if self.local_error.is_some() {
@@ -495,17 +533,23 @@ impl ModelPicker {
                     frame.render_widget(
                         Paragraph::new(Span::styled(
                             format!(" {}", h),
-                            Style::default().fg(theme.colors.secondary).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(theme.colors.secondary)
+                                .add_modifier(Modifier::BOLD),
                         )),
                         Rect::new(inner.x, y, inner.width, 1),
                     );
                     y += 1;
                 }
                 row => {
-                    let Some(m) = self.row_model(row) else { continue };
+                    let Some(m) = self.row_model(row) else {
+                        continue;
+                    };
                     let selected = abs == self.local_cursor;
                     let name_style = if selected {
-                        Style::default().fg(theme.colors.primary).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(theme.colors.primary)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(theme.colors.muted)
                     };
@@ -521,12 +565,21 @@ impl ModelPicker {
                     };
                     spans.push(Span::styled(label, name_style));
                     if m.installed && m.name != m.tag {
-                        spans.push(Span::styled(m.name.clone(), Style::default().fg(theme.colors.dim)));
+                        spans.push(Span::styled(
+                            m.name.clone(),
+                            Style::default().fg(theme.colors.dim),
+                        ));
                     } else if !m.installed {
-                        spans.push(Span::styled(m.name.clone(), Style::default().fg(theme.colors.dim)));
+                        spans.push(Span::styled(
+                            m.name.clone(),
+                            Style::default().fg(theme.colors.dim),
+                        ));
                     }
                     if m.loaded {
-                        spans.push(Span::styled("  ● in VRAM", Style::default().fg(theme.colors.success)));
+                        spans.push(Span::styled(
+                            "  ● in VRAM",
+                            Style::default().fg(theme.colors.success),
+                        ));
                     }
                     if self.local_pending_delete.as_deref() == Some(m.tag.as_str()) {
                         spans.push(Span::styled(
@@ -566,7 +619,12 @@ impl ModelPicker {
         );
     }
 
-    pub(super) fn draw_local_detail(&self, frame: &mut Frame, inner: Rect, theme: &crate::style::Theme) {
+    pub(super) fn draw_local_detail(
+        &self,
+        frame: &mut Frame,
+        inner: Rect,
+        theme: &crate::style::Theme,
+    ) {
         let Some(info) = self.local_info.as_ref() else {
             return self.draw_local_loading(frame, inner, theme);
         };
@@ -602,8 +660,16 @@ impl ModelPicker {
             }
         }
         lines.push(Line::from(Span::styled(
-            if info.installed { "  Installed on this machine" } else { "  Not installed" },
-            Style::default().fg(if info.installed { theme.colors.success } else { theme.colors.muted }),
+            if info.installed {
+                "  Installed on this machine"
+            } else {
+                "  Not installed"
+            },
+            Style::default().fg(if info.installed {
+                theme.colors.success
+            } else {
+                theme.colors.muted
+            }),
         )));
         for l in lines {
             frame.render_widget(Paragraph::new(l), Rect::new(inner.x, cy, inner.width, 1));
@@ -641,7 +707,10 @@ impl ModelPicker {
             }
         } else {
             frame.render_widget(
-                Paragraph::new(Span::styled("  Pick a quant:", Style::default().fg(theme.colors.secondary))),
+                Paragraph::new(Span::styled(
+                    "  Pick a quant:",
+                    Style::default().fg(theme.colors.secondary),
+                )),
                 Rect::new(inner.x, cy, inner.width, 1),
             );
             cy += 1;
@@ -650,7 +719,9 @@ impl ModelPicker {
             for (i, q) in info.quants.iter().enumerate().take(avail) {
                 let selected = i == self.local_quant_cursor;
                 let style = if selected {
-                    Style::default().fg(theme.colors.primary).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme.colors.primary)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     text
                 };
@@ -660,8 +731,16 @@ impl ModelPicker {
                     .and_then(|f| f.est_tps)
                     .map(|t| format!("~{:.0} tok/s", t))
                     .unwrap_or_else(|| "—".to_string());
-                let verdict = q.fit.as_ref().map(|f| Self::fit_label(&f.verdict)).unwrap_or("?");
-                let star = if q.quant.to_uppercase() == recommended { " ★" } else { "" };
+                let verdict = q
+                    .fit
+                    .as_ref()
+                    .map(|f| Self::fit_label(&f.verdict))
+                    .unwrap_or("?");
+                let star = if q.quant.to_uppercase() == recommended {
+                    " ★"
+                } else {
+                    ""
+                };
                 let approx = if q.exact { "" } else { "~" };
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![
@@ -694,7 +773,12 @@ impl ModelPicker {
         self.draw_help(frame, inner, theme, help);
     }
 
-    pub(super) fn draw_local_installing(&self, frame: &mut Frame, inner: Rect, theme: &crate::style::Theme) {
+    pub(super) fn draw_local_installing(
+        &self,
+        frame: &mut Frame,
+        inner: Rect,
+        theme: &crate::style::Theme,
+    ) {
         let name = self
             .local_info
             .as_ref()
@@ -725,7 +809,10 @@ impl ModelPicker {
                     "pulling" => (format!("  {}", job.status), 0.0),
                     "benchmarking" => ("  Downloaded — measuring tokens/sec…".to_string(), 1.0),
                     "done" => ("  Installed".to_string(), 1.0),
-                    _ => (format!("  Failed: {}", job.error.clone().unwrap_or_default()), 0.0),
+                    _ => (
+                        format!("  Failed: {}", job.error.clone().unwrap_or_default()),
+                        0.0,
+                    ),
                 };
                 frame.render_widget(
                     Paragraph::new(Span::styled(label, text)),
@@ -764,7 +851,9 @@ impl ModelPicker {
                                 Span::styled("  ✓ ", Style::default().fg(theme.colors.success)),
                                 Span::styled(
                                     format!("{:.1} tok/s measured{}", b.decode_tps, prompt),
-                                    Style::default().fg(theme.colors.success).add_modifier(Modifier::BOLD),
+                                    Style::default()
+                                        .fg(theme.colors.success)
+                                        .add_modifier(Modifier::BOLD),
                                 ),
                             ])),
                             Rect::new(inner.x, cy, inner.width, 1),
@@ -783,7 +872,11 @@ impl ModelPicker {
         }
 
         self.draw_local_error(frame, inner, theme);
-        let done = self.local_job.as_ref().map(|j| j.state == "done").unwrap_or(false);
+        let done = self
+            .local_job
+            .as_ref()
+            .map(|j| j.state == "done")
+            .unwrap_or(false);
         let help: &[(&str, &str)] = if done {
             &[("Enter", "use it now"), ("Esc", "back to list")]
         } else {

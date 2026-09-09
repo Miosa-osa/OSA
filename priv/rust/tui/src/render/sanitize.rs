@@ -145,7 +145,9 @@ pub fn scrub_untrusted_document(text: &str) -> std::borrow::Cow<'_, str> {
 /// Terminal output needs whole escape sequences removed *before* word wrapping
 /// or URL detection. Keeping an OSC URI after dropping just ESC duplicates links.
 pub fn scrub_terminal_output(text: &str) -> std::borrow::Cow<'_, str> {
-    if !text.contains('\u{1b}') { return scrub_untrusted_document(text); }
+    if !text.contains('\u{1b}') {
+        return scrub_untrusted_document(text);
+    }
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while !rest.is_empty() {
@@ -322,7 +324,8 @@ mod tests {
     #[test]
     fn the_whole_trojan_source_family_is_covered() {
         for ch in [
-            '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', // embeddings/overrides
+            '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+            '\u{202E}', // embeddings/overrides
             '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', // isolates
             '\u{200E}', '\u{200F}', '\u{061C}', // marks
         ] {
@@ -344,7 +347,10 @@ mod tests {
     /// lets untrusted text drive the terminal directly.
     #[test]
     fn control_characters_are_stripped_from_a_line() {
-        assert_eq!(scrub_untrusted_line("safe\x1b]0;pwn\x07tail"), "safe]0;pwntail");
+        assert_eq!(
+            scrub_untrusted_line("safe\x1b]0;pwn\x07tail"),
+            "safe]0;pwntail"
+        );
         assert_eq!(scrub_untrusted_line("a\tb\nc\rd"), "abcd");
     }
 
@@ -359,14 +365,21 @@ mod tests {
             "/Users/rhl/projects/osa/priv/rust/tui",
             "grep -rn 'a|b' --include=*.rs .",
         ] {
-            assert_eq!(scrub_untrusted_line(s), s, "must pass through unchanged: {s:?}");
+            assert_eq!(
+                scrub_untrusted_line(s),
+                s,
+                "must pass through unchanged: {s:?}"
+            );
         }
     }
 
     /// The block variant keeps line structure but nothing else.
     #[test]
     fn the_block_variant_keeps_newlines_only() {
-        assert_eq!(scrub_untrusted_block("one\ntwo\tthree\rfour"), "one\ntwothreefour");
+        assert_eq!(
+            scrub_untrusted_block("one\ntwo\tthree\rfour"),
+            "one\ntwothreefour"
+        );
         assert_eq!(scrub_untrusted_block("a\u{202E}b\nc"), "ab\nc");
     }
 
@@ -378,7 +391,10 @@ mod tests {
             &*scrub_untrusted_document("a\n\tb\rc\u{1b}d\u{7}e"),
             "a\n\tbcde"
         );
-        assert_eq!(&*scrub_untrusted_document("rm -rf /\u{202E}# ohce"), "rm -rf /# ohce");
+        assert_eq!(
+            &*scrub_untrusted_document("rm -rf /\u{202E}# ohce"),
+            "rm -rf /# ohce"
+        );
     }
 
     /// Emoji joiners and variation selectors are invisible but not dangerous:

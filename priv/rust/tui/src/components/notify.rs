@@ -51,9 +51,7 @@ pub fn detect_channel_from(
 /// Strip control characters and the OSC field separator so titles/bodies can
 /// never break out of the sequence.
 fn sanitize(s: &str) -> String {
-    s.chars()
-        .filter(|c| !c.is_control() && *c != ';')
-        .collect()
+    s.chars().filter(|c| !c.is_control() && *c != ';').collect()
 }
 
 /// Build the raw notification sequence (no multiplexer wrapping, no BEL).
@@ -100,9 +98,18 @@ mod tests {
 
     #[test]
     fn channel_detection() {
-        assert_eq!(detect_channel_from(Some("ghostty"), None, false), Channel::Osc777);
-        assert_eq!(detect_channel_from(None, Some("xterm-ghostty"), false), Channel::Osc777);
-        assert_eq!(detect_channel_from(None, Some("xterm-kitty"), false), Channel::Osc99);
+        assert_eq!(
+            detect_channel_from(Some("ghostty"), None, false),
+            Channel::Osc777
+        );
+        assert_eq!(
+            detect_channel_from(None, Some("xterm-ghostty"), false),
+            Channel::Osc777
+        );
+        assert_eq!(
+            detect_channel_from(None, Some("xterm-kitty"), false),
+            Channel::Osc99
+        );
         assert_eq!(detect_channel_from(None, None, true), Channel::Osc99);
         assert_eq!(
             detect_channel_from(Some("iTerm.app"), Some("xterm-256color"), false),

@@ -544,13 +544,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
   # meaning. Stripped before the all-stop test so "stop doing shit please"
   # reduces to ["stop"] and halts, while a real target word survives and keeps
   # the message a steer. "wait" is filler (a bare "wait" must not kill a turn).
-  @stop_filler MapSet.new(
-                 ~w(please just now ok okay pls plz dude man bro yo no nah nope
+  @stop_filler MapSet.new(~w(please just now ok okay pls plz dude man bro yo no nah nope
                     nvm wait the a an of it its that this these those your you u
                     i we lol like fucking fuckin fuck shit damn hell bullshit
                     crap ass doing working going already right here so really
-                    actually all everything anything)
-               )
+                    actually all everything anything))
 
   @doc false
   @spec stop_intent?(String.t()) :: boolean()
@@ -1134,7 +1132,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
     new_seen = Enum.reduce(new_children, seen, &MapSet.put(&2, &1))
     attached = Enum.reject(new_children, &MapSet.member?(background_ids, &1))
 
-    bfs_descendants(children_by_parent, background_ids, rest ++ attached, new_seen, acc ++ attached)
+    bfs_descendants(
+      children_by_parent,
+      background_ids,
+      rest ++ attached,
+      new_seen,
+      acc ++ attached
+    )
   end
 
   @doc """
@@ -2877,7 +2881,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
         # `to_string/1` on a list raised `ArgumentError` — attaching an image
         # crashed the turn here. `content_text/1` extracts the prose (a scaffold
         # marker is always plain text, never an image block).
-        content = OptimalSystemAgent.Utils.Text.content_text(Map.get(m, :content) || Map.get(m, "content"))
+        content =
+          OptimalSystemAgent.Utils.Text.content_text(
+            Map.get(m, :content) || Map.get(m, "content")
+          )
+
         trimmed = String.trim(content)
 
         trimmed in ReactLoop.interrupt_markers() or

@@ -121,7 +121,7 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.Stall do
 
     wrote_or_edited? =
       Enum.any?(write_status_window) or
-        (name_window |> Enum.take(uncovered) |> Enum.any?(&write_or_edit_tool?/1))
+        name_window |> Enum.take(uncovered) |> Enum.any?(&write_or_edit_tool?/1)
 
     investigated? = Enum.any?(name_window, &progress_tool?/1)
 

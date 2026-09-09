@@ -395,7 +395,8 @@ impl PasteBurst {
         }
         let start_byte = retro_start_index(before, retro_chars);
         let grabbed = before[start_byte..].to_string();
-        let looks_pastey = grabbed.chars().any(char::is_whitespace) || grabbed.chars().count() >= 16;
+        let looks_pastey =
+            grabbed.chars().any(char::is_whitespace) || grabbed.chars().count() >= 16;
         if looks_pastey {
             self.begin_with_retro_grabbed(grabbed.clone(), now);
             Some(RetroGrab {
@@ -490,11 +491,10 @@ mod tests {
         for ch in s.chars() {
             match burst.on_plain_char(ch, t) {
                 Some(CharDecision::RetainFirstChar) => {}
-                Some(CharDecision::BeginBufferFromPending)
-                | Some(CharDecision::BufferAppend) => burst.append_char_to_buffer(ch, t),
-                Some(CharDecision::BeginBuffer { .. }) | None => {
+                Some(CharDecision::BeginBufferFromPending) | Some(CharDecision::BufferAppend) => {
                     burst.append_char_to_buffer(ch, t)
                 }
+                Some(CharDecision::BeginBuffer { .. }) | None => burst.append_char_to_buffer(ch, t),
             }
             t += Duration::from_millis(1);
         }
@@ -868,6 +868,9 @@ mod tests {
         assert!(!burst.newline_should_insert_instead_of_submit(t));
         assert!(burst.decide_begin_buffer(t, "a b c", 3).is_none());
         assert_eq!(burst.flush_before_modified_input(), None);
-        assert_eq!(burst.flush_if_due(t + Duration::from_secs(1)), FlushResult::None);
+        assert_eq!(
+            burst.flush_if_due(t + Duration::from_secs(1)),
+            FlushResult::None
+        );
     }
 }

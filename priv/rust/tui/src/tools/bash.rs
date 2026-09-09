@@ -9,7 +9,13 @@ use super::{
 pub struct BashRenderer;
 
 impl ToolRenderer for BashRenderer {
-    fn render(&self, _name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        _name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
         // Extract command from args JSON
@@ -124,7 +130,12 @@ mod collapsed_output_tests {
     fn flat(lines: &[Line<'_>]) -> Vec<String> {
         lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect()
     }
 
@@ -137,7 +148,11 @@ mod collapsed_output_tests {
         let result = "l1\nl2\nl3\nl4\nl5\nl6";
         let lines = BashRenderer.render("Bash", r#"{"command":"seq 6"}"#, result, &opts());
         let rendered = flat(&lines);
-        assert_eq!(rendered.len(), 5, "header + 1 head + marker + 2 tail: {rendered:?}");
+        assert_eq!(
+            rendered.len(),
+            5,
+            "header + 1 head + marker + 2 tail: {rendered:?}"
+        );
         assert!(rendered[1].starts_with("  \u{23bf}  l1"), "{rendered:?}");
         assert!(
             rendered[2].contains("+3 lines (ctrl+o to expand)"),
@@ -153,6 +168,10 @@ mod collapsed_output_tests {
         let lines = BashRenderer.render("Bash", r#"{"command":"seq 4"}"#, result, &opts());
         let rendered = flat(&lines);
         assert_eq!(rendered.len(), 5, "{:?}", rendered); // header + all 4 lines
-        assert!(!rendered.last().unwrap().contains("ctrl+o"), "{:?}", rendered);
+        assert!(
+            !rendered.last().unwrap().contains("ctrl+o"),
+            "{:?}",
+            rendered
+        );
     }
 }

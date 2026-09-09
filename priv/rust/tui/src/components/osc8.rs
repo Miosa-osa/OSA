@@ -241,7 +241,12 @@ pub fn supports_hyperlinks_with(env: impl Fn(&str) -> Option<String>) -> bool {
 
     // 5. VTE ≥ 0.50 supports OSC 8.
     if let Some(vte) = env("VTE_VERSION") {
-        if vte.trim().parse::<u32>().map(|v| v >= 5000).unwrap_or(false) {
+        if vte
+            .trim()
+            .parse::<u32>()
+            .map(|v| v >= 5000)
+            .unwrap_or(false)
+        {
             return true;
         }
     }

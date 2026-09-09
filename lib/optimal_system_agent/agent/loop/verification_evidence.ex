@@ -45,7 +45,7 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
   # four times through `file_transform` — and because not one of those fixes was
   # recorded as a source write, no discriminating triple could form and the gate
   # demanded the work it had just watched happen, three times over.
-  @write_edit_tools ~w(file_write file_edit multi_file_edit notebook_edit
+  @write_edit_tools ~w(file_write file_edit multi_file_edit structural_edit notebook_edit
                        file_transform write_file edit_file apply_patch
                        str_replace str_replace_editor create_file file_append
                        multi_edit file_create)
@@ -400,7 +400,7 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
     # none: it could not be pending, could not be covered, and could not be
     # weighed by `change_scale/1`. Both key names are accepted now.
     multi =
-      [Map.get(args, "files"), Map.get(args, "edits")]
+      [Map.get(args, "files"), Map.get(args, "edits"), pattern_paths(args)]
       |> Enum.flat_map(fn
         list when is_list(list) ->
           Enum.flat_map(list, fn
@@ -420,6 +420,12 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
   end
 
   defp extract_paths(_, _), do: []
+
+  # `structural_edit`'s `pattern.paths` — a list of raw path strings nested
+  # one level under `pattern`, not directly comparable to the `edits`/`files`
+  # shapes above.
+  defp pattern_paths(%{"pattern" => %{"paths" => paths}}) when is_list(paths), do: paths
+  defp pattern_paths(_), do: []
 
   defp normalize_path(p, base) when is_binary(base), do: Path.expand(p, base)
   defp normalize_path(p, _), do: Path.expand(p)
@@ -441,7 +447,7 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationEvidence do
   # few lines the argument happens to carry. That asymmetry is what keeps the
   # `cancel-async-tasks` shape at full strength: every deliverable in that run
   # was produced by `file_write` or a heredoc.
-  @in_place_tools ~w(file_edit multi_file_edit multi_edit str_replace
+  @in_place_tools ~w(file_edit multi_file_edit structural_edit multi_edit str_replace
                      str_replace_editor edit_file file_transform)
 
   defp edit_shape(args, tool) do

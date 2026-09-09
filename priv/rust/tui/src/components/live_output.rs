@@ -156,8 +156,7 @@ impl LiveCommandOutput {
     /// per-line byte budget.
     pub fn lines(&self) -> Vec<String> {
         if self.truncated {
-            let mut out: Vec<String> =
-                Vec::with_capacity(self.head.len() + self.tail.len() + 1);
+            let mut out: Vec<String> = Vec::with_capacity(self.head.len() + self.tail.len() + 1);
             out.extend(self.head.iter().cloned());
             out.extend(self.tail.iter().cloned());
             if self.has_partial_line {

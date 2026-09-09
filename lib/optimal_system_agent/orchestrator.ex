@@ -350,6 +350,10 @@ defmodule OptimalSystemAgent.Orchestrator do
       batch_id: batch_id,
       wave: wave,
       model: to_string(model),
+      # The per-subagent spend ceiling (per-call override or the tier default),
+      # so the TUI can render live cost against its cap ("$2.48 / $4.00") instead
+      # of an unbounded-looking number. Same value enforced in run_subagent.
+      budget_cap_usd: Map.get(config, :max_budget_usd) || Tier.max_budget_usd(tier),
       # Age of the RUN, not of this frame. The run row is created at DISPATCH,
       # so a subagent that waited behind the concurrency cap reports the wait it
       # actually did rather than restarting the clock when it finally starts —
@@ -1973,8 +1977,7 @@ defmodule OptimalSystemAgent.Orchestrator do
           # global one, so a single turn cannot balloon into hundreds of tool
           # round-trips (the per-turn token balloon). This complements the
           # per-tier USD budget, which bounds COST across turns.
-          max_iterations:
-            Keyword.get(opts, :max_iterations) || subagent_per_turn_tool_ceiling()
+          max_iterations: Keyword.get(opts, :max_iterations) || subagent_per_turn_tool_ceiling()
         )
       rescue
         e ->

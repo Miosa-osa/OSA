@@ -9,7 +9,9 @@ defmodule OptimalSystemAgent.Agent.Loop.BackgroundMarkerStripTest do
   alias OptimalSystemAgent.Agent.Loop.VerificationGate, as: Gate
 
   test "removes the marker line from the final answer" do
-    content = "All set — kicked off the build.\n\nBACKGROUND_INTENTIONAL: build runs in background"
+    content =
+      "All set — kicked off the build.\n\nBACKGROUND_INTENTIONAL: build runs in background"
+
     assert Gate.strip_background_marker(content) == "All set — kicked off the build."
   end
 

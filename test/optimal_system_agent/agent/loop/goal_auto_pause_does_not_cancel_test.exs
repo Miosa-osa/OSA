@@ -84,7 +84,9 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalAutoPauseDoesNotCancelTest do
       gaps = ["same blocker every round"]
       for _ <- 1..8, do: GoalTracker.advance(sid, incomplete(gaps), 1)
 
-      assert GoalTracker.paused?(sid), "the stall must actually trip for this test to mean anything"
+      assert GoalTracker.paused?(sid),
+             "the stall must actually trip for this test to mean anything"
+
       assert GoalTracker.snapshot(sid).pause_reason == :no_progress
 
       assert_untouched(bg)

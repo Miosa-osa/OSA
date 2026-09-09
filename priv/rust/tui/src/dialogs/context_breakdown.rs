@@ -131,10 +131,26 @@ pub fn draw(frame: &mut Frame, area: Rect, stats: &ContextStats) {
 
     // Segment order matters: conversation, system, tool-results (spec colors).
     let cats = [
-        Category { label: "Conversation", tokens: stats.conversation_tokens, color: c.secondary },
-        Category { label: "System prompt", tokens: stats.system_tokens, color: c.primary },
-        Category { label: "Tool schemas", tokens: stats.tool_schema_tokens, color: c.success },
-        Category { label: "Tool results", tokens: stats.tool_result_tokens, color: c.warning },
+        Category {
+            label: "Conversation",
+            tokens: stats.conversation_tokens,
+            color: c.secondary,
+        },
+        Category {
+            label: "System prompt",
+            tokens: stats.system_tokens,
+            color: c.primary,
+        },
+        Category {
+            label: "Tool schemas",
+            tokens: stats.tool_schema_tokens,
+            color: c.success,
+        },
+        Category {
+            label: "Tool results",
+            tokens: stats.tool_result_tokens,
+            color: c.warning,
+        },
     ];
 
     // title-gap(1) bar(1) gap(1) 4 rows(4) sep(1) TOTAL(1) gap(1) footer(1) = 11.
@@ -151,7 +167,10 @@ pub fn draw(frame: &mut Frame, area: Rect, stats: &ContextStats) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(c.primary))
         .title(Line::from(vec![
-            Span::styled(" OSA ", Style::default().fg(c.primary).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " OSA ",
+                Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("\u{00b7} context ", Style::default().fg(c.muted)),
         ]))
         .style(Style::default().bg(c.dialog_bg));
@@ -176,16 +195,26 @@ pub fn draw(frame: &mut Frame, area: Rect, stats: &ContextStats) {
     for (i, cat) in cats.iter().enumerate() {
         let ww = widths.get(i).copied().unwrap_or(0);
         if ww > 0 {
-            bar.push(Span::styled("\u{2588}".repeat(ww), Style::default().fg(cat.color)));
+            bar.push(Span::styled(
+                "\u{2588}".repeat(ww),
+                Style::default().fg(cat.color),
+            ));
         }
     }
     // Trailing free space (last width entry) drawn dim.
     if let Some(&free) = widths.last() {
         if free > 0 {
-            bar.push(Span::styled("\u{2591}".repeat(free), Style::default().fg(c.dim)));
+            bar.push(Span::styled(
+                "\u{2591}".repeat(free),
+                Style::default().fg(c.dim),
+            ));
         }
     }
-    put(frame, Paragraph::new(Line::from(bar)), Rect::new(inner.x, cy, iw, 1));
+    put(
+        frame,
+        Paragraph::new(Line::from(bar)),
+        Rect::new(inner.x, cy, iw, 1),
+    );
     cy += 2;
 
     // ── Per-category rows: dot + label (left), "NN,NNN (PP%)" (right) ──────
@@ -199,28 +228,40 @@ pub fn draw(frame: &mut Frame, area: Rect, stats: &ContextStats) {
         let pct = pct_of(cat.tokens, stats.max_tokens);
         // Left: colored dot + label.
         let left = truncate_chars(cat.label, label_w.saturating_sub(2));
-        put(frame, Paragraph::new(Line::from(vec![
-            Span::styled("\u{25CF} ", Style::default().fg(cat.color)),
-            Span::styled(left, Style::default().fg(c.muted)),
-        ])), Rect::new(inner.x, cy, label_w as u16, 1));
+        put(
+            frame,
+            Paragraph::new(Line::from(vec![
+                Span::styled("\u{25CF} ", Style::default().fg(cat.color)),
+                Span::styled(left, Style::default().fg(c.muted)),
+            ])),
+            Rect::new(inner.x, cy, label_w as u16, 1),
+        );
         // Right: right-aligned value in bright + dim percent.
-        put(frame, Paragraph::new(Line::from(vec![
-            Span::styled(
-                group_thousands(cat.tokens),
-                Style::default().fg(cat.color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!(" ({pct}%)"), Style::default().fg(c.dim)),
-        ])).alignment(Alignment::Right),
-        Rect::new(inner.x + label_w as u16, cy, val_w as u16, 1));
+        put(
+            frame,
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    group_thousands(cat.tokens),
+                    Style::default().fg(cat.color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!(" ({pct}%)"), Style::default().fg(c.dim)),
+            ]))
+            .alignment(Alignment::Right),
+            Rect::new(inner.x + label_w as u16, cy, val_w as u16, 1),
+        );
         cy += 1;
     }
 
     // ── Divider + TOTAL row ────────────────────────────────────────────────
     if cy < inner.y + inner.height {
-        put(frame, Paragraph::new(Line::from(Span::styled(
-            "\u{2500}".repeat(iw as usize),
-            Style::default().fg(c.border),
-        ))), Rect::new(inner.x, cy, iw, 1));
+        put(
+            frame,
+            Paragraph::new(Line::from(Span::styled(
+                "\u{2500}".repeat(iw as usize),
+                Style::default().fg(c.border),
+            ))),
+            Rect::new(inner.x, cy, iw, 1),
+        );
         cy += 1;
     }
     if cy < inner.y + inner.height {
@@ -232,31 +273,51 @@ pub fn draw(frame: &mut Frame, area: Rect, stats: &ContextStats) {
         } else {
             c.success
         };
-        put(frame, Paragraph::new(Line::from(vec![
-            Span::styled("\u{25CF} ", Style::default().fg(total_color)),
-            Span::styled("Estimated total", Style::default().fg(c.muted).add_modifier(Modifier::BOLD)),
-        ])), Rect::new(inner.x, cy, label_w as u16, 1));
-        put(frame, Paragraph::new(Line::from(vec![
-            Span::styled(
-                group_thousands(stats.used_tokens),
-                Style::default().fg(total_color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" / {}", group_thousands(stats.max_tokens)),
-                Style::default().fg(c.dim),
-            ),
-            Span::styled(format!("  {total_pct}%"), Style::default().fg(total_color)),
-        ])).alignment(Alignment::Right),
-        Rect::new(inner.x + label_w as u16, cy, val_w as u16, 1));
+        put(
+            frame,
+            Paragraph::new(Line::from(vec![
+                Span::styled("\u{25CF} ", Style::default().fg(total_color)),
+                Span::styled(
+                    "Estimated total",
+                    Style::default().fg(c.muted).add_modifier(Modifier::BOLD),
+                ),
+            ])),
+            Rect::new(inner.x, cy, label_w as u16, 1),
+        );
+        put(
+            frame,
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    group_thousands(stats.used_tokens),
+                    Style::default()
+                        .fg(total_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" / {}", group_thousands(stats.max_tokens)),
+                    Style::default().fg(c.dim),
+                ),
+                Span::styled(format!("  {total_pct}%"), Style::default().fg(total_color)),
+            ]))
+            .alignment(Alignment::Right),
+            Rect::new(inner.x + label_w as u16, cy, val_w as u16, 1),
+        );
         cy += 2;
     }
 
     // ── Footer hint ────────────────────────────────────────────────────────
     if cy < inner.y + inner.height {
-        put(frame, Paragraph::new(Line::from(vec![
-            Span::styled("esc", Style::default().fg(c.muted).add_modifier(Modifier::BOLD)),
-            Span::styled(" close", Style::default().fg(c.dim)),
-        ])), Rect::new(inner.x, cy, iw, 1));
+        put(
+            frame,
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "esc",
+                    Style::default().fg(c.muted).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" close", Style::default().fg(c.dim)),
+            ])),
+            Rect::new(inner.x, cy, iw, 1),
+        );
     }
 }
 
@@ -281,11 +342,32 @@ mod context_breakdown_tests {
         let cases = [
             stats(),
             // max == 0 must not divide-by-zero anywhere.
-            ContextStats { system_tokens: 10, conversation_tokens: 20, tool_result_tokens: 5, tool_schema_tokens: 0, max_tokens: 0, used_tokens: 35 },
+            ContextStats {
+                system_tokens: 10,
+                conversation_tokens: 20,
+                tool_result_tokens: 5,
+                tool_schema_tokens: 0,
+                max_tokens: 0,
+                used_tokens: 35,
+            },
             // Over-full window (used > max): percentages clamp, bar stays in-track.
-            ContextStats { system_tokens: 120_000, conversation_tokens: 120_000, tool_result_tokens: 90_000, tool_schema_tokens: 13_500, max_tokens: 200_000, used_tokens: 343_500 },
+            ContextStats {
+                system_tokens: 120_000,
+                conversation_tokens: 120_000,
+                tool_result_tokens: 90_000,
+                tool_schema_tokens: 13_500,
+                max_tokens: 200_000,
+                used_tokens: 343_500,
+            },
             // Empty session.
-            ContextStats { system_tokens: 0, conversation_tokens: 0, tool_result_tokens: 0, tool_schema_tokens: 0, max_tokens: 200_000, used_tokens: 0 },
+            ContextStats {
+                system_tokens: 0,
+                conversation_tokens: 0,
+                tool_result_tokens: 0,
+                tool_schema_tokens: 0,
+                max_tokens: 200_000,
+                used_tokens: 0,
+            },
         ];
         for s in &cases {
             for (w, h) in [(1u16, 1u16), (10, 4), (40, 12), (70, 20), (200, 60)] {
@@ -311,9 +393,21 @@ mod context_breakdown_tests {
     #[test]
     fn segment_widths_sum_to_track_and_leave_free_space() {
         let cats = [
-            Category { label: "a", tokens: 60_000, color: Color::Red },
-            Category { label: "b", tokens: 8_000, color: Color::Green },
-            Category { label: "c", tokens: 24_000, color: Color::Blue },
+            Category {
+                label: "a",
+                tokens: 60_000,
+                color: Color::Red,
+            },
+            Category {
+                label: "b",
+                tokens: 8_000,
+                color: Color::Green,
+            },
+            Category {
+                label: "c",
+                tokens: 24_000,
+                color: Color::Blue,
+            },
         ];
         let track = 50usize;
         let widths = segment_widths(&cats, 200_000, track);

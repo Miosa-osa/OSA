@@ -65,18 +65,13 @@ impl ConfigField {
 
 enum RowKind {
     /// Cycles through a fixed set of option strings.
-    Enum {
-        options: Vec<String>,
-        index: usize,
-    },
+    Enum { options: Vec<String>, index: usize },
     /// On/off toggle.
     Bool(bool),
     /// Free-text string, edited inline.
     Text(String),
     /// Defers to an external picker (no in-place value; shows a live snapshot).
-    Action {
-        display: String,
-    },
+    Action { display: String },
 }
 
 struct Row {
@@ -87,10 +82,14 @@ struct Row {
 impl Row {
     fn value_str(&self) -> String {
         match &self.kind {
-            RowKind::Enum { options, index } => {
-                options.get(*index).cloned().unwrap_or_default()
+            RowKind::Enum { options, index } => options.get(*index).cloned().unwrap_or_default(),
+            RowKind::Bool(b) => {
+                if *b {
+                    "on".into()
+                } else {
+                    "off".into()
+                }
             }
-            RowKind::Bool(b) => if *b { "on".into() } else { "off".into() },
             RowKind::Text(s) => {
                 if s.is_empty() {
                     "(default)".into()
@@ -120,10 +119,7 @@ pub enum ConfigAction {
     OpenModelPicker,
     /// A value was committed; persist + apply it. `value` is the new string
     /// (for `Notifications` it is "on"/"off").
-    SetValue {
-        field: ConfigField,
-        value: String,
-    },
+    SetValue { field: ConfigField, value: String },
 }
 
 // ── Snapshot passed in at construction ──────────────────────────────────────
@@ -173,11 +169,15 @@ impl ConfigEditor {
         let rows = vec![
             Row {
                 field: ConfigField::Provider,
-                kind: RowKind::Action { display: snap.provider },
+                kind: RowKind::Action {
+                    display: snap.provider,
+                },
             },
             Row {
                 field: ConfigField::Model,
-                kind: RowKind::Action { display: snap.model },
+                kind: RowKind::Action {
+                    display: snap.model,
+                },
             },
             enum_row(
                 ConfigField::ReasoningEffort,
@@ -223,7 +223,10 @@ impl ConfigEditor {
             return self.handle_edit_key(key);
         }
 
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             // Allow Ctrl+C to close, ignore other modified keys.
             if key.code == KeyCode::Char('c') {
                 return Some(ConfigAction::Close);
@@ -256,9 +259,7 @@ impl ConfigEditor {
         let field = self.current_field();
         match &mut self.rows[self.cursor].kind {
             RowKind::Action { .. } => match field {
-                ConfigField::Provider | ConfigField::Model => {
-                    Some(ConfigAction::OpenModelPicker)
-                }
+                ConfigField::Provider | ConfigField::Model => Some(ConfigAction::OpenModelPicker),
                 _ => None,
             },
             RowKind::Bool(b) => {
@@ -320,7 +321,9 @@ impl ConfigEditor {
                 None
             }
             KeyCode::Char(c)
-                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 buf.push(c);
                 None

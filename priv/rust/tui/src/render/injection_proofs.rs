@@ -244,10 +244,9 @@ fn an_osc8_url_cannot_terminate_its_own_sequence() {
 
     // Fixed: the URI is percent-encoded per the OSC 8 spec, so no byte in it can
     // close the string.
-    let obs = observe(Text::from(Line::from(Span::raw(super::super::components::osc8::osc8(
-        "click",
-        &hostile_url,
-    )))));
+    let obs = observe(Text::from(Line::from(Span::raw(
+        super::super::components::osc8::osc8("click", &hostile_url),
+    ))));
     assert_eq!(
         obs.title, "",
         "a hyperlink URL still drove the terminal:\n{}",
@@ -444,7 +443,11 @@ fn the_tool_backstop_preserves_legitimate_hyperlinks() {
         "the injected payload was not neutralized: {flat:?}"
     );
     // Only the hyperlink's own four ESCs remain.
-    assert_eq!(flat.matches('\u{1b}').count(), 4, "stray ESC left: {flat:?}");
+    assert_eq!(
+        flat.matches('\u{1b}').count(),
+        4,
+        "stray ESC left: {flat:?}"
+    );
 }
 
 /// An *incomplete* hyperlink wrapper is not a hyperlink — it is an open OSC
@@ -521,7 +524,8 @@ fn the_session_title_cannot_drive_the_terminal() {
 
     let title = term.backend().vt100().screen().title().to_string();
     assert_eq!(
-        title, "",
+        title,
+        "",
         "the model-generated session title drove the terminal from persistent \
          chrome:\n{}",
         term.backend().contents()
@@ -615,7 +619,10 @@ fn tab_indentation_survives_the_scrub() {
                 .collect::<String>()
         })
         .collect();
-    assert!(flat.contains('\t'), "tab indentation was stripped: {flat:?}");
+    assert!(
+        flat.contains('\t'),
+        "tab indentation was stripped: {flat:?}"
+    );
 }
 
 /// A diff must still be a *coloured* diff: +/- background bars intact.
@@ -646,7 +653,10 @@ fn diff_colouring_is_intact() {
 fn a_clean_hyperlink_is_unchanged() {
     let url = "https://example.com/a/b?c=1&d=2#frag";
     let seq = super::super::components::osc8::osc8("docs", url);
-    assert_eq!(seq, format!("\u{1b}]8;;{url}\u{1b}\\docs\u{1b}]8;;\u{1b}\\"));
+    assert_eq!(
+        seq,
+        format!("\u{1b}]8;;{url}\u{1b}\\docs\u{1b}]8;;\u{1b}\\")
+    );
 
     // And it renders as clickable text on a real emulator: the escape is
     // consumed, the label is on screen.

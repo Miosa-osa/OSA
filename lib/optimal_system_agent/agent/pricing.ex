@@ -422,15 +422,18 @@ defmodule OptimalSystemAgent.Agent.Pricing do
 
   defp surplus_key?(key), do: String.starts_with?(key, SurplusModels.prefix())
 
-  # The gateway's published rate when the runtime card carries one, otherwise
-  # the conservative provider-level estimate. Never $0 and never a native
-  # vendor's row, so `max_budget_usd` sees the spend either way.
+  # The gateway's published rate: the live runtime card first, then the static
+  # snapshot of featured frontier models, then the conservative provider-level
+  # estimate. Never $0 and never a native vendor's row, so `max_budget_usd` sees
+  # the spend either way.
   #
   # The fallback number mirrors `Agent.Budget`'s surplus provider rate
   # ({2.0, 10.0}); it is reported `:estimated` by `confidence/2`, which keys off
-  # the same runtime lookup, so a fallback price is never labelled authoritative.
+  # the same runtime+static lookup, so ONLY that provider-level fallback is ever
+  # labelled non-authoritative — a real per-model price (runtime or static) is
+  # `:exact`.
   defp surplus_rate(key) do
-    SurplusModels.runtime_rate(key) || @surplus_fallback_rate
+    SurplusModels.runtime_rate(key) || SurplusModels.static_rate(key) || @surplus_fallback_rate
   end
 
   # The same guard `exact_rate/1` carries, for the mechanisms that are checked
@@ -898,7 +901,9 @@ defmodule OptimalSystemAgent.Agent.Pricing do
       # `:exact`; the conservative provider-level fallback, used until the live
       # catalog is fetched, is a guess and is `:estimated`.
       surplus_key?(key) ->
-        if SurplusModels.runtime_rate(key), do: :exact, else: :estimated
+        if SurplusModels.runtime_rate(key) || SurplusModels.static_rate(key),
+          do: :exact,
+          else: :estimated
 
       # A windowed rate is published on both tiers; it is only a guess when the
       # caller could not say which tier the request fell in.

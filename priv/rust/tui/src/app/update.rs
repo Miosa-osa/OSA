@@ -398,6 +398,17 @@ impl App {
                 }
                 false
             }
+            AppState::GoalCompletion => {
+                use crate::components::completion_panel::CompletionPanelAction;
+                if matches!(
+                    self.completion_panel.as_mut().map(|p| p.handle_key(key)),
+                    Some(CompletionPanelAction::Close)
+                ) {
+                    self.completion_panel = None;
+                    self.exit_overlay();
+                }
+                false
+            }
             AppState::Persona => {
                 use crate::dialogs::persona_picker::PersonaPickerAction;
                 match self.persona_picker.as_mut().map(|d| d.handle_key(key)) {
@@ -465,6 +476,7 @@ impl App {
             AppState::Tasks => self.tasks_panel.is_none(),
             AppState::Persona => self.persona_picker.is_none(),
             AppState::Sandbox => self.sandbox_picker.is_none(),
+            AppState::GoalCompletion => self.completion_panel.is_none(),
             _ => false,
         }
     }

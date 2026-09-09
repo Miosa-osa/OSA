@@ -925,12 +925,20 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatTest do
         }),
         sse(%{
           "choices" => [
-            %{"delta" => %{"tool_calls" => [%{"index" => 0, "function" => %{"arguments" => "{\"ta"}}]}}
+            %{
+              "delta" => %{
+                "tool_calls" => [%{"index" => 0, "function" => %{"arguments" => "{\"ta"}}]
+              }
+            }
           ]
         }),
         sse(%{
           "choices" => [
-            %{"delta" => %{"tool_calls" => [%{"index" => 0, "function" => %{"arguments" => "sk\": \"go"}}]}}
+            %{
+              "delta" => %{
+                "tool_calls" => [%{"index" => 0, "function" => %{"arguments" => "sk\": \"go"}}]
+              }
+            }
           ]
         }),
         "data: [DONE]\n\n"

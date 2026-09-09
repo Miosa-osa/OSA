@@ -85,11 +85,15 @@ pub(crate) struct ScanState {
 impl ScanState {
     pub(crate) fn scan(&mut self, source: &str) -> usize {
         for (offset, byte) in source.as_bytes()[self.examined..].iter().enumerate() {
-            if *byte != b'\n' { continue; }
+            if *byte != b'\n' {
+                continue;
+            }
             let end = self.examined + offset;
             let line = &source[self.pos..end];
             if !super::markdown::fence_boundary(line, &mut self.in_code)
-                && self.in_code.is_none() && line.trim().is_empty() {
+                && self.in_code.is_none()
+                && line.trim().is_empty()
+            {
                 self.boundary = end + 1;
             }
             self.pos = end + 1;
@@ -191,8 +195,12 @@ impl StreamingRenderer {
     /// streaming block cursor appended. O(tail) — one in-progress block.
     fn render_tail(&self, with_cursor: bool) -> Vec<Line<'static>> {
         let tail = &self.source[self.frozen_bytes..];
-        let mut lines = if tail.is_empty() { Vec::new() } else {
-            let preview = if with_cursor { inline_preview(tail) } else {
+        let mut lines = if tail.is_empty() {
+            Vec::new()
+        } else {
+            let preview = if with_cursor {
+                inline_preview(tail)
+            } else {
                 std::borrow::Cow::Borrowed(tail)
             };
             render_markdown(&preview, self.width).lines
@@ -252,9 +260,14 @@ impl StreamingRenderer {
 
 fn paint_cursor(lines: &mut [Line<'static>], width: u16) {
     if let Some(last) = lines.last_mut() {
-        let columns: usize = last.spans.iter().map(|s| crate::util::cols(&s.content)).sum();
+        let columns: usize = last
+            .spans
+            .iter()
+            .map(|s| crate::util::cols(&s.content))
+            .sum();
         if columns < usize::from(width) {
-            last.spans.push(ratatui::text::Span::raw(CURSOR.to_string()));
+            last.spans
+                .push(ratatui::text::Span::raw(CURSOR.to_string()));
         }
     }
 }
@@ -272,8 +285,10 @@ fn inline_preview(src: &str) -> std::borrow::Cow<'_, str> {
     // while its final delimiter arrives instead of flashing raw pipes and
     // moving the preceding table into a different block.
     if let Some((head, last)) = src.rsplit_once('\n') {
-        if last.trim_start().starts_with('|') && (last.trim() == "|" || !last.trim_end().ends_with('|'))
-            && head.lines().any(super::markdown::table_separator) {
+        if last.trim_start().starts_with('|')
+            && (last.trim() == "|" || !last.trim_end().ends_with('|'))
+            && head.lines().any(super::markdown::table_separator)
+        {
             return std::borrow::Cow::Borrowed(head);
         }
     }
@@ -283,11 +298,15 @@ fn inline_preview(src: &str) -> std::borrow::Cow<'_, str> {
     while i < bytes.len() {
         if bytes[i] == b'\\' {
             i += 1;
-            if i < bytes.len() { i += src[i..].chars().next().unwrap().len_utf8(); }
+            if i < bytes.len() {
+                i += src[i..].chars().next().unwrap().len_utf8();
+            }
             continue;
         }
         if stack.last() == Some(&"`") {
-            if bytes[i] == b'`' { stack.pop(); }
+            if bytes[i] == b'`' {
+                stack.pop();
+            }
             i += src[i..].chars().next().unwrap().len_utf8();
             continue;
         }
@@ -298,41 +317,65 @@ fn inline_preview(src: &str) -> std::borrow::Cow<'_, str> {
                 None => false,
                 Some(end) => {
                     let after = &rest[end + 1..];
-                    after.starts_with('(') && super::markdown::closing_delimiter(&after[1..], '(', ')').is_none()
+                    after.starts_with('(')
+                        && super::markdown::closing_delimiter(&after[1..], '(', ')').is_none()
                 }
             };
             if unfinished {
                 let label = label_end.map_or(rest, |end| &rest[..end]);
                 let mut out = src[..i].to_owned();
                 out.push_str(label);
-                for closing in stack.iter().rev() { out.push_str(closing); }
+                for closing in stack.iter().rev() {
+                    out.push_str(closing);
+                }
                 return std::borrow::Cow::Owned(out);
             }
         }
-        let token = if src[i..].starts_with("***") { Some("***") }
-            else if src[i..].starts_with("**") { Some("**") }
-            else if src[i..].starts_with("___") { Some("___") }
-            else if src[i..].starts_with("__") { Some("__") }
-            else if src[i..].starts_with("~~") { Some("~~") }
-            else if bytes[i] == b'`' { Some("`") }
-            else if bytes[i] == b'*' { Some("*") }
-            else if bytes[i] == b'_' { Some("_") }
-            else { None };
+        let token = if src[i..].starts_with("***") {
+            Some("***")
+        } else if src[i..].starts_with("**") {
+            Some("**")
+        } else if src[i..].starts_with("___") {
+            Some("___")
+        } else if src[i..].starts_with("__") {
+            Some("__")
+        } else if src[i..].starts_with("~~") {
+            Some("~~")
+        } else if bytes[i] == b'`' {
+            Some("`")
+        } else if bytes[i] == b'*' {
+            Some("*")
+        } else if bytes[i] == b'_' {
+            Some("_")
+        } else {
+            None
+        };
         if let Some(token) = token {
             // Intraword underscores belong to identifiers, not emphasis.
-            if token.starts_with('_') && stack.last() != Some(&token)
-                && src[..i].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            if token.starts_with('_')
+                && stack.last() != Some(&token)
+                && src[..i]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_')
+            {
                 i += token.len();
                 continue;
             }
             if stack.last() == Some(&token) {
                 stack.pop();
-            } else if src[i + token.len()..].chars().next().is_some_and(|c| !c.is_whitespace()) {
+            } else if src[i + token.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| !c.is_whitespace())
+            {
                 stack.push(token);
             } else if i + token.len() == src.len() {
                 // A delimiter arriving on its own must not flash as raw markup.
                 let mut out = src[..i].to_owned();
-                for closing in stack.iter().rev() { out.push_str(closing); }
+                for closing in stack.iter().rev() {
+                    out.push_str(closing);
+                }
                 return std::borrow::Cow::Owned(out);
             }
             i += token.len();
@@ -340,9 +383,13 @@ fn inline_preview(src: &str) -> std::borrow::Cow<'_, str> {
             i += src[i..].chars().next().unwrap().len_utf8();
         }
     }
-    if stack.is_empty() { return std::borrow::Cow::Borrowed(src); }
+    if stack.is_empty() {
+        return std::borrow::Cow::Borrowed(src);
+    }
     let mut out = src.to_owned();
-    for closing in stack.iter().rev() { out.push_str(closing); }
+    for closing in stack.iter().rev() {
+        out.push_str(closing);
+    }
     std::borrow::Cow::Owned(out)
 }
 
@@ -351,7 +398,15 @@ mod edge_cases {
     use super::*;
     #[test]
     fn literal_brackets_and_identifiers_are_not_links_or_emphasis() {
-        for src in ["Read array[0]", "Read array[", "Keep [note]", "Keep [", "file_name", "__init__", r"escaped \[x\]"] {
+        for src in [
+            "Read array[0]",
+            "Read array[",
+            "Keep [note]",
+            "Keep [",
+            "file_name",
+            "__init__",
+            r"escaped \[x\]",
+        ] {
             assert_eq!(inline_preview(src), src, "{src}");
         }
     }
@@ -360,7 +415,12 @@ mod edge_cases {
         for source in ["Hello __world", "Hello _world", "Hello ___world"] {
             let mut r = StreamingRenderer::new(60);
             r.update(source);
-            let text: String = r.body_with_cursor().lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.as_ref())).collect();
+            let text: String = r
+                .body_with_cursor()
+                .lines
+                .iter()
+                .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+                .collect();
             assert_eq!(text, "Hello world█");
             assert_eq!(r.source(), source);
         }
@@ -431,7 +491,10 @@ mod tests {
         let mut rendered = render_markdown(&preview, W);
         // A settled blank separator belongs to the immutable prefix, not the
         // live tail; do not paint a cursor into it.
-        if !render_markdown(&inline_preview(&src[boundary..]), W).lines.is_empty() {
+        if !render_markdown(&inline_preview(&src[boundary..]), W)
+            .lines
+            .is_empty()
+        {
             paint_cursor(&mut rendered.lines, W);
         }
         flat(&rendered)
@@ -445,12 +508,19 @@ mod tests {
 
     #[test]
     fn incomplete_inline_markup_is_presentation_only() {
-        for (src, want) in [("hello **bold words", "hello bold words"),
-                            ("hello *italic", "hello italic"),
-                            ("hello ~~old", "hello old")] {
+        for (src, want) in [
+            ("hello **bold words", "hello bold words"),
+            ("hello *italic", "hello italic"),
+            ("hello ~~old", "hello old"),
+        ] {
             let mut r = StreamingRenderer::new(W);
             r.update(src);
-            assert_eq!(flat(&r.body_with_cursor()).join("\n").trim_end_matches(CURSOR), want);
+            assert_eq!(
+                flat(&r.body_with_cursor())
+                    .join("\n")
+                    .trim_end_matches(CURSOR),
+                want
+            );
             assert_eq!(r.source(), src);
             assert_eq!(flat(&r.finish()), full_plain(src));
         }
@@ -508,7 +578,11 @@ mod tests {
         // Once the fence closes and a blank follows, we can freeze.
         let s = "```\ncode\n```\n\ntail";
         let b = find_frozen_boundary(s);
-        assert!(b > 0 && &s[..b] == "```\ncode\n```\n\n", "got {b}: {:?}", &s[..b]);
+        assert!(
+            b > 0 && &s[..b] == "```\ncode\n```\n\n",
+            "got {b}: {:?}",
+            &s[..b]
+        );
     }
 
     #[test]
@@ -546,7 +620,10 @@ mod tests {
             "completed paragraph should extend the frozen prefix"
         );
         let prefix_3 = flat(&r.body_with_cursor())[..frozen_after_heading].to_vec();
-        assert_eq!(prefix_1, prefix_3, "frozen heading lines changed after 3rd push");
+        assert_eq!(
+            prefix_1, prefix_3,
+            "frozen heading lines changed after 3rd push"
+        );
     }
 
     // ── incomplete list / paragraph is NOT frozen ───────────────────────────
@@ -604,7 +681,10 @@ mod tests {
         for &cut in cuts {
             let end = cut.min(doc.len());
             // land on a char boundary
-            let end = (0..=end).rev().find(|&i| doc.is_char_boundary(i)).unwrap_or(0);
+            let end = (0..=end)
+                .rev()
+                .find(|&i| doc.is_char_boundary(i))
+                .unwrap_or(0);
             r.update(&doc[..end]);
             assert_eq!(
                 flat(&r.body_with_cursor()),
@@ -754,7 +834,8 @@ Done.
             let opens = streamed.iter().filter(|l| l.starts_with('┌')).count();
             let closes = streamed.iter().filter(|l| l.starts_with('└')).count();
             assert_eq!(
-                opens, closes,
+                opens,
+                closes,
                 "prefix len {end}: {opens} open frames vs {closes} closed — the table is drawn \
                  half-open\n{}",
                 streamed.join("\n")

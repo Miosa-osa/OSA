@@ -28,7 +28,28 @@ defmodule OptimalSystemAgent.ToolchainPinTest do
 
   It deliberately reads the workflow files as DATA rather than duplicating
   their values here — a constant in this file would be a fourth place to drift.
+
+  ## Local dev vs. CI
+
+  Every assertion here except "the running toolchain is the pinned toolchain"
+  is pure data validation of files in the repo (`.tool-versions`, the
+  workflows, `mix.exs`) — those must always enforce, on every machine, because
+  they catch drift between the files regardless of what Elixir happens to be
+  installed locally. Only that one test compares against *this machine's*
+  live `System.version()` / OTP release, which is legitimately expected to
+  differ on a developer's box (asdf, Homebrew, whatever they have) — that
+  test is a release-gate check, not a "your dev setup is wrong" check.
+
+  It enforces exactly where it needs to: in CI. `ci.yml` sets `ELIXIR_VERSION`
+  and `OTP_VERSION` as workflow-level `env:`, which GitHub Actions exports as
+  real shell environment variables to every step including `mix test` — so
+  their presence *is* the "this run is on the toolchain CI/release pinned"
+  signal, with no extra plumbing needed. Locally, nothing exports those names,
+  so the test skips with a message pointing at `asdf install` instead of
+  failing every local `mix test`.
   """
+
+  alias OptimalSystemAgent.Test.CiSignal
 
   @root Path.expand("..", __DIR__)
   @tool_versions Path.join(@root, ".tool-versions")
@@ -97,6 +118,14 @@ defmodule OptimalSystemAgent.ToolchainPinTest do
            """
   end
 
+  @tag skip:
+         (unless CiSignal.pinned_toolchain?() do
+            "not running under the CI-pinned toolchain (ELIXIR_VERSION/OTP_VERSION are not " <>
+              "set in this shell) — this machine's Elixir #{System.version()} is a local dev " <>
+              "toolchain, not a claim about what CI or the release build will run. This " <>
+              "enforces for real in CI, where ci.yml exports the pinned versions. To check it " <>
+              "here: `asdf install` the pinned toolchain from .tool-versions."
+          end)
   test "the running toolchain is the pinned toolchain" do
     p = pinned()
     elixir = p["elixir"] |> String.replace(~r/-otp-\d+$/, "")

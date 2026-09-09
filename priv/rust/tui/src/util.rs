@@ -258,8 +258,7 @@ pub const RECAP_ELAPSED_THRESHOLD_SECS: u64 = 10;
 /// defense-in-depth for legacy payloads that only carry the name list.
 pub fn is_internal_tool(name: &str) -> bool {
     let n = name.trim().to_ascii_lowercase();
-    n.starts_with("memory")
-        || matches!(n.as_str(), "session_search" | "session_recall" | "recall")
+    n.starts_with("memory") || matches!(n.as_str(), "session_search" | "session_recall" | "recall")
 }
 
 /// Count the substantive (user-visible) tools in a turn's tool list, excluding
@@ -576,10 +575,7 @@ mod tests {
     fn assert_whole_cluster_prefix(s: &str, out: &str, budget: usize) {
         use unicode_segmentation::UnicodeSegmentation;
 
-        assert!(
-            cols(out) <= budget,
-            "overflowed budget {budget}: {out:?}"
-        );
+        assert!(cols(out) <= budget, "overflowed budget {budget}: {out:?}");
 
         let body = out.strip_suffix('\u{2026}').unwrap_or(out);
 
@@ -667,7 +663,11 @@ mod tests {
         let home = Some("/Users/rhl");
         // 1. session cwd wins.
         assert_eq!(
-            display_path("/Users/rhl/projects/osa/src/lib.rs", Some("/Users/rhl/projects/osa"), home),
+            display_path(
+                "/Users/rhl/projects/osa/src/lib.rs",
+                Some("/Users/rhl/projects/osa"),
+                home
+            ),
             "src/lib.rs"
         );
         // 2. agent sandbox — the sub-agent case the roster actually shows.
@@ -676,7 +676,10 @@ mod tests {
             "codex/codex-rs/hooks"
         );
         // 3. plain home.
-        assert_eq!(display_path("/Users/rhl/notes.md", None, home), "~/notes.md");
+        assert_eq!(
+            display_path("/Users/rhl/notes.md", None, home),
+            "~/notes.md"
+        );
         // Nothing matches → untouched, never a lie.
         assert_eq!(display_path("/etc/hosts", None, home), "/etc/hosts");
         // Sibling directory is NOT under the root (boundary must be `/`).
@@ -684,7 +687,10 @@ mod tests {
         // The root itself has no tail to show; left alone.
         assert_eq!(display_path("/Users/rhl", None, home), "/Users/rhl");
         // Relative paths pass straight through.
-        assert_eq!(display_path("src/main.rs", Some("/Users/rhl"), home), "src/main.rs");
+        assert_eq!(
+            display_path("src/main.rs", Some("/Users/rhl"), home),
+            "src/main.rs"
+        );
     }
 
     #[test]
@@ -702,9 +708,15 @@ mod tests {
             "file_read: a/b/d"
         );
         // No shared directory component.
-        assert_eq!(elide_shared_prefix("dir_list: a/x", "dir_list: b/y"), "dir_list: b/y");
+        assert_eq!(
+            elide_shared_prefix("dir_list: a/x", "dir_list: b/y"),
+            "dir_list: b/y"
+        );
         // Shared head too short to be worth a marker ("a/" is 2 cols).
-        assert_eq!(elide_shared_prefix("dir_list: a/x", "dir_list: a/y"), "dir_list: a/y");
+        assert_eq!(
+            elide_shared_prefix("dir_list: a/x", "dir_list: a/y"),
+            "dir_list: a/y"
+        );
         // Not `verb: value` shaped at all.
         assert_eq!(elide_shared_prefix("thinking", "planning"), "planning");
         // Identical rows leave no tail.

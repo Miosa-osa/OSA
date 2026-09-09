@@ -141,7 +141,11 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = Vec::new();
         walk(&root, &mut files);
-        assert!(!files.is_empty(), "found no sources under {}", root.display());
+        assert!(
+            !files.is_empty(),
+            "found no sources under {}",
+            root.display()
+        );
 
         let mut offenders: Vec<String> = Vec::new();
         for path in files {

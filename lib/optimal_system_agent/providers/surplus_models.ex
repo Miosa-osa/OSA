@@ -13,6 +13,13 @@ defmodule OptimalSystemAgent.Providers.SurplusModels do
   # Surplus sells; the live picker still exposes those on demand.
   @featured [
     {"claude-fable-5.1", "Claude Fable 5.1"},
+    # Claude 5 family — frontier priority. Surplus relists these under Anthropic's
+    # own ids; the capability-keyed cache gate ("claude" substring) and the
+    # dotted→dashed context-window resolver handle them with no per-id wiring.
+    {"claude-opus-5", "Claude Opus 5"},
+    {"claude-opus-5-fast", "Claude Opus 5 Fast"},
+    {"claude-sonnet-5", "Claude Sonnet 5"},
+    {"claude-fable-5", "Claude Fable 5"},
     {"glm-5.3-flash", "GLM 5.3 Flash"},
     {"muse-spark-1.3-contributor", "Meta: Muse Spark 1.3 Contributor"},
     {"gpt-6-astra", "GPT-6 Astra"},
@@ -59,6 +66,29 @@ defmodule OptimalSystemAgent.Providers.SurplusModels do
   # a bottleneck and an ETS table needs an owner process this data does not.
   @runtime_key {__MODULE__, :runtime_pricing}
   @prefix "surplus/"
+
+  # ── Static rate card: OFFLINE fallback for the frontier models we ship ─────
+  #
+  # Surplus prices are dynamic and the RUNTIME map above is authoritative — it
+  # overrides any row here the moment the live `/v1/models` catalog is fetched.
+  # This snapshot exists only so a model we KNOW the price of never falls to the
+  # conservative `{2,10}` provider-level estimate before that first fetch (fresh
+  # process, offline, no key). Transcribed from Surplus' published reseller rates
+  # on 2026-09-14. `{input, output}` USD per 1M tokens; all 1M context.
+  #
+  # Deliberately only the Claude family we feature: these are the ids most likely
+  # to be selected before a catalog fetch, and their price gap vs the {2,10}
+  # estimate is the widest (claude-opus-5 is ~20x cheaper on input). A row that
+  # goes stale is corrected by the next live fetch, never outlives one.
+  @static_pricing %{
+    "claude-fable-5.1" => {2.50, 12.50},
+    "claude-fable-5" => {5.75, 28.75},
+    "claude-opus-5" => {0.092, 0.46},
+    "claude-opus-5-fast" => {3.00, 15.00},
+    "claude-sonnet-5" => {0.50, 2.49}
+  }
+
+  @static_by_key Map.new(@static_pricing, fn {id, rate} -> {@prefix <> id, rate} end)
 
   @doc """
   The pricing-key prefix that namespaces a bare surplus id, so a surplus turn
@@ -110,6 +140,17 @@ defmodule OptimalSystemAgent.Providers.SurplusModels do
     do: Map.get(runtime_pricing(), String.downcase(namespaced_id))
 
   def runtime_rate(_), do: nil
+
+  @doc """
+  A statically-known Surplus rate for a NAMESPACED key, or nil. This is the
+  OFFLINE fallback for the featured frontier models; `runtime_rate/1` (the live
+  catalog) takes precedence over it in `Pricing`. Case-insensitive.
+  """
+  @spec static_rate(String.t() | nil) :: {number(), number()} | nil
+  def static_rate(namespaced_id) when is_binary(namespaced_id),
+    do: Map.get(@static_by_key, String.downcase(namespaced_id))
+
+  def static_rate(_), do: nil
 
   @doc false
   # Test seam — lets a test drive the empty-card fallback and a stubbed row

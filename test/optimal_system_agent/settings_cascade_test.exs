@@ -4,6 +4,7 @@ defmodule OptimalSystemAgent.SettingsCascadeTest do
   use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Settings
+  alias OptimalSystemAgent.Test.EnvIsolation
 
   setup do
     # PathCanon FIRST: the BEAM resolves `/var/folders/...` to the physical
@@ -66,18 +67,14 @@ defmodule OptimalSystemAgent.SettingsCascadeTest do
   test "get_merged_hooks concatenates hook lists across layers (trusted workspace)" do
     alias OptimalSystemAgent.Workspace.Trust
     cwd = File.cwd!()
-    old_home = System.get_env("OSA_HOME")
     # Redirect the trust store into the tmp workspace so no real ~/.osa state
     # is read or written, then accept trust for this directory.
+    # `protect/1` is called BEFORE the `Trust.forget` on_exit below so its
+    # restore (on_exit is LIFO) fires AFTER `Trust.forget` — which still
+    # needs OSA_HOME pointed at `cwd` to find the right trust store to clear.
+    EnvIsolation.protect(env: ["OSA_HOME"])
     System.put_env("OSA_HOME", cwd)
-
-    on_exit(fn ->
-      Trust.forget(cwd)
-
-      if old_home,
-        do: System.put_env("OSA_HOME", old_home),
-        else: System.delete_env("OSA_HOME")
-    end)
+    on_exit(fn -> Trust.forget(cwd) end)
 
     project_hook = %{"type" => "shell", "command" => "echo project"}
     local_hook = %{"type" => "shell", "command" => "echo local"}
@@ -105,17 +102,10 @@ defmodule OptimalSystemAgent.SettingsCascadeTest do
   test "get_merged_hooks keeps ALL workspace hooks inert in an UNTRUSTED workspace" do
     alias OptimalSystemAgent.Workspace.Trust
     cwd = File.cwd!()
-    old_home = System.get_env("OSA_HOME")
     # Empty trust store inside the tmp workspace → this directory is untrusted.
+    EnvIsolation.protect(env: ["OSA_HOME"])
     System.put_env("OSA_HOME", cwd)
-
-    on_exit(fn ->
-      Trust.forget(cwd)
-
-      if old_home,
-        do: System.put_env("OSA_HOME", old_home),
-        else: System.delete_env("OSA_HOME")
-    end)
+    on_exit(fn -> Trust.forget(cwd) end)
 
     project_hook = %{"type" => "shell", "command" => "echo project"}
     local_hook = %{"type" => "shell", "command" => "echo local"}

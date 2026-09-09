@@ -1375,8 +1375,11 @@ mod panel_invariants {
             W,
             a.height().max(1),
         ));
+        // The raw backend tool id ("file_glob") is mapped to a human label
+        // (2b — `crate::tools::humanize_tool_action`) before it ever reaches
+        // the trail, so the row reads "Finding /w/x.rs", not the wire id.
         assert!(
-            expanded.contains("file_glob: /w/x.rs"),
+            expanded.contains("Finding /w/x.rs"),
             "an expanded node shows its trail:\n{expanded}"
         );
 
@@ -1387,7 +1390,7 @@ mod panel_invariants {
             a.height().max(1),
         ));
         assert!(
-            !collapsed.contains("file_glob"),
+            !collapsed.contains("Finding") && !collapsed.contains("file_glob"),
             "a collapsed node hides its trail:\n{collapsed}"
         );
         assert!(
@@ -1402,7 +1405,7 @@ mod panel_invariants {
             a.height().max(1),
         ));
         assert!(
-            restored.contains("file_glob"),
+            restored.contains("Finding"),
             "toggling again restores the trail:\n{restored}"
         );
     }

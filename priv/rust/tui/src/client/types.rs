@@ -378,6 +378,27 @@ pub struct GoalStatus {
     /// from a finished one.
     #[serde(default)]
     pub pause_reason: Option<String>,
+    /// Item #3 pull path — present ONLY when `status` is terminal
+    /// (completed/blocked/abandoned; see `GoalTracker.completion_overview/1`),
+    /// absent otherwise (same "keys missing = not terminal" convention as the
+    /// live `goal_completion_overview` event). Lets a resumed session recover
+    /// the full-screen completion report on reconnect via the ordinary
+    /// `/goal status` pull, not only from the one-time live event.
+    ///
+    /// Distinct file paths touched this session (the VerificationEvidence
+    /// ledger) — a LIST of paths, not prose.
+    #[serde(default)]
+    pub work_summary: Vec<String>,
+    /// The frozen acceptance-criteria text, when distinct from the goal text.
+    #[serde(default)]
+    pub acceptance_criteria: Option<String>,
+    /// Goal-verifier-panel findings. Commonly empty for blocked/abandoned
+    /// (see `components::completion_panel::CompletionReport::gaps`).
+    #[serde(default)]
+    pub gaps: Vec<String>,
+    /// Most recent goal-tracker history line.
+    #[serde(default)]
+    pub latest: Option<String>,
 }
 
 // === Tools ===
@@ -1120,6 +1141,43 @@ mod health_update_parse_tests {
     }
 }
 
+// ── item #3 pull path: completion fields on the `/goal` response's `goal` ──
+#[cfg(test)]
+mod goal_status_completion_fields_tests {
+    use super::GoalStatus;
+
+    #[test]
+    fn parses_completion_fields_when_terminal() {
+        let json = r#"{
+            "active": false,
+            "status": "completed",
+            "goal": "Ship it",
+            "gaps": ["docs still stale"],
+            "work_summary": ["lib/foo.ex", "lib/bar.ex"],
+            "acceptance_criteria": "All tests pass",
+            "latest": "verified complete"
+        }"#;
+        let g: GoalStatus = serde_json::from_str(json).unwrap();
+        assert_eq!(g.gaps, vec!["docs still stale".to_string()]);
+        assert_eq!(
+            g.work_summary,
+            vec!["lib/foo.ex".to_string(), "lib/bar.ex".to_string()]
+        );
+        assert_eq!(g.acceptance_criteria.as_deref(), Some("All tests pass"));
+        assert_eq!(g.latest.as_deref(), Some("verified complete"));
+    }
+
+    #[test]
+    fn a_non_terminal_response_omits_the_completion_keys_entirely() {
+        // Same "keys missing = not terminal" convention as the live event.
+        let json = r#"{"active": true, "status": "active", "goal": "Ship it"}"#;
+        let g: GoalStatus = serde_json::from_str(json).unwrap();
+        assert!(g.gaps.is_empty());
+        assert!(g.work_summary.is_empty());
+        assert_eq!(g.acceptance_criteria, None);
+        assert_eq!(g.latest, None);
+    }
+}
 
 // === Local model manager (/models/local) ===
 

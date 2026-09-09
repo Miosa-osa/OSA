@@ -227,7 +227,9 @@ defmodule OptimalSystemAgent.Agent.Loop.TruncatedResponseTest do
         Steer.queue(s, "set the goal and lock it in")
       end)
 
-      on_exit(fn -> Application.delete_env(:optimal_system_agent, :mock_provider_after_call_once) end)
+      on_exit(fn ->
+        Application.delete_env(:optimal_system_agent, :mock_provider_after_call_once)
+      end)
 
       Application.put_env(:optimal_system_agent, :mock_provider_final_text, "here is the plan")
       Application.delete_env(:optimal_system_agent, :mock_provider_stop_reason)

@@ -139,6 +139,17 @@ pub(super) fn row_activity(entry: &AgentEntry) -> &str {
     }
 }
 
+/// [`row_activity`], with any raw backend tool-id verb mapped to a human
+/// label (2b) — the form actually drawn on the roster head row.
+///
+/// Kept separate from `row_activity` (which stays raw and borrowed) because
+/// `trail_actions`'s de-dup compares it against the backend's OWN
+/// `recent_actions` entries, which are not humanized at the source; humanizing
+/// only at render time keeps that comparison exact and allocation-free.
+pub(super) fn row_activity_display(entry: &AgentEntry) -> String {
+    crate::tools::humanize_tool_action(row_activity(entry))
+}
+
 /// A live agent the backend says is NOT actively working — queued behind the
 /// concurrency cap, or blocked waiting on a model response. It is not failed and
 /// not idle-done; it is stuck-in-place, which is the state a runaway or a wedged
@@ -152,6 +163,39 @@ pub(super) fn is_blocked_waiting(entry: &AgentEntry) -> bool {
             .phase
             .as_ref()
             .is_some_and(|p| matches!(p.name.as_str(), "queued" | "awaiting_model"))
+}
+
+/// What a BLOCKED (⏸) row is actually blocked on (2c).
+///
+/// `is_blocked_waiting` styles the row amber, but the TEXT it showed was
+/// whatever `current_action` held BEFORE the agent stopped progressing — its
+/// last real action (a shell command, a delegated child, …) if it had one, or
+/// the task subject if it never got that far — neither of which says the
+/// agent is blocked, let alone why. Reported: an amber row with no legible
+/// cause.
+///
+/// This combines the last known action (humanized — 2b, e.g. `"$ npm
+/// install"` or `"Delegating @child"`) with the backend's own phase
+/// description (`"queued, not started yet"` / `"waiting on the model"`), so
+/// the row states a fact instead of just wearing a caution color:
+/// `"$ npm install · waiting on the model"`. Caller must already know
+/// `is_blocked_waiting(entry)` is true; a row that is not actually blocked has
+/// no phase to describe and this degrades to the plain last action.
+pub(super) fn blocked_activity_detail(entry: &AgentEntry) -> String {
+    let phase_desc = entry.phase.as_ref().map(|p| p.describe());
+    let last_action = if entry.current_action.trim().is_empty() {
+        None
+    } else {
+        Some(crate::tools::humanize_tool_action(
+            entry.current_action.trim(),
+        ))
+    };
+    match (last_action, phase_desc) {
+        (Some(action), Some(desc)) => format!("{action} \u{00b7} {desc}"),
+        (Some(action), None) => action,
+        (None, Some(desc)) => desc,
+        (None, None) => "blocked".to_string(),
+    }
 }
 
 /// The de-duplicated, bounded child action list for one running agent, ordered
@@ -378,10 +422,17 @@ impl Agents {
     }
 
     /// The trail of one running agent as it will be DRAWN: shortened, then with
-    /// each row's shared directory head collapsed against the row above it.
+    /// each row's shared directory head collapsed against the row above it,
+    /// then with the raw tool-id VERB mapped to a human label (2b — see
+    /// [`crate::tools::humanize_tool_action`]).
     ///
     /// Elision compares full shortened forms, never already-elided ones, so a run
-    /// of three siblings yields `…/b`, `…/c` and not `…//c`.
+    /// of three siblings yields `…/b`, `…/c` and not `…//c`. Humanizing happens
+    /// LAST, after elision: both `trail_shorten`'s output and an elided row stay
+    /// `verb: arg` shaped (only the arg is ever shortened), which is exactly the
+    /// shape `elide_shared_prefix` requires to compare siblings — humanizing the
+    /// verb any earlier would strip the `:` separator and silently disable
+    /// elision for every mapped tool.
     ///
     /// Row COUNT is unchanged by this function — it only rewrites text — so
     /// `entry_rows` stays authoritative for the reservation.
@@ -390,11 +441,12 @@ impl Agents {
         let mut out = Vec::new();
         for a in trail_actions(entry, self.trail_cap()) {
             let shortened = self.trail_shorten(&a);
-            out.push(match prev {
+            let elided = match prev {
                 Some(ref p) => crate::util::elide_shared_prefix(p, &shortened),
                 None => shortened.clone(),
-            });
+            };
             prev = Some(shortened);
+            out.push(crate::tools::humanize_tool_action(&elided));
         }
         out
     }
@@ -632,7 +684,10 @@ impl Agents {
                 AgentStatus::Partial => "partial (resumable)".to_string(),
                 AgentStatus::Failed if e.current_action.is_empty() => "failed".to_string(),
                 _ if e.current_action.is_empty() => "starting…".to_string(),
-                _ => e.current_action.clone(),
+                // 2b: same humanization the roster row applies, so this
+                // summary never names a raw tool id ("shell_execute") where
+                // every other surface says "$ <command>".
+                _ => crate::tools::humanize_tool_action(&e.current_action),
             };
             let mut summary = format!(
                 "{} — {} · {} tool{} · {} tok · {}",
@@ -663,6 +718,49 @@ impl Agents {
             }
             summary
         })
+    }
+
+    /// How long a child may go silent before a `task_wait`/join naming it is
+    /// no longer "healthy" — beyond this the CHILD itself has stalled, and
+    /// the parent's plain silence alarm is the correct thing to show instead
+    /// of a reassuring label that is no longer true. Matches the parent
+    /// turn's own `SILENCE_NOTICE_SECS` (`components::activity`) so the two
+    /// surfaces agree on how long is "still normal" for a fan-out.
+    const JOIN_WAIT_QUIET_SECS: u64 = 60;
+
+    /// What a `task_wait`/join is blocked ON, for the parent's activity row
+    /// (1/2d — see `Activity::join_wait_detail`).
+    ///
+    /// A `task_wait` blocks the PARENT's own output while it waits on other
+    /// agents, so the parent turn's silence alarm ("no response for Ns") could
+    /// not tell a healthy multi-minute fan-out from a genuinely wedged turn —
+    /// both looked identical, because the alarm only ever measured the
+    /// parent's own (deliberately absent) output. This names the most
+    /// recently active tracked child instead: its role/name, its live
+    /// activity (humanized — 2b), and its elapsed, e.g.
+    /// `"waiting on backend — grep… 4m"`.
+    ///
+    /// Returns `None` — let the caller's plain alarm speak — when there is no
+    /// child to name (no agents tracked at all, e.g. the wait is on
+    /// background task output with no fan-out row) OR when even the freshest
+    /// child has itself gone quiet past [`Self::JOIN_WAIT_QUIET_SECS`]: at
+    /// that point the fleet really might be stuck, and reporting otherwise
+    /// would be the exact false reassurance this whole fix exists to remove.
+    pub fn join_wait_label(&self) -> Option<String> {
+        let entry = self
+            .entries
+            .iter()
+            .filter(|e| !e.status.is_terminal())
+            .min_by_key(|e| e.last_activity.elapsed())?;
+        if entry.last_activity.elapsed().as_secs() >= Self::JOIN_WAIT_QUIET_SECS {
+            return None;
+        }
+        let name = self.display_label(&entry.name);
+        let activity = row_activity_display(entry);
+        let elapsed = crate::components::status_bar::fmt_elapsed_compact(entry.elapsed_secs());
+        Some(format!(
+            "waiting on {name} \u{2014} {activity} \u{00b7} {elapsed}"
+        ))
     }
 
     /// Number of running/spawning background subagents tracked in the panel
@@ -1018,6 +1116,7 @@ impl Agents {
                     last_activity: std::time::Instant::now(),
                     result_summary: None,
                     cost_usd: None,
+                    budget_cap_usd: None,
                     phase: None,
                     active_skills: Vec::new(),
                     model_reason: String::new(),
@@ -1096,6 +1195,7 @@ impl Agents {
                 last_activity: std::time::Instant::now(),
                 result_summary: None,
                 cost_usd: None,
+                budget_cap_usd: None,
                 phase: None,
                 active_skills: Vec::new(),
                 model_reason: String::new(),
@@ -1173,6 +1273,22 @@ impl Agents {
             if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
                 entry.context_percent = Some(pct);
             }
+        }
+    }
+
+    /// Record this agent's per-subagent spend ceiling in USD
+    /// (`max_budget_usd` on the orchestrator — see [`AgentEntry::budget_cap_usd`]).
+    ///
+    /// (2e) The cap is fixed at spawn time and does not change over the run,
+    /// so unlike the live counters this is set once from the `agent_started`
+    /// frame; a later call with the same value is a harmless no-op. Kept as
+    /// its own setter — rather than a parameter on `agent_started` — so the
+    /// dozens of existing call sites (production and test) that don't know
+    /// about a cap are unaffected; only the one call site that receives the
+    /// field needs to invoke this.
+    pub fn set_agent_budget_cap(&mut self, name: &str, cap_usd: f64) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
+            entry.budget_cap_usd = Some(cap_usd);
         }
     }
 
@@ -1374,6 +1490,7 @@ impl Agents {
                 last_activity: now,
                 result_summary: None,
                 cost_usd: None,
+                budget_cap_usd: None,
                 phase: Some(parsed),
                 active_skills: Vec::new(),
                 model_reason: String::new(),
@@ -1559,6 +1676,70 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+
+    // ── 1/2d: what a task_wait/join is blocked on ───────────────────────────
+
+    #[test]
+    fn join_wait_label_names_the_live_child_and_its_activity() {
+        let mut a = Agents::new();
+        a.agent_started("agent:s1:1", "backend", "", "wire the API", None, None);
+        a.agent_progress("agent:s1:1", "grep: TODO", 2, 40, "", vec![], None);
+
+        let label = a.join_wait_label().expect("a live child must be named");
+        assert!(label.starts_with("waiting on backend"), "{label:?}");
+        assert!(label.contains("Searching TODO"), "{label:?}");
+    }
+
+    #[test]
+    fn join_wait_label_is_none_with_no_tracked_children() {
+        let a = Agents::new();
+        assert_eq!(a.join_wait_label(), None);
+    }
+
+    #[test]
+    fn join_wait_label_is_none_once_a_terminal_row_is_the_only_one_left() {
+        let mut a = Agents::new();
+        a.agent_started("agent:s1:1", "backend", "", "wire the API", None, None);
+        a.agent_completed("agent:s1:1", Some(3), Some(100), None);
+        assert_eq!(
+            a.join_wait_label(),
+            None,
+            "a finished agent is not who the join is waiting on"
+        );
+    }
+
+    #[test]
+    fn join_wait_label_goes_quiet_once_the_freshest_child_has_gone_quiet() {
+        let mut a = Agents::new();
+        a.agent_started("agent:s1:1", "backend", "", "wire the API", None, None);
+        a.agent_progress("agent:s1:1", "grep: TODO", 2, 40, "", vec![], None);
+        assert!(
+            a.join_wait_label().is_some(),
+            "freshly active — must be named"
+        );
+
+        // Backdate the last signal past the quiet threshold: even the
+        // freshest child has stopped reporting, so this must fall back to
+        // `None` and let the caller's plain silence alarm speak — reporting
+        // otherwise would be exactly the false reassurance this exists to
+        // prevent.
+        a.entries[0].last_activity = std::time::Instant::now() - std::time::Duration::from_secs(90);
+        assert_eq!(a.join_wait_label(), None);
+    }
+
+    #[test]
+    fn join_wait_label_prefers_the_freshest_of_several_children() {
+        let mut a = Agents::new();
+        a.agent_started("agent:s1:1", "backend", "", "wire the API", None, None);
+        a.agent_started("agent:s1:2", "frontend", "", "wire the UI", None, None);
+        // Make w1 stale-ish (but still under the quiet threshold) and w2 the
+        // freshest signal.
+        a.entries[0].last_activity = std::time::Instant::now() - std::time::Duration::from_secs(30);
+        a.agent_progress("agent:s1:2", "file_write: app.tsx", 1, 10, "", vec![], None);
+
+        let label = a.join_wait_label().unwrap();
+        assert!(label.starts_with("waiting on frontend"), "{label:?}");
     }
 
     #[test]
@@ -2475,6 +2656,125 @@ mod tests {
         );
     }
 
+    // ── 2b: raw backend tool ids never leak into the roster ────────────────
+
+    #[test]
+    fn roster_head_row_humanizes_raw_tool_ids() {
+        let mut a = Agents::new();
+        a.agent_started("w1", "coder", "", "build the project", None, None);
+        a.agent_progress("w1", "shell_execute: cargo build", 1, 10, "", vec![], None);
+
+        let text = render_text(&a, 80, 12);
+        assert!(
+            text.contains("$ cargo build"),
+            "expected the humanized shell action on the head row: {text:?}"
+        );
+        assert!(
+            !text.contains("shell_execute"),
+            "raw tool id leaked onto the roster: {text:?}"
+        );
+    }
+
+    #[test]
+    fn trail_rows_humanize_raw_tool_ids() {
+        let mut a = Agents::new();
+        a.agent_started("w1", "coder", "", "build the project", None, None);
+        a.agent_progress(
+            "w1",
+            "file_write: notes.md",
+            2,
+            20,
+            "",
+            vec![
+                "file_read: input.md".to_string(),
+                "dir_list: workdir".to_string(),
+            ],
+            None,
+        );
+
+        let text = render_text(&a, 90, 14);
+        assert!(text.contains("Reading input.md"), "{text:?}");
+        assert!(text.contains("Listing workdir"), "{text:?}");
+        assert!(!text.contains("file_read:"), "{text:?}");
+        assert!(!text.contains("dir_list:"), "{text:?}");
+    }
+
+    #[test]
+    fn humanize_tool_action_leaves_ordinary_sentences_alone() {
+        // A dashboard/summary/trail sentence that is NOT a raw tool id (a
+        // stall message, a cancellation notice) must render byte-for-byte.
+        assert_eq!(
+            crate::tools::humanize_tool_action("no progress for 14m"),
+            "no progress for 14m"
+        );
+        assert_eq!(crate::tools::humanize_tool_action("cancelled"), "cancelled");
+    }
+
+    // ── 2c: a blocked row states WHAT it is blocked on ──────────────────────
+
+    #[test]
+    fn a_blocked_row_names_its_last_action_and_the_phase() {
+        let mut a = Agents::new();
+        a.agent_started("w1", "coder", "", "ship the release", None, None);
+        // The agent's last real action before it stopped progressing.
+        a.agent_progress("w1", "shell_execute: npm install", 1, 5, "", vec![], None);
+        // The backend now reports it as blocked (queued behind the concurrency
+        // cap / awaiting the model) — current_action is untouched by a phase
+        // frame (see `agent_phase`), so without 2c the row would still show
+        // only the stale "$ npm install" with no sign anything changed.
+        a.agent_phase("w1", "coder", "awaiting_model", "", None);
+
+        let text = render_text(&a, 90, 12);
+        assert!(
+            text.contains("$ npm install"),
+            "the blocking action must be named: {text:?}"
+        );
+        assert!(
+            text.contains("waiting on the model"),
+            "the phase must also be stated: {text:?}"
+        );
+    }
+
+    #[test]
+    fn blocked_activity_detail_degrades_gracefully_with_no_last_action() {
+        // A freshly-spawned agent that got queued before ever running a tool
+        // has no last action to show — the phase alone must still say
+        // something, never a blank amber row.
+        let entry = AgentEntry {
+            name: "w1".into(),
+            role: "coder".into(),
+            model: String::new(),
+            subject: "ship the release".into(),
+            status: AgentStatus::Running,
+            current_action: String::new(),
+            recent_actions: Vec::new(),
+            tool_uses: 0,
+            tokens_used: 0,
+            context_percent: None,
+            batch_id: None,
+            started_at: std::time::Instant::now(),
+            finished_at: None,
+            last_activity: std::time::Instant::now(),
+            result_summary: None,
+            cost_usd: None,
+            budget_cap_usd: None,
+            phase: Some(AgentPhase {
+                name: "queued".into(),
+                detail: String::new(),
+                since: std::time::Instant::now(),
+            }),
+            active_skills: Vec::new(),
+            model_reason: String::new(),
+            skill_reason: String::new(),
+            retry_count: 0,
+            failure_count: 0,
+            delivery_status: String::new(),
+            available_controls: Vec::new(),
+        };
+        assert!(is_blocked_waiting(&entry));
+        assert_eq!(blocked_activity_detail(&entry), "queued, not started yet");
+    }
+
     /// A deep, wide fleet whose names, activities and actions are full of wide
     /// (CJK/emoji) and control (ESC) bytes must render at every width from very
     /// narrow up without panicking and without any row exceeding the pane — the
@@ -3036,5 +3336,61 @@ mod tests {
             !text.contains("$0.00 "),
             "a sub-cent cost must not collapse to zero: {text:?}"
         );
+    }
+
+    // ── 2e: the per-agent budget cap rides alongside live cost ─────────────
+
+    #[test]
+    fn a_known_budget_cap_is_shown_beside_the_live_cost_on_both_surfaces() {
+        let mut a = Agents::new();
+        a.agent_started("w1", "coder", "", "ship it", None, None);
+        a.set_agent_cost("w1", Some(2.48));
+        a.set_agent_budget_cap("w1", 4.0);
+
+        assert_eq!(
+            a.entries
+                .iter()
+                .find(|e| e.name == "w1")
+                .unwrap()
+                .budget_cap_usd,
+            Some(4.0)
+        );
+
+        // Inline roster meta column.
+        let inline = render_text(&a, 90, 12);
+        assert!(
+            inline.contains("$2.48 / $4.00"),
+            "inline roster must show cost with its cap: {inline:?}"
+        );
+
+        // Full-screen dashboard.
+        let dashboard = render_dashboard_text(&a, 100, 16);
+        assert!(
+            dashboard.contains("$2.48 / $4.00"),
+            "dashboard must show cost with its cap: {dashboard:?}"
+        );
+    }
+
+    #[test]
+    fn no_cap_reported_shows_the_bare_cost_unchanged() {
+        // An older backend that never sends `budget_cap_usd` must render
+        // exactly as it did before this field existed.
+        let mut a = Agents::new();
+        a.agent_started("w1", "coder", "", "ship it", None, None);
+        a.set_agent_cost("w1", Some(2.48));
+
+        let text = render_text(&a, 90, 12);
+        assert!(text.contains("$2.48"), "{text:?}");
+        assert!(
+            !text.contains("$2.48 /"),
+            "no cap must not print a bare slash: {text:?}"
+        );
+    }
+
+    #[test]
+    fn set_agent_budget_cap_is_a_noop_for_an_unknown_agent() {
+        let mut a = Agents::new();
+        a.set_agent_budget_cap("ghost", 4.0);
+        assert!(a.entries.is_empty());
     }
 }

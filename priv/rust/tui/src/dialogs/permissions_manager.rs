@@ -128,7 +128,10 @@ impl PermissionsManager {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> PermissionsAction {
         // Ignore chorded shortcuts — they belong to the app, not the filter box.
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return PermissionsAction::None;
         }
         let last = self.ordered().len().saturating_sub(1);
@@ -205,7 +208,10 @@ impl PermissionsManager {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(c.primary))
             .title(Line::from(vec![
-                Span::styled(" OSA ", Style::default().fg(c.primary).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " OSA ",
+                    Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("\u{00b7} permissions ", Style::default().fg(c.muted)),
             ]))
             .style(Style::default().bg(c.dialog_bg));
@@ -230,11 +236,20 @@ impl PermissionsManager {
         put(
             frame,
             Paragraph::new(Line::from(vec![
-                Span::styled(format!("{na} allow"), Style::default().fg(c.success).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{na} allow"),
+                    Style::default().fg(c.success).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" \u{00b7} ", sep),
-                Span::styled(format!("{nd} deny"), Style::default().fg(c.error).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{nd} deny"),
+                    Style::default().fg(c.error).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" \u{00b7} ", sep),
-                Span::styled(format!("{nk} ask"), Style::default().fg(c.warning).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{nk} ask"),
+                    Style::default().fg(c.warning).add_modifier(Modifier::BOLD),
+                ),
             ])),
             Rect::new(inner.x, cy, iw, 1),
         );
@@ -257,7 +272,10 @@ impl PermissionsManager {
         // ── separator ──────────────────────────────────────────────────────
         put(
             frame,
-            Paragraph::new(Span::styled("\u{2500}".repeat(maxw), Style::default().fg(c.dim))),
+            Paragraph::new(Span::styled(
+                "\u{2500}".repeat(maxw),
+                Style::default().fg(c.dim),
+            )),
             Rect::new(inner.x, cy, iw, 1),
         );
         cy += 1;
@@ -269,19 +287,26 @@ impl PermissionsManager {
         let ordered = self.ordered();
         if ordered.is_empty() {
             let msg = if self.rules.is_empty() {
-                "No permission rules \u{2014} decisions you make with 'always' land here.".to_string()
+                "No permission rules \u{2014} decisions you make with 'always' land here."
+                    .to_string()
             } else {
                 format!("No rules match \u{201c}{}\u{201d}", self.filter)
             };
             put(
                 frame,
-                Paragraph::new(Span::styled(truncate_chars(&msg, maxw), Style::default().fg(c.muted)))
-                    .alignment(Alignment::Center),
+                Paragraph::new(Span::styled(
+                    truncate_chars(&msg, maxw),
+                    Style::default().fg(c.muted),
+                ))
+                .alignment(Alignment::Center),
                 Rect::new(inner.x, cy + list_h / 2, iw, 1),
             );
         } else {
-            let scroll =
-                crate::dialogs::clamp_scroll_to_cursor(self.scroll, self.cursor, (list_h as usize).max(1));
+            let scroll = crate::dialogs::clamp_scroll_to_cursor(
+                self.scroll,
+                self.cursor,
+                (list_h as usize).max(1),
+            );
             for rel in 0..(list_h as usize) {
                 let abs = rel + scroll;
                 let Some(&ri) = ordered.get(abs) else { break };
@@ -318,9 +343,19 @@ impl PermissionsManager {
                     let used = bw + 1 + crate::util::cols(&rule_txt);
                     let pad = maxw.saturating_sub(used + sw);
                     let spans = vec![
-                        Span::styled(badge, Style::default().fg(Self::badge_color(&r.behavior, c)).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            badge,
+                            Style::default()
+                                .fg(Self::badge_color(&r.behavior, c))
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         Span::raw(" "),
-                        Span::styled(rule_txt, Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            rule_txt,
+                            Style::default()
+                                .fg(c.secondary)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         Span::raw(" ".repeat(pad)),
                         Span::styled(src, Style::default().fg(c.dim)),
                     ];
@@ -338,13 +373,32 @@ impl PermissionsManager {
         put(
             frame,
             Paragraph::new(Line::from(vec![
-                Span::styled("type", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
-                Span::styled(" filter  ", Style::default().fg(c.dim)),
-                Span::styled("\u{2191}\u{2193}", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
-                Span::styled(" nav  ", Style::default().fg(c.dim)),
-                Span::styled("esc", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
                 Span::styled(
-                    if self.filter.is_empty() { " close" } else { " clear" },
+                    "type",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" filter  ", Style::default().fg(c.dim)),
+                Span::styled(
+                    "\u{2191}\u{2193}",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" nav  ", Style::default().fg(c.dim)),
+                Span::styled(
+                    "esc",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    if self.filter.is_empty() {
+                        " close"
+                    } else {
+                        " clear"
+                    },
                     Style::default().fg(c.dim),
                 ),
             ])),
@@ -373,11 +427,31 @@ mod permissions_manager_tests {
 
     fn sample() -> Vec<Rule> {
         vec![
-            Rule { behavior: "allow".into(), rule: "Bash(git status:*)".into(), source: "session".into() },
-            Rule { behavior: "deny".into(), rule: "Bash(rm -rf:*)".into(), source: "project".into() },
-            Rule { behavior: "ask".into(), rule: "Write(**/*.rs)".into(), source: "user".into() },
-            Rule { behavior: "allow".into(), rule: "Read(\u{4e2d}\u{6587}/**)".into(), source: "local".into() },
-            Rule { behavior: "deny".into(), rule: "\u{20ac}".repeat(90), source: "legacy".into() },
+            Rule {
+                behavior: "allow".into(),
+                rule: "Bash(git status:*)".into(),
+                source: "session".into(),
+            },
+            Rule {
+                behavior: "deny".into(),
+                rule: "Bash(rm -rf:*)".into(),
+                source: "project".into(),
+            },
+            Rule {
+                behavior: "ask".into(),
+                rule: "Write(**/*.rs)".into(),
+                source: "user".into(),
+            },
+            Rule {
+                behavior: "allow".into(),
+                rule: "Read(\u{4e2d}\u{6587}/**)".into(),
+                source: "local".into(),
+            },
+            Rule {
+                behavior: "deny".into(),
+                rule: "\u{20ac}".repeat(90),
+                source: "legacy".into(),
+            },
         ]
     }
 

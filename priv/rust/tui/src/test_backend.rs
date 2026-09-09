@@ -371,7 +371,10 @@ mod tests {
     fn emulated_rows_never_exceed_the_terminal_width() {
         let mut term = Terminal::new(VT100Backend::new(6, 2)).unwrap();
         term.draw(|f| {
-            f.render_widget(Paragraph::new("\u{6a21}\u{578b}\u{6a21}\u{578b}\u{6a21}"), f.area());
+            f.render_widget(
+                Paragraph::new("\u{6a21}\u{578b}\u{6a21}\u{578b}\u{6a21}"),
+                f.area(),
+            );
         })
         .unwrap();
         for line in term.backend().contents().lines() {

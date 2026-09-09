@@ -110,6 +110,38 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalCompletionOverviewTest do
     end
   end
 
+  describe "a paused goal shows its unresolved gaps (G3)" do
+    test "the panel's own gap list is shown, not just a stall description", %{session_id: sid} do
+      GoalTracker.start(sid, "ship the widget exporter")
+
+      gaps = [
+        "[completeness] the CSV export path is missing",
+        "[verifiability] no test proves it"
+      ]
+
+      GoalTracker.advance(sid, %GoalVerifier.Result{verdict: :incomplete, reason: "x", gaps: gaps})
+
+      GoalTracker.advance(sid, %GoalVerifier.Result{verdict: :incomplete, reason: "y", gaps: gaps})
+
+      assert GoalTracker.paused?(sid)
+
+      output = capture_cli(fn -> Commands.dispatch("goal", sid) end)
+
+      assert output =~ "Unresolved gap(s)"
+      assert output =~ "the CSV export path is missing"
+      assert output =~ "no test proves it"
+    end
+
+    test "a manual pause (no panel findings) shows no gap section", %{session_id: sid} do
+      GoalTracker.start(sid, "ship the widget exporter")
+      GoalTracker.pause(sid, :user)
+
+      output = capture_cli(fn -> Commands.dispatch("goal", sid) end)
+
+      refute output =~ "Unresolved gap(s)"
+    end
+  end
+
   describe "non-terminal states get no banner or overview" do
     test "an active goal shows neither", %{session_id: sid} do
       GoalTracker.start(sid, "still working on it")

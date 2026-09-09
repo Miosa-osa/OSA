@@ -165,6 +165,12 @@ pub enum BackendEvent {
         /// NOT zero: a client must keep whatever anchor it already had rather
         /// than reset to "just started".
         elapsed_ms: Option<u64>,
+        /// This agent's per-subagent spend ceiling in USD (2e —
+        /// `max_budget_usd` on the orchestrator: a caller override or the
+        /// spawning tier's default). Fixed for the life of the run, so this
+        /// is reported once here rather than repeated on every progress
+        /// frame. `None` from an older backend that does not yet send it.
+        budget_cap_usd: Option<f64>,
     },
     OrchestratorAgentProgress {
         agent_name: String,
@@ -508,6 +514,40 @@ pub enum BackendEvent {
         pause_reason: Option<String>,
         turn_count: u32,
         verify_run_count: u32,
+    },
+    /// Item #3 — one-time full-screen completion report, fired exactly once
+    /// when a goal transitions into a TERMINAL status: `completed` (panel
+    /// verdict), `blocked` (repeated `claim_blocked`), or `abandoned` (model
+    /// called `abandon`). NOT fired for `paused` (resumable, not terminal).
+    ///
+    /// Producer: `GoalTracker.completion_overview/1` /
+    /// `maybe_emit_completion_overview/1`
+    /// (`lib/optimal_system_agent/agent/loop/goal_tracker.ex`), forwarded as
+    /// `goal_completion_overview` on the session's PubSub topic — the same
+    /// mechanism as `goal_verifier_round`/`goal_tracker_transition`.
+    GoalCompletionOverview {
+        goal_id: Option<String>,
+        goal: Option<String>,
+        /// `"completed"` | `"blocked"` | `"abandoned"` — see
+        /// `components::completion_panel::CompletionOutcome::from_status`.
+        status: String,
+        /// Why a Blocked run stopped, when the backend reported one.
+        pause_reason: Option<String>,
+        /// Goal-verifier-panel findings. Populated when the skeptic panel
+        /// ran (typically the `completed` path, even when it approved with
+        /// residual notes); commonly EMPTY for `blocked`/`abandoned`, which
+        /// stop via `claim_blocked`/`abandon` rather than a panel verdict.
+        gaps: Vec<String>,
+        /// Distinct file paths touched this session (from the backend's
+        /// VerificationEvidence ledger) — NOT prose.
+        work_summary: Vec<String>,
+        /// The frozen acceptance-criteria text, if the goal had one set and
+        /// it differs from the goal text itself.
+        acceptance_criteria: Option<String>,
+        turn_count: u32,
+        verify_run_count: u32,
+        /// Most recent goal-tracker history line, for extra context.
+        latest: Option<String>,
     },
     SwarmIntelligenceConverged {
         swarm_id: String,

@@ -109,7 +109,13 @@ mod outcome_is_legible_without_colour {
     #[test]
     fn success_and_error_do_not_share_a_glyph() {
         let ok = plain("file_read", r#"{"path":"/a"}"#, "x", ToolStatus::Success, 5);
-        let err = plain("file_read", r#"{"path":"/a"}"#, "Error: nope", ToolStatus::Error, 5);
+        let err = plain(
+            "file_read",
+            r#"{"path":"/a"}"#,
+            "Error: nope",
+            ToolStatus::Error,
+            5,
+        );
         let ok_glyph = ok.chars().next().unwrap();
         let err_glyph = err.chars().next().unwrap();
         assert_ne!(

@@ -11,7 +11,13 @@ use super::{
 pub struct AgentRenderer;
 
 impl ToolRenderer for AgentRenderer {
-    fn render(&self, _name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        _name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
         let task_name = parse_json_arg(args, &["task", "description", "name", "input", "prompt"])
@@ -69,7 +75,11 @@ impl ToolRenderer for AgentRenderer {
             }
             let mut parts: Vec<String> = Vec::new();
             if tool_count > 0 {
-                let noun = if tool_count == 1 { "tool use" } else { "tool uses" };
+                let noun = if tool_count == 1 {
+                    "tool use"
+                } else {
+                    "tool uses"
+                };
                 parts.push(format!("{} {}", tool_count, noun));
             }
             if !dur.is_empty() {
@@ -130,35 +140,37 @@ impl ToolRenderer for AgentRenderer {
 
 /// Detect if a tree line starts with a known status icon and return that
 /// icon plus an appropriate style.
-fn parse_tree_line_prefix(
-    line: &str,
-    theme: &crate::style::Theme,
-) -> (String, Style) {
+fn parse_tree_line_prefix(line: &str, theme: &crate::style::Theme) -> (String, Style) {
     if line.starts_with('✓') {
         (
             "✓".to_string(),
-            Style::default().fg(theme.colors.success).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.colors.success)
+                .add_modifier(Modifier::BOLD),
         )
     } else if line.starts_with('✘') {
         (
             "✘".to_string(),
-            Style::default().fg(theme.colors.error).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.colors.error)
+                .add_modifier(Modifier::BOLD),
         )
     } else if line.starts_with('◈') {
         (
             "◈".to_string(),
-            Style::default().fg(theme.colors.primary).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.colors.primary)
+                .add_modifier(Modifier::BOLD),
         )
     } else if line.starts_with('⏺') || line.starts_with('●') {
         (
             crate::tools::tool_bullet().to_string(), // ● (Linux) / ⏺ (macOS)
-            Style::default().fg(theme.colors.primary).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.colors.primary)
+                .add_modifier(Modifier::BOLD),
         )
     } else {
-        (
-            "·".to_string(),
-            Style::default().fg(theme.colors.muted),
-        )
+        ("·".to_string(), Style::default().fg(theme.colors.muted))
     }
 }
 
@@ -167,14 +179,19 @@ fn parse_tree_line_prefix(
 pub struct DelegateRenderer;
 
 impl ToolRenderer for DelegateRenderer {
-    fn render(&self, _name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        _name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
         let task = parse_json_arg(args, &["task", "description", "input", "prompt"])
             .unwrap_or_else(|| "delegate task".to_string());
 
-        let tier = parse_json_arg(args, &["tier", "model_tier", "agent_tier"])
-            .unwrap_or_default();
+        let tier = parse_json_arg(args, &["tier", "model_tier", "agent_tier"]).unwrap_or_default();
 
         // Truncate task to 80 chars
         let task_display: String = if task.len() > 80 {
@@ -214,10 +231,7 @@ impl ToolRenderer for DelegateRenderer {
             if !first_line.is_empty() {
                 return vec![
                     header,
-                    Line::from(Span::styled(
-                        format!("  {}", first_line),
-                        theme.faint(),
-                    )),
+                    Line::from(Span::styled(format!("  {}", first_line), theme.faint())),
                 ];
             }
             return vec![header];

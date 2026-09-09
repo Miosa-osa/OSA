@@ -279,7 +279,9 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalAbandonTest do
 
       # And the parameter surface still exposes nothing but `status`.
       params = OptimalSystemAgent.Tools.Builtins.Goal.UpdateTool.parameters()
-      assert Enum.sort(Map.keys(params["properties"])) == ~w(artifact criterion question status work_summary)
+
+      assert Enum.sort(Map.keys(params["properties"])) ==
+               ~w(artifact criterion question status work_summary)
 
       # Abandoning ends the goal; it does not silently become the new one.
       assert {:ok, _} = update(ctx, "abandoned")

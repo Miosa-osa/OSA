@@ -225,6 +225,85 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
     end
   end
 
+  # #4 — the SAME background-work guard, but for the TOOL-CALLED reverify path
+  # (`maybe_gate/1`/`skip_reason/1`). Before this fix, `skip_reason/1` had no
+  # `awaiting_background_work?/1` check at all — only its sibling
+  # `wait_skip_reason/1` (used by the tool-call-free `maybe_wait_for_user/2`)
+  # did. A turn that makes an incidental tool call (e.g. checking on
+  # something) while genuinely waiting on a delegated background agent goes
+  # through `maybe_gate/1`, not `maybe_wait_for_user/2` — so it could still
+  # triage `:candidate_complete` on stale evidence, spawn a real panel round
+  # that (correctly) finds nothing new, and feed an unchanged gap fingerprint
+  # into the SAME cross-turn stall counter `GoalTracker` uses to auto-pause.
+  # Two such rounds in a row was the residual false "no_progress" pause.
+  describe "skip_reason/1 while a background agent is running" do
+    test "returns :awaiting_background_work, taking precedence over :no_work", %{
+      session_id: sid
+    } do
+      child = "agent:#{sid}:1"
+      RunStore.start_run(%{agent_id: child, parent_session_id: sid, role: "worker"})
+
+      # No write recorded either — :no_work would ALSO be a valid skip, but
+      # the background guard must win: an operator debugging why the panel
+      # never runs needs to see the REAL reason, not a coincidental one.
+      assert GoalVerifier.skip_reason(base_state(sid)) == :awaiting_background_work
+
+      RunStore.complete(child, %{status: :completed, summary: "done"})
+    end
+
+    test "does not skip for that reason once the background agent finishes", %{
+      session_id: sid
+    } do
+      mark_write(sid)
+      child = "agent:#{sid}:1"
+      RunStore.start_run(%{agent_id: child, parent_session_id: sid, role: "worker"})
+      assert GoalVerifier.skip_reason(base_state(sid)) == :awaiting_background_work
+
+      RunStore.complete(child, %{status: :completed, summary: "done"})
+      refute GoalVerifier.skip_reason(base_state(sid)) == :awaiting_background_work
+    end
+  end
+
+  describe "maybe_gate/1 with a running background agent (tool-called path)" do
+    test "identical-gap, tool-called rounds do NOT stall while background work is running", %{
+      session_id: sid
+    } do
+      GoalTracker.start(sid, "run the security scan and report back")
+      mark_write(sid)
+      child = "agent:#{sid}:1"
+      RunStore.start_run(%{agent_id: child, parent_session_id: sid, role: "worker"})
+
+      Application.put_env(
+        :optimal_system_agent,
+        :goal_verifier_triage_runner,
+        fn _state -> {:ok, ~s({"status": "candidate_complete"})} end
+      )
+
+      stub_runner(fn _sid, configs ->
+        Enum.map(configs, fn _ -> json_result(true, reason: "still waiting on the scan") end)
+      end)
+
+      state =
+        base_state(sid)
+        |> Map.put(:goal_verifier_runs, 0)
+        |> Map.put(:total_tool_calls, 7)
+
+      for _ <- 1..4, do: GoalVerifier.maybe_gate(state)
+
+      snap = GoalTracker.snapshot(sid)
+
+      assert snap.verify_run_count == 0,
+             "the panel must never even RUN while real background work is in flight"
+
+      assert snap.status == :active,
+             "a session legitimately waiting on running background work must never auto-pause"
+
+      RunStore.complete(child, %{status: :completed, summary: "done"})
+      Application.delete_env(:optimal_system_agent, :goal_verifier_triage_runner)
+      GoalTracker.reset(sid)
+    end
+  end
+
   # ── TUI-facing labels ────────────────────────────────────────────────────
 
   describe "skeptic display labels" do
@@ -398,6 +477,135 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
 
       assert result.verdict == :incomplete
       assert result.total == 0
+    end
+  end
+
+  # ── C2 — red-test gate: a completion claim must not stand on a RED gate ──
+  describe "red-test gate (C2)" do
+    test "vetoes :complete when the latest recorded build/test run is RED", %{session_id: sid} do
+      mark_write(sid)
+
+      Ledger.record(sid, %{
+        tool: "shell_execute",
+        args: %{"command" => "mix test"},
+        success: false
+      })
+
+      stub_runner(fn _sid, _configs ->
+        [json_result(false), json_result(false), json_result(false)]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      assert result.verdict == :incomplete,
+             "every skeptic voted complete, but the gate itself is RED — must not pass"
+
+      assert Enum.any?(result.gaps, &(&1 =~ "red-test" and &1 =~ "mix test"))
+    end
+
+    test "does not veto once a LATER rerun of the same command is green", %{session_id: sid} do
+      mark_write(sid)
+
+      Ledger.record(sid, %{
+        tool: "shell_execute",
+        args: %{"command" => "mix test"},
+        success: false
+      })
+
+      Ledger.record(sid, %{tool: "shell_execute", args: %{"command" => "mix test"}, success: true})
+
+      stub_runner(fn _sid, _configs ->
+        [json_result(false), json_result(false), json_result(false)]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      assert result.verdict == :complete,
+             "the red run was superseded by a later green rerun of the SAME command — resolved, not a gap"
+    end
+
+    test "does not veto when no build/test command was ever run", %{session_id: sid} do
+      mark_write(sid)
+
+      stub_runner(fn _sid, _configs ->
+        [json_result(false), json_result(false), json_result(false)]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      assert result.verdict == :complete
+    end
+
+    test "a RED build (not just a red test) also vetoes completion", %{session_id: sid} do
+      mark_write(sid)
+
+      Ledger.record(sid, %{
+        tool: "shell_execute",
+        args: %{"command" => "mix compile"},
+        success: false
+      })
+
+      stub_runner(fn _sid, _configs ->
+        [json_result(false), json_result(false), json_result(false)]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      assert result.verdict == :incomplete
+      assert Enum.any?(result.gaps, &(&1 =~ "mix compile"))
+    end
+
+    test "the gate still catches a red test even when the panel's own vote would have passed",
+         %{session_id: sid} do
+      mark_write(sid)
+
+      Ledger.record(sid, %{
+        tool: "shell_execute",
+        args: %{"command" => "mix test"},
+        success: false
+      })
+
+      # Only 1/3 refuted -> majority NOT reached on the panel's own vote alone
+      # (needed = 2) -> WITHOUT the red-test gate this would be :complete.
+      stub_runner(fn _sid, _configs ->
+        [
+          json_result(true, reason: "the exporter is missing"),
+          json_result(false),
+          json_result(false)
+        ]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      assert result.verdict == :incomplete
+      assert Enum.any?(result.gaps, &(&1 =~ "red-test"))
+    end
+
+    test "an already-:incomplete verdict (real panel majority) keeps the PANEL's own gaps", %{
+      session_id: sid
+    } do
+      mark_write(sid)
+
+      Ledger.record(sid, %{
+        tool: "shell_execute",
+        args: %{"command" => "mix test"},
+        success: false
+      })
+
+      stub_runner(fn _sid, _configs ->
+        [
+          json_result(true, reason: "the exporter is missing"),
+          json_result(true, reason: "the exporter is missing"),
+          json_result(false)
+        ]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      assert result.verdict == :incomplete
+
+      assert Enum.any?(result.gaps, &(&1 =~ "exporter is missing")),
+             "the gate must not overwrite a real panel refute with its own reason"
     end
   end
 
@@ -588,6 +796,64 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       refute prompt =~ ~r/uncertain,?\s+REFUTE/i
       assert prompt =~ "Default to NOT-REFUTED when uncertain"
       assert prompt =~ "CONCRETE evidence"
+    end
+  end
+
+  # ── G4 — bounded panel scope: feed the ledger, don't let it re-crawl ─────
+  #
+  # Before this, a skeptic's only inputs were the goal, the diff, and the
+  # agent's own closing prose — nothing said which files were actually
+  # touched or which build/test commands already ran and passed, so a
+  # skeptic with no other lead reasonably re-explored the whole repository
+  # from scratch (measured: 29+ file reads, ~$2.61/round on one engagement).
+  describe "the skeptic prompt embeds a bounded evidence digest (G4)" do
+    test "the ledger's written paths and check results are embedded verbatim", %{
+      session_id: sid
+    } do
+      mark_write(sid, "/tmp/goal_verifier_fixture_digest.ex")
+
+      Ledger.record(sid, %{tool: "shell_execute", args: %{"command" => "mix test"}, success: true})
+
+      {[%{task: prompt} | _], _result} = capture_prompts(sid, [false, false, false])
+
+      assert prompt =~ "Evidence already gathered this session"
+      assert prompt =~ "/tmp/goal_verifier_fixture_digest.ex"
+      assert prompt =~ "mix test"
+      assert prompt =~ "PASSED"
+    end
+
+    test "a failed check is labelled FAILED, not silently omitted", %{session_id: sid} do
+      mark_write(sid)
+
+      Ledger.record(sid, %{
+        tool: "shell_execute",
+        args: %{"command" => "mix test"},
+        success: false
+      })
+
+      {[%{task: prompt} | _], _result} = capture_prompts(sid, [false, false, false])
+
+      assert prompt =~ "mix test"
+      assert prompt =~ "FAILED"
+    end
+
+    test "the prompt tells the skeptic to corroborate, not re-crawl the whole tree", %{
+      session_id: sid
+    } do
+      mark_write(sid)
+
+      {[%{task: prompt} | _], _result} = capture_prompts(sid, [false, false, false])
+
+      assert prompt =~ ~r/do not re-glob or re-read the wider repository/i
+    end
+
+    test "no evidence recorded still produces a well-formed (empty) digest, not a crash", %{
+      session_id: sid
+    } do
+      {[%{task: prompt} | _], _result} = capture_prompts(sid, [false, false, false])
+
+      assert prompt =~ "no successful writes recorded"
+      assert prompt =~ "no build/test/shell command recorded"
     end
   end
 

@@ -115,7 +115,9 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
 
   alias OptimalSystemAgent.Agent.Loop.GoalVerifier
   alias OptimalSystemAgent.Agent.Loop.Steer
+  alias OptimalSystemAgent.Agent.Loop.VerificationEvidence, as: Ledger
   alias OptimalSystemAgent.Agent.ProgressLedger
+  alias OptimalSystemAgent.Agent.TaskBrief
   alias OptimalSystemAgent.ConfigFile
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.System.AtomicFile
@@ -154,6 +156,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
             rounds_since_verify: non_neg_integer(),
             verify_run_count: non_neg_integer(),
             last_gap_fingerprint: integer() | nil,
+            last_gaps: [String.t()],
             last_work_marker: non_neg_integer() | nil,
             token_budget: pos_integer() | nil,
             tokens_at_start: non_neg_integer() | nil,
@@ -179,6 +182,12 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
               rounds_since_verify: 0,
               verify_run_count: 0,
               last_gap_fingerprint: nil,
+              # The most recent verification round's GAP LIST, verbatim (not just its
+              # hash) — what `last_gap_fingerprint` only lets you compare, not read.
+              # Threaded through so a pause/blocked halt and the completion-overview
+              # event can tell the user WHAT is unresolved instead of a bare "N gaps"
+              # counter. Cleared on `:complete`.
+              last_gaps: [],
               last_work_marker: nil,
               # Opt-in, nullable — mirrors Codex's `token_budget`, whose own tool
               # doc says "Omit unless explicitly requested". A goal with no
@@ -610,15 +619,21 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
         }
 
         if streak >= blocked_threshold() do
+          message = "goal blocked after #{streak} consecutive claims"
           snap = %{snap | status: :blocked, phase: :idle, pause_reason: :blocked}
+          snap = %{snap | history: Enum.take([message | snap.history], @history_max)}
           put(snap)
 
-          log(
-            session_id,
-            tag(snap, "[goal-tracker] goal blocked after #{streak} consecutive claims")
-          )
+          log(session_id, tag(snap, "[goal-tracker] #{message}"))
 
           emit(snap, :blocked)
+          # `claim_blocked/1` bypasses `transition/2` (a distinct `:blocked`
+          # sub-event, not `:transition`), so the completion-overview emission
+          # `transition/2` triggers for every OTHER terminal status must be
+          # fired explicitly here too — otherwise the one MODEL-reachable
+          # terminal (a self-declared blocker, as opposed to the panel's own
+          # `:completed`/`abandon/1`'s `:abandoned`) would never produce one.
+          maybe_emit_completion_overview(snap)
           {:blocked, snap}
         else
           put(snap)
@@ -820,16 +835,59 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
         phase: :idle,
         pause_reason: nil,
         last_gap_fingerprint: nil,
+        last_gaps: [],
         stall_count: 0
     }
 
     transition(snap, "goal COMPLETED — #{result.reason}")
   end
 
-  defp apply_verdict(snap, %GoalVerifier.Result{verdict: :off_track} = result, _work) do
-    snap = %{snap | status: :off_track, phase: :planning}
-    steer_replan(snap.session_id, result)
-    transition(snap, "goal OFF-TRACK — #{result.reason}; re-plan nudge queued")
+  # `:off_track` shares its stall / lifetime-run-cap bookkeeping with
+  # `:incomplete` below — both are "the panel found real, unresolved gaps"
+  # verdicts, and a goal the panel keeps judging unachievable-as-framed is
+  # exactly as stuck as one it keeps judging merely unfinished. Before this,
+  # ONLY `:incomplete` fed `advance_stall/3` or checked the lifetime run cap,
+  # so a goal that kept coming back `:off_track` (the same contradiction or
+  # missing prerequisite cited every round) had no cross-turn circuit breaker
+  # at all: `continue?/1` stays true for `:off_track` forever, and
+  # `pause_reason: :off_track` was declared in the type but never actually
+  # assigned anywhere. The only thing that could ever stop a persistently
+  # off-track goal was an operator-configured finite `goal_tracker_max_runs`
+  # (default `:infinity`) — i.e. never, by default.
+  defp apply_verdict(snap, %GoalVerifier.Result{verdict: :off_track} = result, work_marker) do
+    fingerprint = gap_fingerprint(result.gaps)
+    {stall_count, stalled?} = advance_stall(snap, fingerprint, work_marker)
+
+    snap = %{
+      snap
+      | last_gap_fingerprint: fingerprint,
+        last_gaps: result.gaps,
+        last_work_marker: work_marker || snap.last_work_marker,
+        stall_count: stall_count
+    }
+
+    cond do
+      stalled? ->
+        snap
+        |> Map.merge(%{status: :paused, pause_reason: :off_track})
+        |> transition(
+          "goal PAUSED (off_track) — #{stall_count} consecutive rounds judged this goal " <>
+            "unachievable as framed: " <> Enum.join(result.gaps, "; ")
+        )
+
+      run_cap_reached?(snap.verify_run_count) ->
+        snap
+        |> Map.merge(%{status: :paused, pause_reason: :run_cap})
+        |> transition(
+          "goal PAUSED (run_cap) — lifetime verification cap (#{max_runs()}) reached, " <>
+            "still off-track: #{result.reason}"
+        )
+
+      true ->
+        snap = %{snap | status: :off_track, phase: :planning}
+        steer_replan(snap.session_id, result)
+        transition(snap, "goal OFF-TRACK — #{result.reason}; re-plan nudge queued")
+    end
   end
 
   defp apply_verdict(snap, %GoalVerifier.Result{verdict: :incomplete} = result, work_marker) do
@@ -839,6 +897,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
     snap = %{
       snap
       | last_gap_fingerprint: fingerprint,
+        last_gaps: result.gaps,
         last_work_marker: work_marker || snap.last_work_marker,
         stall_count: stall_count
     }
@@ -958,6 +1017,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
 
     log(snap.session_id, tag(snap, "[goal-tracker] #{message}"))
     emit(snap, :transition, %{message: message})
+    maybe_emit_completion_overview(snap)
 
     Logger.info(
       "[goal-tracker] session=#{snap.session_id} status=#{snap.status} phase=#{snap.phase} " <>
@@ -965,6 +1025,116 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
     )
 
     snap
+  end
+
+  # A goal reaching one of these is DONE, one way or another — `/goal resume`
+  # can no longer undo it (unlike `:paused`/`:awaiting_user`). Matches the CLI's
+  # own `@terminal_goal_statuses` in `Channels.CLI.Commands`.
+  @terminal_statuses [:completed, :blocked, :abandoned]
+
+  @doc """
+  Structured completion-overview payload for a goal that just reached (or
+  currently sits in) a TERMINAL state — `nil` for anything else.
+
+  The single source of truth behind the `:goal_completion_overview` event
+  (below) and available directly for any caller (CLI, TUI, tests) that wants
+  the same data without replaying the event stream. Reuses
+  `VerificationEvidence` — the SAME ledger the completion panel itself was
+  judged against — so this is never a second, possibly-disagreeing account of
+  what happened.
+  """
+  @spec completion_overview(String.t()) :: map() | nil
+  def completion_overview(session_id) when is_binary(session_id) do
+    case get(session_id) do
+      %Snapshot{status: status} = snap when status in @terminal_statuses ->
+        overview_from_snapshot(snap)
+
+      _ ->
+        nil
+    end
+  end
+
+  def completion_overview(_), do: nil
+
+  # The pure builder, taking the Snapshot DIRECTLY rather than re-reading it
+  # from the store by id. This distinction is load-bearing for
+  # `maybe_emit_completion_overview/1` below: `transition/2` (where that fires)
+  # runs BEFORE its own caller persists the just-transitioned snapshot —
+  # `abandon/1` and `advance/3` both call `transition(snap, message)` and only
+  # `put/1` the result afterward — so re-fetching by id from inside
+  # `transition/2` would read the STALE, still-`:active` snapshot and silently
+  # produce `nil`. Building straight from the in-hand struct sidesteps the
+  # ordering question entirely.
+  defp overview_from_snapshot(%Snapshot{} = snap) do
+    %{
+      session_id: snap.session_id,
+      goal_id: snap.goal_id,
+      goal: snap.goal,
+      status: snap.status,
+      pause_reason: snap.pause_reason,
+      gaps: snap.last_gaps || [],
+      work_summary: work_summary(snap.session_id),
+      acceptance_criteria: acceptance_criteria(snap.session_id, snap.goal),
+      turn_count: snap.turn_count,
+      verify_run_count: snap.verify_run_count,
+      latest: List.first(snap.history)
+    }
+  end
+
+  # Fires exactly once per transition INTO a terminal status (every
+  # `transition/2` call re-checks; a snapshot that is ALREADY terminal when a
+  # later, unrelated transition somehow re-fires would re-emit, but nothing in
+  # this module transitions a terminal snapshot again — `:completed` and
+  # `:abandoned` have no outgoing transition, and a resumed `:blocked` goal
+  # goes through `resume/1`, which does not call `transition/2`).
+  defp maybe_emit_completion_overview(%Snapshot{status: status} = snap)
+       when status in @terminal_statuses do
+    overview = overview_from_snapshot(snap)
+    Bus.emit(:system_event, Map.put(overview, :event, :goal_completion_overview))
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp maybe_emit_completion_overview(_snap), do: :ok
+
+  @doc """
+  Distinct file paths successfully WRITTEN this session, per
+  `VerificationEvidence` — "what actually got touched". Shared by the CLI's
+  `/goal` work overview and the completion-overview event so both tell the
+  same story from the same ledger.
+  """
+  @spec work_summary(String.t()) :: [String.t()]
+  def work_summary(session_id) when is_binary(session_id) do
+    session_id
+    |> Ledger.entries()
+    |> Enum.filter(&(Map.get(&1, :kind) == :write and Map.get(&1, :success) == true))
+    |> Enum.flat_map(fn e -> List.wrap(Map.get(e, :paths)) end)
+    |> Enum.reject(&(is_nil(&1) or &1 == ""))
+    |> Enum.map(&to_string/1)
+    |> Enum.uniq()
+  rescue
+    _ -> []
+  end
+
+  def work_summary(_), do: []
+
+  # The frozen acceptance criteria, when they say something the goal text does
+  # not already say (the brief falls back to storing the goal as its own
+  # criteria when none were authored — echoing that back would read as a real
+  # criterion that was never actually set).
+  defp acceptance_criteria(session_id, goal) do
+    case TaskBrief.load(session_id) do
+      {:ok, %{acceptance_criteria: c}} when is_binary(c) and c != "" ->
+        if String.trim(c) == String.trim(goal || ""), do: nil, else: c
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
   end
 
   # ---------------------------------------------------------------------------
@@ -1006,6 +1176,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
           phase: :executing,
           pause_reason: nil,
           last_gap_fingerprint: nil,
+          last_gaps: [],
           stall_count: 0,
           rounds_since_verify: 0,
           # "If the user resumes a goal that was previously marked blocked, treat
@@ -1645,6 +1816,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
       "rounds_since_verify" => snap.rounds_since_verify,
       "verify_run_count" => snap.verify_run_count,
       "last_gap_fingerprint" => snap.last_gap_fingerprint,
+      "last_gaps" => snap.last_gaps,
       "stall_count" => snap.stall_count,
       "last_work_marker" => snap.last_work_marker,
       "pause_reason" => snap.pause_reason && to_string(snap.pause_reason),
@@ -1679,6 +1851,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
       rounds_since_verify: non_neg_int(Map.get(map, "rounds_since_verify")),
       verify_run_count: non_neg_int(Map.get(map, "verify_run_count")),
       last_gap_fingerprint: int_or_nil(Map.get(map, "last_gap_fingerprint")),
+      last_gaps: string_list(Map.get(map, "last_gaps")),
       stall_count: non_neg_int(Map.get(map, "stall_count")),
       last_work_marker: int_or_nil(map["last_work_marker"]),
       pause_reason: known_atom(Map.get(map, "pause_reason"), @pause_reasons, nil),

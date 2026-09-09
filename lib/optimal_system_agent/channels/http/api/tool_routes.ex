@@ -512,22 +512,49 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
     # replaced.
     snap = GoalTracker.snapshot(session_id)
 
-    goal = %{
-      # THE field clients gate on. Deliberately not derived here: it is exactly
-      # what the loop asks before it continues.
-      active: GoalTracker.goal_loop?(session_id) and GoalTracker.continue?(session_id),
-      pending_decision: snap && snap.pending_decision,
-      status: snap && snap.status && to_string(snap.status),
-      phase: snap && snap.phase && to_string(snap.phase),
-      goal: snap && snap.goal,
-      goal_id: snap && snap.goal_id,
-      turn_count: (snap && snap.turn_count) || 0,
-      verify_run_count: (snap && snap.verify_run_count) || 0,
-      pause_reason: snap && snap.pause_reason && to_string(snap.pause_reason)
-    }
+    goal =
+      %{
+        # THE field clients gate on. Deliberately not derived here: it is exactly
+        # what the loop asks before it continues.
+        active: GoalTracker.goal_loop?(session_id) and GoalTracker.continue?(session_id),
+        pending_decision: snap && snap.pending_decision,
+        status: snap && snap.status && to_string(snap.status),
+        phase: snap && snap.phase && to_string(snap.phase),
+        goal: snap && snap.goal,
+        goal_id: snap && snap.goal_id,
+        turn_count: (snap && snap.turn_count) || 0,
+        verify_run_count: (snap && snap.verify_run_count) || 0,
+        pause_reason: snap && snap.pause_reason && to_string(snap.pause_reason)
+      }
+      |> merge_completion_overview(session_id)
 
     body = Jason.encode!(%{output: output, command: command, goal: goal})
     conn |> put_resp_content_type("application/json") |> send_resp(200, body)
+  end
+
+  # A PULL path for the same data the live `:goal_completion_overview` Bus
+  # event carries (`GoalTracker.completion_overview/1` — see that module).
+  # The Bus event is one-shot: a client that reconnects (or was never
+  # connected) after the goal already reached a TERMINAL state
+  # (`:completed`/`:blocked`/`:abandoned`) never sees it replayed. Re-issuing
+  # `/goal` (or `/goal status`) over THIS endpoint — which every client
+  # already calls to dispatch the command — now reconstructs the identical
+  # gaps/work_summary/acceptance_criteria/latest onto the same `goal` map,
+  # so there is one shape to read and no second endpoint to poll. A no-op
+  # (returns `goal` unchanged) for any non-terminal status.
+  defp merge_completion_overview(goal, session_id) do
+    case OptimalSystemAgent.Agent.Loop.GoalTracker.completion_overview(session_id) do
+      %{} = overview ->
+        Map.merge(goal, %{
+          gaps: overview.gaps,
+          work_summary: overview.work_summary,
+          acceptance_criteria: overview.acceptance_criteria,
+          latest: overview.latest
+        })
+
+      nil ->
+        goal
+    end
   end
 
   # ── POST /:name/execute (tools) ────────────────────────────────────

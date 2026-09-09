@@ -247,9 +247,10 @@ impl Sidebar {
                 self.sections.push(SidebarSection {
                     title: "Context".into(),
                     items: vec![
-                        ("used".into(), crate::components::status_bar::compact_tokens(
-                            self.context_tokens,
-                        )),
+                        (
+                            "used".into(),
+                            crate::components::status_bar::compact_tokens(self.context_tokens),
+                        ),
                         ("window".into(), "unknown".into()),
                     ],
                 });
@@ -264,10 +265,7 @@ impl Sidebar {
 
             self.sections.push(SidebarSection {
                 title: "Context".into(),
-                items: vec![
-                    ("ctx".into(), bar),
-                    ("use".into(), pct_str),
-                ],
+                items: vec![("ctx".into(), bar), ("use".into(), pct_str)],
             });
         }
 
@@ -384,7 +382,8 @@ impl Component for Sidebar {
             }
 
             // Left border on every row of this section (title + items + gap)
-            let section_h = 1 + section.items.len() as u16 + if si + 1 < section_count { 1 } else { 0 };
+            let section_h =
+                1 + section.items.len() as u16 + if si + 1 < section_count { 1 } else { 0 };
             for row in 0..section_h {
                 let ry = y + row;
                 if ry >= area.y + area.height {
@@ -407,10 +406,7 @@ impl Component for Sidebar {
                     theme.sidebar_title()
                 };
                 frame.render_widget(
-                    Paragraph::new(Line::from(Span::styled(
-                        &section.title,
-                        title_style,
-                    ))),
+                    Paragraph::new(Line::from(Span::styled(&section.title, title_style))),
                     Rect::new(inner_x, y, inner_w, 1),
                 );
             }
@@ -444,10 +440,7 @@ impl Component for Sidebar {
                 ]);
 
                 if inner_w > 0 {
-                    frame.render_widget(
-                        Paragraph::new(line),
-                        Rect::new(inner_x, y, inner_w, 1),
-                    );
+                    frame.render_widget(Paragraph::new(line), Rect::new(inner_x, y, inner_w, 1));
                 }
                 y += 1;
             }
@@ -476,7 +469,10 @@ mod sidebar_tests {
             .sections
             .iter()
             .any(|sec| sec.items.iter().any(|(label, _)| label == "yolo"));
-        assert!(!has_yolo, "sidebar must not render a duplicate yolo/overdrive item");
+        assert!(
+            !has_yolo,
+            "sidebar must not render a duplicate yolo/overdrive item"
+        );
     }
 
     #[test]
@@ -488,7 +484,10 @@ mod sidebar_tests {
             .sections
             .iter()
             .any(|sec| sec.items.iter().any(|(label, _)| label == "proactive"));
-        assert!(has_proactive, "proactive mode should still surface in the sidebar");
+        assert!(
+            has_proactive,
+            "proactive mode should still surface in the sidebar"
+        );
     }
 
     fn context_items(s: &Sidebar) -> Vec<(String, String)> {
@@ -525,7 +524,10 @@ mod sidebar_tests {
         s.set_context_window(1_000_000, 52_100);
 
         let items = context_items(&s);
-        assert!(items.iter().any(|(k, v)| k == "use" && v == "5%"), "{items:?}");
+        assert!(
+            items.iter().any(|(k, v)| k == "use" && v == "5%"),
+            "{items:?}"
+        );
         assert!(items.iter().any(|(k, _)| k == "ctx"), "bar still rendered");
     }
 }

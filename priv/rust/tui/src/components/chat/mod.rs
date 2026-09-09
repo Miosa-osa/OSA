@@ -159,9 +159,9 @@ impl Chat {
             last_user_text: None,
             scrollback_started: false,
             stream_cache: RefCell::new(None),
-            stream_renderer: RefCell::new(
-                crate::render::markdown_stream::StreamingRenderer::new(80),
-            ),
+            stream_renderer: RefCell::new(crate::render::markdown_stream::StreamingRenderer::new(
+                80,
+            )),
             raw_view: false,
             turn_started: false,
             turn_separators: true,
@@ -283,10 +283,7 @@ impl Chat {
         // permission prompt is not a message at all — it is an overlay drawn
         // into the stream band. None of them can reach this branch, so no
         // setting of this flag can swallow them.
-        if self.lean
-            && matches!(msg.msg_type, MessageType::ToolCall)
-            && !msg.is_turn_separator()
-        {
+        if self.lean && matches!(msg.msg_type, MessageType::ToolCall) && !msg.is_turn_separator() {
             self.agent_flow_open = false;
             self.hidden_count += 1;
             self.hidden.push(msg);
@@ -456,7 +453,11 @@ impl Chat {
 
     /// Add an inline tool-call summary to the chat (compact one-liner, legacy).
     pub fn add_tool_message(&mut self, content: &str) {
-        self.push_scrollback_block(Message::new(MessageType::ToolCall, content.to_string(), None));
+        self.push_scrollback_block(Message::new(
+            MessageType::ToolCall,
+            content.to_string(),
+            None,
+        ));
     }
 
     /// Add a rich tool-call message. Held in the live tail (`messages`) until its
@@ -815,7 +816,9 @@ impl Chat {
             // rows) and independent of the answer's length.
             let (body, full_h, scroll) = {
                 let cache = self.stream_cache.borrow();
-                let c = cache.as_ref().expect("cache populated by ensure_stream_cache");
+                let c = cache
+                    .as_ref()
+                    .expect("cache populated by ensure_stream_cache");
                 // `c.height` counts the label row; a continuation preview draws
                 // no label, so it is exactly one row shorter.
                 let full_h = if header {
@@ -913,7 +916,11 @@ mod turn_separator_tests {
         chat.add_agent_message("a2", None);
 
         let msgs = chat.drain_scrollback();
-        assert_eq!(sep_count(&msgs), 1, "exactly one separator between two turns");
+        assert_eq!(
+            sep_count(&msgs),
+            1,
+            "exactly one separator between two turns"
+        );
         // No separator before the first turn: the first block is the user message.
         assert!(!msgs[0].is_turn_separator());
         assert!(matches!(msgs[0].msg_type, MessageType::User));
@@ -922,7 +929,10 @@ mod turn_separator_tests {
         let next_user = msgs[sep_idx + 1..]
             .iter()
             .any(|m| matches!(m.msg_type, MessageType::User));
-        assert!(next_user, "separator sits before the next turn's user message");
+        assert!(
+            next_user,
+            "separator sits before the next turn's user message"
+        );
     }
 
     #[test]
@@ -1069,7 +1079,12 @@ mod stream_cache_tests {
         c.body
             .lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }

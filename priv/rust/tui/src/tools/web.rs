@@ -128,7 +128,13 @@ fn short_content_type(ct: &str) -> &str {
 pub struct WebFetchRenderer;
 
 impl ToolRenderer for WebFetchRenderer {
-    fn render(&self, _name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        _name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
         let url = identifying_arg(args, &["url", "uri", "endpoint", "input"])
@@ -349,7 +355,13 @@ fn parse_hits(result: &str) -> Vec<Hit> {
 pub struct WebSearchRenderer;
 
 impl ToolRenderer for WebSearchRenderer {
-    fn render(&self, _name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        _name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
         let query = identifying_arg(args, &["query", "q", "search_query", "input"])
@@ -408,7 +420,11 @@ impl ToolRenderer for WebSearchRenderer {
                 Style::default().add_modifier(Modifier::BOLD),
             )];
             if !hosts.is_empty() {
-                let tail = if hits.len() > hosts.len() { ", \u{2026}" } else { "" };
+                let tail = if hits.len() > hosts.len() {
+                    ", \u{2026}"
+                } else {
+                    ""
+                };
                 spans.push(Span::styled(
                     format!("  \u{b7}  {}{}", hosts.join(", "), tail),
                     Style::default().fg(theme.colors.dim),
@@ -583,7 +599,10 @@ Reference implementations\n\n\
         let out = text_of(&lines);
         assert!(out.contains("Found 2 results"), "no result count: {out}");
         assert!(out.contains("github.com"), "no host: {out}");
-        assert!(!out.contains("Did 1 search"), "old uninformative line: {out}");
+        assert!(
+            !out.contains("Did 1 search"),
+            "old uninformative line: {out}"
+        );
     }
 
     #[test]
@@ -647,7 +666,10 @@ Reference implementations\n\n\
         let out = text_of(&lines);
         assert!(out.contains("https://final.example.com/page"), "{out}");
         assert!(out.contains("real content here"), "{out}");
-        assert!(!out.contains("HTTP 200 text/html\n---"), "envelope leaked: {out}");
+        assert!(
+            !out.contains("HTTP 200 text/html\n---"),
+            "envelope leaked: {out}"
+        );
     }
 
     #[test]
@@ -655,7 +677,10 @@ Reference implementations\n\n\
         let hits = parse_markdown_hits(SEARCH_RESULT);
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].title, "Model Context Protocol servers");
-        assert_eq!(hits[0].url, "https://github.com/modelcontextprotocol/servers");
+        assert_eq!(
+            hits[0].url,
+            "https://github.com/modelcontextprotocol/servers"
+        );
         assert_eq!(hits[0].snippet, "Reference implementations");
         assert_eq!(hits[1].url, "https://bestmcp.dev/directory");
     }

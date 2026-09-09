@@ -187,6 +187,64 @@ defmodule OptimalSystemAgent.Channels.HTTP.CommandExecuteTest do
     refute output =~ "no acceleration tier"
   end
 
+  describe "#3 follow-up — /goal reconstructs the completion overview on a pull, not just the live event" do
+    alias OptimalSystemAgent.Agent.Loop.{GoalTracker, GoalVerifier}
+    alias OptimalSystemAgent.Agent.Loop.VerificationEvidence, as: Ledger
+
+    test "a completed goal's gaps/work_summary/acceptance_criteria ride along on /goal" do
+      session_id = "goal-http-overview-#{System.unique_integer([:positive])}"
+
+      on_exit(fn ->
+        GoalTracker.reset(session_id)
+        Ledger.reset(session_id)
+      end)
+
+      GoalTracker.start(session_id, "ship the widget exporter",
+        acceptance_criteria: "mix test passes and lib/exporter.ex exports dump/1"
+      )
+
+      Ledger.record(session_id, %{
+        tool: "file_write",
+        args: %{"path" => "lib/widget/exporter.ex"},
+        success: true
+      })
+
+      GoalTracker.advance(session_id, %GoalVerifier.Result{
+        verdict: :complete,
+        reason: "all criteria met"
+      })
+
+      body = execute("goal", session_id).resp_body |> Jason.decode!()
+
+      assert body["goal"]["status"] == "completed"
+      assert body["goal"]["gaps"] == []
+
+      assert Enum.any?(
+               body["goal"]["work_summary"],
+               &String.ends_with?(&1, "lib/widget/exporter.ex")
+             )
+
+      assert body["goal"]["acceptance_criteria"] ==
+               "mix test passes and lib/exporter.ex exports dump/1"
+
+      assert is_binary(body["goal"]["latest"])
+    end
+
+    test "a merely paused (non-terminal) goal does not carry the overview fields" do
+      session_id = "goal-http-paused-#{System.unique_integer([:positive])}"
+      on_exit(fn -> GoalTracker.reset(session_id) end)
+
+      GoalTracker.start(session_id, "ship the widget exporter")
+      GoalTracker.pause(session_id, :user)
+
+      body = execute("goal", session_id).resp_body |> Jason.decode!()
+
+      assert body["goal"]["status"] == "paused"
+      refute Map.has_key?(body["goal"], "gaps")
+      refute Map.has_key?(body["goal"], "work_summary")
+    end
+  end
+
   test "fast-tier fallback only recognizes acceleration-specific errors" do
     refute OptimalSystemAgent.Agent.Loop.LLMClient.tier_rejection?(
              "HTTP 400: invalid tool schema"

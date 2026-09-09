@@ -109,15 +109,7 @@ pub fn render_diff_body(
                         let fg = fg_runs_at(&new_hl, change.new_index());
                         let composed = overlay_syntax_fg(vec![(content, ctx_style)], &fg);
                         push_diff_row(
-                            &mut lines,
-                            ln,
-                            num_w,
-                            ' ',
-                            composed,
-                            None,
-                            ctx_style,
-                            width,
-                            avail,
+                            &mut lines, ln, num_w, ' ', composed, None, ctx_style, width, avail,
                         );
                     }
                     ChangeTag::Delete => dels.push(DiffLine {
@@ -395,10 +387,7 @@ fn push_diff_row(
 /// Wrap styled text runs into rows of at most `max_w` display columns,
 /// splitting on grapheme boundaries (unicode-width aware). Always returns at
 /// least one (possibly empty) row.
-pub(crate) fn wrap_styled(
-    spans: Vec<(String, Style)>,
-    max_w: usize,
-) -> Vec<Vec<(String, Style)>> {
+pub(crate) fn wrap_styled(spans: Vec<(String, Style)>, max_w: usize) -> Vec<Vec<(String, Style)>> {
     let max_w = max_w.max(1);
     let mut rows: Vec<Vec<(String, Style)>> = Vec::new();
     let mut cur: Vec<(String, Style)> = Vec::new();
@@ -432,7 +421,12 @@ mod tests {
     fn text(lines: &[Line<'static>]) -> Vec<String> {
         lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect()
     }
 
@@ -526,8 +520,14 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter())
             .any(|s| s.style.bg == Some(theme.colors.diff_del_bg));
-        assert!(has_add_bg, "add rows must keep diff_add_bg under highlighting");
-        assert!(has_del_bg, "delete rows must keep diff_del_bg under highlighting");
+        assert!(
+            has_add_bg,
+            "add rows must keep diff_add_bg under highlighting"
+        );
+        assert!(
+            has_del_bg,
+            "delete rows must keep diff_del_bg under highlighting"
+        );
     }
 
     #[test]
@@ -540,7 +540,10 @@ mod tests {
             s.style.bg == Some(theme.colors.diff_add_highlight_bg)
                 || s.style.bg == Some(theme.colors.diff_del_highlight_bg)
         });
-        assert!(has_word_hl, "word-level highlight bg must survive compositing");
+        assert!(
+            has_word_hl,
+            "word-level highlight bg must survive compositing"
+        );
     }
 
     #[test]
@@ -560,7 +563,10 @@ mod tests {
         let unknown_new = content_fg_colors(&render_diff(old, new, 80, Some("no-such-ext-xyz")))
             .into_iter()
             .all(|c| plain_colors.contains(&c));
-        assert!(unknown_new, "unknown language must not introduce new colors");
+        assert!(
+            unknown_new,
+            "unknown language must not introduce new colors"
+        );
     }
 }
 

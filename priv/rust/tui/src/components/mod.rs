@@ -4,19 +4,20 @@
 pub mod activity;
 pub mod agents;
 pub mod chat;
+pub mod completion_panel;
 pub mod header;
 pub mod input;
 pub mod jailbreak;
 pub mod measure;
 pub mod notify;
-pub mod osc8;
 pub mod osc52;
+pub mod osc8;
+pub mod sidebar;
 pub mod status_bar;
-pub mod title;
 pub mod task_checklist;
 pub mod tasks;
+pub mod title;
 pub mod toast;
-pub mod sidebar;
 
 use ratatui::prelude::*;
 

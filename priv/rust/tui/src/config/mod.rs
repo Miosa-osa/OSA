@@ -130,7 +130,10 @@ mod version_display_tests {
     fn preserves_prerelease_and_build_suffix() {
         assert_eq!(pad_version_display("1.0.2-rc.1"), "1.0.002-rc.1");
         assert_eq!(pad_version_display("1.0.2+build.5"), "1.0.002+build.5");
-        assert_eq!(pad_version_display("1.0.2-rc.1+build.5"), "1.0.002-rc.1+build.5");
+        assert_eq!(
+            pad_version_display("1.0.2-rc.1+build.5"),
+            "1.0.002-rc.1+build.5"
+        );
     }
 
     #[test]

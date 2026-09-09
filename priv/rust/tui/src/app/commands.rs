@@ -15,7 +15,10 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("clear", "Clear the conversation view"),
     ("model", "Choose a provider, then one of its models"),
     ("models", "Pick a model from the current provider"),
-    ("provider", "Choose a provider — connect an account or paste a key"),
+    (
+        "provider",
+        "Choose a provider — connect an account or paste a key",
+    ),
     ("sessions", "Browse sessions"),
     ("resume", "Resume a past session"),
     ("continue", "Resume this folder's last session"),
@@ -27,7 +30,10 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("fg", "Bring a backgrounded turn to the foreground"),
     ("agents", "Background-agent dashboard"),
     ("rewind", "Restore code/conversation from a checkpoint"),
-    ("revert", "Restore files N mutating-tool steps ago (transcript kept)"),
+    (
+        "revert",
+        "Restore files N mutating-tool steps ago (transcript kept)",
+    ),
     ("fork", "Fork this session, keeping history"),
     ("compact", "Compact the conversation to free context"),
     ("recap", "Summarize the session so far"),
@@ -40,7 +46,10 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("update", "Update OSA to the latest version"),
     ("reasoning", "Set the reasoning effort level"),
     ("verbose", "Cycle tool output detail"),
-    ("lean", "Lean view — print the model's words, not its tool calls"),
+    (
+        "lean",
+        "Lean view — print the model's words, not its tool calls",
+    ),
     ("theme", "Switch the color theme"),
     ("keybindings", "Show the keybinding map + config file"),
     ("config", "Open the settings editor"),
@@ -49,7 +58,10 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("overdrive", "Toggle overdrive (full auto)"),
     ("yolo", "Toggle overdrive (full auto)"),
     ("coordinator", "Toggle coordinator mode (delegation only)"),
-    ("ask-user", "Let the agent ask you questions mid-task (off by default)"),
+    (
+        "ask-user",
+        "Let the agent ask you questions mid-task (off by default)",
+    ),
     ("memory", "Save or recall a memory"),
     ("channels", "Show channel connectivity"),
     ("doctor", "Run backend diagnostics"),
@@ -283,10 +295,8 @@ impl App {
                     if parts.len() >= 2 && !parts[1].is_empty() {
                         self.switch_model(parts[0], parts[1]);
                     } else {
-                        self.chat.add_system_message(
-                            "Usage: /model provider/model_name",
-                            "warning",
-                        );
+                        self.chat
+                            .add_system_message("Usage: /model provider/model_name", "warning");
                     }
                 } else if let Some((first, rest)) = arg.split_once(' ') {
                     if KNOWN_PROVIDERS.contains(&first) {
@@ -610,7 +620,10 @@ impl App {
                     // an unvalidated typo would display a bogus effort while
                     // the backend rejects it.
                     let lvl = arg.to_ascii_lowercase();
-                    if matches!(lvl.as_str(), "off" | "fast" | "medium" | "high" | "xhigh" | "ultra") {
+                    if matches!(
+                        lvl.as_str(),
+                        "off" | "fast" | "medium" | "high" | "xhigh" | "ultra"
+                    ) {
                         self.execute_reasoning_command(&lvl);
                     } else {
                         self.chat.add_system_message(
@@ -677,7 +690,9 @@ impl App {
                             let _ = tx.send(Event::Backend(BackendEvent::SessionCreated(Ok(resp))));
                         }
                         Err(e) => {
-                            let _ = tx.send(Event::Backend(BackendEvent::SessionCreated(Err(e.to_string()))));
+                            let _ = tx.send(Event::Backend(BackendEvent::SessionCreated(Err(
+                                e.to_string()
+                            ))));
                         }
                     }
                 });
@@ -833,25 +848,21 @@ impl App {
                 // a checkpoint snapshotted before an earlier prompt.
                 self.load_rewind_checkpoints();
             }
-            "/revert" => {
-                match arg {
-                    "list" | "ls" => self.do_step_revert_list(),
-                    "" => {
-                        let output = "Usage: /revert N  (restore files N mutating-tool steps ago)\n       /revert list".to_string();
-                        self.toasts.push(
-                            output,
-                            crate::components::toast::ToastLevel::Info,
-                        );
-                    }
-                    other => match other.parse::<u32>() {
-                        Ok(n) if n >= 1 => self.do_step_revert(n),
-                        _ => self.toasts.push(
-                            "Usage: /revert N  (N is a positive integer)".into(),
-                            crate::components::toast::ToastLevel::Warning,
-                        ),
-                    },
+            "/revert" => match arg {
+                "list" | "ls" => self.do_step_revert_list(),
+                "" => {
+                    let output = "Usage: /revert N  (restore files N mutating-tool steps ago)\n       /revert list".to_string();
+                    self.toasts
+                        .push(output, crate::components::toast::ToastLevel::Info);
                 }
-            }
+                other => match other.parse::<u32>() {
+                    Ok(n) if n >= 1 => self.do_step_revert(n),
+                    _ => self.toasts.push(
+                        "Usage: /revert N  (N is a positive integer)".into(),
+                        crate::components::toast::ToastLevel::Warning,
+                    ),
+                },
+            },
             "/update" => {
                 // Self-update via the installed `osa` launcher's rollback-safe
                 // staged updater. Runs in the background (non-blocking, cancel-
@@ -884,16 +895,16 @@ impl App {
         let sid = self.session_id.clone();
         tokio::spawn(async move {
             let event = match client.list_step_snapshots(&sid).await {
-                Ok(msg) => BackendEvent::CommandResult(Ok(
-                    crate::client::types::CommandExecuteResponse {
+                Ok(msg) => {
+                    BackendEvent::CommandResult(Ok(crate::client::types::CommandExecuteResponse {
                         kind: "info".into(),
                         output: msg,
                         action: None,
                         command: "revert".into(),
                         effort: None,
                         goal: None,
-                    },
-                )),
+                    }))
+                }
                 Err(e) => BackendEvent::CommandResult(Err(e.to_string())),
             };
             let _ = tx.send(Event::Backend(event));
@@ -906,16 +917,16 @@ impl App {
         let sid = self.session_id.clone();
         tokio::spawn(async move {
             let event = match client.revert_steps(&sid, steps).await {
-                Ok(msg) => BackendEvent::CommandResult(Ok(
-                    crate::client::types::CommandExecuteResponse {
+                Ok(msg) => {
+                    BackendEvent::CommandResult(Ok(crate::client::types::CommandExecuteResponse {
                         kind: "info".into(),
                         output: msg,
                         action: None,
                         command: "revert".into(),
                         effort: None,
                         goal: None,
-                    },
-                )),
+                    }))
+                }
                 Err(e) => BackendEvent::CommandResult(Err(e.to_string())),
             };
             let _ = tx.send(Event::Backend(event));
@@ -1011,9 +1022,7 @@ impl App {
                     // "worth an LLM round-trip" floor. It returns unchanged
                     // counts and emits nothing — so without this branch,
                     // `/compact` would appear to do nothing at all. Say so.
-                    if r.messages_before == r.messages_after
-                        && r.tokens_before == r.tokens_after
-                    {
+                    if r.messages_before == r.messages_after && r.tokens_before == r.tokens_after {
                         BackendEvent::CommandResult(Ok(
                             crate::client::types::CommandExecuteResponse {
                                 kind: "info".into(),
@@ -1045,16 +1054,16 @@ impl App {
         let sid = self.session_id.clone();
         tokio::spawn(async move {
             let event = match client.recap_session(&sid).await {
-                Ok(r) => BackendEvent::CommandResult(Ok(
-                    crate::client::types::CommandExecuteResponse {
+                Ok(r) => {
+                    BackendEvent::CommandResult(Ok(crate::client::types::CommandExecuteResponse {
                         kind: "info".into(),
                         output: format!("Recap:\n{}", r.recap),
                         action: None,
                         command: "recap".into(),
                         effort: None,
                         goal: None,
-                    },
-                )),
+                    }))
+                }
                 Err(e) => BackendEvent::CommandResult(Err(e.to_string())),
             };
             let _ = tx.send(Event::Backend(event));
@@ -1173,7 +1182,10 @@ mod tests {
             entry.is_some(),
             "`coordinator` missing from BUILTIN_SLASH_COMMANDS"
         );
-        assert_eq!(entry.unwrap().1, "Toggle coordinator mode (delegation only)");
+        assert_eq!(
+            entry.unwrap().1,
+            "Toggle coordinator mode (delegation only)"
+        );
     }
 
     #[test]

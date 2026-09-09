@@ -63,6 +63,7 @@ defmodule OptimalSystemAgent.Agent.Loop.SubagentIterationCapTest do
     # The loop halted at the PER-RUN cap (1), not the global (100), and the halt
     # is the forced wrap-up handoff, not a silent stop.
     assert Map.get(final, :iteration) == 1
+
     assert response =~ ~r/used all 1 iteration/i,
            "expected the forced wrap-up at the per-run cap; got: #{inspect(response)}"
   end

@@ -160,7 +160,13 @@ fn highlight_memoized(
 
         // 1. Commit every newly-completed line into the memo, advancing state.
         for line_str in LinesWithEndings::from(&fresh[..commit_len]) {
-            match highlight_one(&mut memo.parse, &mut memo.highlight, &highlighter, ss, line_str) {
+            match highlight_one(
+                &mut memo.parse,
+                &mut memo.highlight,
+                &highlighter,
+                ss,
+                line_str,
+            ) {
                 Some(line) => memo.lines.push(line),
                 None => return None, // caller falls back to plain rendering
             }
@@ -453,7 +459,10 @@ mod tests {
         let one_shot = highlight(code, "rust");
 
         let mut streamed = ResumableHighlighter::new("rust");
-        let resumed = vec![streamed.push_line("let x = 1;"), streamed.push_line("let y = 2;")];
+        let resumed = vec![
+            streamed.push_line("let x = 1;"),
+            streamed.push_line("let y = 2;"),
+        ];
 
         assert_eq!(one_shot.len(), resumed.len());
         for (a, b) in one_shot.iter().zip(resumed.iter()) {
@@ -473,8 +482,18 @@ mod tests {
         // mapped through `adapt_color` — no raw `Color::Rgb` survives.
         let line = ranges_to_line(vec![(
             syntect::highlighting::Style {
-                foreground: syntect::highlighting::Color { r: 200, g: 40, b: 40, a: 255 },
-                background: syntect::highlighting::Color { r: 0, g: 0, b: 0, a: 255 },
+                foreground: syntect::highlighting::Color {
+                    r: 200,
+                    g: 40,
+                    b: 40,
+                    a: 255,
+                },
+                background: syntect::highlighting::Color {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                },
                 font_style: syntect::highlighting::FontStyle::empty(),
             },
             "error",
@@ -552,7 +571,13 @@ mod tests {
         let rust = "fn main() {\n    let s = \"x\";\n";
         let py = "def main():\n    s = \"x\"\n";
         let _ = highlight(rust, "rust");
-        assert_eq!(cells(&highlight(py, "python")), one_shot_reference(py, "python"));
-        assert_eq!(cells(&highlight(rust, "rust")), one_shot_reference(rust, "rust"));
+        assert_eq!(
+            cells(&highlight(py, "python")),
+            one_shot_reference(py, "python")
+        );
+        assert_eq!(
+            cells(&highlight(rust, "rust")),
+            one_shot_reference(rust, "rust")
+        );
     }
 }

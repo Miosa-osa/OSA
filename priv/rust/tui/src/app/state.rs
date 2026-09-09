@@ -37,6 +37,10 @@ pub enum AppState {
     Sandbox,
     Metrics,
     Tasks,
+    /// Full-screen goal-COMPLETION report (item #3): a durable goal reached a
+    /// terminal state (completed/blocked/abandoned). Backend-driven, like
+    /// `Cost`/`AgentsDashboard` — never entered by a user command.
+    GoalCompletion,
 }
 
 impl AppState {
@@ -81,6 +85,7 @@ impl AppState {
                 | (Idle, Sandbox)
                 | (Idle, Metrics)
                 | (Idle, Tasks)
+                | (Idle, GoalCompletion)
                 // Recording transitions
                 | (Recording, Idle)
                 // Processing transitions
@@ -112,6 +117,7 @@ impl AppState {
                 | (Processing, Sandbox)
                 | (Processing, Metrics)
                 | (Processing, Tasks)
+                | (Processing, GoalCompletion)
                 // Agents dashboard returns to whichever state opened it
                 | (AgentsDashboard, Idle)
                 | (AgentsDashboard, Processing)
@@ -165,6 +171,8 @@ impl AppState {
                 | (Metrics, Processing)
                 | (Tasks, Idle)
                 | (Tasks, Processing)
+                | (GoalCompletion, Idle)
+                | (GoalCompletion, Processing)
                 | (Onboarding, Idle)
                 // Emergency: any state can go to Connecting (reconnect)
                 | (_, Connecting)
@@ -209,6 +217,7 @@ impl AppState {
                 | AppState::Sandbox
                 | AppState::Metrics
                 | AppState::Tasks
+                | AppState::GoalCompletion
         )
     }
 
@@ -218,7 +227,10 @@ impl AppState {
     }
 
     pub fn allows_input(&self) -> bool {
-        matches!(self, AppState::Idle | AppState::Processing | AppState::Recording)
+        matches!(
+            self,
+            AppState::Idle | AppState::Processing | AppState::Recording
+        )
     }
 
     pub fn is_processing(&self) -> bool {
@@ -261,6 +273,7 @@ impl std::fmt::Display for AppState {
             AppState::Sandbox => write!(f, "Sandbox"),
             AppState::Metrics => write!(f, "Metrics"),
             AppState::Tasks => write!(f, "Tasks"),
+            AppState::GoalCompletion => write!(f, "Goal Completion"),
         }
     }
 }
@@ -315,6 +328,29 @@ mod fleet_select_transition_tests {
         // A guarantees the inline roster is distinct from the full-screen
         // dashboard: there is no FleetSelect → AgentsDashboard edge.
         assert!(!FleetSelect.can_transition_to(AgentsDashboard));
+    }
+
+    // ── item #3: the goal-completion panel is reachable and returns cleanly ──
+
+    #[test]
+    fn a_goal_can_complete_from_idle_or_a_running_turn() {
+        // A durable goal can reach a terminal state whether the user is
+        // sitting idle or mid-turn — the backend event is not gated on either.
+        assert!(Idle.can_transition_to(GoalCompletion));
+        assert!(Processing.can_transition_to(GoalCompletion));
+    }
+
+    #[test]
+    fn the_completion_panel_returns_to_whichever_state_opened_it() {
+        assert!(GoalCompletion.can_transition_to(Idle));
+        assert!(GoalCompletion.can_transition_to(Processing));
+    }
+
+    #[test]
+    fn the_completion_panel_is_a_real_overlay() {
+        // Unlike PlanReview/Survey (intentionally inline), the completion
+        // report is a dedicated FULL-SCREEN panel.
+        assert!(GoalCompletion.is_overlay());
     }
 }
 
@@ -500,6 +536,7 @@ mod overlay_dialog_lost_is_complete {
             AppState::Tasks,
             AppState::Persona,
             AppState::Sandbox,
+            AppState::GoalCompletion,
         ] {
             let arm = format!("AppState::{state:?} =>");
             assert!(
@@ -516,7 +553,10 @@ mod overlay_dialog_lost_is_complete {
     #[test]
     fn the_guard_runs_before_the_state_dispatch() {
         let src = include_str!("update.rs");
-        let after = src.split("fn handle_key").nth(1).expect("handle_key exists");
+        let after = src
+            .split("fn handle_key")
+            .nth(1)
+            .expect("handle_key exists");
         let guard = after.find("self.overlay_dialog_lost()");
         let dispatch = after.find("match self.state {");
         assert!(

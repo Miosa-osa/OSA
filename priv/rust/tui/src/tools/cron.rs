@@ -14,9 +14,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use super::{
-    make_header, parse_json_arg, status_icon, RenderOpts, ToolRenderer,
-};
+use super::{make_header, parse_json_arg, status_icon, RenderOpts, ToolRenderer};
 
 pub struct CronRenderer;
 
@@ -56,7 +54,13 @@ impl ToolRenderer for CronRenderer {
             other => ("Schedule", other.to_string()),
         };
 
-        let header = make_header(opts.status, opts.spinner_frame, label, &detail, opts.duration_ms);
+        let header = make_header(
+            opts.status,
+            opts.spinner_frame,
+            label,
+            &detail,
+            opts.duration_ms,
+        );
 
         if result.is_empty() {
             return vec![header];
@@ -107,7 +111,9 @@ fn render_job_list(body: &mut Vec<Line<'static>>, result: &str, theme: &crate::s
             body.push(Line::from(vec![
                 Span::styled(
                     id.to_string(),
-                    Style::default().fg(theme.colors.muted).add_modifier(Modifier::DIM),
+                    Style::default()
+                        .fg(theme.colors.muted)
+                        .add_modifier(Modifier::DIM),
                 ),
                 Span::raw("  "),
                 Span::styled(

@@ -46,7 +46,10 @@ defmodule OptimalSystemAgent.Agent.ImageContentCrashTest do
     end
 
     test "still detects a real task-notification marker" do
-      assert Loop.scaffold_message?(%{role: "user", content: "<task-notification>x</task-notification>"})
+      assert Loop.scaffold_message?(%{
+               role: "user",
+               content: "<task-notification>x</task-notification>"
+             })
     end
   end
 end

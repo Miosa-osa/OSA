@@ -1,14 +1,18 @@
 use ratatui::text::Line;
 
-use super::{
-    make_header, render_tool_box, truncate_lines, RenderOpts, ToolRenderer, ToolStatus,
-};
+use super::{make_header, render_tool_box, truncate_lines, RenderOpts, ToolRenderer, ToolStatus};
 
 /// Fallback renderer for all unregistered tools.
 pub struct GenericRenderer;
 
 impl ToolRenderer for GenericRenderer {
-    fn render(&self, name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         // Use the raw tool name as display, collapse args into a short preview
         let args_preview = args_summary(args);
 

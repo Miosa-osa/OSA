@@ -119,6 +119,35 @@ impl ThinkingBox {
         self.reasoning_title = None;
     }
 
+    /// Call this whenever a new agent action begins — a tool call starting, or
+    /// the model resuming text output — so a frozen thought is never mistaken
+    /// for the CURRENT state of a healthy run.
+    ///
+    /// G2: the box freezes to "∴ Thought for Ns" on the reasoning→action edge
+    /// (see [`finish`](Self::finish)) so that FIRST summary isn't lost. But
+    /// nothing previously cleared it afterward, and the event-loop draw swap
+    /// replaces the whole activity row with this box whenever it is non-empty
+    /// (see `event_loop::draw_inline`) — so once frozen, every action AFTER
+    /// the first (more tool calls with no reasoning between them, a second
+    /// text chunk, …) rendered behind the SAME stale "Thought for Ns" line,
+    /// hiding the live spinner/tool name/duration for the rest of the turn. A
+    /// perfectly healthy multi-step run therefore looked permanently stuck.
+    ///
+    /// The rule: a reasoning summary is shown for exactly ONE action edge.
+    ///   * still running (mid-reasoning, this is the FIRST action after it) →
+    ///     freeze it now, same as today — the summary is genuinely new.
+    ///   * already frozen (this action follows one that already consumed the
+    ///     summary) → clear it, so the box goes empty and the plain activity
+    ///     feed takes over cleanly for this and every later action, until the
+    ///     next real reasoning delta (`update`) restarts a fresh run.
+    pub fn on_action_start(&mut self) {
+        if self.running {
+            self.finish();
+        } else if !self.content.is_empty() {
+            self.clear();
+        }
+    }
+
     // Thinking panel mode cycle (alt+t — chat:thinkingToggle). Wired via
     // keymap_dispatch Action::ThinkingToggle.
     //
@@ -298,7 +327,11 @@ impl ThinkingBox {
 
     /// The header string for the current running/done + title state.
     fn header_text(&self) -> String {
-        compose_header(self.running, self.elapsed(), self.reasoning_title.as_deref())
+        compose_header(
+            self.running,
+            self.elapsed(),
+            self.reasoning_title.as_deref(),
+        )
     }
 
     /// The reasoning body (content minus any promoted title) rendered through
@@ -474,6 +507,62 @@ mod tests {
         assert!(tb.content.contains("second pass"));
     }
 
+    // ── G2: a stale frozen thought must never survive into a LATER action ──
+
+    #[test]
+    fn on_action_start_freezes_a_running_box_once() {
+        // First action after reasoning: the box is still running, so this is
+        // the genuine reasoning->action edge — freeze it, exactly like today.
+        let mut tb = ThinkingBox::new();
+        tb.update("first pass reasoning");
+        assert!(tb.running);
+        tb.on_action_start();
+        assert!(!tb.running, "first action freezes the box");
+        assert!(!tb.is_empty(), "the summary is shown for this one edge");
+        assert!(tb.header_text().starts_with("\u{2234} Thought for"));
+    }
+
+    #[test]
+    fn on_action_start_clears_an_already_frozen_box() {
+        // A SECOND action with no reasoning in between must not keep showing
+        // the first action's stale summary — that is G2 exactly: a healthy
+        // run looked stuck because every later tool call rendered behind the
+        // same frozen "Thought for Ns" line.
+        let mut tb = ThinkingBox::new();
+        tb.update("first pass reasoning");
+        tb.on_action_start(); // tool #1 starts: freeze
+        assert!(!tb.is_empty());
+
+        tb.on_action_start(); // tool #2 starts: no new reasoning happened
+        assert!(
+            tb.is_empty(),
+            "a stale frozen thought must be cleared, not rendered as current"
+        );
+    }
+
+    #[test]
+    fn on_action_start_is_a_noop_on_an_empty_box() {
+        let mut tb = ThinkingBox::new();
+        tb.on_action_start();
+        assert!(tb.is_empty());
+        assert!(!tb.running);
+    }
+
+    #[test]
+    fn fresh_reasoning_after_a_cleared_action_starts_a_new_run() {
+        // Tool #1 -> tool #2 clears the stale box (as above). If the model
+        // THEN reasons again before tool #3, the box must show the NEW
+        // thought, not stay empty or resurrect the old one.
+        let mut tb = ThinkingBox::new();
+        tb.update("first pass reasoning");
+        tb.on_action_start();
+        tb.on_action_start(); // cleared
+        tb.update("second pass reasoning");
+        assert!(tb.running);
+        assert!(tb.content.contains("second pass"));
+        assert!(!tb.content.contains("first pass"));
+    }
+
     #[test]
     fn finish_freezes_elapsed_and_flips_to_done() {
         let mut tb = ThinkingBox::new();
@@ -483,7 +572,11 @@ mod tests {
         assert!(!tb.running, "done after finish");
         assert!(tb.elapsed().is_some(), "elapsed frozen");
         // Header is now the done state.
-        assert!(tb.header_text().starts_with("\u{2234} Thought for"), "{}", tb.header_text());
+        assert!(
+            tb.header_text().starts_with("\u{2234} Thought for"),
+            "{}",
+            tb.header_text()
+        );
     }
 
     // ── Item 2: Markdown inside the thinking body ──────────────────────────
@@ -499,7 +592,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         // The unordered-list renderer emits bullets — flat dim text would not.
-        assert!(flat.contains('\u{2022}'), "expected a bullet, got: {flat:?}");
+        assert!(
+            flat.contains('\u{2022}'),
+            "expected a bullet, got: {flat:?}"
+        );
         assert!(flat.contains("first step"), "{flat:?}");
         assert!(flat.contains("second step"), "{flat:?}");
     }
