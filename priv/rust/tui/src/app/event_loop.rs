@@ -125,7 +125,13 @@ fn spawn_animation_timer(
 ///
 /// Exits quietly (no event sent) if the OS refuses to let us listen for this
 /// signal at all, which does not happen in practice for SIGTERM/SIGHUP/SIGQUIT
-/// on any platform this binary ships for.
+/// on any unix platform this binary ships for.
+///
+/// unix-only: `tokio::signal::unix` and the raw `libc::SIG*` constants it is
+/// called with (see `App::run`) do not exist on Windows. There is no
+/// equivalent listener spawned on Windows at all — see the module doc on
+/// `Event::TerminateSignal` for what that means for that platform.
+#[cfg(unix)]
 fn spawn_signal_listener(
     tx: tokio::sync::mpsc::UnboundedSender<Event>,
     kind: tokio::signal::unix::SignalKind,
@@ -828,16 +834,23 @@ impl App {
         // `Event::TerminateSignal`). Left running for the app's whole
         // lifetime; there is nothing to pause them around the way the
         // terminal reader gets paused for a viewport rebuild.
+        //
+        // unix-only (`tokio::signal::unix` + `libc::SIG*` do not exist on
+        // Windows): nothing is spawned on Windows, so `Event::TerminateSignal`
+        // is simply never produced there and this whole path stays dormant.
+        #[cfg(unix)]
         let sigterm_handle = spawn_signal_listener(
             self.event_tx.clone(),
             tokio::signal::unix::SignalKind::terminate(),
             libc::SIGTERM,
         );
+        #[cfg(unix)]
         let sighup_handle = spawn_signal_listener(
             self.event_tx.clone(),
             tokio::signal::unix::SignalKind::hangup(),
             libc::SIGHUP,
         );
+        #[cfg(unix)]
         let sigquit_handle = spawn_signal_listener(
             self.event_tx.clone(),
             tokio::signal::unix::SignalKind::quit(),
@@ -1784,8 +1797,11 @@ impl App {
         tick_handle.abort();
         anim_handle.abort();
         term_handle.abort();
+        #[cfg(unix)]
         sigterm_handle.abort();
+        #[cfg(unix)]
         sighup_handle.abort();
+        #[cfg(unix)]
         sigquit_handle.abort();
 
         // If a dialog still owned the full/alternate screen when the loop broke

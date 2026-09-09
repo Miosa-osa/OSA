@@ -121,18 +121,26 @@ fn main() -> Result<()> {
         // is not, and cannot be, handled this way: no signal number ever
         // reaches user code for it, so there is nothing to re-raise — an
         // accepted, documented limitation, not a gap in this handler.
+        //
+        // On unix, `libc::raise` below terminates the process before
+        // execution ever reaches the `std::process::exit` fallback. On
+        // Windows this variant is never actually produced in the first place
+        // (no `tokio::signal::unix` listener runs there — see
+        // `spawn_signal_listener` in event_loop.rs, unix-only), so the `exit`
+        // below is dead in practice on that platform too; it stays as the one
+        // portable statement in this arm so the match itself needs no
+        // platform-specific arms.
         Ok(app::resume::ExitOutcome::TerminatedBySignal(sig)) => {
+            #[cfg(unix)]
             unsafe {
                 libc::signal(sig, libc::SIG_DFL);
-            }
-            unsafe {
                 libc::raise(sig);
             }
             // The re-raised signal's default disposition terminates the
             // process before execution returns here for SIGTERM/SIGHUP/SIGQUIT
-            // on every platform this binary ships for. Kept as an honest,
-            // non-zero fallback rather than falling through to `Ok(())`, in
-            // case that ever stops being true.
+            // on unix. Kept as an honest, non-zero fallback rather than
+            // falling through to `Ok(())`, in case that ever stops being true
+            // — and as the only thing this arm does at all on non-unix.
             std::process::exit(128 + sig);
         }
         Err(e) => Err(e),

@@ -64,5 +64,12 @@ pub enum Event {
     /// and quits through the SAME cleanup path every other exit uses — see its
     /// handling there and `ExitOutcome::TerminatedBySignal`. SIGKILL is not, and
     /// cannot be, represented here: no signal number reaches user code for it.
+    ///
+    /// Never constructed on non-unix: no listener is spawned there at all (see
+    /// `spawn_signal_listener` in event_loop.rs, unix-only). `allow(dead_code)`
+    /// rather than `cfg(unix)` on the variant itself, so the enum and every
+    /// exhaustive match on it (`update.rs`, `main.rs`) stay portable with no
+    /// platform-specific arms.
+    #[cfg_attr(not(unix), allow(dead_code))]
     TerminateSignal(i32),
 }
