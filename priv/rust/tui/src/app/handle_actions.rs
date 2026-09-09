@@ -686,8 +686,10 @@ impl App {
         }
 
         // Startup discovery can finish after the user types. Do not send a
-        // prompt on the provisional ID which SessionCreated will replace.
-        if !matches!(text, "/exit" | "/quit" | "/clear" | "/new" | "/help")
+        // prompt on the provisional ID which SessionCreated will replace —
+        // the same gate `/clear` now closes (see commands.rs) while it swaps
+        // the session out from under `self.session_id`.
+        if !exempt_from_session_gate(text)
             && startup_session_pending(self.dir_session_resolved, self.session_creation_pending)
         {
             self.enqueue_message(text);
@@ -2938,9 +2940,20 @@ fn startup_session_pending(resolved: bool, creating: bool) -> bool {
     !resolved || creating
 }
 
+/// Commands allowed to run straight through the session-swap gate instead of
+/// being queued. Each names its own session-creation round trip (or needs
+/// none), so parking it behind ITS OWN gate would deadlock: `/clear` and
+/// `/new` are what CLOSE the gate in the first place, and a user who wants
+/// out (`/exit`, `/quit`) or help (`/help`) must never be told to wait on it.
+/// Plain prompt text has no such exemption — it is exactly what must wait for
+/// the real (post-swap) session id rather than firing on the stale one.
+fn exempt_from_session_gate(text: &str) -> bool {
+    matches!(text, "/exit" | "/quit" | "/clear" | "/new" | "/help")
+}
+
 #[cfg(test)]
 mod startup_session_tests {
-    use super::startup_session_pending;
+    use super::{exempt_from_session_gate, startup_session_pending};
 
     #[test]
     fn early_prompt_waits_through_discovery_and_session_creation() {
@@ -2953,6 +2966,38 @@ mod startup_session_tests {
     fn session_commands_also_wait_for_the_replacement_session() {
         assert!(startup_session_pending(false, true));
         assert!(startup_session_pending(true, true));
+    }
+
+    /// The bug this closes: `/clear` used to leave `session_creation_pending`
+    /// false for the entire cancel -> save -> tombstone -> swap round trip, so
+    /// a message typed in that window sailed through this gate and posted to
+    /// the OLD (about-to-be-tombstoned) session id. The backend's orchestrate
+    /// route restarts a loop for whatever id it is given, and `Loop.init`
+    /// falls back to the just-saved-then-supposedly-discarded transcript —
+    /// which is precisely the "/clear doesn't work" report. `/clear` now sets
+    /// `session_creation_pending = true` before the swap starts, so ordinary
+    /// text must queue exactly like it does during startup discovery.
+    #[test]
+    fn plain_text_is_gated_during_a_clear_swap_but_clear_itself_is_not() {
+        let mid_swap = startup_session_pending(true, true);
+        assert!(mid_swap, "the gate must be closed while /clear is swapping");
+
+        assert!(
+            !exempt_from_session_gate("keep going with the refactor"),
+            "ordinary prompt text must wait for the post-clear session id"
+        );
+        assert!(
+            exempt_from_session_gate("/clear"),
+            "/clear itself must never be blocked by the gate it closes"
+        );
+        assert!(
+            exempt_from_session_gate("/new"),
+            "/new must never be blocked by the gate it closes"
+        );
+        assert!(
+            exempt_from_session_gate("/exit"),
+            "the way out must never be gated"
+        );
     }
 }
 
