@@ -225,6 +225,18 @@ defmodule OptimalSystemAgent.Soul.ToolsSection do
     end
   end
 
+  @doc """
+  Public accessor for the `<mcp-servers>` catalog block, or `nil` when no MCP
+  tool is currently deferred (nothing to catalog, or virtualization inactive).
+
+  Same rendering `build_mcp_catalog/0` inlines into the prompt — exposed so a
+  caller that wants to know the COST of what ships (e.g.
+  `MCP.Virtualization.cost_estimate/0`) can measure the exact text rather than
+  re-implementing the per-server name cap.
+  """
+  @spec mcp_catalog_text() :: String.t() | nil
+  def mcp_catalog_text, do: build_mcp_catalog()
+
   defp build_mcp_catalog do
     catalog = Registry.mcp_catalog()
 

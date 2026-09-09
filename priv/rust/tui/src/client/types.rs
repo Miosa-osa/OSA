@@ -79,10 +79,33 @@ pub struct McpServerDto {
     #[serde(default)]
     pub toggleable: bool,
 }
+/// Cost-visibility snapshot from `MCP.Virtualization.cost_estimate/0` — what
+/// the currently-connected MCP servers cost the prompt right now, so a client
+/// can show "12 MCP · ~417 tok" instead of leaving an operator to guess
+/// whether a dozen connected servers are cheap or expensive. `estimated_tokens`
+/// is a heuristic (not the provider's real tokenizer): good for a status-bar
+/// order-of-magnitude, not for billing.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct McpContextDto {
+    #[serde(default)]
+    pub tool_count: i64,
+    #[serde(default)]
+    pub server_count: i64,
+    #[serde(default)]
+    pub virtualized: bool,
+    #[serde(default)]
+    pub estimated_tokens: u64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct McpServersResponse {
     #[serde(default)]
     pub servers: Vec<McpServerDto>,
+    /// `None` only against an old backend that predates this field — never
+    /// against a healthy one, since the route always includes it (defaulting
+    /// to an all-zero estimate rather than omitting the key).
+    #[serde(default)]
+    pub mcp_context: Option<McpContextDto>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

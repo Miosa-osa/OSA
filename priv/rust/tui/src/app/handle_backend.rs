@@ -1170,6 +1170,16 @@ impl App {
                     // automatically instead of only after the dialog is opened.
                     let enabled = resp.servers.iter().filter(|s| s.enabled).count();
                     self.status.set_mcp(enabled);
+                    // Cost-visibility chip: how many tokens the currently-active
+                    // MCP tool exposure is estimated to cost. 0 against an old
+                    // backend that predates this field (no chip suffix, just the
+                    // count).
+                    self.status.set_mcp_tokens(
+                        resp.mcp_context
+                            .as_ref()
+                            .map(|c| c.estimated_tokens)
+                            .unwrap_or(0),
+                    );
                     let servers = resp
                         .servers
                         .into_iter()

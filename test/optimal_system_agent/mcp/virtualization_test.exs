@@ -143,4 +143,92 @@ defmodule OptimalSystemAgent.MCP.VirtualizationTest do
       assert Virtualization.apply_decision(%{}) == %{}
     end
   end
+
+  describe "cost_estimate/0" do
+    alias OptimalSystemAgent.Tools.Registry
+    alias OptimalSystemAgent.MCP.Client.ToolBridge
+
+    @pt_key {Registry, :mcp_tools}
+
+    setup do
+      prior = :persistent_term.get(@pt_key, %{})
+      on_exit(fn -> :persistent_term.put(@pt_key, prior) end)
+      :ok
+    end
+
+    defp publish(server, count) do
+      schemas =
+        for i <- 1..count do
+          %{
+            "name" => "tool_#{i}",
+            "description" => "a tool",
+            "inputSchema" => %{"type" => "object", "properties" => %{}}
+          }
+        end
+
+      tools = ToolBridge.build_tools(server, schemas, nil)
+      :persistent_term.put(@pt_key, Map.merge(:persistent_term.get(@pt_key, %{}), tools))
+    end
+
+    test "reports zero for an empty toolset" do
+      :persistent_term.put(@pt_key, %{})
+      Application.put_env(:optimal_system_agent, :mcp_virtualization, :auto)
+
+      assert Virtualization.cost_estimate() == %{
+               tool_count: 0,
+               server_count: 0,
+               virtualized: false,
+               estimated_tokens: 0
+             }
+    end
+
+    test "below threshold: not virtualized, cost reflects the native schemas" do
+      Application.put_env(:optimal_system_agent, :mcp_virtualization, :auto)
+      Application.put_env(:optimal_system_agent, :mcp_virtualization_threshold, 10)
+      # apply_decision/1 runs in MCP.Client.Manager.republish/1, not on the
+      # raw ToolBridge output — publish already-decided (should_defer?: false)
+      # entries directly so this test does not depend on the Manager GenServer.
+      publish("small", 3)
+
+      :persistent_term.put(
+        @pt_key,
+        Map.new(:persistent_term.get(@pt_key), fn {k, v} -> {k, %{v | should_defer?: false}} end)
+      )
+
+      result = Virtualization.cost_estimate()
+
+      assert result.tool_count == 3
+      assert result.server_count == 1
+      assert result.virtualized == false
+      # 3 small tools serialize to well under a couple hundred tokens.
+      assert result.estimated_tokens > 0
+      assert result.estimated_tokens < 500
+    end
+
+    test "above threshold: virtualized, cost reflects the capped catalog, not the schemas" do
+      Application.put_env(:optimal_system_agent, :mcp_virtualization, :auto)
+      Application.put_env(:optimal_system_agent, :mcp_virtualization_threshold, 10)
+      publish("huge", 200)
+
+      result = Virtualization.cost_estimate()
+
+      assert result.tool_count == 200
+      assert result.server_count == 1
+      assert result.virtualized == true
+      # The whole point of virtualization: 200 schemas collapse to a small
+      # catalog line, not hundreds of tool descriptions worth of tokens.
+      assert result.estimated_tokens > 0
+      assert result.estimated_tokens < 200
+    end
+
+    test ":off mode never virtualizes regardless of count" do
+      Application.put_env(:optimal_system_agent, :mcp_virtualization, :off)
+      publish("many", 50)
+
+      result = Virtualization.cost_estimate()
+
+      assert result.virtualized == false
+      assert result.tool_count == 50
+    end
+  end
 end

@@ -266,11 +266,26 @@ fn hooks_label(ok: u32, failed: u32) -> Option<String> {
     }
 }
 
-fn mcp_label(count: usize) -> Option<String> {
-    if count > 0 {
-        Some(format!("{} MCP", count))
+/// U-T26 chip text: `"N MCP"`, or `"N MCP · ~Xk tok"` once a nonzero cost
+/// estimate is known. `None` when there are no servers.
+///
+/// The token half answers the question the count alone cannot: a dozen
+/// connected servers reads as alarming until you know whether virtualization
+/// collapsed them to a few hundred tokens or they are shipping full schemas.
+/// Appended rather than replacing the base chip, so `"N MCP"` is always a
+/// prefix — existing callers matching on that substring are unaffected.
+fn mcp_label(count: usize, estimated_tokens: u64) -> Option<String> {
+    if count == 0 {
+        return None;
+    }
+    if estimated_tokens > 0 {
+        Some(format!(
+            "{} MCP \u{00b7} {} tok",
+            count,
+            compact_tokens(estimated_tokens)
+        ))
     } else {
-        None
+        Some(format!("{} MCP", count))
     }
 }
 
@@ -511,6 +526,11 @@ pub struct StatusBar {
     /// U-T26 — number of connected MCP servers (from `McpServersLoaded`). 0 ⇒
     /// no chip. Populated on session start and on `/mcp`.
     mcp_count: usize,
+    /// Estimated token cost of the currently-active MCP tool exposure (from
+    /// `McpServersLoaded`'s `mcp_context.estimated_tokens`). 0 ⇒ the chip
+    /// shows only the server count, either because there is truly nothing to
+    /// report yet or a pre-cost-visibility backend never sent the field.
+    mcp_tokens: u64,
     /// U-B5 — live swarm-intelligence status ("swarm · round N"), driven by the
     /// SwarmIntelligence* events. None ⇒ no swarm running ⇒ chip omitted.
     swarm_label: Option<String>,
@@ -586,6 +606,7 @@ impl StatusBar {
             context_compact_at: 0,
             context_warn_at: 0,
             mcp_count: 0,
+            mcp_tokens: 0,
             swarm_label: None,
             hooks_ok: 0,
             hooks_failed: 0,
@@ -701,6 +722,13 @@ impl StatusBar {
     /// U-T26 — number of connected MCP servers, feeding the row-0 MCP chip.
     pub fn set_mcp(&mut self, count: usize) {
         self.mcp_count = count;
+    }
+
+    /// Estimated token cost of the currently-active MCP tool exposure,
+    /// feeding the `· ~Xk tok` half of the row-0 MCP chip. 0 clears it (chip
+    /// falls back to the bare count).
+    pub fn set_mcp_tokens(&mut self, tokens: u64) {
+        self.mcp_tokens = tokens;
     }
 
     /// Record one finished hook invocation. `outcome` is the backend's own
@@ -1548,8 +1576,8 @@ impl Component for StatusBar {
             );
         }
 
-        // MCP chip (`3 MCP`). U-T26. Omitted when no servers.
-        if let Some(mcp) = mcp_label(self.mcp_count) {
+        // MCP chip (`3 MCP` or `3 MCP · ~417 tok`). U-T26. Omitted when no servers.
+        if let Some(mcp) = mcp_label(self.mcp_count, self.mcp_tokens) {
             let style = Style::default().fg(theme.colors.primary);
             push_segment_if_fits(
                 &mut spans,
@@ -2110,8 +2138,22 @@ mod status_bar_tests {
             "watching \u{00b7} 3 monitors \u{00b7} 2 loops"
         );
         // U-T26 — MCP chip: count when non-zero, else nothing.
-        assert_eq!(mcp_label(0), None);
-        assert_eq!(mcp_label(3).unwrap(), "3 MCP");
+        assert_eq!(mcp_label(0, 0), None);
+        assert_eq!(mcp_label(3, 0).unwrap(), "3 MCP");
+        // Zero servers with a (nonsensical) nonzero cost still omits the chip —
+        // there is nothing to attribute a cost to.
+        assert_eq!(mcp_label(0, 500), None);
+    }
+
+    #[test]
+    fn mcp_label_shows_the_cost_estimate_once_known() {
+        // The cost-visibility half: same "N MCP" prefix, with a compact token
+        // estimate appended once virtualization / the backend reports one.
+        assert_eq!(mcp_label(12, 417).unwrap(), "12 MCP \u{00b7} ~417 tok");
+        assert_eq!(mcp_label(12, 72_111).unwrap(), "12 MCP \u{00b7} ~72.1k tok");
+        // No known cost yet (old backend, or genuinely zero) → bare count,
+        // matching pre-cost-visibility rendering exactly.
+        assert_eq!(mcp_label(12, 0).unwrap(), "12 MCP");
     }
 
     #[test]
