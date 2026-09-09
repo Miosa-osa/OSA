@@ -167,7 +167,13 @@ defmodule OptimalSystemAgent.MCP.VirtualizationTest do
         end
 
       tools = ToolBridge.build_tools(server, schemas, nil)
-      :persistent_term.put(@pt_key, Map.merge(:persistent_term.get(@pt_key, %{}), tools))
+      # Replace, not merge: every caller below asserts an EXACT tool_count
+      # from cost_estimate/0. Merging onto whatever :persistent_term already
+      # held made the assertion depend on ambient state left by any other
+      # test that registers (and fails to clean up) an mcp tool in the same
+      # global slot — see mcp_routes_test.exs's `publish/2` for the same fix
+      # and the leak this closes (pagination_test.exs / progress_timeout_test.exs).
+      :persistent_term.put(@pt_key, tools)
     end
 
     test "reports zero for an empty toolset" do

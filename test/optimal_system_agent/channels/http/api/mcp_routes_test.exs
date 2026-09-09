@@ -42,7 +42,14 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.MCPRoutesTest do
       end
 
     tools = ToolBridge.build_tools(server, schemas, nil)
-    :persistent_term.put(@pt_key, Map.merge(:persistent_term.get(@pt_key, %{}), tools))
+    # Replace, not merge: the assertions below check an EXACT tool_count/
+    # server_count for the aggregate this test publishes. Merging onto
+    # whatever :persistent_term currently holds made this test's outcome
+    # depend on ambient state from any other test that has ever registered
+    # (and failed to clean up) an mcp tool in the same global slot — an
+    # order-dependent flake, not a property of this test. Owning the whole
+    # map here makes the assertion correct regardless of what else runs.
+    :persistent_term.put(@pt_key, tools)
   end
 
   describe "GET / — mcp_context" do

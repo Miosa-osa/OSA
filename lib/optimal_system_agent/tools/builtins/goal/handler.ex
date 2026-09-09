@@ -33,6 +33,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.Goal.Handler do
     criteria = Map.get(input, "acceptance_criteria")
 
     cond do
+      # The user's kill switch for autonomous goal pursuit — see
+      # `GoalTracker.auto_enabled?/0`'s moduledoc. Checked first, ahead of
+      # every other validation: the objective/criteria never matter if the
+      # model is not allowed to anchor one on its own initiative at all. An
+      # explicit `/goal <text>` typed BY the user is a completely different
+      # code path (`Channels.CLI.Commands.anchor_goal_command/2`) and is
+      # untouched by this — the switch is about the harness deciding to
+      # pursue something unasked, not about removing the feature.
+      not GoalTracker.auto_enabled?() ->
+        {:error,
+         "Autonomous goal pursuit is turned off (/goal auto off). Complete the request " <>
+           "directly and stop — do not anchor a cross-turn goal. The user can /goal auto on " <>
+           "to re-enable it, or /goal <text> to anchor one explicitly themselves.", -32_602}
+
       String.trim(objective) == "" ->
         {:error, "objective must not be empty", -32_602}
 

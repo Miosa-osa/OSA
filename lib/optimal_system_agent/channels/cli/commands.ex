@@ -2686,13 +2686,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         resolve_goal_decision(session_id, verb, nil, "")
 
       text ->
-        case String.split(text, " ", parts: 2, trim: true) do
-          [decision, rest] when decision in ["approve", "reject"] ->
-            {id, notes} = split_decision_id_and_notes(rest)
-            resolve_goal_decision(session_id, decision, id, notes)
-
-          _ ->
-            anchor_goal_command(text, session_id)
+        case String.downcase(String.trim(text)) do
+          "auto" -> print_goal_auto_status()
+          "auto on" -> set_goal_auto(true)
+          "auto off" -> set_goal_auto(false)
+          _ -> dispatch_goal_decision_or_anchor(text, session_id)
         end
     end
 
@@ -2702,6 +2700,66 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     e ->
       IO.puts("  #{@yellow}error: could not update goal (#{Exception.message(e)})#{@reset}\n")
       session_id
+  end
+
+  # The `text ->` catch-all's original logic — approve/reject with a bare-word
+  # id, else anchor a new goal from the text. Extracted so `/goal auto ...`
+  # (a plain two-word sub-command, not a decision or an objective) can be
+  # intercepted BEFORE it — the pre-existing behavior would have anchored a
+  # goal literally titled "auto off".
+  defp dispatch_goal_decision_or_anchor(text, session_id) do
+    case String.split(text, " ", parts: 2, trim: true) do
+      [decision, rest] when decision in ["approve", "reject"] ->
+        {id, notes} = split_decision_id_and_notes(rest)
+        resolve_goal_decision(session_id, decision, id, notes)
+
+      _ ->
+        anchor_goal_command(text, session_id)
+    end
+  end
+
+  # ── /goal auto on|off ───────────────────────────────────────────────────
+  #
+  # `GoalTracker.auto_enabled?/0`'s user-facing kill switch: per-user,
+  # persisted the same way the MCP server allow-list is
+  # (`Settings.set_user/2` → `~/.osa/settings.json`), so it survives this
+  # session and every future one — not the per-turn `permission_mode` a
+  # `Loop` carries, and NOT overdrive/full-auto, which is about tool-call
+  # approval and must stay independent of this (see that function's
+  # moduledoc for why the two were never coupled).
+  defp print_goal_auto_status do
+    alias OptimalSystemAgent.Agent.Loop.GoalTracker
+
+    state = if GoalTracker.auto_enabled?(), do: "on", else: "off"
+
+    IO.puts("  #{@bold}Autonomous goal pursuit:#{@reset} #{state}")
+
+    IO.puts(
+      "  #{@dim}/goal auto on|off to change it. Independent of overdrive/full-auto — " <>
+        "that is about tool-call approval, not whether OSA anchors and chases its own " <>
+        "goals.#{@reset}"
+    )
+  end
+
+  defp set_goal_auto(enabled?) do
+    case OptimalSystemAgent.Settings.set_user("goal_auto", enabled?) do
+      :ok ->
+        if enabled? do
+          IO.puts(
+            "  #{@green}✓#{@reset} Autonomous goal pursuit turned #{@bold}on#{@reset}. " <>
+              "OSA may anchor and auto-continue a goal again."
+          )
+        else
+          IO.puts(
+            "  #{@green}✓#{@reset} Autonomous goal pursuit turned #{@bold}off#{@reset}. " <>
+              "OSA will complete requests directly and stop; a goal only exists if you " <>
+              "explicitly anchor one with /goal <text>."
+          )
+        end
+
+      {:error, reason} ->
+        IO.puts("  #{@yellow}error: could not save the setting (#{inspect(reason)})#{@reset}")
+    end
   end
 
   # `rest` is everything typed after `approve`/`reject`. The old parser always

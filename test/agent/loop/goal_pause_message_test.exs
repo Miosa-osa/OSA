@@ -74,6 +74,17 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalPauseMessageTest do
     :ok
   end
 
+  # A minimal, well-formed decision request — same shape `update_goal`'s
+  # `decision` action and `GoalVerifier`'s `:awaiting_user` triage both build.
+  defp await_request do
+    %{
+      "question" => "Approve draft v1?",
+      "criterion" => "Steven approves the thesis",
+      "work_summary" => "Draft complete; approval missing",
+      "artifact" => "thesis.md revision v1"
+    }
+  end
+
   setup do
     saved =
       for key <- [:default_provider, :mock_provider_final_text],
@@ -215,6 +226,112 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalPauseMessageTest do
 
       assert message =~ "not a stall",
              "the goal's own mid-turn continuation must still stop when paused"
+
+      GoalTracker.reset(s)
+    end
+  end
+
+  # Same defect class as the `:paused` block above, one status over:
+  # `awaiting_user?/1`'s halt had NO `iter > 0` guard at all (unlike `:paused`,
+  # which had already been fixed), so it swallowed a brand-new top-level turn
+  # exactly as readily as the model's own mid-turn continuation. Reported
+  # live: an anchored goal asked a decision question, and every ordinary
+  # message the user typed afterward — not `/goal approve`/`/goal reject`,
+  # just normal chat — came back with nothing but the same static "waiting
+  # for your decision" notice.
+  describe "the halt never swallows a fresh user turn while awaiting a decision" do
+    test "an awaiting-decision goal still lets a brand-new user prompt run and get answered" do
+      s = sid()
+      GoalTracker.start(s, "ship the exporter")
+      {:ok, _snap} = GoalTracker.request_decision(s, await_request())
+      assert GoalTracker.awaiting_user?(s)
+
+      {response, _state} =
+        ReactLoop.run(fresh_turn_state(s, "just merge them, I trust you"))
+
+      assert response == "Here is the status you asked for.",
+             "the user's real prompt must reach the model, not the pending-decision notice: " <>
+               response
+
+      refute response =~ "Waiting for your decision"
+
+      GoalTracker.reset(s)
+    end
+
+    test "a SECOND fresh prompt right after also runs — the decision does not stick to the input lane" do
+      s = sid()
+      GoalTracker.start(s, "ship the exporter")
+      {:ok, _snap} = GoalTracker.request_decision(s, await_request())
+
+      {first, _} = ReactLoop.run(fresh_turn_state(s, "what's the status"))
+      assert first == "Here is the status you asked for."
+
+      {second, _} = ReactLoop.run(fresh_turn_state(s, "EXCUSE ME"))
+      assert second == "Here is the status you asked for."
+      refute second =~ "Waiting for your decision"
+
+      GoalTracker.reset(s)
+    end
+
+    test "the pending decision is untouched by the user's turn running — /goal approve|reject still required" do
+      s = sid()
+      GoalTracker.start(s, "ship the exporter")
+      {:ok, _snap} = GoalTracker.request_decision(s, await_request())
+
+      {_response, _state} = ReactLoop.run(fresh_turn_state(s, "what's the status"))
+
+      assert GoalTracker.awaiting_user?(s),
+             "answering the user must not silently resolve the pending decision"
+
+      GoalTracker.reset(s)
+    end
+
+    # Live repro that sharpened the fix above: a plain-prose message ("okay so
+    # waht") still got NOTHING but the pending decision re-displayed. A bare
+    # `iter > 0` check only exempted a turn's FIRST model call — if the model
+    # needed a SECOND round trip to answer (any tool call at all), iteration 2
+    # walked right back into the same unconditional halt and discarded the
+    # real answer. `goal_was_driving_at_turn_start?` is captured ONCE, at
+    # `iteration == 0`, and threaded through every later iteration of the
+    # SAME turn specifically so this cannot happen — simulated here directly
+    # at iteration 2, the shape that check exists for.
+    test "a turn that STARTED already awaiting a decision never halts, however many " <>
+           "iterations it takes to answer" do
+      s = sid()
+      GoalTracker.start(s, "ship the exporter")
+      {:ok, _snap} = GoalTracker.request_decision(s, await_request())
+
+      state =
+        s
+        |> fresh_turn_state("okay so waht")
+        |> Map.put(:iteration, 2)
+        |> Map.put(:goal_was_driving_at_turn_start?, false)
+
+      {response, _state} = ReactLoop.run(state)
+
+      refute response =~ "Waiting for your decision",
+             "iteration 2 of a turn that started already awaiting a decision must not be " <>
+               "swallowed: #{response}"
+
+      assert response == "Here is the status you asked for."
+
+      assert GoalTracker.awaiting_user?(s),
+             "the pending decision itself is unaffected either way — only /goal approve|reject resolves it"
+
+      GoalTracker.reset(s)
+    end
+
+    test "a turn ALREADY in flight (iteration > 0) still halts — only fresh turns are exempt" do
+      s = sid()
+      GoalTracker.start(s, "ship the exporter")
+      {:ok, snap} = GoalTracker.request_decision(s, await_request())
+
+      {message, _state} = ReactLoop.run(base_state(s))
+
+      assert message =~ "Waiting for your decision",
+             "the model's own mid-turn continuation past its own question must still stop"
+
+      assert message =~ snap.pending_decision["request_id"]
 
       GoalTracker.reset(s)
     end
