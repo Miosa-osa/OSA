@@ -442,6 +442,10 @@ pub struct App {
     /// What the in-flight `/goal` request was for, so its answer can be acted on
     /// rather than merely printed. `None` when no `/goal` request is outstanding.
     pub goal_intent: Option<crate::app::handle_actions::GoalIntent>,
+    /// The last "goal is no longer active" notice `continue_goal_from` actually
+    /// printed, so a materially identical stop notice for the SAME dormant
+    /// reason is collapsed instead of repeated. `None` on a fresh anchor.
+    pub last_goal_stop_notice: Option<String>,
     /// Instant the active goal became live, so the status-line goal indicator can
     /// count up "Working on: <goal> · 3m 40s" from activation (Codex
     /// `thread_goal_actions` + `status_indicator_widget` elapsed). Stamped the
@@ -863,6 +867,7 @@ impl App {
             goal_cycle: 0,
             goal_max_cycles,
             goal_intent: None,
+            last_goal_stop_notice: None,
             goal_activated_at: None,
             attachments: Vec::new(),
             welcome_injected: false,

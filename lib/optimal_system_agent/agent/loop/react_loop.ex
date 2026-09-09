@@ -285,6 +285,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       "send a new instruction."
   end
 
+  defp goal_pause_halt_message(:blocked_on_human, gaps) do
+    "Goal auto-paused: the same blocker repeated across consecutive turns and it needs " <>
+      "something only you can do:\n" <>
+      goal_gaps_block(gaps) <>
+      "\nDo that, then resume it, refine it, or send a new instruction."
+  end
+
+  defp goal_pause_halt_message(:verification_unavailable, _gaps) do
+    "Goal auto-paused: the independent skeptic panel could not return a verdict this round " <>
+      "(a provider failure or timeout, not a finding about your work). The goal is kept — " <>
+      "resume it, refine it, or send a new instruction."
+  end
+
   defp goal_pause_halt_message(reason, gaps) do
     "Goal auto-paused (#{reason})." <>
       goal_pause_gaps_suffix(gaps) <>
@@ -320,13 +333,37 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         # P4 (v1057): `:empty_answer_nudges` is per-turn too — the loop state
         # lives in the `Loop` GenServer across turns, so a fresh turn must start
         # with the full empty-answer nudge budget rather than a spent one.
+        #
+        # `:goal_was_driving_at_turn_start?` — captured ONCE, here, before this
+        # turn has called the model even once — is what the `awaiting_user?`/
+        # `paused?` halt clauses below actually gate on now, replacing a bare
+        # `iter > 0` check. `iter > 0` alone only exempted a turn's FIRST
+        # iteration: a plain user message that needed more than one model
+        # round trip to answer (any tool call at all) still hit the SAME halt
+        # on iteration 2+, discarding the model's real, on-topic answer and
+        # re-emitting the stale "waiting for your decision" notice instead —
+        # reported live with a plain "okay so waht" that got nothing back but
+        # the pending decision, twice. Capturing it once, at turn start, and
+        # threading it through every iteration of the SAME turn fixes that:
+        # a turn that begins while ALREADY awaiting a decision (or paused)
+        # never halts on this, no matter how many iterations it takes to
+        # answer; a turn that was genuinely driving and only THEN, mid-turn,
+        # ran into a freshly-raised decision/pause still stops there, exactly
+        # as before.
         state
         |> Map.put(:truncations, 0)
         |> Map.put(:empty_answer_nudges, 0)
         |> Map.delete(:gate_directive_iteration)
+        |> Map.put(:goal_was_driving_at_turn_start?, GoalTracker.continue?(sid))
       else
         state
       end
+
+    # Missing key (a synthetic/direct-constructed state that never passed
+    # through the `iter == 0` branch above, as some tests do to simulate a
+    # turn already in flight) defaults to `true` — the ORIGINAL "still halts"
+    # behavior for exactly that shape of caller.
+    turn_was_driving? = Map.get(state, :goal_was_driving_at_turn_start?, true)
 
     cancelled? =
       try do
@@ -358,7 +395,38 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
         finalize_interrupt(state, nil)
 
-      GoalTracker.awaiting_user?(sid) ->
+      # Goal awaiting a human decision (`update_goal` requested one, or the
+      # panel's own triage classified the next useful action as a human
+      # gate — see `GoalVerifier`'s `:awaiting_user` triage outcome). This
+      # used to fire unconditionally — so a BRAND NEW top-level turn, which
+      # is exactly what a user's freshly-typed message looks like, got
+      # swallowed by this halt's canned "waiting for your decision" notice
+      # instead of ever reaching the model. Confirmed live: an anchored goal
+      # asked a decision question, and every ordinary message the user typed
+      # afterward — not `/goal approve` or `/goal reject`, just normal chat —
+      # came back with nothing but the same static notice, with no way to
+      # redirect the agent short of clearing the goal outright.
+      #
+      # The fix mirrors the `:paused` clause a few lines down, for the exact
+      # same reason: the TUI's own auto-continue driver already stops
+      # submitting another goal-continuation turn the moment it learns the
+      # goal is no longer `active` (`continue_goal_from` in
+      # `handle_actions.rs` treats `:awaiting_user` exactly like `:paused` —
+      # `GoalTracker.goal_loop?/1` is false for both), so a NEW top-level turn
+      # arriving while awaiting a decision is, by construction, the user
+      # talking, not the goal talking to itself.
+      #
+      # `turn_was_driving?` (captured once, at `iter == 0`, before this
+      # turn's own work) scopes the halt to what it can still legitimately be
+      # for. A bare `iter > 0` check exempted only a turn's FIRST iteration —
+      # a plain message that took more than one model round trip to answer
+      # (any tool call at all) still hit this halt on iteration 2+, discarding
+      # the model's real answer for the SAME stale notice. `turn_was_driving?`
+      # stays false for every iteration of a turn that started already
+      # awaiting a decision, however many it takes to answer; it stays true,
+      # and so still halts, for a turn that was genuinely driving and only
+      # THEN — mid-turn — ran into a freshly-raised decision.
+      turn_was_driving? and GoalTracker.awaiting_user?(sid) ->
         TerminalSource.halt(GoalTracker.waiting_message(sid), state, :control)
 
       paused?(sid) ->
@@ -377,27 +445,32 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         )
 
       # Goal auto-pause: the cross-turn GoalTracker tripped stall detection
-      # (identical gap fingerprints), the run cap, the token budget, or the
+      # (identical gap fingerprints), the run cap, the token budget, a
+      # durably-blocked human-only blocker (`:blocked_on_human`), an
+      # unavailable verification round (`:verification_unavailable`), or the
       # goal was paused by the user (a manual `/goal pause`, or the TUI's own
       # interrupt-driven pause) — the goal's OWN auto-continuation must not
       # keep driving turns toward a paused goal.
       #
       # A genuine USER prompt must NEVER be swallowed by this, though — and a
-      # BRAND NEW top-level turn (`iter == 0`, before this turn's model has
-      # even been called once) is exactly what a user's freshly-typed message
-      # looks like. The TUI's own auto-continue driver already never submits
-      # another goal-continuation turn once it learns the goal is paused (see
-      # `continue_goal_from`/`maybe_continue_goal` in `handle_actions.rs`), so
-      # by construction a NEW top-level turn arriving while paused is the
-      # user, not the goal talking to itself — reported live: two consecutive
-      # ordinary messages ("what's the status", "EXCUSE ME") both got NOTHING
-      # but this halt's canned notice instead of an answer.
+      # BRAND NEW top-level turn is exactly what a user's freshly-typed
+      # message looks like. The TUI's own auto-continue driver already never
+      # submits another goal-continuation turn once it learns the goal is
+      # paused (see `continue_goal_from`/`maybe_continue_goal` in
+      # `handle_actions.rs`), so by construction a NEW top-level turn
+      # arriving while paused is the user, not the goal talking to itself —
+      # reported live: two consecutive ordinary messages ("what's the
+      # status", "EXCUSE ME") both got NOTHING but this halt's canned notice
+      # instead of an answer.
       #
-      # `iter > 0` scopes the halt to what it can actually still be for: a
-      # turn ALREADY in flight (past its first model call) that this SAME
-      # goal's own machinery just paused mid-course — stopping ITS further
-      # self-driven continuation, never a turn that has not even started yet.
-      iter > 0 and GoalTracker.enabled?(state) and GoalTracker.paused?(sid) ->
+      # `turn_was_driving?` (see its capture above, and the `awaiting_user?`
+      # clause's comment for the fuller "why not just `iter > 0`" rationale)
+      # scopes the halt to what it can actually still be for: a turn that was
+      # genuinely driving before it started and only THEN, mid-turn, ran
+      # into this SAME goal's own machinery pausing it — stopping ITS further
+      # self-driven continuation, never a turn — however many iterations it
+      # needs to answer — that started already paused.
+      turn_was_driving? and GoalTracker.enabled?(state) and GoalTracker.paused?(sid) ->
         snap = GoalTracker.snapshot(sid)
         reason = Map.get(snap || %{}, :pause_reason, :no_progress)
         gaps = Map.get(snap || %{}, :last_gaps, []) || []
@@ -1257,7 +1330,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       # it had proposed, asked to act on an approval of something it could no
       # longer see. Every sibling clause in this `cond` appends the answer before
       # it continues; a clause that stops must do the same before it stops.
-      GoalTracker.awaiting_user?(state.session_id) ->
+      #
+      # `goal_was_driving?` scopes this to a FRESH transition — the SAME guard
+      # the sibling `:paused` clause below already uses, for the identical
+      # reason. Unscoped, this fired whenever the goal was ALREADY
+      # `:awaiting_user` from an EARLIER turn too, so a genuine new user
+      # message — one directly answering the pending question in plain chat,
+      # not `/goal approve`/`/goal reject` — got its own on-topic reply
+      # discarded and replaced with the same static "waiting for your
+      # decision" notice every time, no matter what it said. A goal already
+      # dormant-awaiting before this turn even started must let THIS turn's
+      # real answer through; the pending decision is unaffected either way
+      # (only `/goal approve`/`/goal reject` resolves it).
+      goal_was_driving? and GoalTracker.awaiting_user?(state.session_id) ->
         state = %{state | messages: state.messages ++ [%{role: "assistant", content: content}]}
 
         TerminalSource.halt(GoalTracker.waiting_message(state.session_id), state, :control)
