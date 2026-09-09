@@ -1214,6 +1214,15 @@ impl ModelPicker {
             .collect()
     }
 
+    /// The model-row tok/s badge text, or `None` when there is no measurement
+    /// yet. Extracted from the render loop so it is testable without a
+    /// `Frame`/`Buffer` — mirrors "no badge when unmeasured", not "0 tok/s".
+    fn tok_s_badge(tok_s: Option<f64>) -> Option<String> {
+        tok_s
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .map(|v| format!(" ~{:.0} tok/s", v))
+    }
+
     fn handle_key_entry_key(&mut self, key: KeyEvent) -> Option<ModelPickerAction> {
         // Match the mask/reveal chord BEFORE the Ctrl/Alt guard.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
@@ -2044,6 +2053,9 @@ impl ModelPicker {
                     format!(" {} ctx", m.ctx)
                 };
                 spans.push(Span::styled(ctx, Style::default().fg(theme.colors.dim)));
+            }
+            if let Some(badge) = Self::tok_s_badge(m.tok_s) {
+                spans.push(Span::styled(badge, Style::default().fg(theme.colors.dim)));
             }
             if m.tools {
                 spans.push(Span::styled(
@@ -3312,6 +3324,7 @@ mod dynamic_catalog_wait_tests {
                 tools: true,
                 recommended: true,
                 note: None,
+                tok_s: None,
             },
             OnboardingModel {
                 id: "llama3:70b".to_string(),
@@ -3320,6 +3333,7 @@ mod dynamic_catalog_wait_tests {
                 tools: true,
                 recommended: false,
                 note: None,
+                tok_s: None,
             },
         ]
     }
@@ -3595,5 +3609,51 @@ mod models_jump_tests {
             picker.prov_cursor, 0,
             "the jump must not move the highlight"
         );
+    }
+}
+
+#[cfg(test)]
+mod tok_s_badge_tests {
+    //! `ModelPicker::tok_s_badge/1` — the row badge for a model's measured
+    //! tok/s (see `OptimalSystemAgent.Providers.ModelSpeed` server-side).
+    //! Extracted from the render loop specifically so "no badge when
+    //! unmeasured" is assertable without a `Frame`/`Buffer`.
+    use super::*;
+
+    #[test]
+    fn no_badge_when_unmeasured() {
+        assert_eq!(ModelPicker::tok_s_badge(None), None);
+    }
+
+    #[test]
+    fn renders_a_rounded_tok_s_badge_when_measured() {
+        assert_eq!(
+            ModelPicker::tok_s_badge(Some(140.3)),
+            Some(" ~140 tok/s".to_string())
+        );
+    }
+
+    #[test]
+    fn rounds_rather_than_truncates() {
+        // 140.6 rounds to 141, not 140 — `{:.0}` rounds, it does not floor.
+        assert_eq!(
+            ModelPicker::tok_s_badge(Some(140.6)),
+            Some(" ~141 tok/s".to_string())
+        );
+    }
+
+    #[test]
+    fn zero_is_not_a_measurement_so_no_badge_renders() {
+        // A real measured rate is always positive (`ModelSpeed.record/3`
+        // rejects <= 0 server-side); a stray `Some(0.0)` must still not
+        // render "~0 tok/s", which would read as a real, terrible number
+        // rather than "no data".
+        assert_eq!(ModelPicker::tok_s_badge(Some(0.0)), None);
+    }
+
+    #[test]
+    fn a_non_finite_value_never_renders() {
+        assert_eq!(ModelPicker::tok_s_badge(Some(f64::NAN)), None);
+        assert_eq!(ModelPicker::tok_s_badge(Some(f64::INFINITY)), None);
     }
 }

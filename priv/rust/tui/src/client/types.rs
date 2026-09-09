@@ -749,6 +749,12 @@ pub struct OnboardingModel {
     pub recommended: bool,
     #[serde(default)]
     pub note: Option<String>,
+    /// Measured tokens/sec (visible content only), from real turns against
+    /// this exact provider+model — see `OptimalSystemAgent.Providers.ModelSpeed`.
+    /// `None` until at least one real turn has produced a sample; the picker
+    /// renders no badge at all for that case rather than a fabricated number.
+    #[serde(default)]
+    pub tok_s: Option<f64>,
 }
 
 /// `Default` is derived so the offline fallback catalog (and tests) can build
