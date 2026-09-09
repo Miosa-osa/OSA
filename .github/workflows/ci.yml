@@ -237,6 +237,17 @@ jobs:
         working-directory: priv/rust/tui
         run: cargo fmt --check
 
+      # Doc-rot check: fails if a comment in priv/rust/tui/src cites a
+      # `assert_*`/`test_*` Rust symbol that does not actually exist anywhere
+      # in the tree. Exists because event_loop.rs cited a test named
+      # `assert_chrome_bottom_anchored` that had never been written, and
+      # nothing caught the drift for 8+ releases. Pure Python, no build
+      # required, so it runs before (and gates ahead of) the expensive
+      # release compile below. See priv/rust/tui/scripts/doc_rot_lint.py for
+      # the exact resolution rules and false-positive strategy.
+      - name: Doc comments cite real symbols
+        run: python3 priv/rust/tui/scripts/doc_rot_lint.py
+
       # `--release`, matching how it is run locally and how the binary ships.
       # The debug profile has different timing and different overflow
       # behaviour, so a debug-only gate would not be testing what users get.
