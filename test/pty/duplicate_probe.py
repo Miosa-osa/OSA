@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import scrollback_prelude  # noqa: E402
 import term_env  # noqa: E402
-from osa_pty import SETTLE, SINGLETON_BANDS, PtySession  # noqa: E402
+from osa_pty import SETTLE, SINGLETON_BANDS, USER_HEADER, PtySession  # noqa: E402
 from stub_backend import StubBackend  # noqa: E402
 
 STUB_PORT = 12793
@@ -88,7 +88,24 @@ class PreludeSession(PtySession):
 
 
 def counts(s: PtySession) -> dict[str, int]:
-    return {name: s.count(pat) for name, pat in SINGLETON_BANDS.items()}
+    """Singleton-band counts, corrected for two markers' known ambiguity.
+
+    `composer` (`^\\s*❯`) also matches the `❯  You` header a committed user
+    message leaves in the transcript (`USER_HEADER`) -- several probes here
+    submit real slash commands, which are echoed as user messages, so this
+    subtracts it exactly as `test_resize.py` does.
+
+    `composer_top` (`^─{20,}$`) also matches the turn separator drawn between
+    committed turns, which is byte-for-byte indistinguishable from the
+    composer's own top divider (same glyph run, no other marker on the row).
+    `test_resize.py` drops this marker entirely for the same reason; mirrored
+    here rather than trusted, since it cannot tell a real second composer
+    apart from a completed turn.
+    """
+    counts = {name: s.count(pat) for name, pat in SINGLETON_BANDS.items()}
+    counts["composer"] -= s.count(USER_HEADER)
+    del counts["composer_top"]
+    return counts
 
 
 def report(label: str, s: PtySession, failures: list[str], dump_on_fail: bool = True) -> None:

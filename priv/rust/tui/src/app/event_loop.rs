@@ -2707,6 +2707,113 @@ impl App {
     }
 }
 
+/// Debug/test bookkeeping for the "exactly one copy of the chrome (composer +
+/// hint row + status bar) ever exists" invariant (see `last_inline_top`
+/// above). `switch_to_full`, `switch_to_inline`, and `rebuild_inline` are the
+/// only three places that install a fresh chrome region, and each records
+/// here — a `thread_local!` counter bump, not a rendered-buffer scrape — so a
+/// test can ask "did exactly one region get (re)built, and where does it sit
+/// now" without regexing a `Terminal`'s cell grid.
+///
+/// This module was originally landing-row-only: it proved the NEW region
+/// always starts where its caller expects, but said nothing about whether
+/// the OLD region it replaced was actually reclaimed first. That half of the
+/// invariant is where the real bug lived — measured live (v1.0.189, a
+/// long-running tmux pane): the VISIBLE screen always shows exactly one
+/// chrome block (`tmux capture-pane -p`), but `-S -2000` (history + visible)
+/// shows two to four. The live render was never wrong; old chrome rows were
+/// being scrolled into the pane's PERMANENT history — never cleared, never
+/// reclaimed — instead of overwritten in place, and each occurrence is a
+/// fossil nothing after this point can ever remove. A generation delta of
+/// exactly one (the original half of this module) reads as perfectly healthy
+/// while that happens: the new region was still built exactly once, in the
+/// right place; the old one just was not reclaimed before it moved. `top`
+/// and `height` are now tracked, not just `top`, so callers can also ask
+/// "did the erase that preceded this rebuild reach far enough up the screen
+/// to cover where the PREVIOUS region started" — see `reclaimed` below.
+///
+/// Thread-local, not global: `cargo test` runs test bodies on a pool of OS
+/// threads and never two bodies concurrently on the same thread, so a test
+/// snapshotting a before/after delta around one call is isolated from every
+/// other test's rebuilds. It is not meant to be read across threads, and the
+/// production event loop only ever runs on one.
+mod chrome_region {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Bumped by one on every chrome (re)build observed on this thread.
+        static GENERATION: Cell<u32> = const { Cell::new(0) };
+        /// Absolute top row of the chrome region as of the last (re)build
+        /// observed on this thread.
+        static LAST_TOP: Cell<u16> = const { Cell::new(0) };
+        /// Row count of the chrome region as of the last (re)build observed
+        /// on this thread.
+        static LAST_HEIGHT: Cell<u16> = const { Cell::new(0) };
+    }
+
+    /// Record that a chrome region was just (re)built at `top..top+height`.
+    pub(super) fn record(top: u16, height: u16) {
+        GENERATION.with(|g| g.set(g.get() + 1));
+        LAST_TOP.with(|t| t.set(top));
+        LAST_HEIGHT.with(|h| h.set(height));
+    }
+
+    /// How many chrome (re)builds this thread has observed so far. Wrap a
+    /// single `switch_to_full` / `switch_to_inline` / `rebuild_inline` call
+    /// with a before/after snapshot of this and assert the delta is exactly
+    /// one: zero means the call silently no-op'd and left a stale region on
+    /// screen (the region that should have been reclaimed survives); two or
+    /// more means it built the chrome more than once in what should have
+    /// been one atomic swap (the "two chat things" duplicate). Also doubles
+    /// as "is there a previous region at all" — `0` means this thread has
+    /// never recorded one, so there is nothing for a rebuild to reclaim.
+    ///
+    /// Deliberately NOT `#[cfg(test)]`: `switch_to_inline` and
+    /// `rebuild_inline` read this from a production `debug_assert!` (see
+    /// `reclaimed` below), which has to compile in every build even though
+    /// `debug_assert!` itself compiles away to nothing in release.
+    pub(crate) fn generation() -> u32 {
+        GENERATION.with(|g| g.get())
+    }
+
+    /// Top row of the most recently (re)built chrome region on this thread —
+    /// i.e., read BEFORE calling `record` again, this is the region the next
+    /// rebuild is about to replace.
+    pub(crate) fn last_top() -> u16 {
+        LAST_TOP.with(|t| t.get())
+    }
+
+    /// Row count of the most recently (re)built chrome region on this thread.
+    /// Unlike `generation`/`last_top`, production code never reads this (the
+    /// `reclaimed` check below only needs a top row) — `#[cfg(test)]` so it
+    /// stays test-only rather than a dead accessor kept warm in release.
+    #[cfg(test)]
+    pub(crate) fn last_height() -> u16 {
+        LAST_HEIGHT.with(|h| h.get())
+    }
+
+    /// Whether a rebuild that erases (or lands) from `erase_floor` down to
+    /// the bottom of the screen fully reclaims a PREVIOUS chrome region that
+    /// started at `prev_top`.
+    ///
+    /// True whenever there was no previous region at all (`had_previous` is
+    /// false — nothing to reclaim), or the erase floor is at or above where
+    /// the old region began (`prev_top >= erase_floor`): the erase covers
+    /// every row the old chrome could have occupied, all the way to the
+    /// bottom, so none of it survives outside the erased-and-rebuilt range.
+    ///
+    /// False means the old region started ABOVE the erase floor — some of
+    /// its rows sit outside what this rebuild touches. On a live terminal
+    /// those rows do not just linger on screen; if anything scrolls before
+    /// they are ever reclaimed, they scroll into PERMANENT history — the
+    /// fossil this whole module exists to catch. A pure function (no
+    /// `Terminal`, no I/O) so the containment arithmetic is directly
+    /// testable independent of ratatui/crossterm plumbing.
+    pub(super) fn reclaimed(had_previous: bool, prev_top: u16, erase_floor: u16) -> bool {
+        !had_previous || prev_top >= erase_floor
+    }
+}
+
 /// Enter the alternate screen and rebuild the terminal at full height. Used for
 /// dialogs, onboarding, connecting, and the file picker.
 fn switch_to_full(terminal: &mut Term) -> Result<()> {
@@ -2714,6 +2821,18 @@ fn switch_to_full(terminal: &mut Term) -> Result<()> {
     crate::app::alt_screen::mark_entered();
     *terminal = Terminal::new(InlineBackend::new(std::io::stdout()))?;
     terminal.clear()?; // fresh diff state after rebuild
+
+    // The alternate screen is always a blank buffer at row 0 — there is no
+    // "previous region" to reclaim here, `EnterAlternateScreen` already gave
+    // us one. If this ever fires, `Terminal::new` stopped anchoring at 0 and
+    // every erase/rebuild elsewhere in this file that assumes a full-screen
+    // chrome starts at row 0 is now wrong too.
+    debug_assert_eq!(
+        terminal.get_frame().area().top(),
+        0,
+        "full-screen chrome must start at row 0"
+    );
+    chrome_region::record(0, terminal.get_frame().area().height);
     Ok(())
 }
 
@@ -2901,6 +3020,40 @@ fn switch_to_inline(
             },
         ) {
             *terminal = t;
+            // The region was primed at `top` — the SAME row the erase above
+            // just cleared `FromCursorDown` from. Landing anywhere else would
+            // mean the erase and the rebuild disagree about where the old
+            // chrome was, leaving some of it stranded above (or the new
+            // region overlapping rows the erase never touched).
+            debug_assert_eq!(
+                terminal.get_frame().area().top(),
+                top,
+                "primed inline rebuild must land exactly on the just-erased row"
+            );
+            // The RECLAIM half of the invariant, not just the landing half:
+            // the erase just above wiped rows `top..term_rows`, so the region
+            // this call is about to replace must have started at or below
+            // `top` too — read BEFORE `record` overwrites it — or some of its
+            // rows sat above the erase and were never reclaimed. That is
+            // exactly how the live-tmux fossils were produced (measured on
+            // v1.0.189: the visible screen always shows one chrome block,
+            // but pane HISTORY held two to four) — this call reported a
+            // clean generation delta of one every time, because the NEW
+            // region was still built exactly once, in the right place; the
+            // stranded rows were the OLD region's, left behind above the
+            // floor this erase reached.
+            debug_assert!(
+                chrome_region::reclaimed(
+                    chrome_region::generation() > 0,
+                    chrome_region::last_top(),
+                    top,
+                ),
+                "chrome erased from row {top} but the previous region started \
+                 higher, at row {} — it was not fully reclaimed and may now \
+                 be stranded on screen or scrolled into permanent history",
+                chrome_region::last_top()
+            );
+            chrome_region::record(top, inline_h);
             return Ok(());
         }
     }
@@ -2915,6 +3068,14 @@ fn switch_to_inline(
         ) {
             Ok(t) => {
                 *terminal = t;
+                // Reaching the query ladder at all means either there was no
+                // remembered top (`placed.is_none()`) or the primed attempt
+                // above failed outright (its `Ok(t)` would have already
+                // returned). Either way the priming branch cannot also have
+                // recorded a region this call, so this is still the one
+                // rebuild the invariant expects — just landed via a real DSR
+                // round trip instead of a primed answer.
+                chrome_region::record(terminal.get_frame().area().top(), inline_h);
                 return Ok(());
             }
             Err(e) => {
@@ -2934,6 +3095,12 @@ fn switch_to_inline(
     );
     *terminal = Terminal::new(InlineBackend::new(std::io::stdout()))?;
     let _ = terminal.clear();
+    debug_assert_eq!(
+        terminal.get_frame().area().top(),
+        0,
+        "full-screen degrade path must land at row 0"
+    );
+    chrome_region::record(0, terminal.get_frame().area().height);
     Ok(())
 }
 
@@ -2986,6 +3153,33 @@ fn rebuild_inline(terminal: &mut Term, inline_h: u16, known_top: Option<u16>) ->
             },
         ) {
             *terminal = t;
+            // `known_top` is the row the CALLER already erased/scrolled to
+            // (see the doc comment above); the rebuilt region must land there
+            // exactly, or the erase and the rebuild disagree about where the
+            // old chrome was and some of it survives on screen.
+            debug_assert_eq!(
+                terminal.get_frame().area().top(),
+                top,
+                "known-top inline rebuild must land exactly on the caller-erased row"
+            );
+            // NOT running `chrome_region::reclaimed` here on purpose, unlike
+            // the equivalent branch in `switch_to_inline`. There, `top` is
+            // both the erase floor AND the landing row in one local scope, so
+            // checking the previous region against it is sound. Here,
+            // `known_top` is only ever the LANDING row `rebuild_inline`
+            // receives; the actual erase floor its callers use is `new_top`
+            // for a plain height change but `min(old_top, new_top)` for a
+            // surgical resize clear (see `surgical_clear_top`) — smaller
+            // whenever the region is moving DOWN the screen — and this
+            // function has no way to tell which one ran. Asserting against
+            // `known_top` as if it were the floor would false-positive on
+            // exactly that resize shape (old region above the new one, fully
+            // covered by the wider surgical erase, but not by `known_top`
+            // alone). `chrome_region::last_top()`/`last_height()` are still
+            // recorded below either way — a caller that DOES know its real
+            // erase floor (the resize/scroll path dup-chrome-190 owns) can
+            // call `chrome_region::reclaimed` itself with that floor.
+            chrome_region::record(top, inline_h);
             return Ok(());
         }
     }
@@ -2999,6 +3193,10 @@ fn rebuild_inline(terminal: &mut Term, inline_h: u16, known_top: Option<u16>) ->
         ) {
             Ok(t) => {
                 *terminal = t;
+                // As in `switch_to_inline`'s query ladder: only reachable when
+                // `known_top` was absent or its primed attempt failed, so
+                // this is still the one region-build the invariant expects.
+                chrome_region::record(terminal.get_frame().area().top(), inline_h);
                 return Ok(());
             }
             Err(e) => {
@@ -3016,6 +3214,12 @@ fn rebuild_inline(terminal: &mut Term, inline_h: u16, known_top: Option<u16>) ->
     );
     *terminal = Terminal::new(InlineBackend::new(std::io::stdout()))?;
     let _ = terminal.clear();
+    debug_assert_eq!(
+        terminal.get_frame().area().top(),
+        0,
+        "full-screen degrade path must land at row 0"
+    );
+    chrome_region::record(0, terminal.get_frame().area().height);
     Ok(())
 }
 
@@ -4022,6 +4226,80 @@ mod render_tests {
         }
     }
 
+    /// The regression `replay_scrollback`'s bottom-alignment exists to prevent,
+    /// stated directly rather than only implied by the padding arithmetic above.
+    ///
+    /// A source-backed resize rebuild always reconstructs the inline viewport at
+    /// row 0, then replays the retained transcript with `insert_before`, which
+    /// leaves the live region on whatever row the replay ends at. A LONG
+    /// transcript overflows the screen, so that row already coincides with
+    /// `rows - inline_h` — the bottom. A SHORT one does not: with no padding, a
+    /// three-line transcript on a 30-row, 4-row-chrome screen would leave the
+    /// composer at row 3, twenty-three rows above where it belongs, with dead
+    /// space under it — visibly regressed against a real resize, which has
+    /// re-anchored the region at the bottom since v1.0.75. That is "the chrome
+    /// rebuilt at the TOP" shape.
+    ///
+    /// `bottom_align_lead` is the fix: pad ahead of a short transcript so the
+    /// live region always lands on the bottom `inline_h` rows regardless of
+    /// how little content preceded it. This test asserts the shape directly —
+    /// the resulting top row equals `rows - inline_h` (the bottom-anchored
+    /// invariant `resize_clear_top_from_bottom` also encodes) and, for a short
+    /// transcript, is NOT row 0 — rather than only checking (as
+    /// `a_padded_replay_fills_the_screen_exactly` does) that the three
+    /// quantities sum to `rows`.
+    #[test]
+    fn assert_chrome_bottom_anchored() {
+        // The exact repro shape from the regression: a short transcript that
+        // would otherwise leave the chrome stranded near the top.
+        let rows = 30u16;
+        let inline_h = 4u16;
+        let content_h = 3u16;
+        let pad = bottom_align_lead(rows, inline_h, content_h);
+        let live_region_top = pad + content_h;
+
+        assert_eq!(
+            live_region_top,
+            rows - inline_h,
+            "a short replayed transcript must still leave the live region \
+             bottom-anchored, not stranded above dead rows"
+        );
+        assert_ne!(
+            live_region_top, 0,
+            "the live region must not be rebuilt at the TOP of the screen — \
+             the defect this test is named for"
+        );
+
+        // Sweep a range of screen/chrome/content combinations: the bottom
+        // anchor must hold whenever there is room for it (content shorter than
+        // the screen minus the chrome), and must never accidentally land on
+        // row 0 unless the chrome itself consumes the whole screen.
+        for rows in [10u16, 24, 30, 50, 80] {
+            for inline_h in [1u16, 4, 7] {
+                if inline_h >= rows {
+                    continue;
+                }
+                for content_h in 0..rows.saturating_sub(inline_h) {
+                    let pad = bottom_align_lead(rows, inline_h, content_h);
+                    let top = pad + content_h;
+                    assert_eq!(
+                        top,
+                        rows - inline_h,
+                        "rows={rows} inline_h={inline_h} content_h={content_h}: \
+                         live region must anchor to the bottom"
+                    );
+                    if rows > inline_h {
+                        assert_ne!(
+                            top, 0,
+                            "rows={rows} inline_h={inline_h} content_h={content_h}: \
+                             live region rebuilt at the top"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn resize_clear_top_from_bottom_lands_on_region_first_row() {
         // The inline live region is pinned to the bottom `inline_h` rows. On a
@@ -4783,6 +5061,159 @@ mod render_tests {
                 });
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// "Exactly one copy of the chrome ever exists — for the WHOLE life of the
+// session, not just the current frame" — the invariant `last_inline_top`
+// documents in prose above, enforced here rather than only asserted about.
+//
+// `chrome_region` is a thread-local counter + geometry pair bumped by
+// `switch_to_full`, `switch_to_inline`, and `rebuild_inline` — the only three
+// functions that install a fresh chrome region — every time one of them
+// completes. A test wraps a single call in a before/after snapshot and
+// asserts the generation delta is exactly one: that is "how many live chrome
+// regions got built", answered by a counter instead of scraping a rendered
+// `Buffer` for duplicate composer text.
+//
+// That counter alone proved insufficient: it was measured live (v1.0.189, a
+// long-running tmux pane) that the VISIBLE screen always shows exactly one
+// chrome block while pane HISTORY (`tmux capture-pane -S -2000`) held two to
+// four. Every rebuild still landed in the right place, one at a time — the
+// half this module originally checked — but the OLD region was not always
+// reclaimed before it scrolled into permanent history, and a clean
+// generation delta of one says nothing about that. `reclaimed` is the fix:
+// a pure predicate over "where did the old region start" vs. "how far up did
+// this rebuild's erase reach", directly testable without a `Terminal`.
+//
+// This cannot exercise `switch_to_full`/`switch_to_inline` end-to-end here —
+// both write real cursor-control sequences to `std::io::Stdout`, which a unit
+// test has no business doing — but the counter, the geometry, and the
+// `reclaimed` predicate are directly testable: a test standing in for a call
+// site (bump-then-check, exactly like the real callers do) proves the
+// bookkeeping is sound in isolation, and `debug_assert!`s inside the three
+// real functions (see their bodies) prove each one starts its rebuilt region
+// on the row the caller expected, and (where the erase floor is knowable
+// without ambiguity) that the previous region was fully reclaimed.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod chrome_region_tests {
+    use super::chrome_region;
+
+    #[test]
+    fn one_record_call_bumps_the_generation_by_exactly_one() {
+        let before = chrome_region::generation();
+        chrome_region::record(7, 4);
+        assert_eq!(
+            chrome_region::generation(),
+            before + 1,
+            "a single chrome (re)build must bump the generation by exactly one \
+             — a delta of zero means a call site silently no-op'd and left the \
+             old region on screen; a delta of two or more means it built the \
+             chrome more than once in what should have been one atomic swap"
+        );
+        assert_eq!(chrome_region::last_top(), 7);
+        assert_eq!(chrome_region::last_height(), 4);
+    }
+
+    #[test]
+    fn last_top_and_height_reflect_the_most_recent_record_only() {
+        chrome_region::record(3, 2);
+        chrome_region::record(9, 5);
+        assert_eq!(
+            chrome_region::last_top(),
+            9,
+            "last_top must report the LATEST build, not accumulate history — a \
+             test asserting exactly-one-chrome cares about where it is now"
+        );
+        assert_eq!(chrome_region::last_height(), 5);
+    }
+
+    #[test]
+    fn generation_is_monotonic_across_repeated_rebuilds() {
+        // Models a session that goes full-screen and back inline several
+        // times (dialogs, onboarding, the file picker): each round trip must
+        // account for exactly one region build per switch, never zero (a
+        // stranded old region) and never more than one (a duplicate).
+        let start = chrome_region::generation();
+        for top in [0u16, 5, 0, 12, 0] {
+            let before = chrome_region::generation();
+            chrome_region::record(top, 4);
+            assert_eq!(chrome_region::generation(), before + 1);
+            assert_eq!(chrome_region::last_top(), top);
+        }
+        assert_eq!(chrome_region::generation(), start + 5);
+    }
+
+    // -- `reclaimed`: the reclaim-half predicate --------------------------
+
+    #[test]
+    fn nothing_to_reclaim_is_always_fine() {
+        // `had_previous = false` means this thread has never recorded a
+        // region — there is nothing for the erase to have missed, regardless
+        // of where `prev_top`/`erase_floor` happen to be.
+        assert!(chrome_region::reclaimed(false, 0, 0));
+        assert!(chrome_region::reclaimed(false, 50, 0));
+        assert!(chrome_region::reclaimed(false, 0, 50));
+    }
+
+    #[test]
+    fn an_erase_that_reaches_the_old_top_reclaims_it() {
+        // The erase floor is AT the old region's start row: every row the old
+        // chrome could have occupied is inside `[floor, bottom)`.
+        assert!(chrome_region::reclaimed(true, 20, 20));
+        // The erase floor is ABOVE the old region's start row: still covered,
+        // with room to spare.
+        assert!(chrome_region::reclaimed(true, 20, 10));
+    }
+
+    #[test]
+    fn an_erase_that_stops_short_of_the_old_top_does_not_reclaim_it() {
+        // The exact fossil shape: the old region started at row 5, but this
+        // rebuild only erased from row 10 down. Rows 5..10 of the old chrome
+        // are outside the erased-and-rebuilt range — stranded, and a fossil
+        // in permanent history the moment anything scrolls.
+        assert!(!chrome_region::reclaimed(true, 5, 10));
+    }
+
+    #[test]
+    fn surgical_resize_floor_is_always_reclaimed_by_construction() {
+        // Regression-shaped: `surgical_clear_top` (used by the real resize
+        // path) always erases from `min(old_top, new_top)`, which by
+        // definition can never be greater than `old_top` — so a caller that
+        // feeds `reclaimed` the SAME `min(...)` it actually erased from can
+        // never observe a stranding here, whichever way the region moved.
+        for old_top in [0u16, 5, 12, 40] {
+            for new_top in [0u16, 3, 20, 60] {
+                let floor = super::surgical_clear_top(old_top, new_top);
+                assert!(
+                    chrome_region::reclaimed(true, old_top, floor),
+                    "old_top={old_top} new_top={new_top} floor={floor}: the \
+                     surgical erase floor must always reclaim the old region"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn using_the_landing_row_alone_as_the_floor_would_false_positive() {
+        // The exact trap `rebuild_inline`'s known-top branch avoids: when the
+        // region moves DOWN the screen (old_top < new_top), the real erase
+        // floor is `min(old_top, new_top)` == `old_top`, which reclaims it —
+        // but naively asserting against the landing row alone (`new_top`)
+        // would wrongly call this a stranding. This test pins down WHY that
+        // check was deliberately left out of `rebuild_inline`, rather than
+        // asserting the (safe) absence of a check by omission.
+        let old_top = 5u16;
+        let new_top = 20u16;
+        let real_floor = super::surgical_clear_top(old_top, new_top);
+        assert!(chrome_region::reclaimed(true, old_top, real_floor));
+        assert!(
+            !chrome_region::reclaimed(true, old_top, new_top),
+            "asserting against the landing row alone must disagree with the \
+             real (surgical) floor here — that mismatch is the false positive"
+        );
     }
 }
 
