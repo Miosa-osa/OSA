@@ -212,6 +212,12 @@ impl App {
                 self.check_health();
                 false
             }
+            // `dispatch_event` intercepts and quits on this before `update` is
+            // ever called (it needs to set `pending_signal`, which this fn has
+            // no access to) — unreachable in practice, kept only so the match
+            // stays exhaustive if `Event` ever gains another signal-shaped
+            // variant that DOES want ordinary update-layer handling.
+            Event::TerminateSignal(_) => false,
         }
     }
 

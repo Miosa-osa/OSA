@@ -18,6 +18,7 @@ dump rather than a pytest traceback, because the screen IS the evidence.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import traceback
 from pathlib import Path
@@ -1280,7 +1281,13 @@ def test_connecting_splash_does_not_trap_the_user(backend: StubBackend) -> None:
                     f"--- rendered screen ---\n{s.dump()}"
                 )
 
-            # 2. Typing is kept and shown.
+            # 2. Typing is kept and shown — and shown exactly ONCE. A bare
+            #    `wait_for_text` only proves the text is SOMEWHERE on screen;
+            #    it stays true even if the connect splash got redrawn into a
+            #    second, stranded copy while a health retry ticked (the same
+            #    shape as the resize-stranding defect this whole file is
+            #    named for), which would leave two "KEPT-WHILE-CONNECTING"
+            #    rows and this check none the wiser.
             mark = post_mark()
             s.write(b"KEPT-WHILE-CONNECTING")
             if not s.wait_for_text("KEPT-WHILE-CONNECTING", 3.0):
@@ -1288,6 +1295,13 @@ def test_connecting_splash_does_not_trap_the_user(backend: StubBackend) -> None:
                     "text typed during connect was neither buffered nor shown "
                     "— every keystroke went nowhere, which is the reported "
                     f"defect.\n--- rendered screen ---\n{s.dump()}"
+                )
+            typed_count = s.count(re.compile(re.escape("KEPT-WHILE-CONNECTING")))
+            if typed_count != 1:
+                raise AssertionError(
+                    "expected the typed draft to appear exactly once on the "
+                    f"connect splash, found {typed_count} — a stranded extra "
+                    f"copy of the splash.\n--- rendered screen ---\n{s.dump()}"
                 )
 
             # 3. …but Enter cannot send it. The draft is held, not armed.
@@ -1339,6 +1353,14 @@ def test_a_draft_typed_while_connecting_survives_into_the_composer(
             release_health()
             s.boot()
 
+            # Exactly one live region came out of the connecting -> inline
+            # transition (`switch_to_inline`). This is the transition the
+            # naive full-to-inline rebuild used to strand a stale copy of
+            # (`full_to_inline_naive_rebuild_strands_stale_chrome_rows`, in
+            # the Rust suite) — a real PTY is the only harness that can catch
+            # it happening for real rather than against a model of one.
+            assert_single_live_region(s, "after the connecting splash hands off to the composer")
+
             # The composer row itself must carry it — matched against the
             # prompt glyph so a leftover splash row cannot satisfy this.
             rows = [line for line in s.lines() if "SURVIVES-CONNECT" in line]
@@ -1352,6 +1374,24 @@ def test_a_draft_typed_while_connecting_survives_into_the_composer(
                 )
     finally:
         release_health()
+
+
+def test_a_fresh_boot_at_default_size_shows_exactly_one_chrome(
+    backend: StubBackend,
+) -> None:
+    """A bare boot, no resize, no dialog, no `/clear` — the simplest possible
+    session — still ends with exactly one chrome block.
+
+    Every other test in this file earns its singleton assertion by putting
+    the app through *something* first (a resize sweep, a health-retry splash,
+    a `/clear`). This one deliberately does nothing at all beyond booting at
+    the suite's own default size, so that if a fossil ever turns out to be
+    seeded at boot itself — before any of those — it fails here first, on the
+    cheapest and least ambiguous reproduction there is.
+    """
+    with PtySession(backend.base_url) as s:
+        s.boot()
+        assert_single_live_region(s, "immediately after a bare boot at 100x30")
 
 
 #: How long the test below waits between the two Escs.
@@ -3083,6 +3123,7 @@ TESTS = [
     test_a_stale_backend_says_so_instead_of_relabelling_the_tui,
     test_a_missing_session_recovers_without_a_reconnect_loop,
     test_a_draft_typed_while_connecting_survives_into_the_composer,
+    test_a_fresh_boot_at_default_size_shows_exactly_one_chrome,
     test_a_slow_second_escape_still_interrupts,
     test_one_stray_escape_still_does_not_kill_a_turn,
     test_a_turn_that_ends_under_an_overlay_does_not_wedge_the_session,
