@@ -28,7 +28,11 @@ defmodule OptimalSystemAgent.Providers.SurplusModels do
     {"kimi-k3-fast-api", "Kimi K3 Fast"},
     {"qwen3.8-flash", "Qwen3.8 Flash"},
     {"deepseek-v4-pro", "DeepSeek V4 Pro"},
+    {"deepseek-v4.1-flash", "DeepSeek V4.1 Flash"},
     {"deepseek-v4-flash", "DeepSeek V4 Flash"},
+    {"gpt-5.6-luna", "GPT-5.6 Luna"},
+    {"minimax-m3", "MiniMax M3"},
+    {"xiaomi-mimo-v2-5", "Xiaomi MiMo V2.5"},
     {"qwen3.8-2.4t-a95b", "Qwen3.8 2.4T A95B"},
     {"qwen3-coder-next", "Qwen3 Coder Next"},
     {"mistral-large-3", "Mistral Large 3"},
@@ -85,7 +89,18 @@ defmodule OptimalSystemAgent.Providers.SurplusModels do
     "claude-fable-5" => {5.75, 28.75},
     "claude-opus-5" => {0.092, 0.46},
     "claude-opus-5-fast" => {3.00, 15.00},
-    "claude-sonnet-5" => {0.50, 2.49}
+    "claude-sonnet-5" => {0.50, 2.49},
+    # Measured from the live catalog 2026-09-09: prompt $0.30/M,
+    # completion $1.20/M, cache-read $0.006/M — 50x cheaper than a fresh
+    # read, so the prompt cache is worth far more here than the headline.
+    "deepseek-v4.1-flash" => {0.30, 1.20},
+    # gpt-5.6-luna: 1.05M ctx at budget rates, cache-read $0.02/M.
+    "gpt-5.6-luna" => {0.20, 1.20},
+    # minimax-m3 supersedes the already-featured m2.
+    "minimax-m3" => {0.30, 1.20},
+    # xiaomi-mimo-v2-5: cheapest 1M window in the catalog, and its
+    # cache read ($0.0028/M) is ~50x below its own prompt rate.
+    "xiaomi-mimo-v2-5" => {0.14, 0.28}
   }
 
   @static_by_key Map.new(@static_pricing, fn {id, rate} -> {@prefix <> id, rate} end)
