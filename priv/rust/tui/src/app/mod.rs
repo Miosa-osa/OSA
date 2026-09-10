@@ -10,6 +10,7 @@ mod handle_actions;
 mod handle_backend;
 mod handle_dialogs;
 pub mod inline_backend;
+mod inline_chrome;
 pub mod key_normalize;
 mod keymap_dispatch;
 pub mod keys;
