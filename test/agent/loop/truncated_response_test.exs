@@ -88,6 +88,7 @@ defmodule OptimalSystemAgent.Agent.Loop.TruncatedResponseTest do
       else: Application.delete_env(:optimal_system_agent, :mock_provider_stop_reason)
 
     MockProvider.reset_round_trips()
+    MockProvider.reset_last_opts()
     {response, state} = ReactLoop.run(base_state())
     {response, state, MockProvider.round_trips()}
   end
@@ -167,6 +168,38 @@ defmodule OptimalSystemAgent.Agent.Loop.TruncatedResponseTest do
              "an empty+length generation must be bounded; the loop made #{n} round-trips"
 
       assert Map.get(state, :truncations, 0) > 0
+    end
+
+    test "a reasoning-exhausted generation is retried with thinking TURNED OFF" do
+      # The ceiling bump alone does not recover this shape. MEASURED on a live
+      # 21-minute session (2026-09-10, 75 tool uses): the first attempt spent
+      # 32,768 tokens entirely on reasoning and emitted nothing; the recovery
+      # raised the ceiling to 64,000 and the model spent all 64,000 reasoning
+      # again and still emitted nothing. The retry cost 2x and recovered zero,
+      # because a bigger ceiling buys more THINKING from a model that will not
+      # stop thinking.
+      #
+      # The lever that works is switching thinking off, so the recovery must
+      # actually ask for it. `MockProvider.last_opts/0` is the last round-trip,
+      # which on this path IS the recovery attempt.
+      run_with("", "length")
+
+      assert MockProvider.last_opts()[:thinking_disabled] == true,
+             "the reasoning-exhaustion recovery must disable thinking. The old " <>
+               "directive only asked the model to 'keep internal reasoning brief', " <>
+               "which is a request, not a control. opts were: " <>
+               "#{inspect(MockProvider.last_opts())}"
+    end
+
+    test "a content-ful truncation is NOT retried with thinking disabled" do
+      # A partial ANSWER that ran long is a different failure: the model is
+      # mid-answer and the continuation resumes it. Disabling thinking there
+      # would throw away reasoning it is actively using, for no reason.
+      run_with(@fragment, "length")
+
+      refute MockProvider.last_opts()[:thinking_disabled] == true,
+             "thinking must stay on for a content-ful continuation; opts were: " <>
+               "#{inspect(MockProvider.last_opts())}"
     end
   end
 

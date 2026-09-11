@@ -118,6 +118,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       # LAST: DeepSeek accepts only low/high/max, so this must overwrite the
       # generic "medium" that maybe_add_reasoning/3 would otherwise leave.
       |> maybe_add_provider_thinking(model, opts, base_url)
+      |> maybe_disable_thinking(opts)
       |> maybe_add_prompt_cache_key(opts, base_url)
 
     # Fingerprint AFTER every body transform, so what is hashed is what goes on
@@ -450,6 +451,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     # LAST: DeepSeek accepts only low/high/max, so this must overwrite the
     # generic "medium" that maybe_add_reasoning/3 would otherwise leave.
     |> maybe_add_provider_thinking(model, opts, base_url)
+    |> maybe_disable_thinking(opts)
     |> maybe_add_prompt_cache_key(opts, base_url)
   end
 
@@ -1709,6 +1711,57 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       Map.put(body, :service_tier, tier)
     else
       body
+    end
+  end
+
+  # ── Thinking disable: a RECOVERY lever, never a default ──────────────────
+  #
+  # `ReactLoop` sets `:thinking_disabled` when a generation spent its ENTIRE
+  # output budget on internal reasoning and produced no answer. Raising the
+  # ceiling alone does not recover that: the model thinks LONGER, it does not
+  # answer. So the retry asks the provider to stop thinking.
+  #
+  # Allowlisted per provider, exactly like `@service_tiers` above and for the
+  # same reason: this is a foreign field on most of the ~20 providers this
+  # module serves, and an unrecognized field there is a validation error, not
+  # an ignored one. A provider absent from this map sees the exact bytes it
+  # saw before.
+  #
+  # `surplus` is the entry with EVIDENCE behind it. Measured 2026-09-10
+  # against `deepseek-v4.1-flash`, three trials per row:
+  #
+  #     (baseline)                      reason_chars = 2332 / 3906 / 4476
+  #     thinking: {"type":"disabled"}   reason_chars =    0 /    0 /    0
+  #     enable_thinking: false          reason_chars =    0 /    0 /    0
+  #     reasoning_effort: "none"        reason_chars = 2999        <-- IGNORED
+  #     reasoning: {"max_tokens": 512}  reason_chars = 4476        <-- IGNORED
+  #     thinking: {"budget_tokens":512} reason_chars = 4261        <-- IGNORED
+  #
+  # The last three rows are why this is NOT solved by wiring up
+  # `Effort.thinking_budget/0`: that ladder (medium -> 5,000) is real and is
+  # honoured by Bedrock and Google, but this transport has no field for it and
+  # the plausible spellings are dropped silently rather than rejected. A
+  # budget-shaped fix here would have looked correct, changed nothing, and been
+  # untestable without a live call - the exact "silent capability loss" this
+  # codebase has been bitten by before.
+  #
+  # The shape is the same one `Providers.DeepSeekModels.thinking_params/2`
+  # already emits for the `"off"` effort (NOT for the atom `:disabled`, which
+  # `normalize_effort/1` does not match and silently maps to "high"/enabled).
+  # It does not reach a Surplus turn because `maybe_add_provider_thinking/4`
+  # gates on the NATIVE deepseek host.
+  @thinking_disable %{
+    surplus: %{"type" => "disabled"}
+  }
+
+  defp maybe_disable_thinking(body, opts) do
+    provider = Keyword.get(opts, :provider, image_provider(opts))
+
+    with true <- Keyword.get(opts, :thinking_disabled, false),
+         shape when is_map(shape) <- Map.get(@thinking_disable, provider) do
+      Map.put(body, :thinking, shape)
+    else
+      _ -> body
     end
   end
 

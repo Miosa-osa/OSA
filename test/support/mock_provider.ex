@@ -112,9 +112,13 @@ defmodule OptimalSystemAgent.Test.MockProvider do
   invokes `{:done, result}` so the Loop's process-dictionary capture works.
   """
   @impl true
-  def chat_stream(_messages, callback, _opts) do
+  def chat_stream(_messages, callback, opts) do
     maybe_sleep()
     bump_round_trips()
+    # Recorded here as well as in `chat/2`: the agent loop takes the STREAMING
+    # path, so without this the opts the loop actually sends are unobservable
+    # and a recovery flag threaded through them cannot be asserted on.
+    record_opts(opts)
     run_after_call_once()
 
     case forced_final_text() do
