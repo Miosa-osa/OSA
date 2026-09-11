@@ -182,8 +182,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
       {{:ok, state.last_tree}, state}
     else
       tree_result =
-        if targeted_snapshot?(params) and Code.ensure_loaded?(state.adapter) and
-             function_exported?(state.adapter, :snapshot, 1) do
+        if targeted_snapshot?(params) and exports?(state.adapter, :snapshot, 1) do
           state.adapter.snapshot(params)
         else
           state.adapter.get_tree()
@@ -205,7 +204,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
   end
 
   defp dispatch("wait", params, state) do
-    if function_exported?(state.adapter, :wait, 1) do
+    if exports?(state.adapter, :wait, 1) do
       result = state.adapter.wait(Map.get(params, "seconds", 1))
       {format_result(result, "Waited"), bump_step(state)}
     else
@@ -214,7 +213,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
   end
 
   defp dispatch("list_windows", _params, state) do
-    if function_exported?(state.adapter, :list_windows, 0) do
+    if exports?(state.adapter, :list_windows, 0) do
       {state.adapter.list_windows(), bump_step(state)}
     else
       {{:error, "list_windows is not supported by #{inspect(state.adapter)}"}, state}
@@ -222,7 +221,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
   end
 
   defp dispatch("focus_window", %{"window_id" => window_id}, state) do
-    if function_exported?(state.adapter, :focus_window, 1) do
+    if exports?(state.adapter, :focus_window, 1) do
       result = state.adapter.focus_window(window_id)
       {format_result(result, "Focused window #{window_id}"), bump_step(state)}
     else
@@ -231,7 +230,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
   end
 
   defp dispatch("close_window", %{"window_id" => window_id}, state) do
-    if function_exported?(state.adapter, :close_window, 1) do
+    if exports?(state.adapter, :close_window, 1) do
       result = state.adapter.close_window(window_id)
       {format_result(result, "Closed window #{window_id}"), bump_step(state)}
     else
@@ -248,7 +247,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
   end
 
   defp dispatch("launch", %{"app" => app}, state) do
-    if function_exported?(state.adapter, :launch, 1) do
+    if exports?(state.adapter, :launch, 1) do
       result = state.adapter.launch(app)
       {format_result(result, "Launched #{app}"), bump_step(state)}
     else
@@ -257,7 +256,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
   end
 
   defp dispatch("cursor", _params, state) do
-    if function_exported?(state.adapter, :cursor, 0) do
+    if exports?(state.adapter, :cursor, 0) do
       {state.adapter.cursor(), bump_step(state)}
     else
       {{:error, "cursor is not supported by #{inspect(state.adapter)}"}, state}
@@ -265,7 +264,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
   end
 
   defp dispatch("snapshot", params, state) do
-    if function_exported?(state.adapter, :snapshot, 1) do
+    if exports?(state.adapter, :snapshot, 1) do
       case state.adapter.snapshot(params) do
         {:ok, elements} when is_list(elements) -> store_accessibility_tree(elements, state)
         other -> {other, state}
@@ -365,11 +364,38 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
     {{:error, "Unknown action: #{action}"}, state}
   end
 
+  # Does `adapter` export `function/arity`?
+  #
+  # NOT `function_exported?/3` on its own, and that distinction is the whole
+  # point of this function. `function_exported?/3` answers false for a module
+  # that has not been LOADED, and it does not load one — so asking it about a
+  # module nobody has touched yet says "this adapter cannot do that" about an
+  # adapter that can.
+  #
+  # That is not hypothetical here. `Adapter.adapter_for/1` selects an adapter by
+  # MODULE ATOM (`{:ok, Adapters.MacOS}`) and never calls it, so on a fresh
+  # release VM - where modules load lazily - the adapter is unloaded at the
+  # moment these checks run. The FIRST `computer_use` call for any guarded
+  # action therefore failed with a false "is not supported by
+  # ...Adapters.MacOS", while the very same action succeeded on a later call in
+  # the same session, once some other path had loaded the module. Reported live
+  # on 2026-09-10 as `computer_use(snapshot)` and, in an earlier session, as
+  # `computer_use(list_windows)` - the same defect, twice, with MacOS
+  # implementing both (`list_windows/0` at macos.ex:270, `snapshot/1` at :471).
+  #
+  # `Code.ensure_loaded?/1` loads the module from the code path and reports
+  # whether it can be loaded at all, so a genuinely unsupported action still
+  # gets its honest "not supported" — but only after actually asking the
+  # adapter's code rather than the loader's cache.
+  defp exports?(adapter, function, arity) do
+    Code.ensure_loaded?(adapter) and function_exported?(adapter, function, arity)
+  end
+
   defp format_result(:ok, msg), do: {:ok, msg}
   defp format_result({:error, _} = err, _msg), do: err
 
   defp adapter_result(state, function, args) do
-    if function_exported?(state.adapter, function, length(args)) do
+    if exports?(state.adapter, function, length(args)) do
       {apply(state.adapter, function, args), bump_step(state)}
     else
       {{:error, "#{function} is not supported by #{inspect(state.adapter)}"}, state}
@@ -377,7 +403,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
   end
 
   defp adapter_ok(state, function, args, message) do
-    if function_exported?(state.adapter, function, length(args)) do
+    if exports?(state.adapter, function, length(args)) do
       result = apply(state.adapter, function, args)
       {format_result(result, message), bump_step(state)}
     else
@@ -398,8 +424,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Server do
     case resolve_ref(ref, state) do
       {:ok, %{pid: pid, actions: actions} = element}
       when is_integer(pid) and is_list(actions) ->
-        if "AXPress" in actions and Code.ensure_loaded?(state.adapter) and
-             function_exported?(state.adapter, :perform_element, 3) do
+        if "AXPress" in actions and exports?(state.adapter, :perform_element, 3) do
           result = state.adapter.perform_element(element, :press, nil)
           {format_result(result, "Pressed semantic element #{ref}"), bump_step(state)}
         else

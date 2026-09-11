@@ -237,8 +237,13 @@ defmodule OptimalSystemAgent.Providers.Registry do
          }}
 
       module when is_atom(module) ->
+        # `Code.ensure_loaded?/1` first: `function_exported?/3` answers false
+        # for a module that has not been loaded and does not load one, so a
+        # provider whose module nobody has touched yet silently fell back to
+        # `[default_model()]` and dropped its whole model list. Same defect as
+        # `ComputerUse.Server`'s (see `exports?/3` there).
         fallback_models =
-          if function_exported?(module, :available_models, 0) do
+          if Code.ensure_loaded?(module) and function_exported?(module, :available_models, 0) do
             module.available_models()
           else
             [module.default_model()]
@@ -446,8 +451,15 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   @impl true
   def handle_call({:register_provider, name, module}, _from, state) do
-    # Validate the module implements the behaviour
-    if function_exported?(module, :chat, 2) and
+    # Validate the module implements the behaviour.
+    #
+    # `Code.ensure_loaded?/1` is not decoration here: without it this check
+    # REJECTS a correct module that simply has not been loaded yet, replying
+    # "does not implement Providers.Behaviour" about a module that does. A
+    # plugin registered at boot - before anything has called its code - hit
+    # exactly that. `function_exported?/3` never loads a module; it only asks
+    # whether one is already there.
+    if Code.ensure_loaded?(module) and function_exported?(module, :chat, 2) and
          function_exported?(module, :name, 0) and
          function_exported?(module, :default_model, 0) do
       new_state = put_in(state[:extra_providers][name], module)

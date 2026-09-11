@@ -303,4 +303,68 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.ServerTest do
       assert state_after.tree_fetched_at >= state_before.tree_fetched_at
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # An adapter that has not been LOADED yet
+  # ---------------------------------------------------------------------------
+
+  # `ColdAdapter` lives in `test/support/cold_adapter.ex`, NOT here. It has to
+  # have a real `.beam` on the code path: a module defined inline in this file
+  # is compiled in memory, so once purged it cannot be reloaded and the test
+  # cannot tell "unloaded but loadable" from "deleted and gone". See that file's
+  # moduledoc.
+  alias OptimalSystemAgent.Test.ColdAdapter
+
+  describe "an adapter that has not been loaded yet" do
+    # Reported live 2026-09-10: the FIRST `computer_use` call of a session came
+    # back "snapshot is not supported by ...Adapters.MacOS" - for an action
+    # macos.ex implements at :471 - and an earlier session the same way for
+    # `list_windows` (:270). Both succeeded on a LATER call in the same session,
+    # which is what made it look like a flake.
+    #
+    # Cause: `function_exported?/3` answers FALSE for a module that has not been
+    # loaded, and it does not load one. `Adapter.adapter_for/1` selects an
+    # adapter by module ATOM and never calls it, and `Server.init/1` only stores
+    # it - so on a fresh release VM, where modules load lazily, the adapter is
+    # genuinely unloaded when the first dispatch runs. Nine dispatch clauses
+    # asked `function_exported?` directly; two others guarded the same question
+    # with `Code.ensure_loaded?`, which is the tell that this was a known trap
+    # that only half the call sites remembered.
+    test "a supported action is not falsely reported unsupported" do
+      :code.purge(ColdAdapter)
+      :code.delete(ColdAdapter)
+
+      # Precondition. If this stops holding, the test stops testing anything -
+      # it would pass against the unfixed code too.
+      refute :code.is_loaded(ColdAdapter),
+             "ColdAdapter is still loaded, so this cannot exercise the unloaded path"
+
+      refute function_exported?(ColdAdapter, :list_windows, 0),
+             "the bare check must read false here, or there is no bug left to regress"
+
+      {:ok, pid} =
+        Server.start_link(adapter: ColdAdapter, platform: :macos, session_id: "cold_adapter")
+
+      # Both actions that were reported broken, through the real dispatch path.
+      assert {:ok, _} = Server.execute(pid, "list_windows", %{})
+      assert {:ok, _} = Server.execute(pid, "snapshot", %{})
+
+      stop_server(pid)
+    end
+
+    test "a genuinely unsupported action still says so" do
+      :code.purge(ColdAdapter)
+      :code.delete(ColdAdapter)
+
+      {:ok, pid} =
+        Server.start_link(adapter: ColdAdapter, platform: :macos, session_id: "cold_missing")
+
+      # ColdAdapter implements no `cursor/0`. The fix must not turn a real
+      # absence into a crash or a false success - the honest error stays.
+      assert {:error, msg} = Server.execute(pid, "cursor", %{})
+      assert msg =~ "is not supported by"
+
+      stop_server(pid)
+    end
+  end
 end
