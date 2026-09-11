@@ -715,7 +715,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         llm_opts = [
           tools: tools_for_call,
           temperature: LLMClient.temperature(),
-          max_tokens: max_response_tokens()
+          max_tokens: max_response_tokens(),
+          # Set by the reasoning-exhaustion recovery below. Process-scoped and
+          # cleared when a generation ends on its own, exactly like
+          # `:osa_bumped_max_tokens` - see `max_response_tokens/0`.
+          thinking_disabled: Process.get(:osa_disable_thinking, false)
         ]
 
         llm_opts =
@@ -924,6 +928,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       # the model has produced a complete one, the recovery is over and the
       # configured ceiling is the right one again.
       Process.delete(:osa_bumped_max_tokens)
+      Process.delete(:osa_disable_thinking)
 
       {{:ok, resp}, Map.put(state, :turn_truncated, false)}
     end
@@ -982,15 +987,21 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       # role-alternation on stricter providers — so it gets only a budget-raise
       # directive telling it to answer within the larger ceiling and keep its
       # internal reasoning brief.
+      # A reasoning-only exhaustion: the model spent the WHOLE ceiling
+      # thinking and emitted nothing to deliver. Named here because the
+      # recovery below branches on it twice.
+      reasoning_only? = String.trim(to_string(content)) == ""
+
       injected =
-        if String.trim(to_string(content)) == "" do
+        if reasoning_only? do
           [
             %{
               role: "system",
               content:
                 "[Your previous attempt reached the output-token limit while reasoning and " <>
-                  "produced no answer. The output budget has been raised to #{bumped}. Give your " <>
-                  "answer now, and keep internal reasoning brief so it fits.]"
+                  "produced no answer. The output budget has been raised to #{bumped} and " <>
+                  "extended thinking has been TURNED OFF for this attempt. Answer directly, " <>
+                  "without a reasoning preamble.]"
             }
           ]
         else
@@ -1013,6 +1024,23 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
       # Store bumped max_tokens for this session
       Process.put(:osa_bumped_max_tokens, bumped)
+
+      # A reasoning-only exhaustion is NOT recovered by a bigger ceiling alone,
+      # and the old directive asked the model to "keep internal reasoning
+      # brief" - a polite request against a model that had just spent 64,000
+      # tokens thinking. MEASURED 2026-09-10 on a live 21-minute session: the
+      # ceiling bump took the attempt from 32,768 all-reasoning tokens to
+      # 64,000 all-reasoning tokens and still delivered nothing, so the retry
+      # cost 2x and recovered zero. Thinking is now switched off for the
+      # recovery attempt, which is the lever that actually works on a provider
+      # that will not accept a reasoning budget (see
+      # `[OI]Compat.maybe_disable_thinking/2` for the per-provider evidence).
+      #
+      # Scoped to the reasoning-only case on purpose: a content-ful truncation
+      # is a real answer that ran long, and disabling thinking there would
+      # discard reasoning the model is mid-way through for no reason.
+      if reasoning_only?, do: Process.put(:osa_disable_thinking, true)
+
       run(state)
     end
   end
