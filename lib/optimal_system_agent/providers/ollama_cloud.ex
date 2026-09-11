@@ -314,6 +314,40 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       requires_subscription: nil,
       note: "512K ctx, frontier MoE, multiple reasoning modes"
     },
+    # DeepSeek V4.1 Flash - probed 2026-09-10 through a signed-in local daemon:
+    # `deepseek_v41.context_length` = 1,048,576 and capabilities
+    # completion / thinking / tools / vision (no audio); 763B params, FP8.
+    # The sibling of `deepseek-v4-flash:cloud` below, a generation newer and
+    # with the vision capability that tag does not carry.
+    #
+    # PRICED AT THE PEAK RATE. DeepSeek publishes two columns for this id and
+    # the off-peak one is half the peak one: $0.15 in / $0.60 out per M
+    # (cache-hit $0.003) off-peak, $0.30 / $1.20 (cache-hit $0.006) during peak
+    # hours, which are 01:00-04:00 and 06:00-10:00 UTC Monday-Friday. The PEAK
+    # figure is recorded, the same call `glm-5.3-flash:cloud` makes about its
+    # launch promo: accounting the discounted rate would under-count every turn
+    # taken inside a peak window, and the cheap number is the floor, not the
+    # estimate. Ollama's own model page and OpenRouter's live endpoint for the
+    # bare id both report this same {0.30, 1.20}.
+    %{
+      id: "deepseek-v4.1-flash:cloud",
+      name: "DeepSeek V4.1 Flash",
+      ctx: 1_048_576,
+      ctx_source: :probe,
+      tools: true,
+      thinking: true,
+      vision: true,
+      audio: false,
+      pricing: {0.30, 1.20},
+      recommended: false,
+      requires_subscription: nil,
+      # Says what it IS, not that it is cheap: at {0.30, 1.20} this tag costs
+      # more than twice its own sibling `deepseek-v4-flash:cloud` and more per
+      # output token than `deepseek-v4-pro:cloud`. The earlier draft of this
+      # note called it DeepSeek's "cheap 1M tier", which the table itself
+      # contradicts two rows down.
+      note: "1M ctx, 763B MoE - vision + thinking, newer sibling of V4 Flash"
+    },
     %{
       id: "deepseek-v4-flash:cloud",
       name: "DeepSeek V4 Flash",

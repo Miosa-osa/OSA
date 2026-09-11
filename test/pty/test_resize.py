@@ -3105,7 +3105,58 @@ def test_a_running_subagent_is_not_squeezed_off_screen_by_a_plan(
             )
 
 
+def test_a_glyph_split_across_two_reads_still_renders(backend: StubBackend) -> None:
+    """A read boundary landing mid-glyph must not corrupt the screen.
+
+    `pump` reads raw bytes with `os.read`, and every box-drawing character the
+    chrome is made of is 3 bytes (`─` is E2 94 80). Decoding each chunk on its
+    own with `errors="replace"` turned a glyph split that way into U+FFFD
+    replacement characters. The damage is invisible where it is made — `raw`
+    still holds the correct bytes — and fatal where the suite looks: a composer
+    rule row that is no longer ALL dashes stops matching `^─{20,}$`, so
+    `assert_single_live_region` reported `composer_top: 0` for a screen that
+    was in fact perfect.
+
+    That is a FALSE failure, and its frequency tracks how the OS happened to
+    buffer reads, so it presents as a flaky product bug and burns a release.
+    It failed `test_a_fresh_boot_at_default_size_shows_exactly_one_chrome` on
+    the v1.0.194 candidate (the row held U+FFFD at columns 68-70 of 100) and
+    two unrelated tests on v1.0.191 (`test_height_resize`,
+    `test_a_draft_typed_while_connecting_survives_into_the_composer`).
+
+    Asserts the split is survived at EVERY split point, through the same
+    `feed_bytes` path `pump` uses, and via the band detector that was fooled —
+    so a regression here fails on the detector rather than on a raw row compare.
+    """
+    s = PtySession(backend.base_url, cols=100, rows=30)
+    rule = "─" * 40
+    raw = rule.encode("utf-8")
+
+    for split in range(1, len(raw)):
+        s.screen.reset()
+        s.feed_bytes(raw[:split])
+        s.feed_bytes(raw[split:])
+
+        rendered = s.lines()[0]
+        if rendered != rule:
+            raise AssertionError(
+                f"a rule split {split} byte(s) in rendered as {rendered!r}, not "
+                f"the intact glyph run — the harness corrupted its own byte "
+                f"stream.\n--- rendered screen ---\n{s.dump()}"
+            )
+
+        # And the detector that actually failed a release now agrees.
+        if s.count(SINGLETON_BANDS["composer_top"]) != 1:
+            raise AssertionError(
+                f"a rule split {split} byte(s) in stopped matching the "
+                f"composer_top band: "
+                f"{s.count(SINGLETON_BANDS['composer_top'])} match(es).\n"
+                f"--- rendered screen ---\n{s.dump()}"
+            )
+
+
 TESTS = [
+    test_a_glyph_split_across_two_reads_still_renders,
     test_fast_updates_the_persistent_effort_chip,
     test_resize_sweep,
     test_resize_with_transcript,

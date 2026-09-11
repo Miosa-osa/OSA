@@ -133,6 +133,14 @@
         recommended: false
       },
       %{
+        id: "deepseek-v4.1-flash:cloud",
+        name: "DeepSeek V4.1 Flash",
+        tools: true,
+        note: "1M ctx, 763B MoE - vision + thinking, newer sibling of V4 Flash",
+        ctx: 1_048_576,
+        recommended: false
+      },
+      %{
         id: "deepseek-v4-flash:cloud",
         name: "DeepSeek V4 Flash",
         tools: true,
