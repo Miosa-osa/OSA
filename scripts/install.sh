@@ -13,6 +13,7 @@
 # Environment overrides:
 #   OSA_VERSION   Pin to a release tag (e.g. "v0.4.0"). Default: latest.
 #   OSA_HOME      Install root. Default: $HOME/.osa
+#   OSA_INSTALL_MODE  full or headless. Default: saved mode, otherwise full.
 #
 # Exit codes:
 #   0 success   1 unsupported platform   2 network error   3 extraction error
@@ -46,6 +47,20 @@ info() { printf "  ${CYAN}→${RESET} %s\n" "$*"; }
 ok()   { printf "  ${GREEN}✓${RESET} %s\n" "$*"; }
 warn() { printf "  ${YELLOW}!${RESET} %s\n" "$*" >&2; }
 fail() { printf "  ${RED}✗${RESET} %s\n" "$1" >&2; exit "${2:-1}"; }
+
+# An explicit setting wins; reinstall preserves the last successful mode.
+if [ "${OSA_INSTALL_MODE+x}" = x ]; then
+  INSTALL_MODE="$OSA_INSTALL_MODE"
+elif [ -e "$OSA_HOME/install_mode" ] || [ -L "$OSA_HOME/install_mode" ]; then
+  INSTALL_MODE="$(cat "$OSA_HOME/install_mode")" || fail "Could not read saved install mode."
+else
+  INSTALL_MODE=full
+fi
+case "$INSTALL_MODE" in
+  full|headless) ;;
+  *) fail "Invalid OSA_INSTALL_MODE: ${INSTALL_MODE}. Expected full or headless." ;;
+esac
+command -v bash >/dev/null 2>&1 || fail "Bash is required by the installed osa launcher."
 
 _download() {
   # _download <url> <dest> — curl first, wget fallback. Returns 2 on failure.
@@ -177,14 +192,16 @@ if ! _download "${BASE_URL}/${TARBALL}" "${TMP_DIR}/${TARBALL}"; then
 fi
 ok "Downloaded ${TARBALL}"
 
-info "Downloading ${TUI_ASSET}..."
-if ! _download "${BASE_URL}/${TUI_ASSET}" "${TMP_DIR}/${TUI_ASSET}"; then
-  fail "Download failed for ${TUI_ASSET}." 2
+if [ "$INSTALL_MODE" = "full" ]; then
+  info "Downloading ${TUI_ASSET}..."
+  if ! _download "${BASE_URL}/${TUI_ASSET}" "${TMP_DIR}/${TUI_ASSET}"; then
+    fail "Download failed for ${TUI_ASSET}." 2
+  fi
+  # Sanity: the TUI is executed directly, so it must be a non-empty file (a 404 or
+  # truncated download would otherwise be copied in and fail later at exec time).
+  [ -s "${TMP_DIR}/${TUI_ASSET}" ] || fail "Downloaded ${TUI_ASSET} is empty — aborting." 2
+  ok "Downloaded ${TUI_ASSET}"
 fi
-# Sanity: the TUI is executed directly, so it must be a non-empty file (a 404 or
-# truncated download would otherwise be copied in and fail later at exec time).
-[ -s "${TMP_DIR}/${TUI_ASSET}" ] || fail "Downloaded ${TUI_ASSET} is empty — aborting." 2
-ok "Downloaded ${TUI_ASSET}"
 
 # ---------------------------------------------------------------------------
 # Verify checksum (best effort — warn if sidecar absent)
@@ -198,6 +215,7 @@ if _download "${BASE_URL}/${TARBALL}.sha256" "${TMP_DIR}/${TARBALL}.sha256" 2>/d
     ACTUAL="$(shasum -a 256 "${TMP_DIR}/${TARBALL}" | awk '{print $1}')"
   else
     ACTUAL=""
+    [ "$INSTALL_MODE" != "headless" ] || fail "Headless install requires sha256sum or shasum." 3
     warn "No sha256sum/shasum found — skipping verification."
   fi
   if [ -n "$ACTUAL" ]; then
@@ -207,12 +225,15 @@ if _download "${BASE_URL}/${TARBALL}.sha256" "${TMP_DIR}/${TARBALL}.sha256" 2>/d
     ok "Checksum verified"
   fi
 else
+  [ "$INSTALL_MODE" != "headless" ] || fail "Headless install requires the release checksum sidecar." 3
   warn "No .sha256 sidecar for this release — skipping verification."
 fi
 
 # Verify the standalone TUI binary too (it is fetched separately from the
 # tarball, so it needs its own checksum — supply-chain hardening, M2).
-_verify_asset "${TMP_DIR}/${TUI_ASSET}" "${BASE_URL}/${TUI_ASSET}.sha256" "${TUI_ASSET}"
+if [ "$INSTALL_MODE" = "full" ]; then
+  _verify_asset "${TMP_DIR}/${TUI_ASSET}" "${BASE_URL}/${TUI_ASSET}.sha256" "${TUI_ASSET}"
+fi
 
 # ---------------------------------------------------------------------------
 # Extract OTP release into ~/.osa/release (fresh)
@@ -233,15 +254,17 @@ ok "Release installed"
 # Install the Rust TUI binary
 # ---------------------------------------------------------------------------
 mkdir -p "$BIN_DIR"
-cp "${TMP_DIR}/${TUI_ASSET}" "$TUI_BIN" || fail "Could not write ${TUI_BIN}." 3
-chmod +x "$TUI_BIN" || fail "Could not make ${TUI_BIN} executable." 3
-[ -s "$TUI_BIN" ] && [ -x "$TUI_BIN" ] \
-  || fail "${TUI_BIN} is empty or not executable after install." 3
-# The TUI is exec'd directly by the launcher, so prove it actually runs here
-# rather than discovering it at first launch.
-TUI_REPORTED="$("$TUI_BIN" --version 2>/dev/null | head -1 | awk '{print $NF}')"
-[ -n "$TUI_REPORTED" ] || fail "${TUI_BIN} did not run (--version produced no output)." 3
-ok "TUI installed to ${TUI_BIN} (reports ${TUI_REPORTED})"
+if [ "$INSTALL_MODE" = "full" ]; then
+  cp "${TMP_DIR}/${TUI_ASSET}" "$TUI_BIN" || fail "Could not write ${TUI_BIN}." 3
+  chmod +x "$TUI_BIN" || fail "Could not make ${TUI_BIN} executable." 3
+  [ -s "$TUI_BIN" ] && [ -x "$TUI_BIN" ] \
+    || fail "${TUI_BIN} is empty or not executable after install." 3
+  # The TUI is exec'd directly by the launcher, so prove it actually runs here
+  # rather than discovering it at first launch.
+  TUI_REPORTED="$("$TUI_BIN" --version 2>/dev/null | head -1 | awk '{print $NF}')"
+  [ -n "$TUI_REPORTED" ] || fail "${TUI_BIN} did not run (--version produced no output)." 3
+  ok "TUI installed to ${TUI_BIN} (reports ${TUI_REPORTED})"
+fi
 
 # macOS: best-effort clear of the com.apple.quarantine attribute. A curl/wget
 # download does NOT set quarantine (only Finder/browser downloads do), so this
@@ -290,6 +313,18 @@ OSA_HOME="${OSA_HOME:-$HOME/.osa}"
 export OSA_HOME
 RELEASE_BIN="$OSA_HOME/release/bin/osagent"
 TUI_BIN="$OSA_HOME/bin/osagent-tui"
+# OSA_HEADLESS_INSTALL_V1: updater compatibility sentinel; keep in generated launcher.
+if [ "${OSA_INSTALL_MODE+x}" = x ]; then
+  INSTALL_MODE="$OSA_INSTALL_MODE"
+elif [ -e "$OSA_HOME/install_mode" ] || [ -L "$OSA_HOME/install_mode" ]; then
+  INSTALL_MODE="$(cat "$OSA_HOME/install_mode")" || exit 1
+else
+  INSTALL_MODE=full
+fi
+case "$INSTALL_MODE" in
+  full|headless) ;;
+  *) echo "Invalid OSA_INSTALL_MODE: $INSTALL_MODE. Expected full or headless." >&2; exit 1 ;;
+esac
 LOG_DIR="$OSA_HOME/logs"
 RUN_DIR="$OSA_HOME/run"
 PID_FILE="$RUN_DIR/backend.pid"
@@ -699,6 +734,10 @@ _launcher_extract() {
 # that works. Loud on every rejection; 0 only when the file is genuinely ours.
 _launcher_verify() {
   _lv="$1"
+  if [ "$INSTALL_MODE" = "headless" ] && ! grep -qF '# OSA_HEADLESS_INSTALL_V1:' "$_lv"; then
+    printf 'The release launcher does not support headless installs; refusing to replace this launcher.\n' >&2
+    return 1
+  fi
   if [ ! -s "$_lv" ]; then
     printf "  ${RED}✗${RESET} The downloaded launcher is empty.\n" >&2
     return 1
@@ -782,6 +821,14 @@ _update_launcher() {
     rm -rf "$_ul_tmp"
     printf "  ${DIM}  Your working launcher was NOT touched. Nothing was overwritten.${RESET}\n" >&2
     printf "  ${DIM}  Repair with:${RESET} ${CYAN}curl -fsSL https://raw.githubusercontent.com/%s/main/scripts/install.sh | sh${RESET}\n" "$GITHUB_REPO" >&2
+    return 3
+  fi
+
+  # Persist only after the target launcher is validated, before a possible exec.
+  if ! printf '%s\n' "$INSTALL_MODE" > "$OSA_HOME/install_mode.new" ||
+     ! mv "$OSA_HOME/install_mode.new" "$OSA_HOME/install_mode"; then
+    rm -rf "$_ul_tmp"
+    printf 'Could not save OSA install mode.\n' >&2
     return 3
   fi
 
@@ -870,7 +917,7 @@ _update_report() {
     printf "    See ${CYAN}https://github.com/%s/releases/tag/%s${RESET}\n" "$GITHUB_REPO" "$2"
   fi
   printf '\n'
-  if [ -t 0 ]; then
+  if [ "$INSTALL_MODE" = "full" ] && [ -t 0 ]; then
     printf "  ${DIM}Press Enter to launch OSA…${RESET} "
     read -r _ || true
   fi
@@ -957,7 +1004,7 @@ do_update() {
     # are current while the TUI still runs old code — and every later
     # `osa update` would no-op forever. Verify against the real binary and
     # self-heal by re-installing instead of lying.
-    if _tui_is_version "$latest"; then
+    if [ "$INSTALL_MODE" = "headless" ] || _tui_is_version "$latest"; then
       # The binaries are current — but the LAUNCHER may not be, and nothing
       # else in this install would ever notice. Checking it here is what makes
       # "`osa update` leaves you with the launcher for the release you have" an
@@ -974,6 +1021,22 @@ do_update() {
     printf "  ${CYAN}→${RESET} New version available: ${BOLD}%s${RESET}\n" "$latest"
   fi
 
+  # A headless host must reject a legacy launcher before stopping its service
+  # or swapping the runtime. The final launcher swap validates it again.
+  if [ "$INSTALL_MODE" = "headless" ]; then
+    preflight="$(mktemp -d "${TMPDIR:-/tmp}/osa-launcher-check.XXXXXX")" || return 3
+    if ! _download "${_LAUNCHER_RAW_BASE}/${latest}/scripts/install.sh" "$preflight/install.sh"; then
+      rm -rf "$preflight"
+      printf 'Could not check headless launcher compatibility.\n' >&2
+      return 2
+    fi
+    if ! _launcher_extract "$preflight/install.sh" > "$preflight/osa" || ! _launcher_verify "$preflight/osa"; then
+      rm -rf "$preflight"
+      return 3
+    fi
+    rm -rf "$preflight"
+  fi
+
   base="https://github.com/${GITHUB_REPO}/releases/download/${latest}"
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/osa-update.XXXXXX")"
 
@@ -981,11 +1044,13 @@ do_update() {
   if ! _download "${base}/${tarball}" "${tmp}/${tarball}"; then
     rm -rf "$tmp"; printf "  ${RED}✗${RESET} Download failed for %s.\n" "$tarball" >&2; return 2
   fi
-  printf "  ${CYAN}→${RESET} Downloading %s…\n" "$tui_asset"
-  if ! _download "${base}/${tui_asset}" "${tmp}/${tui_asset}"; then
-    rm -rf "$tmp"; printf "  ${RED}✗${RESET} Download failed for %s.\n" "$tui_asset" >&2; return 2
+  if [ "$INSTALL_MODE" = "full" ]; then
+    printf "  ${CYAN}→${RESET} Downloading %s…\n" "$tui_asset"
+    if ! _download "${base}/${tui_asset}" "${tmp}/${tui_asset}"; then
+      rm -rf "$tmp"; printf "  ${RED}✗${RESET} Download failed for %s.\n" "$tui_asset" >&2; return 2
+    fi
+    [ -s "${tmp}/${tui_asset}" ] || { rm -rf "$tmp"; printf "  ${RED}✗${RESET} Downloaded %s is empty — aborting update.\n" "$tui_asset" >&2; return 2; }
   fi
-  [ -s "${tmp}/${tui_asset}" ] || { rm -rf "$tmp"; printf "  ${RED}✗${RESET} Downloaded %s is empty — aborting update.\n" "$tui_asset" >&2; return 2; }
 
   # Verify the tarball checksum (mandatory when the sidecar exists).
   printf "  ${CYAN}→${RESET} Verifying checksum…\n"
@@ -997,6 +1062,11 @@ do_update() {
     elif command -v shasum >/dev/null 2>&1; then
       actual="$(shasum -a 256 "${tmp}/${tarball}" | awk '{print $1}')"
     fi
+    if [ "$INSTALL_MODE" = "headless" ] && [ -z "$actual" ]; then
+      rm -rf "$tmp"
+      printf 'Headless update requires sha256sum or shasum.\n' >&2
+      return 3
+    fi
     if [ -n "$actual" ] && [ "$actual" != "$expected" ]; then
       rm -rf "$tmp"
       printf "  ${RED}✗${RESET} Checksum mismatch — aborting update.\n" >&2
@@ -1004,26 +1074,33 @@ do_update() {
     fi
     [ -n "$actual" ] && printf "  ${GREEN}✓${RESET} Checksum verified\n"
   else
+    if [ "$INSTALL_MODE" = "headless" ]; then
+      rm -rf "$tmp"
+      printf 'Headless update requires the release checksum sidecar.\n' >&2
+      return 3
+    fi
     printf "  ${YELLOW}!${RESET} No .sha256 sidecar — skipping verification.\n" >&2
   fi
 
   # Verify the TUI binary checksum too (fetched separately — supply-chain, M2).
-  if _download "${base}/${tui_asset}.sha256" "${tmp}/${tui_asset}.sha256" 2>/dev/null; then
-    texpected="$(awk '{print $1}' "${tmp}/${tui_asset}.sha256")"
-    tactual=""
-    if command -v sha256sum >/dev/null 2>&1; then
-      tactual="$(sha256sum "${tmp}/${tui_asset}" | awk '{print $1}')"
-    elif command -v shasum >/dev/null 2>&1; then
-      tactual="$(shasum -a 256 "${tmp}/${tui_asset}" | awk '{print $1}')"
+  if [ "$INSTALL_MODE" = "full" ]; then
+    if _download "${base}/${tui_asset}.sha256" "${tmp}/${tui_asset}.sha256" 2>/dev/null; then
+      texpected="$(awk '{print $1}' "${tmp}/${tui_asset}.sha256")"
+      tactual=""
+      if command -v sha256sum >/dev/null 2>&1; then
+        tactual="$(sha256sum "${tmp}/${tui_asset}" | awk '{print $1}')"
+      elif command -v shasum >/dev/null 2>&1; then
+        tactual="$(shasum -a 256 "${tmp}/${tui_asset}" | awk '{print $1}')"
+      fi
+      if [ -n "$tactual" ] && [ "$tactual" != "$texpected" ]; then
+        rm -rf "$tmp"
+        printf "  ${RED}✗${RESET} Checksum mismatch for %s — aborting update.\n" "$tui_asset" >&2
+        return 3
+      fi
+      [ -n "$tactual" ] && printf "  ${GREEN}✓${RESET} Checksum verified (%s)\n" "$tui_asset"
+    else
+      printf "  ${YELLOW}!${RESET} No .sha256 sidecar for %s — skipping verification.\n" "$tui_asset" >&2
     fi
-    if [ -n "$tactual" ] && [ "$tactual" != "$texpected" ]; then
-      rm -rf "$tmp"
-      printf "  ${RED}✗${RESET} Checksum mismatch for %s — aborting update.\n" "$tui_asset" >&2
-      return 3
-    fi
-    [ -n "$tactual" ] && printf "  ${GREEN}✓${RESET} Checksum verified (%s)\n" "$tui_asset"
-  else
-    printf "  ${YELLOW}!${RESET} No .sha256 sidecar for %s — skipping verification.\n" "$tui_asset" >&2
   fi
 
   # Extract the new release beside the current one (same filesystem → atomic
@@ -1048,11 +1125,13 @@ do_update() {
     printf "  ${RED}✗${RESET} Could not create %s — aborting update.\n" "$(dirname "$TUI_BIN")" >&2
     return 3
   }
-  if ! cp "${tmp}/${tui_asset}" "${TUI_BIN}.new" || ! chmod +x "${TUI_BIN}.new"; then
-    rm -f "${TUI_BIN}.new"; rm -rf "$tmp" "$new_rel"
-    printf "  ${RED}✗${RESET} Could not stage the new TUI binary at %s.new — aborting update.\n" "$TUI_BIN" >&2
-    printf "  ${DIM}  Your existing install is untouched. Check disk space and permissions.${RESET}\n" >&2
-    return 3
+  if [ "$INSTALL_MODE" = "full" ]; then
+    if ! cp "${tmp}/${tui_asset}" "${TUI_BIN}.new" || ! chmod +x "${TUI_BIN}.new"; then
+      rm -f "${TUI_BIN}.new"; rm -rf "$tmp" "$new_rel"
+      printf "  ${RED}✗${RESET} Could not stage the new TUI binary at %s.new — aborting update.\n" "$TUI_BIN" >&2
+      printf "  ${DIM}  Your existing install is untouched. Check disk space and permissions.${RESET}\n" >&2
+      return 3
+    fi
   fi
 
   # Atomic swap of the release dir.
@@ -1071,13 +1150,15 @@ do_update() {
   # unchecked: when it failed the launcher kept exec'ing the OLD TUI while the
   # version stamp was rewritten to the new tag, so `osa update` printed success
   # and the TUI kept showing the old version forever.
-  if ! mv "${TUI_BIN}.new" "$TUI_BIN"; then
-    rm -f "${TUI_BIN}.new"; rm -rf "$tmp"
-    printf "  ${RED}✗${RESET} Could not replace the TUI binary at %s.\n" "$TUI_BIN" >&2
-    printf "  ${DIM}  The backend was updated but the TUI was NOT — the install is INCONSISTENT.${RESET}\n" >&2
-    printf "  ${DIM}  Repair with:${RESET} ${CYAN}%s${RESET}\n" \
-      "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sh" >&2
-    return 3
+  if [ "$INSTALL_MODE" = "full" ]; then
+    if ! mv "${TUI_BIN}.new" "$TUI_BIN"; then
+      rm -f "${TUI_BIN}.new"; rm -rf "$tmp"
+      printf "  ${RED}✗${RESET} Could not replace the TUI binary at %s.\n" "$TUI_BIN" >&2
+      printf "  ${DIM}  The backend was updated but the TUI was NOT — the install is INCONSISTENT.${RESET}\n" >&2
+      printf "  ${DIM}  Repair with:${RESET} ${CYAN}%s${RESET}\n" \
+        "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sh" >&2
+      return 3
+    fi
   fi
 
   # macOS: best-effort quarantine strip on the freshly swapped-in binaries.
@@ -1095,24 +1176,26 @@ do_update() {
       "$OSA_HOME/release/bin/osagent" >&2
     return 3
   fi
-  if [ ! -s "$TUI_BIN" ] || [ ! -x "$TUI_BIN" ]; then
-    rm -rf "$tmp"
-    printf "  ${RED}✗${RESET} TUI binary missing, empty, or not executable after update (%s).\n" "$TUI_BIN" >&2
-    printf "  ${DIM}  Repair with:${RESET} ${CYAN}%s${RESET}\n" \
-      "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sh" >&2
-    return 3
+  if [ "$INSTALL_MODE" = "full" ]; then
+    if [ ! -s "$TUI_BIN" ] || [ ! -x "$TUI_BIN" ]; then
+      rm -rf "$tmp"
+      printf "  ${RED}✗${RESET} TUI binary missing, empty, or not executable after update (%s).\n" "$TUI_BIN" >&2
+      printf "  ${DIM}  Repair with:${RESET} ${CYAN}%s${RESET}\n" \
+        "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sh" >&2
+      return 3
+    fi
+    if ! _tui_is_version "$latest"; then
+      tui_now="$(_installed_tui_version || true)"
+      rm -rf "$tmp"
+      printf "  ${RED}✗${RESET} TUI still reports %s after updating to %s — the update did not take.\n" \
+        "${tui_now:-<unreadable>}" "$latest" >&2
+      printf "  ${DIM}  Not stamping the new version, so ${RESET}${CYAN}osa update${RESET}${DIM} will retry.${RESET}\n" >&2
+      printf "  ${DIM}  Repair with:${RESET} ${CYAN}%s${RESET}\n" \
+        "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sh" >&2
+      return 3
+    fi
+    printf "  ${GREEN}✓${RESET} TUI binary verified ${DIM}(reports %s)${RESET}\n" "$(_installed_tui_version)"
   fi
-  if ! _tui_is_version "$latest"; then
-    tui_now="$(_installed_tui_version || true)"
-    rm -rf "$tmp"
-    printf "  ${RED}✗${RESET} TUI still reports %s after updating to %s — the update did not take.\n" \
-      "${tui_now:-<unreadable>}" "$latest" >&2
-    printf "  ${DIM}  Not stamping the new version, so ${RESET}${CYAN}osa update${RESET}${DIM} will retry.${RESET}\n" >&2
-    printf "  ${DIM}  Repair with:${RESET} ${CYAN}%s${RESET}\n" \
-      "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sh" >&2
-    return 3
-  fi
-  printf "  ${GREEN}✓${RESET} TUI binary verified ${DIM}(reports %s)${RESET}\n" "$(_installed_tui_version)"
 
   printf "%s\n" "$OSA_HOME/release" > "$OSA_HOME/release_root"
   printf "%s\n" "$latest" > "$OSA_HOME/version"
@@ -1245,7 +1328,9 @@ case "$OSA_VERB" in
     # TUI binary; printing only the backend hides a half-applied update, which
     # is precisely how "I updated but the TUI shows the old version" happens.
     "$RELEASE_BIN" version || true
-    if [ -x "$TUI_BIN" ]; then
+    if [ "$INSTALL_MODE" = "headless" ]; then
+      printf 'osagent-tui disabled (headless mode)\n'
+    elif [ -x "$TUI_BIN" ]; then
       tui_v="$(_installed_tui_version || true)"
       printf "osagent-tui %s\n" "${tui_v:-<unreadable>}"
     else
@@ -1253,7 +1338,7 @@ case "$OSA_VERB" in
     fi
     stamp="$(cat "$OSA_HOME/version" 2>/dev/null || echo unknown)"
     printf "installed release stamp %s\n" "$stamp"
-    if [ "$stamp" != "unknown" ] && ! _tui_is_version "$stamp"; then
+    if [ "$INSTALL_MODE" = "full" ] && [ "$stamp" != "unknown" ] && ! _tui_is_version "$stamp"; then
       printf "  ${YELLOW}!${RESET} TUI does not match the installed release stamp — run ${CYAN}osa update${RESET} to repair.\n" >&2
     fi
     exit 0
@@ -1269,10 +1354,18 @@ case "$OSA_VERB" in
     # off to the new one (see _update_launcher), the user's exact invocation is
     # replayed across the process boundary instead of being silently dropped.
     do_update ${1+"$@"} || exit $?
+    [ "$INSTALL_MODE" != "headless" ] || exit 0
     # fall through to launch on success
     ;;
   help)                 print_help; exit 0 ;;
 esac
+
+# Headless hosts must not warm a daemon just because an interactive command was used.
+if [ "$INSTALL_MODE" = "headless" ]; then
+  printf 'OSA is installed in headless mode. Use osa serve for the service.\n' >&2
+  printf 'To add the TUI, rerun scripts/install.sh with OSA_INSTALL_MODE=full.\n' >&2
+  exit 1
+fi
 
 # ── Default: warm the daemon (attach instantly if healthy), then TUI ──
 #
@@ -1318,6 +1411,8 @@ export OSA_URL="http://localhost:${PORT}"
 exec "$TUI_BIN" "$@"
 LAUNCHER_EOF
 chmod +x "$LAUNCHER"
+printf '%s\n' "$INSTALL_MODE" > "$OSA_HOME/install_mode.new"
+mv "$OSA_HOME/install_mode.new" "$OSA_HOME/install_mode"
 ok "Launcher installed"
 
 # ---------------------------------------------------------------------------
@@ -1330,7 +1425,7 @@ for dir in $PATH; do
 done
 IFS="$_IFS"
 
-if [ "$on_path" = "false" ]; then
+if [ "$on_path" = "false" ] && [ "$INSTALL_MODE" = "full" ]; then
   SHELL_NAME="$(basename "${SHELL:-/bin/sh}" 2>/dev/null || echo sh)"
   EXPORT_LINE="export PATH=\"${BIN_DIR}:\$PATH\""
   case "$SHELL_NAME" in
@@ -1354,6 +1449,8 @@ printf "\n${GREEN}${BOLD}  OSA ${VERSION} installed.${RESET}\n\n"
 if [ -n "${RELOAD_HINT:-}" ]; then
   printf "  Reload your shell, then run ${BOLD}osa${RESET}:\n"
   printf "    ${DIM}. %s${RESET}\n\n" "$RELOAD_HINT"
+elif [ "$INSTALL_MODE" = "headless" ]; then
+  printf '  Headless install: run %s serve. No shell profiles were changed.\n\n' "$LAUNCHER"
 else
   printf "  Run ${BOLD}osa${RESET} to start.\n\n"
 fi
