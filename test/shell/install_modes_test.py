@@ -16,6 +16,11 @@ import unittest
 
 INSTALLER = Path(__file__).resolve().parents[2] / "scripts/install.sh"
 
+# A port this suite owns. Deliberately NOT `install.sh`'s 9089 default: see the
+# OSA_PORT entry in `setUp`. Any value works as long as it is not a port a real
+# OSA daemon would be using.
+TEST_PORT = 19393
+
 
 class InstallModesTest(unittest.TestCase):
     def setUp(self):
@@ -32,10 +37,25 @@ class InstallModesTest(unittest.TestCase):
         self.env = {
             "PATH": f"{self.bin}:/usr/bin:/bin:/usr/sbin:/sbin",
             "HOME": str(self.home), "OSA_HOME": str(self.osa),
+            # NOT the default. `install.sh` resolves `PORT="${OSA_PORT:-9089}"`,
+            # and `daemon_pid/0` falls back to `lsof -ti :$PORT` when the sandbox
+            # has no pidfile — which it never does. Left unset, this suite
+            # therefore asks `lsof` who is listening on 9089 and finds the
+            # DEVELOPER'S OWN RUNNING DAEMON, which `stop_daemon` then kills with
+            # `kill -TERM -- -$pid`. Measured on 2026-09-11: running this file on
+            # a host with a live OSA daemon terminated that daemon mid-session.
+            "OSA_PORT": str(TEST_PORT),
             "SHELL": "/bin/bash", "LANG": "C.UTF-8",
             "FIXTURE_ROOT": str(self.root), "INSTALLER": str(INSTALLER),
         }
         self.script(self.bin / "uname", 'case "$1" in -s) echo Linux;; -m) echo x86_64;; esac')
+        # `lsof` reports NOTHING, which is the truth: the sandbox has no daemon.
+        # This is the second half of the isolation and the load-bearing one —
+        # a unique port only helps until something happens to listen on it,
+        # whereas a stubbed `lsof` makes `daemon_pid/0` resolve to empty no
+        # matter what is running on the host. Without it, `stop_daemon` can
+        # reach a process outside the sandbox.
+        self.script(self.bin / "lsof", "exit 1")
         # Full installs finish by attaching to a healthy fixture, never a real daemon.
         self.script(self.bin / "curl", r'''
 import json, os, pathlib, shutil, sys
@@ -227,6 +247,50 @@ if [ "${{1:-}}" = --version ]; then echo 'osagent-tui {version}'; fi
         self.call(["sh", str(INSTALLER)], expected=3, OSA_INSTALL_MODE="headless", OSA_VERSION="v1.0.195")
         self.assertFalse((self.osa / "install_mode").exists())
 
+
+    def test_suite_cannot_reach_a_daemon_outside_the_sandbox(self):
+        """A full install cycle must not kill a process the sandbox does not own.
+
+        MEASURED, 2026-09-11: this suite terminated a developer's live OSA daemon
+        on :9089. The chain was `OSA_HOME` pointed at a temp dir (so no pidfile)
+        -> `daemon_pid/0` fell back to `lsof -ti :9089` -> `lsof` was the REAL
+        one, not a stub -> it found the host's daemon -> `stop_daemon` ran
+        `kill -TERM -- -$pid`.
+
+        So this test puts a real listener on the port the sandbox is configured
+        to use and asserts it is STILL LISTENING after a complete install. It
+        fails if the port is left at the default with a live daemon there, and
+        it fails if `lsof` is ever un-stubbed — the two halves of the fix.
+        """
+        import socket
+
+        sentinel = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sentinel.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.addCleanup(sentinel.close)
+        sentinel.bind(("127.0.0.1", TEST_PORT))
+        sentinel.listen(1)
+
+        # The sandbox must be pointed somewhere other than install.sh's default.
+        self.assertIn("OSA_PORT", self.env,
+                      "the sandbox env must pin OSA_PORT; without it install.sh "
+                      "resolves PORT=9089 and can reach a host daemon")
+        self.assertNotEqual(str(self.env["OSA_PORT"]), "9089",
+                            "the sandbox must not use install.sh's default port")
+
+        self.install(OSA_INSTALL_MODE="headless")
+        self.assert_headless()
+
+        # Still listening: nothing in the cycle touched a process it does not own.
+        self.assertEqual(sentinel.getsockname()[1], TEST_PORT)
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.settimeout(2)
+        try:
+            probe.connect(("127.0.0.1", TEST_PORT))
+        except OSError as exc:
+            self.fail(f"the sandbox's install cycle killed a listener it did not "
+                      f"own on :{TEST_PORT} ({exc})")
+        finally:
+            probe.close()
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
