@@ -162,4 +162,53 @@ defmodule OptimalSystemAgent.Providers.RegistryTest do
       assert reason =~ "Unknown provider"
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # register_provider/2 against a module that has not been LOADED
+  # ---------------------------------------------------------------------------
+
+  # `function_exported?/3` answers false for a module that has not been loaded,
+  # and it does not load one — so validating a candidate with it alone REJECTS a
+  # correct module that simply has not been touched yet. Registering a plugin at
+  # boot is exactly when that happens, and the rejection it produced ("does not
+  # implement Providers.Behaviour") named the wrong cause.
+  #
+  # Reported against `ComputerUse.Server` on 2026-09-10 as "snapshot is not
+  # supported by ...Adapters.MacOS" for an action `macos.ex` implements; the same
+  # bare check sat on this call path too.
+  describe "register_provider/2 with an unloaded module" do
+    alias OptimalSystemAgent.Test.ColdProvider
+
+    setup do
+      # There is no `unregister_provider/1`, so restore the registry's own state
+      # rather than leaving a fixture provider behind for whichever tests run
+      # after this one.
+      on_exit(fn ->
+        :sys.replace_state(Registry, fn state ->
+          %{state | extra_providers: Map.delete(state.extra_providers, :cold_provider)}
+        end)
+      end)
+    end
+
+    test "a provider whose module has not been loaded yet still registers" do
+      :code.purge(ColdProvider)
+      :code.delete(ColdProvider)
+
+      # Preconditions. If either stops holding this test stops testing
+      # anything - it would pass against the unfixed code too.
+      refute :code.is_loaded(ColdProvider),
+             "ColdProvider is still loaded, so this cannot exercise the unloaded path"
+
+      refute function_exported?(ColdProvider, :chat, 2),
+             "the bare check must read false here, or there is no bug left to regress"
+
+      assert :ok = Registry.register_provider(:cold_provider, ColdProvider)
+    end
+
+    test "a module that genuinely does not implement the behaviour is still rejected" do
+      # The fix must not turn a real absence into a false accept.
+      assert {:error, message} = Registry.register_provider(:not_a_provider, Enum)
+      assert message =~ "does not implement"
+    end
+  end
 end

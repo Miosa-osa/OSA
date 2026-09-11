@@ -184,8 +184,15 @@ defmodule OptimalSystemAgent.Tools.Registry do
         # on every request, so a tool that fails to defer is paid for by every
         # turn.
         (mod = Map.get(builtin_tools, tool.name)) != nil ->
-          (function_exported?(mod, :deferred?, 0) and mod.deferred?()) or
-            (function_exported?(mod, :should_defer?, 0) and mod.should_defer?())
+          # `Code.ensure_loaded?/1` first, for the reason the comment above
+          # already gives in spirit: a check that reads false for the wrong
+          # reason is how deferral silently stops happening. An unloaded module
+          # answers false to `function_exported?/3` without being asked, so a
+          # tool that means to defer was re-sent in the base prompt on every
+          # turn - the exact cost this branch exists to avoid.
+          (Code.ensure_loaded?(mod) and function_exported?(mod, :deferred?, 0) and mod.deferred?()) or
+            (Code.ensure_loaded?(mod) and function_exported?(mod, :should_defer?, 0) and
+               mod.should_defer?())
 
         # MCP tool marked should_defer? — CRITICAL: keep these out of the base
         # prompt so MCP tools don't flood the system prompt. They stay
@@ -1245,7 +1252,12 @@ defmodule OptimalSystemAgent.Tools.Registry do
   end
 
   defp tool_available?(mod) do
-    not function_exported?(mod, :available?, 0) or mod.available?()
+    # "No `available?/0` means available" is the intent; "not loaded yet" is
+    # not the same answer, and `function_exported?/3` cannot tell them apart.
+    # Load the module first so the guard asks about the tool rather than about
+    # the loader's cache.
+    not (Code.ensure_loaded?(mod) and function_exported?(mod, :available?, 0)) or
+      mod.available?()
   end
 
   # Historical note: the registry used to compile a goldrush `:osa_tool_dispatcher`
