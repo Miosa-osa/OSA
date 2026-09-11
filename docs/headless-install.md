@@ -38,6 +38,22 @@ Headless `osa update` updates the backend and launcher, preserves the mode, and 
 The updater refuses a target launcher without headless support, including historical release launchers, before an upgrade stops the service or swaps its runtime.
 The first release containing this installer change must be published before the normal tag-based update path supports headless installations.
 
+## Release order for the enrollment wrapper
+
+Gate the complete compute rollout on a compatible published OSA release.
+Fresh installs using a merged main-branch installer can already run the existing v1.0.195 backend, but the normal updater will reject the old v1.0.195 tagged launcher.
+Merging the installer alone therefore fixes initial installation without completing the supported update path.
+
+1. Review and merge OSA PR #271, containing the headless installer and launcher.
+2. Have the release owner publish a new OSA version whose tag contains this change, with the normal runtime assets and checksum sidecars, and make it the latest release.
+3. Verify fresh headless install, persisted reinstall, same-version update, and an upgrade using the public installer and tagged launcher, with no `OSA_LAUNCHER_RAW_BASE` override.
+   Check a minimal Linux host without ALSA, preserve an existing full install, and repeat environment-only runtime startup and the local handshake gate.
+4. Review and merge the paired enrollment-wrapper change after its mode-selection and fail-closed checks pass against that published release.
+5. Roll out compute only after those gates pass, then verify authenticated enrollment and supported capabilities through the real product flow.
+
+Publishing and rollout are separate release-owner actions; running the candidate tests or merging a PR does neither.
+Do not bypass the old-launcher rejection by shipping the local test override or silently falling back to full installation.
+
 ## Service environment
 
 Use the same service account, `HOME`, and `OSA_HOME` for login and runtime startup.
