@@ -146,6 +146,47 @@ defmodule OptimalSystemAgent.Providers.RetryClassifierTest do
     end
   end
 
+  describe "classify/4 — empty-response retries on its OWN (tight) budget" do
+    # The category covers two shapes the reason string cannot tell apart: a
+    # gateway that dropped the connection (retry generously — the next attempt
+    # usually answers) and a provider that ANSWERED with `finish_reason` set
+    # and zero completion tokens (it decides the same way every time). Measured
+    # 2026-09-10 against Surplus: five of the 27 featured models did the latter
+    # deterministically for OSA's own system prompt, and a full budget spent
+    # ~4.5 minutes of a turn that could never succeed. The cap below bounds the
+    # second shape to seconds without taking the first shape's retries away.
+    @empty_cap RC.empty_response_retry_threshold()
+
+    test "the cap is tighter than the generic budget (or it would be no cap at all)" do
+      assert @empty_cap < @max
+    end
+
+    test "a retry is still granted below the cap" do
+      err = "Empty response from provider (HTTP 200 with no content, tool calls, or reasoning)"
+      assert {:retry_with_client_rebuild, _} = RC.classify(err, 0, @max)
+      assert {:retry, _} = RC.classify(err, @empty_cap - 2, @max)
+    end
+
+    test "the cap — not the generic budget — ends the retries" do
+      err = "Empty response from provider (HTTP 200 with no content, tool calls, or reasoning)"
+      # `@max` attempts remain available; the empty-response cap still stops it.
+      assert {:fatal, ^err} = RC.classify(err, @empty_cap - 1, @max)
+    end
+
+    test "a caller-supplied threshold overrides it (same knob shape as 429)" do
+      err = "Empty response from provider (HTTP 200 with no content, tool calls, or reasoning)"
+      assert {:retry, _} = RC.classify(err, 1, @max, empty_response_threshold: 10)
+      assert {:fatal, ^err} = RC.classify(err, 1, @max, empty_response_threshold: 2)
+    end
+
+    test "the tightening is scoped to empty-response, not to other transient errors" do
+      # A plain transport error keeps the full budget — the cap must not leak.
+      err = "econnrefused"
+      assert {:retry, _} = RC.classify(err, @empty_cap - 1, @max)
+      assert {:retry, _} = RC.classify(err, @max - 2, @max)
+    end
+  end
+
   describe "classify/4 — partial-tool-call is retryable (cut-off arguments guard)" do
     @partial "Provider returned an incomplete tool call (arguments cut off mid-stream)"
 

@@ -966,6 +966,22 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     # (`mark_output_observed/0`) is not tripped and a retry duplicates nothing.
     if empty_result?(result) do
       Logger.warning("OpenAI-compat stream closed with an empty response — retrying")
+
+      # Name the route and what the stream actually carried. Without them this
+      # warning reads identically whether the gateway dropped the connection or
+      # the model answered with nothing, and an incident reported as OSA hanging
+      # and then reporting an empty provider response arrives with no way to
+      # tell the two apart - which is exactly how it was reported on 2026-09-10.
+      # Both facts are in hand here; nothing below is inferred.
+      Logger.warning(
+        "compat route diagnostics:" <>
+          " model=" <>
+          inspect(model) <>
+          " finish_reason=" <>
+          inspect(Map.get(acc, :finish_reason)) <>
+          " usage=" <> inspect(Map.get(acc, :usage, %{}))
+      )
+
       {:error, @empty_response_reason}
     else
       callback.({:done, result})

@@ -59,6 +59,29 @@ defmodule OptimalSystemAgent.Providers.RetryClassifier do
   # budget just to be rate-limited again is pointless (grok RATE_LIMIT_RETRY_THRESHOLD).
   @rate_limit_retry_threshold 2
 
+  # Cap consecutive EMPTY-response retries well below the generic transport
+  # budget.
+  #
+  # The generic budget is right for a transport fault: an empty SSE stream from
+  # a gateway that dropped the connection usually becomes a real answer on the
+  # next try, so retrying generously costs one round-trip and saves the turn.
+  #
+  # It is wrong for the other shape this category covers, and the two are
+  # indistinguishable from the reason string alone: a provider that ANSWERS —
+  # a 200 whose stream closes with `finish_reason` set and `completion_tokens`
+  # 0 — has decided to emit nothing, and re-sending the identical request
+  # decides the same way again. Measured on 2026-09-10 against Surplus: five of
+  # the 27 featured models returned `finish_reason: "stop"` with 0 content, 0
+  # reasoning and 0 tool-call chunks for OSA's own system prompt, every trial,
+  # while the same models answered normally on a short prompt. A full budget
+  # there is 11 identical requests and roughly 4.5 minutes of a turn that
+  # cannot succeed — long enough that the user reads it as a hung app.
+  #
+  # Three attempts keeps the single-retry insurance that makes the transient
+  # shape safe (a genuine one-off still gets its second chance, and its third)
+  # while bounding the futile shape to seconds.
+  @empty_response_retry_threshold 3
+
   # Exponential backoff: base 2s, cap 30s, ±20% jitter (grok retry_backoff_with_jitter).
   @backoff_base_ms 2_000
   @backoff_cap_ms 30_000
@@ -107,9 +130,12 @@ defmodule OptimalSystemAgent.Providers.RetryClassifier do
   # content, tool calls, or reasoning is, for the flaky OpenAI-compatible
   # gateways OSA talks to (504-with-empty-body, empty-200, empty SSE stream), a
   # transient transport failure — re-requesting usually yields the real answer.
-  # Retrying it (bounded by the same budget/backoff as any other transient
-  # error) keeps a stray empty from ever reaching the agent loop as a counted
-  # "empty generation", which is what trips the ReasoningOnly doom guard.
+  # Retrying it keeps a stray empty from ever reaching the agent loop as a
+  # counted "empty generation", which is what trips the ReasoningOnly doom
+  # guard. It is NOT retried on the generic budget, though: `classify/4` gives
+  # it `@empty_response_retry_threshold` attempts instead, because a provider
+  # that closes a stream with `finish_reason` set and zero completion tokens
+  # has answered rather than failed, and answers the same way again.
   #
   # `:partial_tool_call` is here for the same reason: a stream cut off mid tool-
   # call arguments (non-blank JSON that won't decode) is a transient truncation,
@@ -130,6 +156,10 @@ defmodule OptimalSystemAgent.Providers.RetryClassifier do
   @doc "The consecutive-429 retry cap."
   @spec rate_limit_retry_threshold() :: pos_integer()
   def rate_limit_retry_threshold, do: @rate_limit_retry_threshold
+
+  @doc "The consecutive-empty-response retry cap."
+  @spec empty_response_retry_threshold() :: pos_integer()
+  def empty_response_retry_threshold, do: @empty_response_retry_threshold
 
   @doc """
   True when `reason` is a context-window-overflow error — deterministically
@@ -175,6 +205,10 @@ defmodule OptimalSystemAgent.Providers.RetryClassifier do
   @spec classify(term(), non_neg_integer(), non_neg_integer(), keyword()) :: decision()
   def classify(reason, retry_count, max_retries, opts \\ []) do
     threshold = Keyword.get(opts, :rate_limit_threshold, @rate_limit_retry_threshold)
+
+    empty_threshold =
+      Keyword.get(opts, :empty_response_threshold, @empty_response_retry_threshold)
+
     fail_fast_categories = Keyword.get(opts, :fail_fast_categories, [])
     category = category_of(reason)
 
@@ -211,6 +245,15 @@ defmodule OptimalSystemAgent.Providers.RetryClassifier do
       category == :rate_limit or rate_limited?(reason) ->
         rate_limit_decision(reason, retry_count, max_retries, threshold)
 
+      # 4b. Empty response: retryable, but on a much tighter budget than the
+      #     generic transport case below — see @empty_response_retry_threshold
+      #     for why the same category needs two different budgets. Checked
+      #     BEFORE case 5 so the classifier's own cap owns the termination and
+      #     the outer `attempt < max_attempts` bound never gets to run a full
+      #     budget on a provider that is answering nothing.
+      category == :empty_response ->
+        empty_response_decision(reason, retry_count, max_retries, empty_threshold)
+
       # 5. Generic retryable transport / 5xx (retried even if a provider SDK
       #    would call the 5xx non-retryable). First retry rebuilds the client
       #    on HTTP/1.1 to escape a poisoned HTTP/2 pool; later retries back off.
@@ -232,6 +275,35 @@ defmodule OptimalSystemAgent.Providers.RetryClassifier do
     else
       backoff = retry_after_ms(reason) || backoff_with_jitter(next_attempt)
       {:retry_with_backoff, backoff, true}
+    end
+  end
+
+  # `retryable_decision/3`'s retry shapes — the first retry still rebuilds the
+  # client on HTTP/1.1, because a poisoned HTTP/2 pool is one of the ways a
+  # stream closes with nothing in it and that rebuild is what escapes it — but
+  # with `@empty_response_retry_threshold` as the cap instead of the full
+  # budget. There is no `Retry-After` to honour here (a gateway does not send
+  # one with an empty body), so the backoff is always the jittered schedule.
+  #
+  # "Fatal" is the right verdict when the cap is reached even though a later
+  # attempt might in principle succeed: it is not a claim that the error is
+  # permanent, it is the hand-off. Returning it lets the caller's fallback
+  # chain decide — exactly as the 429 cap does — instead of spending the rest
+  # of the budget on a provider that has stopped answering.
+  defp empty_response_decision(reason, retry_count, max_retries, threshold) do
+    next_attempt = retry_count + 1
+    effective_cap = min(max_retries, threshold)
+
+    if next_attempt >= effective_cap do
+      {:fatal, reason}
+    else
+      backoff = backoff_with_jitter(next_attempt)
+
+      if next_attempt == 1 do
+        {:retry_with_client_rebuild, backoff}
+      else
+        {:retry, backoff}
+      end
     end
   end
 
