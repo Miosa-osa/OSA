@@ -341,7 +341,12 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       pricing: {0.30, 1.20},
       recommended: false,
       requires_subscription: nil,
-      note: "1M ctx, 763B MoE - vision + thinking, DeepSeek's cheap 1M agentic tier"
+      # Says what it IS, not that it is cheap: at {0.30, 1.20} this tag costs
+      # more than twice its own sibling `deepseek-v4-flash:cloud` and more per
+      # output token than `deepseek-v4-pro:cloud`. The earlier draft of this
+      # note called it DeepSeek's "cheap 1M tier", which the table itself
+      # contradicts two rows down.
+      note: "1M ctx, 763B MoE - vision + thinking, newer sibling of V4 Flash"
     },
     %{
       id: "deepseek-v4-flash:cloud",
