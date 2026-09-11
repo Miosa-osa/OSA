@@ -41,6 +41,7 @@ the Elixir backend. It tests LAYOUT, not agent behaviour.
 
 from __future__ import annotations
 
+import codecs
 import fcntl
 import os
 import pty
@@ -145,6 +146,24 @@ class PtySession:
         # so counting only the visible screen would miss real strandings.
         self.screen = pyte.HistoryScreen(cols, rows, history=history)
         self.stream = pyte.Stream(self.screen)
+        # INCREMENTAL, not per-chunk. `pump` reads raw bytes with `os.read`, and
+        # a read boundary can land in the middle of a multi-byte glyph — every
+        # box-drawing character the chrome is made of is 3 bytes (`─` is
+        # E2 94 80). Decoding each chunk on its own with `errors="replace"`
+        # turns a glyph split that way into U+FFFD replacement characters, and
+        # the corruption is invisible in the byte stream (`raw` stays correct)
+        # while being fatal to the anchored band detectors: a composer rule row
+        # that is no longer ALL dashes stops matching `^─{20,}$`, so
+        # `assert_single_live_region` reports `composer_top: 0` for a screen
+        # that is in fact perfect.
+        #
+        # That is a false failure whose frequency tracks how the OS happened to
+        # buffer reads, so it looks like a flaky product bug and burns a
+        # release: it failed `test_a_fresh_boot_at_default_size_shows_exactly_
+        # one_chrome` on v1.0.194 and two unrelated tests on v1.0.191.
+        # An incremental decoder holds the partial sequence until the rest
+        # arrives, so the glyph survives however the reads are split.
+        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         # Every byte the child has written, appended by `pump`. The rendered
         # screen is the primary evidence; this is for the defects the renderer
         # cannot show (see `emitted_since`).
@@ -242,6 +261,19 @@ class PtySession:
         leave = self.raw.rfind(b"\x1b[?1049l")
         return enter > leave
 
+    def feed_bytes(self, chunk: bytes) -> None:
+        """Render one chunk of child output, exactly as `pump` does.
+
+        Split-safe by construction: `self.decoder` is incremental, so a chunk
+        that ends in the middle of a multi-byte glyph holds those bytes until
+        the rest of the glyph arrives instead of degrading them to U+FFFD. See
+        the decoder's comment in `__init__` for the false failures a per-chunk
+        decode caused, and
+        `test_a_glyph_split_across_two_reads_still_renders` for the regression.
+        """
+        self.raw.extend(chunk)
+        self.stream.feed(self.decoder.decode(chunk))
+
     def pump(self, duration: float) -> None:
         """Read and render output for `duration` seconds, answering DSR."""
         assert self.fd is not None
@@ -263,8 +295,7 @@ class PtySession:
             # live region into scrollback on VTE leaves this screen looking
             # perfectly correct. Asserting on what OSA *emitted* sidesteps the
             # emulator's fidelity entirely. See `emitted_since`.
-            self.raw.extend(chunk)
-            self.stream.feed(chunk.decode("utf-8", "replace"))
+            self.feed_bytes(chunk)
             # Answer every cursor query from the EMULATOR's cursor, which is
             # what a real terminal does and what the in-process backend cannot
             # get wrong. 1-based, row then column.
