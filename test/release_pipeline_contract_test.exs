@@ -205,6 +205,44 @@ defmodule OptimalSystemAgent.ReleasePipelineContractTest do
       end
     end
 
+    test "every required asset matches the sidecar-generation glob", %{
+      yaml: yaml,
+      required: required
+    } do
+      # The sidecars are produced by a globbed loop in the publish job:
+      #
+      #     for f in *.tar.gz *.zip osagent-tui-*; do ... sha256sum "$f" > "$f.sha256"; done
+      #
+      # An asset whose extension matches NO glob silently gets no sidecar, so
+      # the gate then fails on a missing `.sha256` and the release never
+      # publishes — for an asset that was built correctly.
+      globs =
+        case Regex.run(~r/for f in ([^;\n]+); do/, yaml) do
+          [_, g] -> g |> String.split() |> Enum.map(&String.trim/1)
+          _ -> []
+        end
+
+      assert globs != [], "the sidecar-generation loop is gone from release.yml"
+
+      # Match a shell glob against a filename: `*` spans any run of characters.
+      matches? = fn glob, name ->
+        Regex.match?(
+          Regex.compile!("^" <> (glob |> Regex.escape() |> String.replace("\\*", ".*")) <> "$"),
+          name
+        )
+      end
+
+      for asset <- required do
+        name = asset |> String.trim_trailing("\\") |> String.trim()
+
+        assert Enum.any?(globs, &matches?.(&1, name)),
+               "the publish gate requires `#{name}`, but no sidecar-generation glob " <>
+                 "matches it (globs: #{inspect(globs)}). The loop would skip it, the " <>
+                 "gate would then fail on a missing `#{name}.sha256`, and the release " <>
+                 "would never publish. Add a glob for this extension."
+      end
+    end
+
     test "the gate requires a .sha256 sidecar for every asset it names", %{
       yaml: yaml
     } do

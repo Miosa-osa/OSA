@@ -1,0 +1,101 @@
+name: Windows desktop helper build and package
+
+# The Windows counterpart to `linux-wayland-helper.yml`.
+#
+# ## Why this job exists
+#
+# `release.yml` builds the Windows desktop helper, validates its PE
+# architecture, hashes it into `priv/helpers`, runs the enrollment suite, and
+# assembles `osa-opencomputers-windows.zip` — and the publish gate now REQUIRES
+# that zip, so a failure anywhere in that chain blocks the ENTIRE release,
+# Linux and macOS included.
+#
+# Before this job, none of it ran anywhere except `release.yml` itself — i.e.
+# only after a tag existed and the version was already public. That is exactly
+# the v1.0.191 failure mode this repository has already paid for once: a lane
+# whose first execution is the release it was supposed to protect.
+#
+# The Linux and macOS native helpers both already have a PR-time job
+# (`linux-wayland-helper.yml`, `native-capture.yml`). Windows was the gap.
+#
+# This job runs the same steps the release job runs, on the same runner, so a
+# break fails on the pull request instead of on the tag.
+
+on:
+  pull_request:
+    paths:
+      - 'native/windows/ScreenShare/**'
+      - 'scripts/windows/**'
+      - 'scripts/install.ps1'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/windows-desktop-helper.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: windows-desktop-helper-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-helper:
+    # Same runner label as `release.yml`'s `build-windows-x64`, so this job's
+    # green is evidence about the release lane rather than about a different
+    # image.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build and test the desktop helper
+        shell: pwsh
+        run: |
+          # Mirrors release.yml exactly: same runtime, same bundle directory.
+          # build.ps1 runs the protocol tests first, then validates the
+          # published PE architecture before it will stage anything.
+          & native/windows/ScreenShare/build.ps1 -Runtime win-x64 -BundleDirectory priv/helpers
+
+      - name: Enrollment suite
+        shell: pwsh
+        run: |
+          & scripts/windows/tests/Enrollment.Tests.ps1
+
+      - name: Assemble the enrollment bundle and check its contents
+        shell: pwsh
+        run: |
+          # A SYNTHETIC tag: Build-EnrollmentBundle.ps1 validates the tag shape,
+          # and CI must never present itself as a real release.
+          & scripts/windows/Build-EnrollmentBundle.ps1 -ReleaseTag 'v0.0.0-ci' -OutputDirectory dist
+
+          $bundle = Join-Path 'dist' 'osa-opencomputers-windows.zip'
+          if (-not (Test-Path -LiteralPath $bundle)) { throw "Missing $bundle" }
+          if ((Get-Item -LiteralPath $bundle).Length -eq 0) { throw "$bundle is empty" }
+
+          # The publish gate requires this file AND a .sha256 sidecar beside it.
+          # The sidecar is generated in the publish job, so only the asset
+          # itself can be checked here.
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $bundle))
+          try {
+            $names = @($zip.Entries | ForEach-Object { $_.FullName })
+            # The runtime installer reads RELEASE_TAG to pin the version it
+            # downloads, and install-runtime.ps1 is the installer it delegates
+            # to. A bundle missing either is unusable for enrollment, which is
+            # the whole reason the release requires it.
+            foreach ($required in @('RELEASE_TAG', 'install-runtime.ps1')) {
+              if ($names -notcontains $required) { throw "bundle is missing $required" }
+            }
+          } finally { $zip.Dispose() }
+
+          Write-Host "Enrollment bundle OK: $((Get-Item -LiteralPath $bundle).Length) bytes"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-desktop-helper-build-only
+          path: |
+            priv/helpers/osa-screen-capture-windows.exe
+            dist/osa-opencomputers-windows.zip
+          if-no-files-found: error
