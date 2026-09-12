@@ -4,7 +4,7 @@ defmodule OptimalSystemAgent.OpenComputers.Session.Backoff do
 
     * Initial delay 1 s
     * Doubles each attempt, capped at 60 s
-    * ±200 ms uniform jitter to decorrelate reconnect thundering-herds
+    * Up to 200 ms positive jitter, bounded by the 60 s maximum
   """
 
   @initial_ms 1_000
@@ -23,5 +23,5 @@ defmodule OptimalSystemAgent.OpenComputers.Session.Backoff do
   end
 
   @spec with_jitter(pos_integer()) :: pos_integer()
-  def with_jitter(base_ms), do: base_ms + :rand.uniform(@jitter_ms)
+  def with_jitter(base_ms), do: min(base_ms + :rand.uniform(@jitter_ms), @max_ms)
 end

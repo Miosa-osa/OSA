@@ -75,6 +75,18 @@ defmodule OptimalSystemAgent.CLI.OpenComputersTest do
   end
 
   describe "connection_verdict/3 — status summariser" do
+    test "missing-key retry polling still gives the login instruction" do
+      {verdict, hint} =
+        OpenComputers.connection_verdict(true, false, %{
+          phase: :disconnected,
+          failure: nil,
+          retry_in_ms: 60_000
+        })
+
+      assert verdict =~ "no host key"
+      assert hint =~ "login"
+    end
+
     test "no host key -> not connected, points at login" do
       {verdict, hint} = OpenComputers.connection_verdict(true, false, "not running")
       assert verdict =~ "NOT connected"
