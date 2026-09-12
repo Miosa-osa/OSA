@@ -15,6 +15,7 @@ defmodule OptimalSystemAgent.OpenComputers.Session.FrameRouter do
           | {:send, term()}
           | {:start_heartbeat, pos_integer()}
           | :reconnect
+          | {:close, term(), term()}
 
   @spec handle(term(), map()) :: {[action()], map()}
   def handle({:hello_ok, info}, state) do
@@ -26,8 +27,7 @@ defmodule OptimalSystemAgent.OpenComputers.Session.FrameRouter do
   def handle({:ping, seq}, state), do: {[{:send, {:pong, seq}}], state}
 
   def handle({:close, code, reason}, state) do
-    Logger.info("[OpenComputers.Session] server close code=#{code} reason=#{reason}")
-    {[:reconnect], state}
+    {[{:close, code, reason}], state}
   end
 
   def handle({:job, job}, state) do

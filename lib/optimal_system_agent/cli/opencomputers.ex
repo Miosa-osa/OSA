@@ -37,6 +37,7 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
 
   defp cmd_status do
     cfg = read_toml()
+    session = session_status()
     config_enabled = Application.get_env(:optimal_system_agent, :open_computers_enabled, false)
     env_enabled = System.get_env(@env_var) == "true"
     marker_enabled = File.exists?(marker_path())
@@ -61,11 +62,12 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
     IO.puts("  Heartbeat ms: #{cfg[:heartbeat_ms] || 30_000}")
     IO.puts("")
     IO.puts("  Supervisor:   #{supervisor_status()}")
-    IO.puts("  Session:      #{session_status()}")
+    IO.puts("  Session:      #{session_label(session)}")
+    print_session_details(session)
     IO.puts("")
 
     has_key = present?(cfg[:host_key])
-    {verdict, hint} = connection_verdict(enabled, has_key, session_status())
+    {verdict, hint} = connection_verdict(enabled, has_key, session)
     IO.puts("  Status: #{verdict}")
     if hint, do: IO.puts("  Next:   #{hint}")
     IO.puts("")
@@ -76,7 +78,25 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
   # whether a host_key is present, and the human session-status string, return
   # {verdict, next_step_hint_or_nil}. Extracted so it can be tested without
   # touching live processes or the network.
-  @spec connection_verdict(boolean(), boolean(), String.t()) :: {String.t(), String.t() | nil}
+  @spec connection_verdict(boolean(), boolean(), String.t() | map()) ::
+          {String.t(), String.t() | nil}
+  def connection_verdict(_enabled, _key, %{phase: :rejected, failure: failure}) do
+    {"REJECTED - #{failure.reason}; automatic reconnect paused", failure.action}
+  end
+
+  def connection_verdict(_enabled, _key, %{phase: :active}) do
+    {"CONNECTED - this machine is online in MIOSA", nil}
+  end
+
+  def connection_verdict(_enabled, _key, %{retry_in_ms: delay, failure: failure})
+      when is_integer(delay) and not is_nil(failure) do
+    {"NOT connected - retrying in #{delay}ms", "transient failure; automatic reconnect scheduled"}
+  end
+
+  def connection_verdict(enabled, key, %{} = session) do
+    connection_verdict(enabled, key, session_label(session))
+  end
+
   def connection_verdict(_enabled, false, _session) do
     {"NOT connected — no host key configured",
      "run `osa opencomputers login` (generate a key at #{@dashboard_url})"}
@@ -127,8 +147,7 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
     case Process.whereis(OptimalSystemAgent.OpenComputers.Session) do
       pid when is_pid(pid) ->
         try do
-          %{phase: phase} = :sys.get_state(pid, 2_000)
-          if phase == :active, do: "connected (active)", else: "running (phase=#{phase})"
+          OptimalSystemAgent.OpenComputers.Session.status()
         rescue
           _ -> "running"
         catch
@@ -139,6 +158,24 @@ defmodule OptimalSystemAgent.CLI.OpenComputers do
         "not running"
     end
   end
+
+  defp session_label(%{phase: :active}), do: "connected (active)"
+  defp session_label(%{phase: phase}), do: "running (phase=#{phase})"
+  defp session_label(status), do: status
+
+  defp print_session_details(%{failure: failure, retry_in_ms: delay}) do
+    if failure do
+      IO.puts(
+        "  Failure:      #{OptimalSystemAgent.OpenComputers.Session.Failure.describe(failure)}"
+      )
+    end
+
+    IO.puts(
+      "  Retry:        #{if is_integer(delay), do: "in #{delay}ms", else: "none scheduled"}"
+    )
+  end
+
+  defp print_session_details(_), do: :ok
 
   # ── login ────────────────────────────────────────────────────────
 

@@ -35,9 +35,9 @@ defmodule OptimalSystemAgent.OpenComputers.Session.FrameRouterTest do
   end
 
   describe "handle/2 — close" do
-    test "returns :reconnect action" do
+    test "preserves close details for Session's retry policy" do
       {actions, _state} = FrameRouter.handle({:close, 1000, "normal"}, @initial_state)
-      assert :reconnect in actions
+      assert {:close, 1000, "normal"} in actions
     end
   end
 

@@ -50,6 +50,10 @@ defmodule OptimalSystemAgent.OpenComputers.Session.BackoffTest do
   end
 
   describe "with_jitter/1" do
+    test "never exceeds the maximum reconnect delay" do
+      assert Backoff.with_jitter(Backoff.max()) <= Backoff.max()
+    end
+
     test "returns a value >= base" do
       base = 5_000
       result = Backoff.with_jitter(base)
