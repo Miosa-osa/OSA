@@ -66,6 +66,30 @@ defmodule OptimalSystemAgent.ReleasePipelineContractTest do
     |> Enum.filter(&String.contains?(&1, "apt-get install"))
   end
 
+  # The producer surface of the workflow: its own text, plus the text of every
+  # script it invokes. Asset names are often created INSIDE a helper (the
+  # Windows enrollment bundle names its output in
+  # `scripts/windows/Build-EnrollmentBundle.ps1`), so searching the workflow
+  # alone would report a producer that exists as missing.
+  defp producer_sources(yaml) do
+    # The gate's own list must NOT count as a producer, or every name in it
+    # trivially "produces itself" and the assertion can never fail. This is not
+    # hypothetical: the first version of this test passed with a deliberately
+    # bogus asset added to the gate, because the search matched the gate line.
+    yaml = String.replace(yaml, ~r/for f in \\.*?\n\s*do\b/s, "")
+
+    scripts =
+      yaml
+      |> String.split("\n")
+      |> Enum.flat_map(&Regex.scan(~r{[A-Za-z0-9_./-]+\.(?:sh|ps1|psm1)}, &1))
+      |> List.flatten()
+      |> Enum.uniq()
+      |> Enum.filter(&File.exists?/1)
+      |> Enum.map(&File.read!/1)
+
+    [yaml | scripts]
+  end
+
   describe "the GStreamer dev install survives the runner image" do
     for workflow <- [@helper_yml, @release_yml] do
       test "#{workflow} installs libunwind-dev before the GStreamer dev packages" do
@@ -162,36 +186,22 @@ defmodule OptimalSystemAgent.ReleasePipelineContractTest do
       yaml: yaml,
       required: required
     } do
-      # An asset in the gate that no step creates is an unconditional release
+      # An asset in the gate that nothing creates is an unconditional release
       # failure: the gate can never be satisfied, so the release never
-      # publishes. Assert the FILENAME appears in a build/produce step, not
-      # merely in the gate's own list.
+      # publishes. This walks the workflow's producer surface — inline commands
+      # AND the scripts those commands invoke — so a name produced inside a
+      # helper script still counts.
+      producers = producer_sources(yaml)
+
       for asset <- required do
-        # Strip the trailing backslash continuation, if any.
         name = asset |> String.trim_trailing("\\") |> String.trim()
 
-        # Producers: copy/mv/Compress-Archive/Get-ChildItem lines that name the
-        # file, plus the per-platform upload artifact blocks.
-        produced? =
-          yaml
-          |> String.split("\n")
-          |> Enum.any?(fn line ->
-            String.contains?(line, name) and
-              not String.contains?(line, "for f in") and
-              not String.contains?(line, "release-assets/") and
-              (String.contains?(line, "cp ") or String.contains?(line, "Copy-Item") or
-                 String.contains?(line, "Compress-Archive") or
-                 String.contains?(line, "Get-ChildItem") or
-                 String.contains?(line, "tar -czf") or
-                 String.contains?(line, "Build-EnrollmentBundle") or
-                 String.contains?(line, "mv "))
-          end)
-
-        assert produced?,
-               "the publish gate requires `#{name}`, but no step in release.yml " <>
-                 "produces a file by that name. The gate can never be satisfied, so " <>
-                 "every release would fail with \"Refusing to publish ... missing " <>
-                 "release assets\"."
+        assert Enum.any?(producers, &String.contains?(&1, name)),
+               "the publish gate requires `#{name}`, but nothing in release.yml or the " <>
+                 "scripts it invokes produces a file by that name. The gate can never " <>
+                 "be satisfied, so every release would fail with \"Refusing to publish " <>
+                 "... missing release assets\".\n\n" <>
+                 "Searched: release.yml plus #{length(producers) - 1} script(s) it invokes."
       end
     end
 
@@ -234,8 +244,10 @@ defmodule OptimalSystemAgent.ReleasePipelineContractTest do
       # the Windows job throws and the gate refuses to publish.
       bundle = read!("scripts/windows/Build-EnrollmentBundle.ps1")
 
-      for input <- ~w(Install-OpenComputer.ps1 Run-OpenComputer.ps1 OpenComputerHost.psm1 WindowsHostPlatform.psm1) do
+      for input <-
+            ~w(Install-OpenComputer.ps1 Run-OpenComputer.ps1 OpenComputerHost.psm1 WindowsHostPlatform.psm1) do
         assert bundle =~ input, "the enrollment bundle no longer copies #{input}"
+
         assert File.exists?("scripts/windows/#{input}"),
                "scripts/windows/#{input} is missing but the bundle copies it"
       end

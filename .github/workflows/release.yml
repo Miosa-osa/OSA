@@ -77,6 +77,12 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: "1.98.0"
         run: |
+          # See linux-wayland-helper.yml for the full root cause: the runner's
+          # preinstalled `libunwind-14-dev` declares Breaks/Replaces on
+          # `libunwind-dev`, and apt will not remove an installed package as a
+          # side effect of resolving a dependency. Naming `libunwind-dev`
+          # explicitly authorises the replacement.
+          sudo apt-get install -y -qq --no-install-recommends libunwind-dev
           sudo apt-get install -y -qq --no-install-recommends libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-pipewire
           rustup toolchain install 1.98.0 --profile minimal
           bash native/linux/ScreenShare/build.sh

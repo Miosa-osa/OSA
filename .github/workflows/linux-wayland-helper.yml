@@ -31,6 +31,29 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update -qq
+          # `libunwind-dev` EXPLICITLY, and in its own transaction, BEFORE the
+          # GStreamer dev packages.
+          #
+          # MEASURED on ubuntu-22.04 (diagnostic run 34670653303): the runner
+          # image ships `libunwind-14-dev` (LLVM 14's versioned unwinder dev
+          # package), which declares `Replaces: libunwind-dev` and
+          # `Breaks: libunwind-dev`. Installing `libunwind-dev` therefore
+          # requires REMOVING `libunwind-14-dev` (and the libc++-dev /
+          # libc++-14-dev that depend on it). apt will not remove an installed
+          # package as a side effect of resolving a dependency inside a combined
+          # transaction, so asking for the dev packages alone dead-ends:
+          #
+          #     libgstreamer1.0-dev : Depends: libunwind-dev
+          #     E: Unable to correct problems, you have held broken packages.
+          #
+          # Naming `libunwind-dev` as an explicit target authorises the
+          # replacement, after which the whole chain installs and pkg-config
+          # reports gstreamer-1.0 1.20.3 / gstreamer-app-1.0 1.20.1.
+          #
+          # This is a RUNNER-IMAGE fact, not a Docker one: a bare ubuntu:22.04
+          # container does not ship libunwind-14-dev, which is why this could
+          # only ever reproduce in CI.
+          sudo apt-get install -y -qq --no-install-recommends libunwind-dev
           sudo apt-get install -y -qq --no-install-recommends pkg-config build-essential python3 libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-pipewire
           rustup toolchain install 1.98.0 --profile minimal --component clippy,rustfmt
       - name: Build and test without desktop access
