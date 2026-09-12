@@ -1,7 +1,7 @@
 name: DIAGNOSTIC apt conflict (temporary)
 
-# TEMPORARY. Reproduces the `linux-helper` apt failure on the real runner and
-# dumps exactly which packages conflict. Delete once the fix lands.
+# TEMPORARY. Round 2: `libgstreamer1.0-dev` Depends: `libunwind-dev`, and that
+# dependency is what cannot be satisfied on the runner. Finds out why.
 on:
   push:
     paths:
@@ -13,47 +13,40 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
-      - name: Runner identity
+      - name: libunwind state
         run: |
-          echo "=== os ==="; cat /etc/os-release | head -3
-          echo "=== arch ==="; uname -m
-          echo "=== image/version ==="
-          echo "ImageOS=${ImageOS:-unset} ImageVersion=${ImageVersion:-unset}"
-          echo "=== apt lists present? ==="; ls /var/lib/apt/lists/ 2>/dev/null | head -5
+          echo "=== installed libunwind ==="; dpkg -l | grep -i libunwind || echo "  (none)"
+          echo "=== policy ==="; apt-cache policy libunwind-dev libunwind8 || true
+          echo "=== available versions ==="; apt-cache madison libunwind-dev libunwind8 || true
+          echo "=== apt preferences / pins ==="
+          cat /etc/apt/preferences 2>/dev/null || echo "  (no /etc/apt/preferences)"
+          ls /etc/apt/preferences.d/ 2>/dev/null && cat /etc/apt/preferences.d/* 2>/dev/null || echo "  (no preferences.d entries)"
+          echo "=== sources ==="; grep -rhE "^deb " /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null | head -10
 
-      - name: What is ALREADY installed that could conflict
-        run: |
-          echo "=== pipewire* ==="; dpkg -l | grep -i pipewire || echo "  (none)"
-          echo "=== gstreamer ==="; dpkg -l | grep -i gstreamer | head -20 || echo "  (none)"
-          echo "=== held packages ==="; apt-mark showhold || echo "  (none held)"
-          echo "=== gstreamer1.0-pipewire policy ==="; apt-cache policy gstreamer1.0-pipewire || true
-          echo "=== libgstreamer1.0-dev policy ==="; apt-cache policy libgstreamer1.0-dev || true
-
-      - name: REPRODUCE - the exact failing command
+      - name: Why can't libunwind-dev install
         run: |
           set +e
-          sudo apt-get update -qq
-          echo "--- update exit: $? ---"
-          sudo apt-get install -y -qq --no-install-recommends \
-            pkg-config build-essential python3 \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-pipewire \
-            > /tmp/install.log 2>&1
-          echo "INSTALL_EXIT=$?"
-          echo "=== tail of install log ==="
-          tail -40 /tmp/install.log
+          echo "=== simulate libunwind-dev alone ==="
+          sudo apt-get install -s libunwind-dev 2>&1 | tail -20
 
-      - name: Diagnose - who wants what
-        if: always()
+      - name: Does installing libunwind-dev first fix the chain
         run: |
           set +e
-          echo "=== apt-get -s (simulate) with debug ==="
-          sudo apt-get install -s --no-install-recommends \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-pipewire 2>&1 | tail -30
+          sudo apt-get install -y -qq libunwind-dev > /tmp/lu.log 2>&1
+          echo "libunwind-dev exit=$?"
+          tail -6 /tmp/lu.log
           echo
-          echo "=== which package is the problem? try them one at a time ==="
-          for p in libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-pipewire; do
-            echo "--- $p ---"
-            sudo apt-get install -y -qq --no-install-recommends "$p" >/tmp/one.log 2>&1
-            echo "  exit=$?"
-            tail -4 /tmp/one.log
-          done
+          echo "=== now the gstreamer dev chain ==="
+          sudo apt-get install -y -qq --no-install-recommends libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev > /tmp/gs.log 2>&1
+          echo "gstreamer dev exit=$?"
+          tail -8 /tmp/gs.log
+          echo
+          echo "=== pkg-config sees gstreamer? ==="
+          pkg-config --modversion gstreamer-1.0 2>&1 || echo "  gstreamer-1.0 NOT found"
+          pkg-config --modversion gstreamer-app-1.0 2>&1 || echo "  gstreamer-app-1.0 NOT found"
+
+      - name: Alternative - is the dev package even needed
+        run: |
+          set +e
+          echo "=== what the crate declares ==="
+          grep -A 30 "\[dependencies\]" native/linux/ScreenShare/Cargo.toml | head -30
