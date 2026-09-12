@@ -1,7 +1,7 @@
 name: DIAGNOSTIC apt conflict (temporary)
 
-# TEMPORARY. Round 2: `libgstreamer1.0-dev` Depends: `libunwind-dev`, and that
-# dependency is what cannot be satisfied on the runner. Finds out why.
+# TEMPORARY. Round 3: confirm the mechanism (libunwind-14-dev conflict) and that
+# the proposed fix lets the REAL helper build succeed on the runner.
 on:
   push:
     paths:
@@ -11,42 +11,40 @@ on:
 jobs:
   diag:
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: "1.98.0"
     steps:
-      - name: libunwind state
-        run: |
-          echo "=== installed libunwind ==="; dpkg -l | grep -i libunwind || echo "  (none)"
-          echo "=== policy ==="; apt-cache policy libunwind-dev libunwind8 || true
-          echo "=== available versions ==="; apt-cache madison libunwind-dev libunwind8 || true
-          echo "=== apt preferences / pins ==="
-          cat /etc/apt/preferences 2>/dev/null || echo "  (no /etc/apt/preferences)"
-          ls /etc/apt/preferences.d/ 2>/dev/null && cat /etc/apt/preferences.d/* 2>/dev/null || echo "  (no preferences.d entries)"
-          echo "=== sources ==="; grep -rhE "^deb " /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null | head -10
+      - uses: actions/checkout@v7
 
-      - name: Why can't libunwind-dev install
+      - name: BEFORE - who owns libunwind
         run: |
-          set +e
-          echo "=== simulate libunwind-dev alone ==="
-          sudo apt-get install -s libunwind-dev 2>&1 | tail -20
+          echo "=== installed ==="; dpkg -l | grep -i libunwind || echo "  (none)"
+          echo "=== does libunwind-14-dev declare a conflict with libunwind-dev? ==="
+          dpkg -s libunwind-14-dev 2>/dev/null | grep -E "^(Package|Version|Conflicts|Replaces|Provides|Breaks)" || true
+          echo "=== what would apt do (simulate)? ==="
+          apt-get install -s libunwind-dev 2>&1 | grep -E "^(Inst|Remv|Conf)" | head -10 || true
 
-      - name: Does installing libunwind-dev first fix the chain
+      - name: THE FIX - install libunwind-dev first, then the chain
         run: |
-          set +e
-          sudo apt-get install -y -qq libunwind-dev > /tmp/lu.log 2>&1
-          echo "libunwind-dev exit=$?"
-          tail -6 /tmp/lu.log
-          echo
-          echo "=== now the gstreamer dev chain ==="
-          sudo apt-get install -y -qq --no-install-recommends libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev > /tmp/gs.log 2>&1
-          echo "gstreamer dev exit=$?"
-          tail -8 /tmp/gs.log
-          echo
-          echo "=== pkg-config sees gstreamer? ==="
-          pkg-config --modversion gstreamer-1.0 2>&1 || echo "  gstreamer-1.0 NOT found"
-          pkg-config --modversion gstreamer-app-1.0 2>&1 || echo "  gstreamer-app-1.0 NOT found"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends libunwind-dev
+          sudo apt-get install -y -qq --no-install-recommends \
+            pkg-config build-essential python3 \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-pipewire
 
-      - name: Alternative - is the dev package even needed
+      - name: AFTER - confirm the replacement happened and gstreamer is usable
         run: |
-          set +e
-          echo "=== what the crate declares ==="
-          grep -A 30 "\[dependencies\]" native/linux/ScreenShare/Cargo.toml | head -30
+          echo "=== libunwind now ==="; dpkg -l | grep -i libunwind || echo "  (none)"
+          echo "=== pkg-config ==="
+          for p in gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0; do
+            printf '  %-22s %s\n' "$p" "$(pkg-config --modversion $p 2>&1)"
+          done
+
+      - name: THE REAL TEST - build the helper
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal --component clippy,rustfmt
+          bash native/linux/ScreenShare/build.sh
+          echo "=== artifact ==="
+          ls -la native/linux/ScreenShare/target/release/osa-screen-capture-wayland
+          file native/linux/ScreenShare/target/release/osa-screen-capture-wayland
