@@ -3,6 +3,9 @@ name: DIAGNOSTIC apt conflict (temporary)
 # TEMPORARY. Reproduces the `linux-helper` apt failure on the real runner and
 # dumps exactly which packages conflict. Delete once the fix lands.
 on:
+  push:
+    paths:
+      - '.github/workflows/diagnostic-apt.yml'
   workflow_dispatch:
 
 jobs:
