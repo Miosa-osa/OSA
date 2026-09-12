@@ -1237,14 +1237,37 @@ impl OnboardingWizard {
         );
         cy += 2;
 
+        // Group headings are RENDER rows that are not SELECTABLE, so the
+        // scroll offset has to be computed in render space while the cursor
+        // lives in provider space. Built up front for the same reason the model
+        // picker does it: scrolling by provider index alone would drift by one
+        // row per heading crossed, and eventually scroll the selection off the
+        // top of the window it was supposed to keep it inside.
+        let mut rows: Vec<(bool, usize)> = Vec::new();
         let mut last_group: Option<&str> = None;
         for (i, p) in self.data.providers.iter().enumerate() {
-            if cy >= area.y + area.height {
-                break;
+            if last_group != Some(p.group.as_str()) {
+                rows.push((true, i));
+                last_group = Some(p.group.as_str());
             }
-            let group = p.group.as_str();
-            if last_group != Some(group) {
-                let label = match group {
+            rows.push((false, i));
+        }
+
+        let avail = (area.y + area.height).saturating_sub(cy) as usize;
+        let cursor_row = rows
+            .iter()
+            .position(|(heading, i)| !heading && *i == self.selected_provider)
+            .unwrap_or(0);
+        // Derived from the cursor every frame rather than stored: this dialog
+        // has no scroll state to keep in sync with a resize, and a stateless
+        // clamp cannot go stale the way a stored offset can.
+        let scroll = super::clamp_scroll_to_cursor(0, cursor_row, avail);
+
+        for (is_heading, i) in rows.iter().skip(scroll).take(avail) {
+            let p = &self.data.providers[*i];
+
+            if *is_heading {
+                let label = match p.group.as_str() {
                     "recommended" => "  \u{2500}\u{2500} Recommended \u{2500}\u{2500}",
                     _ => "  \u{2500}\u{2500} Bring Your Own \u{2500}\u{2500}",
                 };
@@ -1254,10 +1277,10 @@ impl OnboardingWizard {
                     Rect::new(area.x, cy, area.width, 1),
                 );
                 cy += 1;
-                last_group = Some(group);
+                continue;
             }
 
-            let is_selected = self.selected_provider == i;
+            let is_selected = self.selected_provider == *i;
             let style = if is_selected {
                 Style::default()
                     .fg(theme.colors.primary)
@@ -1427,11 +1450,20 @@ impl OnboardingWizard {
                 Rect::new(area.x, cy, area.width, 1),
             );
         } else {
-            // Selection list
-            for (i, (_id, label)) in self.model_list.iter().enumerate() {
-                if cy >= area.y + area.height {
-                    break;
-                }
+            // Selection list.
+            //
+            // SCROLLS to keep the selected row on screen. This loop used to
+            // draw from index 0 and `break` at the bottom, so on a short
+            // terminal the cursor could be moved onto a row that was never
+            // drawn: the selection was real, the arrow keys worked, and the
+            // user could see none of it. Reported 2026-09-11 as "sometimes the
+            // screen is too small and I can't see shit - I have to make the
+            // terminal bigger to see the options". Resizing was the only way
+            // to reach the lower entries because nothing scrolled.
+            let avail = (area.y + area.height).saturating_sub(cy) as usize;
+            let scroll = super::clamp_scroll_to_cursor(0, self.selected_model, avail);
+
+            for (i, (_id, label)) in self.model_list.iter().enumerate().skip(scroll).take(avail) {
                 let is_selected = self.selected_model == i;
                 let style = if is_selected {
                     Style::default()
@@ -1551,10 +1583,12 @@ impl OnboardingWizard {
         // Use confirm_selected as the channel list cursor when on this step
         let cursor = self.confirm_selected.min(CHANNELS.len().saturating_sub(1));
 
-        for (i, (id, name, hint)) in CHANNELS.iter().enumerate() {
-            if cy >= area.y + area.height {
-                break;
-            }
+        // Scrolls for the same reason `draw_step_model` does: a cursor that can
+        // move past the last drawn row is a cursor the user cannot see.
+        let avail = (area.y + area.height).saturating_sub(cy) as usize;
+        let scroll = super::clamp_scroll_to_cursor(0, cursor, avail);
+
+        for (i, (id, name, hint)) in CHANNELS.iter().enumerate().skip(scroll).take(avail) {
             let is_checked = self.selected_channels.get(i).copied().unwrap_or(false);
             let is_cursor = cursor == i;
             let has_token = self.channel_tokens.contains_key(*id);
@@ -1619,8 +1653,18 @@ impl OnboardingWizard {
         );
         cy += 2;
 
+        // The INPUT is pinned to the bottom and the instructions are given
+        // whatever is left above it. Previously both flowed from the top and
+        // the instructions simply ran until the rows ran out, so on a short
+        // terminal the "Bot Token:" label and the field itself were drawn
+        // below the last visible row — the user was typing into something they
+        // could not see, with no indication it was there. Context can be
+        // scrolled past; the field being typed into cannot.
+        let footer_h: u16 = 3; // blank separator + label + input
+        let footer_y = (area.y + area.height).saturating_sub(footer_h);
+
         for line in instructions.iter() {
-            if cy >= area.y + area.height {
+            if cy >= footer_y {
                 break;
             }
             put(
@@ -1631,7 +1675,9 @@ impl OnboardingWizard {
             );
             cy += 1;
         }
-        cy += 1;
+
+        // Pinned, not flowed: `cy` is deliberately discarded here.
+        cy = footer_y + 1;
 
         put(
             frame,
@@ -2146,5 +2192,65 @@ mod onboarding_tests {
         let _ = wizard.handle_key(key(KeyCode::Char(' ')));
         let _ = wizard.handle_key(key(KeyCode::Enter));
         draw_at_all_sizes(&wizard);
+    }
+
+    /// The selected row must be VISIBLE, not merely selected.
+    ///
+    /// The list steps drew from index 0 and `break`-ed at the bottom of the
+    /// area. Arrow keys still moved the cursor, so on a short terminal the
+    /// selection could travel to a row that was never drawn: the key presses
+    /// worked, the highlight moved, and the user saw nothing change. The only
+    /// way to reach the lower entries was to enlarge the window - reported
+    /// 2026-09-11 as "sometimes the screen is too small and I can't see shit,
+    /// I have to make the terminal bigger to see the options for certain
+    /// things".
+    ///
+    /// Asserts on the RENDERED BUFFER rather than on the cursor field, because
+    /// the cursor moving was never the broken part.
+    #[test]
+    fn the_selected_provider_row_is_always_drawn_on_a_short_terminal() {
+        // More providers than fit at the height under test. Names are
+        // zero-padded so none is a substring of another ("P1" would match
+        // "P10", which would let this pass for the wrong row).
+        let providers: Vec<OnboardingProvider> = (0..12)
+            .map(|i| {
+                serde_json::from_value(serde_json::json!({
+                    "id": format!("p{i}"),
+                    "name": format!("P{i:02}"),
+                    "description": "desc",
+                    "group": "recommended",
+                    "requires_key": false,
+                    "models": []
+                }))
+                .unwrap()
+            })
+            .collect();
+
+        let mut wizard = wizard_with(providers);
+        // Deliberately short: the whole list cannot fit.
+        let (w, h) = (60u16, 14u16);
+
+        for step in 0..12usize {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| wizard.draw(f, f.area())).unwrap();
+            let text: String = term
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+
+            let want = format!("P{step:02}");
+            assert!(
+                text.contains(&want),
+                "the cursor is on {want} after {step} Down press(es), but that row \
+                 was not drawn at {w}x{h}: the list does not scroll, so the \
+                 selection is invisible and unreachable without resizing the \
+                 terminal.\n--- rendered ---\n{text}"
+            );
+
+            let _ = wizard.handle_key(key(KeyCode::Down));
+        }
     }
 }
