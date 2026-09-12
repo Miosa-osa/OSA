@@ -2,9 +2,10 @@ defmodule OptimalSystemAgent.OpenComputers.Session.Hello do
   @moduledoc """
   Builds the `{:hello, _}` frame payload sent on connect.
 
-  Pure functions — composes values from Config, Telemetry, and
-  Fingerprint. Derives the capability list from the configured modes
-  with OS-appropriate slicing backends.
+  Composes values from Config, Telemetry, and Fingerprint.
+  Capabilities describe implemented OSA job handlers, not workload readiness.
+  Standalone workload capacity is independently authenticated and verified
+  through the host-runtime protocol, never inferred from this machine's OS.
   """
 
   alias OptimalSystemAgent.OpenComputers.Session.Fingerprint
@@ -33,18 +34,11 @@ defmodule OptimalSystemAgent.OpenComputers.Session.Hello do
   # ── Private ──
 
   defp capabilities_for_mode("direct"), do: [:native_desktop, :native_exec, :osa_runtime]
-  defp capabilities_for_mode("vm_dispatch"), do: [:firecracker]
-  defp capabilities_for_mode("slicing"), do: [slice_backend_for_host()]
+  # Executor dispatch does not implement create_computer/snapshot/restore.
+  # Advertising these here makes the server route jobs that OSA must reject.
+  defp capabilities_for_mode("vm_dispatch"), do: []
+  defp capabilities_for_mode("slicing"), do: []
   defp capabilities_for_mode(_), do: []
-
-  defp slice_backend_for_host do
-    case :os.type() do
-      {:unix, :darwin} -> :apple_containerization
-      {:unix, :linux} -> :firecracker
-      {:win32, _} -> :hyper_v
-      _ -> :firecracker
-    end
-  end
 
   defp osa_version do
     case Application.spec(:optimal_system_agent, :vsn) do
