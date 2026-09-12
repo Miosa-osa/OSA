@@ -1,0 +1,56 @@
+name: DIAGNOSTIC apt conflict (temporary)
+
+# TEMPORARY. Reproduces the `linux-helper` apt failure on the real runner and
+# dumps exactly which packages conflict. Delete once the fix lands.
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Runner identity
+        run: |
+          echo "=== os ==="; cat /etc/os-release | head -3
+          echo "=== arch ==="; uname -m
+          echo "=== image/version ==="
+          echo "ImageOS=${ImageOS:-unset} ImageVersion=${ImageVersion:-unset}"
+          echo "=== apt lists present? ==="; ls /var/lib/apt/lists/ 2>/dev/null | head -5
+
+      - name: What is ALREADY installed that could conflict
+        run: |
+          echo "=== pipewire* ==="; dpkg -l | grep -i pipewire || echo "  (none)"
+          echo "=== gstreamer ==="; dpkg -l | grep -i gstreamer | head -20 || echo "  (none)"
+          echo "=== held packages ==="; apt-mark showhold || echo "  (none held)"
+          echo "=== gstreamer1.0-pipewire policy ==="; apt-cache policy gstreamer1.0-pipewire || true
+          echo "=== libgstreamer1.0-dev policy ==="; apt-cache policy libgstreamer1.0-dev || true
+
+      - name: REPRODUCE - the exact failing command
+        run: |
+          set +e
+          sudo apt-get update -qq
+          echo "--- update exit: $? ---"
+          sudo apt-get install -y -qq --no-install-recommends \
+            pkg-config build-essential python3 \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-pipewire \
+            > /tmp/install.log 2>&1
+          echo "INSTALL_EXIT=$?"
+          echo "=== tail of install log ==="
+          tail -40 /tmp/install.log
+
+      - name: Diagnose - who wants what
+        if: always()
+        run: |
+          set +e
+          echo "=== apt-get -s (simulate) with debug ==="
+          sudo apt-get install -s --no-install-recommends \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-pipewire 2>&1 | tail -30
+          echo
+          echo "=== which package is the problem? try them one at a time ==="
+          for p in libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-pipewire; do
+            echo "--- $p ---"
+            sudo apt-get install -y -qq --no-install-recommends "$p" >/tmp/one.log 2>&1
+            echo "  exit=$?"
+            tail -4 /tmp/one.log
+          done
