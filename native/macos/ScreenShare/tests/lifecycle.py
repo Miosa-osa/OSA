@@ -21,8 +21,9 @@ class Lifecycle(unittest.TestCase):
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
+        port_args = [] if "--port" in args else ["--port", str(port)]
         child = subprocess.Popen(
-            [BINARY, "--stub", "--port", str(port), *args],
+            [BINARY, "--stub", *port_args, *args],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         self.addCleanup(self.reap, child)

@@ -170,7 +170,8 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.VncHardeningT
                "-localhost",
                "-rfbport",
                "0",
-               "-quiet"
+               "-quiet",
+               "-viewonly"
              ]
     end
   end

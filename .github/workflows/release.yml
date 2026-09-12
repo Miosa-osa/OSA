@@ -71,6 +71,23 @@ jobs:
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libasound2-dev libonig-dev
 
+      # Linux only: keep the same glibc/GStreamer baseline as the OTP release.
+      # The helper needs no Rust toolchain on the customer's machine.
+      - name: Build and stage Linux Wayland desktop helper
+        env:
+          RUSTUP_TOOLCHAIN: "1.98.0"
+        run: |
+          # See linux-wayland-helper.yml for the full root cause: the runner's
+          # preinstalled `libunwind-14-dev` declares Breaks/Replaces on
+          # `libunwind-dev`, and apt will not remove an installed package as a
+          # side effect of resolving a dependency. Naming `libunwind-dev`
+          # explicitly authorises the replacement.
+          sudo apt-get install -y -qq --no-install-recommends libunwind-dev
+          sudo apt-get install -y -qq --no-install-recommends libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-pipewire
+          rustup toolchain install 1.98.0 --profile minimal
+          bash native/linux/ScreenShare/build.sh
+          bash native/linux/ScreenShare/stage.sh
+
       - name: Install Elixir deps
         run: |
           mix local.hex --force
@@ -120,6 +137,9 @@ jobs:
         run: |
           mkdir -p dist
           tar -czf "dist/osa-linux-x64.tar.gz" -C _build/prod/rel/osagent .
+
+      - name: Verify Linux release contains current Wayland helper and runtime requirements
+        run: bash native/linux/ScreenShare/verify-package.sh dist/osa-linux-x64.tar.gz x64
 
       - name: Build Rust TUI
         env:
@@ -282,6 +302,17 @@ jobs:
           key: windows-x64-${{ hashFiles('mix.lock') }}
           restore-keys: windows-x64-
 
+      - name: Set up .NET for the native Windows desktop helper
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build and test Windows desktop helper
+        shell: pwsh
+        run: |
+          & native/windows/ScreenShare/build.ps1 -Runtime win-x64 -BundleDirectory priv/helpers
+          & scripts/windows/tests/Enrollment.Tests.ps1
+
       - name: Install Elixir deps
         run: |
           mix local.hex --force
@@ -328,7 +359,13 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $helpers = @(Get-ChildItem _build/prod/rel/osagent/lib -Filter osa-screen-capture-windows.exe -Recurse)
+          if ($helpers.Count -ne 1) { throw 'Release must contain exactly one Windows desktop helper.' }
+          if ((Get-FileHash $helpers[0].FullName).Hash -ne (Get-FileHash priv/helpers/osa-screen-capture-windows.exe).Hash) {
+            throw 'Release contains a stale Windows desktop helper.'
+          }
           Compress-Archive -Path _build\prod\rel\osagent\* -DestinationPath dist\osa-windows-x64.zip -Force
+          & scripts/windows/Build-EnrollmentBundle.ps1 -ReleaseTag $env:GITHUB_REF_NAME -OutputDirectory dist
 
       # Rust ships preinstalled on windows-latest. openssl/oniguruma come from
       # vendored crates; CI-compile is the acceptance bar (no runtime claim).
@@ -423,6 +460,7 @@ jobs:
             osa-macos-arm64.tar.gz \
             osagent-tui-macos-arm64 \
             osa-windows-x64.zip \
+            osa-opencomputers-windows.zip \
             osagent-tui-windows-x64.exe
           do
             # -s, not -e: a 0-byte tarball is a missing asset wearing a filename.
@@ -464,5 +502,7 @@ jobs:
             release-assets/osagent-tui-macos-arm64.sha256
             release-assets/osa-windows-x64.zip
             release-assets/osa-windows-x64.zip.sha256
+            release-assets/osa-opencomputers-windows.zip
+            release-assets/osa-opencomputers-windows.zip.sha256
             release-assets/osagent-tui-windows-x64.exe
             release-assets/osagent-tui-windows-x64.exe.sha256

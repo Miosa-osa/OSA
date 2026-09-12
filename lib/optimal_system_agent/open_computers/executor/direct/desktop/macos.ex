@@ -25,6 +25,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.MacOS do
   """
 
   require Logger
+  import Kernel, except: [spawn: 1]
 
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.HelperPath
 
@@ -47,9 +48,10 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.MacOS do
   Returns `{:ok, t()}` or `{:error, reason}`.
   """
   @spec spawn() :: {:ok, t()} | {:error, term()}
-  def spawn do
-    with {:ok, helper_path} <- find_helper(),
-         {:ok, port} <- open_port(helper_path) do
+  def spawn(opts \\ %{}) do
+    with {:ok, args} <- launch_args(opts),
+         {:ok, helper_path} <- find_helper(),
+         {:ok, port} <- open_port(helper_path, args) do
       result =
         with {:ok, os_pid} <- fetch_os_pid(port),
              {:ok, vnc_port} <- await_port_announcement(port) do
@@ -96,8 +98,8 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.MacOS do
   helper reported, never a fixed one.
   """
   @spec start(map()) :: {:ok, map()} | {:error, term()}
-  def start(_opts \\ %{}) do
-    case spawn() do
+  def start(opts \\ %{}) do
+    case spawn(opts) do
       {:ok, %__MODULE__{port: port, os_pid: os_pid, vnc_port: vnc_port}} ->
         {:ok, %{port_ref: port, os_pid: os_pid, vnc_port: vnc_port}}
 
@@ -134,11 +136,23 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.MacOS do
     HelperPath.resolve(@helper_name, priv_path, user_path, "docs/macos-desktop.md")
   end
 
-  defp open_port(helper_path) do
+  @doc "Validated helper argv; callers supply only locally authorized input permission."
+  def launch_args(opts) do
+    display = Map.get(opts, :display, 0)
+
+    if is_integer(display) and display in 0..63 do
+      mode = if Map.get(opts, :allow_input) === true, do: "--allow-input", else: "--read-only"
+      {:ok, [mode, "--display", Integer.to_string(display)]}
+    else
+      {:error, :invalid_display}
+    end
+  end
+
+  defp open_port(helper_path, args) do
     port =
       Port.open(
         {:spawn_executable, helper_path},
-        [:binary, :exit_status, :stderr_to_stdout, args: []]
+        [:binary, :exit_status, :stderr_to_stdout, args: args]
       )
 
     {:ok, port}

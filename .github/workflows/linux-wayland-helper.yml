@@ -1,0 +1,70 @@
+name: Linux Wayland helper build and package
+
+on:
+  pull_request:
+    paths:
+      - 'native/linux/ScreenShare/**'
+      - 'lib/optimal_system_agent/open_computers/executor/direct/desktop/wayland.ex'
+      - 'test/optimal_system_agent/open_computers/executor/direct/desktop/wayland_test.exs'
+      - '.github/workflows/linux-wayland-helper.yml'
+      - '.github/workflows/release.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'native/linux/ScreenShare/**'
+      - '.github/workflows/linux-wayland-helper.yml'
+      - '.github/workflows/release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  linux-helper:
+    # Same compatibility floor as the shipped Linux x64 OTP artifact.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: "1.98.0"
+      OSA_TEST_ARCH: x64
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update -qq
+          # `libunwind-dev` EXPLICITLY, and in its own transaction, BEFORE the
+          # GStreamer dev packages.
+          #
+          # MEASURED on ubuntu-22.04 (diagnostic run 34670653303): the runner
+          # image ships `libunwind-14-dev` (LLVM 14's versioned unwinder dev
+          # package), which declares `Replaces: libunwind-dev` and
+          # `Breaks: libunwind-dev`. Installing `libunwind-dev` therefore
+          # requires REMOVING `libunwind-14-dev` (and the libc++-dev /
+          # libc++-14-dev that depend on it). apt will not remove an installed
+          # package as a side effect of resolving a dependency inside a combined
+          # transaction, so asking for the dev packages alone dead-ends:
+          #
+          #     libgstreamer1.0-dev : Depends: libunwind-dev
+          #     E: Unable to correct problems, you have held broken packages.
+          #
+          # Naming `libunwind-dev` as an explicit target authorises the
+          # replacement, after which the whole chain installs and pkg-config
+          # reports gstreamer-1.0 1.20.3 / gstreamer-app-1.0 1.20.1.
+          #
+          # This is a RUNNER-IMAGE fact, not a Docker one: a bare ubuntu:22.04
+          # container does not ship libunwind-14-dev, which is why this could
+          # only ever reproduce in CI.
+          sudo apt-get install -y -qq --no-install-recommends libunwind-dev
+          sudo apt-get install -y -qq --no-install-recommends pkg-config build-essential python3 libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-pipewire
+          rustup toolchain install 1.98.0 --profile minimal --component clippy,rustfmt
+      - name: Build and test without desktop access
+        run: bash native/linux/ScreenShare/test-build.sh
+      - name: Stage standalone build artifact for inspection
+        run: |
+          bash native/linux/ScreenShare/stage.sh dist/wayland
+          cd dist/wayland
+          sha256sum osa-screen-capture-wayland > osa-screen-capture-wayland.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wayland-helper-linux-x64-build-only
+          path: dist/wayland/*
+          if-no-files-found: error

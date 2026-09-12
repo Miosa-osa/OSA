@@ -9,7 +9,8 @@
 ///   4. ClientInit / ServerInit
 ///   5. Message loop:
 ///      - Receives FramebufferUpdateRequest → sends one raw-encoded update
-///      - Receives SetPixelFormat / SetEncodings / KeyEvent / PointerEvent → ack/ignore
+///      - Receives KeyEvent / PointerEvent through the permission-gated input sink
+///      - Receives SetPixelFormat / SetEncodings (fixed raw BGRA format)
 ///      - Receives ClientCutText → ignore
 ///
 /// Only one client at a time is served. A second connection attempt is
@@ -20,10 +21,12 @@
 
 import Foundation
 import Network
+import CoreGraphics
 
 // MARK: - Frame Source
 
 enum FrameSource {
+    case unavailable
     case stub
     case live(width: Int, height: Int, data: Data)
 }
@@ -36,19 +39,21 @@ final class VncServer {
     private var connection: NWConnection?
     private let stateLock = NSLock()
     private let activity: () -> Void
+    private let input: DesktopInput?
     private var stopped = false
 
     // Atomic frame storage — updated by Capture, read by the send loop
     private let frameLock = NSLock()
-    private var _frameSource: FrameSource = .stub
+    private var _frameSource: FrameSource = .unavailable
 
     // Default stub dimensions — overridden once a live frame arrives
     private var stubWidth = 1920
     private var stubHeight = 1080
 
-    init(port: UInt16, activity: @escaping () -> Void) {
+    init(port: UInt16, activity: @escaping () -> Void, input: DesktopInput? = nil) {
         self.activity = activity
         self.port = port
+        self.input = input
     }
 
     // MARK: - Public
@@ -85,6 +90,7 @@ final class VncServer {
         stateLock.unlock()
         current?.cancel()
         listener?.cancel()
+        input?.releaseAll()
     }
 
     func setDimensions(width: Int, height: Int) {
@@ -185,7 +191,7 @@ final class VncServer {
                 _ = try await recv(conn, count: 9)
                 // Send one full-screen update
                 activity()
-                let frameData = currentFrame(width: width, height: height)
+                let frameData = try currentFrame(width: width, height: height)
                 let update = FrameEncoder.framebufferUpdate(
                     x: 0, y: 0, width: width, height: height, pixelData: frameData)
                 try await send(conn, data: update)
@@ -199,10 +205,17 @@ final class VncServer {
                 _ = try await recv(conn, count: count * 4)  // each encoding is int32
 
             case RFBClientMsg.keyEvent.rawValue:
-                _ = try await recv(conn, count: 7)  // down(1) pad(2) key(4)
+                let data = try await recv(conn, count: 7)
+                guard data[0] <= 1 else { return }
+                let keysym = UInt32(data[3]) << 24 | UInt32(data[4]) << 16 | UInt32(data[5]) << 8 | UInt32(data[6])
+                input?.key(down: data[0] == 1, keysym: keysym)
+                activity()
 
             case RFBClientMsg.pointerEvent.rawValue:
-                _ = try await recv(conn, count: 5)  // buttonMask(1) x(2) y(2)
+                let data = try await recv(conn, count: 5)
+                input?.pointer(mask: data[0], x: Int(data[1]) << 8 | Int(data[2]),
+                               y: Int(data[3]) << 8 | Int(data[4]))
+                activity()
 
             case RFBClientMsg.clientCutText.rawValue:
                 let header = try await recv(conn, count: 7)  // 3 padding + 4 length
@@ -233,6 +246,7 @@ final class VncServer {
     }
 
     private func releaseConnection(_ conn: NWConnection) {
+        input?.releaseAll()
         conn.cancel()
         stateLock.lock()
         if connection === conn { connection = nil }
@@ -245,6 +259,8 @@ final class VncServer {
         frameLock.lock()
         defer { frameLock.unlock() }
         switch _frameSource {
+        case .unavailable:
+            return (stubWidth, stubHeight)
         case .stub:
             return (stubWidth, stubHeight)
         case .live(let w, let h, _):
@@ -252,17 +268,32 @@ final class VncServer {
         }
     }
 
-    private func currentFrame(width: Int, height: Int) -> Data {
+    private func currentFrame(width: Int, height: Int) throws -> Data {
         frameLock.lock()
         let src = _frameSource
         frameLock.unlock()
 
         switch src {
+        case .unavailable:
+            throw NSError(domain: "ScreenShare", code: 3, userInfo: [NSLocalizedDescriptionKey: "No live frame"])
         case .stub:
             return stubFrame(width: width, height: height)
-        case .live(_, _, let data):
+        case .live(let w, let h, let data):
+            guard w == width, h == height else {
+                throw NSError(domain: "ScreenShare", code: 4, userInfo: [NSLocalizedDescriptionKey: "Display geometry changed; reconnect required"])
+            }
             return data
         }
+    }
+
+    var hasLiveFrame: Bool {
+        frameLock.lock(); defer { frameLock.unlock() }
+        if case .live = _frameSource { return true }
+        return false
+    }
+
+    func configureInput(bounds: CGRect, width: Int, height: Int) {
+        input?.configure(bounds: bounds, width: width, height: height)
     }
 
     /// Solid dark-blue stub frame — 32-bit BGRA layout (matches PixelFormat declared in ServerInit)

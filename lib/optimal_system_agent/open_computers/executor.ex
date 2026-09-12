@@ -27,10 +27,12 @@ defmodule OptimalSystemAgent.OpenComputers.Executor do
   @type reply :: (term() -> :ok)
 
   @spec dispatch(job(), reply()) :: :ok | {:error, term()}
-  def dispatch(%{kind: kind} = job, reply) when is_function(reply, 1) do
+  def dispatch(job, reply), do: dispatch(job, reply, [])
+
+  def dispatch(%{kind: kind} = job, reply, context) when is_function(reply, 1) do
     case mod_for_kind(kind) do
       {:ok, mod} ->
-        case ExecSup.start_child(mod, job, reply) do
+        case ExecSup.start_child(mod, job, reply, if(mod == Desktop, do: context, else: [])) do
           {:ok, _pid} ->
             :ok
 
