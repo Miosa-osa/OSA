@@ -92,12 +92,22 @@ case "$1" in version) echo "osagent v{version}";; esac
             self.script(assets / "osagent-tui-linux-x64", f'''
 echo "tui $*" >> "$FIXTURE_ROOT/calls"
 if [ "${{FAIL_TUI:-}}" = 1 ]; then echo 'libasound.so.2: not found' >&2; exit 127; fi
+if [ -f "$FIXTURE_ROOT/mac-signature-required" ] && [ ! -f "$FIXTURE_ROOT/mac-signature-refreshed" ]; then exit 137; fi
 if [ "${{1:-}}" = --version ]; then echo 'osagent-tui {version}'; fi
 ''')
             for name in ("osa-linux-x64.tar.gz", "osagent-tui-linux-x64"):
                 checksum = hashlib.sha256((assets / name).read_bytes()).hexdigest()
                 (assets / (name + ".sha256")).write_text(f"{checksum}  {name}\n")
         (self.root / "latest").write_text("v1.0.195\n")
+
+    def add_macos_assets(self):
+        version = self.root / "v1.0.195"
+        for source, target in (("osa-linux-x64.tar.gz", "osa-macos-arm64.tar.gz"),
+                               ("osagent-tui-linux-x64", "osagent-tui-macos-arm64")):
+            data = (version / source).read_bytes()
+            (version / target).write_bytes(data)
+            digest = hashlib.sha256(data).hexdigest()
+            (version / (target + ".sha256")).write_text(f"{digest}  {target}\n")
 
     def script(self, path, body, python=False):
         path.write_text((f"#!{sys.executable}\n" if python else "#!/bin/sh\n") + body + "\n")
@@ -158,6 +168,15 @@ if [ "${{1:-}}" = --version ]; then echo 'osagent-tui {version}'; fi
         self.cli("update")
         self.assertTrue((self.osa / "bin/osagent-tui").exists())
         self.assertIn("tui ", self.calls.read_text())
+
+    def test_macos_retries_after_taskgated_signature_rejection(self):
+        self.add_macos_assets()
+        (self.root / "mac-signature-required").touch()
+        self.script(self.bin / "uname", 'case "$1" in -s) echo Darwin;; -m) echo arm64;; esac')
+        self.script(self.bin / "codesign", 'touch "$FIXTURE_ROOT/mac-signature-refreshed"')
+        output = self.install()
+        self.assertIn("Refreshing macOS code signature", output)
+        self.assertIn("reports 1.0.195", output)
 
     def test_full_upgrade_keeps_both_components(self):
         self.call(["sh", str(INSTALLER)], OSA_VERSION="v1.0.194")

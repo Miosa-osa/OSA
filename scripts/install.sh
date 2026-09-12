@@ -260,8 +260,19 @@ if [ "$INSTALL_MODE" = "full" ]; then
   [ -s "$TUI_BIN" ] && [ -x "$TUI_BIN" ] \
     || fail "${TUI_BIN} is empty or not executable after install." 3
   # The TUI is exec'd directly by the launcher, so prove it actually runs here
-  # rather than discovering it at first launch.
+  # rather than discovering it at first launch. On macOS, Taskgated can reject
+  # a linker/ad-hoc signature in a downloaded Mach-O even when codesign's
+  # on-disk verification passes. Preserve a working signature, but refresh the
+  # signature and retry that specific compatibility case before aborting.
   TUI_REPORTED="$("$TUI_BIN" --version 2>/dev/null | head -1 | awk '{print $NF}')"
+  if [ -z "$TUI_REPORTED" ] && [ "$OS" = "macos" ] && command -v codesign >/dev/null 2>&1; then
+    info "Refreshing macOS code signature for the downloaded TUI..."
+    if codesign --force --sign - "$TUI_BIN" >/dev/null 2>&1; then
+      TUI_REPORTED="$("$TUI_BIN" --version 2>/dev/null | head -1 | awk '{print $NF}')"
+    else
+      warn "Could not refresh the macOS code signature for ${TUI_BIN}."
+   fi
+ fi
   [ -n "$TUI_REPORTED" ] || fail "${TUI_BIN} did not run (--version produced no output)." 3
   ok "TUI installed to ${TUI_BIN} (reports ${TUI_REPORTED})"
 fi
