@@ -92,7 +92,8 @@ defmodule OptimalSystemAgent.OpenComputers.Session do
       # heartbeat interval as negotiated in hello_ok (ms)
       heartbeat_ms: 30_000,
       # grant token renewed by control plane (passed along in state)
-      grant_token: nil
+      grant_token: nil,
+      verified_control: false
     }
 
     {:ok, state}
@@ -153,7 +154,8 @@ defmodule OptimalSystemAgent.OpenComputers.Session do
             | conn: conn,
               ref: ref,
               websocket: websocket,
-              phase: :awaiting_hello_ok
+              phase: :awaiting_hello_ok,
+              verified_control: URI.parse(cfg.control_url).scheme == "wss"
           }
 
           case send_term(state, {:hello, Hello.build(cfg)}) do
@@ -294,6 +296,8 @@ defmodule OptimalSystemAgent.OpenComputers.Session do
 
   @impl true
   def terminate(_reason, state) do
+    OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.SessionGrant.clear(state)
+
     if state.conn do
       # Best-effort: send a WS close frame before the connection drops.
       case Mint.WebSocket.encode(state.websocket, :close) do
@@ -449,6 +453,7 @@ defmodule OptimalSystemAgent.OpenComputers.Session do
   # ── State helpers ─────────────────────────────────────────────────────────────
 
   defp close(state) do
+    state = OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.SessionGrant.clear(state)
     cancel_timer(state.reconnect_timer)
     cancel_timer(state.hello_timer)
     cancel_timer(state.heartbeat_timer)

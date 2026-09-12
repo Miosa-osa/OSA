@@ -1,124 +1,115 @@
-/// Capture.cs — Windows Desktop Duplication API wrapper.
-///
-/// Uses DXGI OutputDuplication + Direct3D 11 to grab frames from the primary
-/// (or indexed) display adapter output. Converts each frame to BGR24 bytes and
-/// pushes them to VncServer.SetFrame().
-///
-/// Phase 1 status: skeleton. `Start()` currently falls back to stub mode after
-/// logging the capture_error so the overall pipeline is testable.
-///
-/// What a Phase 2 specialist needs to complete (search TODO:P2):
-///   1. Real D3D11 device + DXGI output enumeration
-///   2. OutputDuplication.AcquireNextFrame() loop
-///   3. Staging texture + Map/Unmap to read CPU-accessible pixels
-///   4. BGRA → BGR24 conversion matching VncServer.PixelFormat
-///   5. Handle OutputDuplication recreation on DXGI_ERROR_ACCESS_LOST
-///   6. Multi-monitor: enumerate IDXGIOutput per IDXGIAdapter
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 
-using System;
-using System.Threading;
+readonly record struct DesktopBounds(int X, int Y, int Width, int Height);
 
-// TODO:P2 — add `using Vortice.DXGI;` and `using Vortice.Direct3D11;`
-// after installing Vortice.DXGI + Vortice.Direct3D11 NuGet packages.
-// Skeleton compiles today without them; swap the TODO stubs for real calls.
+sealed record DesktopFrame(int Width, int Height, byte[] Pixels)
+{
+    // At most 64 MiB per BGRA frame; no unbounded capture queue.
+    public const int MaxPixels = 16 * 1024 * 1024;
 
+    public void Validate()
+    {
+        if (Width <= 0 || Height <= 0 || Width > ushort.MaxValue || Height > ushort.MaxValue ||
+            (long)Width * Height > MaxPixels || (long)Width * Height * 4 != Pixels.Length)
+            throw new InvalidDataException("Unsupported framebuffer dimensions or byte count");
+    }
+}
+
+// GDI is the compatibility capture backend, not a simulated DXGI fallback.
+// All GDI handles are acquired, used and released on the same calling thread.
 sealed class Capture
 {
-    private readonly VncServer _server;
-    private readonly int       _displayIndex;
-    private volatile bool      _running;
+    public DesktopBounds Bounds { get; }
+    private readonly int _displayIndex;
 
-    public Capture(VncServer server, int displayIndex)
+    public Capture(int displayIndex)
     {
-        _server       = server;
+        DesktopSession.RequireInteractive();
         _displayIndex = displayIndex;
+        Bounds = GetBounds(displayIndex);
+        if ((long)Bounds.Width * Bounds.Height > DesktopFrame.MaxPixels)
+            throw new InvalidOperationException("Display exceeds 16 megapixel capture limit");
     }
 
-    /// <summary>
-    /// Starts the Desktop Duplication capture loop.
-    /// Runs until <paramref name="token"/> is cancelled or a non-recoverable
-    /// DXGI error occurs. Falls back to stub on first error.
-    /// </summary>
-    public void Start(CancellationToken token)
+    public DesktopFrame ReadFrame()
     {
-        _running = true;
+        DesktopSession.RequireInteractive();
+        if (GetBounds(_displayIndex) != Bounds)
+            throw new InvalidOperationException("Display topology changed; start a new desktop session");
+        IntPtr screen = IntPtr.Zero, memory = IntPtr.Zero, bitmap = IntPtr.Zero, previous = IntPtr.Zero;
         try
         {
-            StartInternal(token);
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"[ScreenShare] capture_error {ex.Message} — falling back to stub");
-            // VncServer already serves stub frames by default; nothing to do.
+            screen = Native.GetDC(IntPtr.Zero);
+            if (screen == IntPtr.Zero) throw new Win32Exception();
+            memory = Native.CreateCompatibleDC(screen);
+            if (memory == IntPtr.Zero) throw new Win32Exception();
+            var info = new Native.BitmapInfo
+            {
+                Size = 40,
+                Width = Bounds.Width,
+                Height = -Bounds.Height,
+                Planes = 1,
+                BitCount = 32
+            };
+            bitmap = Native.CreateDIBSection(screen, ref info, 0, out var bits, IntPtr.Zero, 0);
+            if (bitmap == IntPtr.Zero || bits == IntPtr.Zero) throw new Win32Exception();
+            previous = Native.SelectObject(memory, bitmap);
+            if (previous == IntPtr.Zero || previous == new IntPtr(-1)) throw new Win32Exception();
+            // SRCCOPY | CAPTUREBLT includes layered windows, not protected content.
+            if (!Native.BitBlt(memory, 0, 0, Bounds.Width, Bounds.Height,
+                    screen, Bounds.X, Bounds.Y, 0x40CC0020)) throw new Win32Exception();
+            DrawCursor(memory);
+            if (!Native.GdiFlush()) throw new Win32Exception();
+            var pixels = new byte[checked(Bounds.Width * Bounds.Height * 4)];
+            Marshal.Copy(bits, pixels, 0, pixels.Length);
+            DesktopSession.RequireInteractive();
+            return new DesktopFrame(Bounds.Width, Bounds.Height, pixels);
         }
         finally
         {
-            _running = false;
+            if (previous != IntPtr.Zero && previous != new IntPtr(-1)) Native.SelectObject(memory, previous);
+            if (bitmap != IntPtr.Zero) Native.DeleteObject(bitmap);
+            if (memory != IntPtr.Zero) Native.DeleteDC(memory);
+            if (screen != IntPtr.Zero) Native.ReleaseDC(IntPtr.Zero, screen);
         }
     }
 
-    public void Stop() => _running = false;
-
-    // -------------------------------------------------------------------------
-    // Internal — Desktop Duplication loop
-    // -------------------------------------------------------------------------
-
-    private void StartInternal(CancellationToken token)
+    private void DrawCursor(IntPtr dc)
     {
-        // TODO:P2 — Real implementation:
-        //
-        //   1. Create D3D11 device:
-        //      D3D11.D3D11CreateDevice(null, DriverType.Hardware, DeviceCreationFlags.None,
-        //          featureLevels, out var device, out _, out var context);
-        //
-        //   2. Get DXGI device + adapter:
-        //      using var dxgiDevice = device.QueryInterface<IDXGIDevice>();
-        //      using var adapter    = dxgiDevice.GetParent<IDXGIAdapter>();
-        //
-        //   3. Enumerate outputs, pick _displayIndex:
-        //      adapter.EnumOutputs(_displayIndex, out var output);
-        //      using var output1 = output.QueryInterface<IDXGIOutput1>();
-        //
-        //   4. Create output duplication:
-        //      output1.DuplicateOutput(device, out var duplication);
-        //
-        //   5. Frame loop:
-        //      while (!token.IsCancellationRequested)
-        //      {
-        //          var hr = duplication.AcquireNextFrame(33, out var info, out var resource);
-        //          if (hr == DXGI_ERROR_WAIT_TIMEOUT) continue;
-        //          if (hr == DXGI_ERROR_ACCESS_LOST)  { /* recreate duplication */ continue; }
-        //
-        //          using var texture2d = resource.QueryInterface<ID3D11Texture2D>();
-        //          var desc = texture2d.Description;
-        //          desc.Usage     = ResourceUsage.Staging;
-        //          desc.BindFlags = BindFlags.None;
-        //          desc.CPUAccessFlags = CpuAccessFlags.Read;
-        //          device.CreateTexture2D(desc, null, out var staging);
-        //
-        //          context.CopyResource(staging, texture2d);
-        //          var mapped = context.Map(staging, 0, MapMode.Read, 0);
-        //
-        //          // Convert BGRA → BGR24 and hand to VncServer
-        //          var frame = ConvertBgraToBgr24(mapped, desc.Width, desc.Height, mapped.RowPitch);
-        //          _server.SetFrame(desc.Width, desc.Height, frame);
-        //
-        //          context.Unmap(staging, 0);
-        //          duplication.ReleaseFrame();
-        //      }
-        //
-        // Console.Error.WriteLine($"[ScreenShare] capture_started display={_displayIndex} {w}x{h}");
-
-        // Stub fallthrough — remove once real capture is wired:
-        throw new NotImplementedException("Desktop Duplication capture not yet implemented (Phase 2)");
+        var cursor = new Native.CursorInfo { Size = Marshal.SizeOf<Native.CursorInfo>() };
+        if (!Native.GetCursorInfo(ref cursor) || (cursor.Flags & 1) == 0) return;
+        if (!Native.GetIconInfo(cursor.Cursor, out var icon)) return;
+        try
+        {
+            Native.DrawIconEx(dc, cursor.Position.X - Bounds.X - (int)icon.HotspotX,
+                cursor.Position.Y - Bounds.Y - (int)icon.HotspotY, cursor.Cursor, 0, 0, 0, IntPtr.Zero, 3);
+        }
+        finally
+        {
+            if (icon.Mask != IntPtr.Zero) Native.DeleteObject(icon.Mask);
+            if (icon.Color != IntPtr.Zero) Native.DeleteObject(icon.Color);
+        }
     }
 
-    // TODO:P2 — Implement pixel format conversion
-    private static byte[] ConvertBgraToBgr24(object /*MappedSubresource*/ mapped, int width, int height, int rowPitch)
+    internal static DesktopBounds GetBounds(int index)
     {
-        // Each BGRA pixel is 4 bytes; drop the A channel.
-        var result = new byte[width * height * 3];
-        // TODO:P2 — unsafe pointer walk over mapped.DataPointer
-        return result;
+        var monitors = new List<(bool Primary, DesktopBounds Bounds)>();
+        Native.MonitorCallback callback = (IntPtr monitor, IntPtr dc, ref Native.Rect rect, IntPtr data) =>
+        {
+            var info = new Native.MonitorInfo { Size = Marshal.SizeOf<Native.MonitorInfo>() };
+            if (!Native.GetMonitorInfo(monitor, ref info)) return false;
+            monitors.Add(((info.Flags & 1) != 0, new DesktopBounds(info.Monitor.Left, info.Monitor.Top,
+                info.Monitor.Right - info.Monitor.Left, info.Monitor.Bottom - info.Monitor.Top)));
+            return true;
+        };
+        if (!Native.EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, callback, IntPtr.Zero))
+            throw new Win32Exception();
+        var ordered = monitors.OrderByDescending(m => m.Primary).ThenBy(m => m.Bounds.X)
+            .ThenBy(m => m.Bounds.Y).ToArray();
+        if (index < 0 || index >= ordered.Length) throw new ArgumentException("Display index is unavailable");
+        var bounds = ordered[index].Bounds;
+        if (bounds.Width <= 0 || bounds.Height <= 0) throw new InvalidOperationException("No active display");
+        return bounds;
     }
 }

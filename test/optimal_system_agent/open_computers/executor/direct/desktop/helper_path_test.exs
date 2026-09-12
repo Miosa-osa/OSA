@@ -9,23 +9,33 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.HelperPathTes
 
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.HelperPath
 
-  @helper "osa-screen-capture-test"
+  @helper "osa-screen-capture-test.exe"
 
   setup do
+    previous =
+      Enum.map(
+        ["OSA_DESKTOP_HELPER_OVERRIDE", "OSA_DESKTOP_HELPER_SHA256"],
+        &{&1, System.get_env(&1)}
+      )
+
     dir = Path.join(System.tmp_dir!(), "helperpath-#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
 
     priv = Path.join(dir, "bundled-#{@helper}")
     user = Path.join(dir, "user-#{@helper}")
     File.write!(priv, "bundled binary")
+    File.chmod!(priv, 0o700)
     File.write!(user, "attacker binary")
 
     System.delete_env("OSA_DESKTOP_HELPER_OVERRIDE")
     System.delete_env("OSA_DESKTOP_HELPER_SHA256")
 
     on_exit(fn ->
-      System.delete_env("OSA_DESKTOP_HELPER_OVERRIDE")
-      System.delete_env("OSA_DESKTOP_HELPER_SHA256")
+      Enum.each(previous, fn
+        {key, nil} -> System.delete_env(key)
+        {key, value} -> System.put_env(key, value)
+      end)
+
       File.rm_rf(dir)
     end)
 
@@ -33,6 +43,12 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.HelperPathTes
   end
 
   describe "resolve/4" do
+    @tag skip: match?({:win32, _}, :os.type())
+    test "a non-executable bundle is not reported as usable", %{priv: priv, user: user} do
+      File.chmod!(priv, 0o600)
+      assert {:error, {:invalid_helper, _}} = HelperPath.resolve(@helper, priv, user, "docs/x.md")
+    end
+
     test "prefers the bundled binary over a user-writable one", %{priv: priv, user: user} do
       # The old order tried `~/.osa/helpers` / `%USERPROFILE%\.osa\helpers`
       # FIRST, so anything that could write a file as the user got code
@@ -55,9 +71,22 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.HelperPathTes
   end
 
   describe "pinned override" do
+    test "a directory override returns an error instead of crashing the desktop caller", %{
+      dir: dir,
+      priv: priv,
+      user: user
+    } do
+      System.put_env("OSA_DESKTOP_HELPER_OVERRIDE", dir)
+      System.put_env("OSA_DESKTOP_HELPER_SHA256", String.duplicate("0", 64))
+
+      assert {:error, {:untrusted_helper, _}} =
+               HelperPath.resolve(@helper, priv, user, "docs/x.md")
+    end
+
     test "runs an override whose hash matches", %{dir: dir, priv: priv, user: user} do
-      override = Path.join(dir, "override")
+      override = Path.join(dir, "override.exe")
       File.write!(override, "explicitly trusted binary")
+      File.chmod!(override, 0o700)
 
       System.put_env("OSA_DESKTOP_HELPER_OVERRIDE", override)
       System.put_env("OSA_DESKTOP_HELPER_SHA256", HelperPath.sha256_file(override))

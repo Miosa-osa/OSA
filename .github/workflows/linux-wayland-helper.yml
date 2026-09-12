@@ -1,0 +1,47 @@
+name: Linux Wayland helper build and package
+
+on:
+  pull_request:
+    paths:
+      - 'native/linux/ScreenShare/**'
+      - 'lib/optimal_system_agent/open_computers/executor/direct/desktop/wayland.ex'
+      - 'test/optimal_system_agent/open_computers/executor/direct/desktop/wayland_test.exs'
+      - '.github/workflows/linux-wayland-helper.yml'
+      - '.github/workflows/release.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'native/linux/ScreenShare/**'
+      - '.github/workflows/linux-wayland-helper.yml'
+      - '.github/workflows/release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  linux-helper:
+    # Same compatibility floor as the shipped Linux x64 OTP artifact.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: "1.98.0"
+      OSA_TEST_ARCH: x64
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends pkg-config build-essential python3 libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-pipewire
+          rustup toolchain install 1.98.0 --profile minimal --component clippy,rustfmt
+      - name: Build and test without desktop access
+        run: bash native/linux/ScreenShare/test-build.sh
+      - name: Stage standalone build artifact for inspection
+        run: |
+          bash native/linux/ScreenShare/stage.sh dist/wayland
+          cd dist/wayland
+          sha256sum osa-screen-capture-wayland > osa-screen-capture-wayland.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wayland-helper-linux-x64-build-only
+          path: dist/wayland/*
+          if-no-files-found: error

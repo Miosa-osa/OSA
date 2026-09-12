@@ -57,6 +57,11 @@ swiftc \
     "${SRC_DIR}/FrameEncoder.swift" \
     "${SRC_DIR}/VncServer.swift" \
     "${SRC_DIR}/Capture.swift" \
+    "${SRC_DIR}/DesktopPermissions.swift" \
+    "${SRC_DIR}/DesktopInput.swift" \
+    "${SRC_DIR}/KeyMapping.swift" \
+    "${SRC_DIR}/CaptureSession.swift" \
+    "${SRC_DIR}/Config.swift" \
     "${SRC_DIR}/main.swift" \
     -o "${BINARY}"
 

@@ -12,6 +12,11 @@ final class Lifetime {
     private let idleSeconds: Double
     private let lock = NSLock()
     private var lastActivity = ProcessInfo.processInfo.systemUptime
+    private var cleanupHook: () -> Void = {}
+    var beforeExit: () -> Void {
+        get { lock.lock(); defer { lock.unlock() }; return cleanupHook }
+        set { lock.lock(); defer { lock.unlock() }; cleanupHook = newValue }
+    }
 
     init(memoryMB: Int, idleSeconds: Int) {
         self.memoryBytes = UInt64(memoryMB) * 1024 * 1024
@@ -104,6 +109,15 @@ final class Lifetime {
         message.utf8CString.withUnsafeBufferPointer {
             _ = Darwin.write(STDERR_FILENO, $0.baseAddress, $0.count - 1)
         }
+        // Best-effort release of this viewer's held input, with a hard deadline
+        // so an input/system call cannot strand the independent watchdog.
+        let cleanup = DispatchGroup()
+        cleanup.enter()
+        DispatchQueue.global(qos: .userInteractive).async {
+            self.beforeExit()
+            cleanup.leave()
+        }
+        _ = cleanup.wait(timeout: .now() + .milliseconds(100))
         // Kernel teardown closes sockets, releases capture surfaces and locks.
         // Do not await a possibly wedged capture task on an emergency exit.
         _exit(status)

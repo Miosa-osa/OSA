@@ -46,7 +46,14 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
   use GenServer
   require Logger
 
-  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.{MacOS, Windows, X11vnc}
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.{
+    MacOS,
+    Readiness,
+    Wayland,
+    Windows,
+    X11vnc
+  }
+
   alias OptimalSystemAgent.OpenComputers.FrameRouter
 
   @vnc_host ~c"127.0.0.1"
@@ -65,6 +72,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
   def handle_frame(frame) do
     GenServer.cast(__MODULE__, {:frame, frame})
   end
+
+  def handle_frame(frame, context),
+    do: GenServer.cast(__MODULE__, {:authorized_frame, frame, context})
 
   # ── GenServer ────────────────────────────────────────────────────────────────
 
@@ -94,6 +104,18 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
 
   @impl true
   def handle_cast({:frame, {:desktop_start_request, %{session_id: session_id} = payload}}, state) do
+    handle_cast(
+      {:authorized_frame, {:desktop_start_request, Map.put(payload, :session_id, session_id)},
+       []},
+      state
+    )
+  end
+
+  def handle_cast(
+        {:authorized_frame, {:desktop_start_request, %{session_id: session_id} = payload},
+         context},
+        state
+      ) do
     width = Map.get(payload, :width, 1920)
     height = Map.get(payload, :height, 1080)
 
@@ -103,8 +125,20 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
 
     state = close_session(state, session_id, :replaced)
 
-    case start_session(session_id, %{width: width, height: height}, state) do
+    opts =
+      OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.launch_options(payload, context)
+
+    opts = Map.put(opts, :desktop_lease, context[:desktop_lease])
+
+    case start_session(session_id, opts, state) do
       {:ok, session_state} ->
+        lease = context[:desktop_lease]
+        if lease, do: Process.monitor(lease)
+        session_state = Map.put(session_state, :desktop_lease, lease)
+
+        if is_pid(lease) and not Process.alive?(lease),
+          do: send(self(), {:expired_desktop, session_id})
+
         new_sessions = Map.put(state.sessions, session_id, session_state)
 
         # The VNC server now requires a per-session password, and the RFB
@@ -115,7 +149,11 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
            %{
              session_id: session_id,
              vnc_password: session_state.vnc_secret,
-             capabilities: %{mouse: true, keyboard: true, clipboard: false}
+             capabilities: %{
+               mouse: opts.allow_input,
+               keyboard: opts.allow_input,
+               clipboard: false
+             }
            }},
           state
         )
@@ -177,6 +215,14 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
   # ── TCP messages from VNC socket ─────────────────────────────────────────────
 
   @impl true
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+    ids = for {id, session} <- state.sessions, session[:desktop_lease] == pid, do: id
+    {:noreply, Enum.reduce(ids, state, &close_session(&2, &1, :grant_expired))}
+  end
+
+  def handle_info({:expired_desktop, session_id}, state),
+    do: {:noreply, close_session(state, session_id, :grant_expired)}
+
   def handle_info({:tcp, socket, data}, state) do
     # Find which session this socket belongs to
     case find_session_by_socket(state.sessions, socket) do
@@ -269,11 +315,12 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
 
   # ── Private — session lifecycle ───────────────────────────────────────────────
 
-  defp start_session(session_id, _opts, controller_state) do
-    with {:ok, vnc_handle} <- start_vnc(controller_state) do
+  defp start_session(session_id, opts, controller_state) do
+    with {:ok, vnc_handle} <- start_vnc(controller_state, opts) do
       try do
         result =
           with :ok <- maybe_sleep(controller_state),
+               :ok <- live_grant(opts),
                {:ok, vnc_port} <- resolve_vnc_port(vnc_handle, controller_state),
                {:ok, socket} <- connect_vnc(vnc_port) do
             :inet.setopts(socket, active: :once)
@@ -305,16 +352,32 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
     end
   end
 
-  defp start_vnc(%{vnc_start_fn: fun}) when is_function(fun, 0), do: fun.()
+  defp start_vnc(%{vnc_start_fn: fun}, _opts) when is_function(fun, 0), do: fun.()
+  defp start_vnc(%{vnc_start_fn: fun}, opts) when is_function(fun, 1), do: fun.(opts)
 
-  defp start_vnc(_controller_state) do
-    case os_family() do
-      :linux -> X11vnc.start()
-      :macos -> MacOS.start()
-      :windows -> Windows.start()
-      _ -> {:error, :unsupported_platform}
+  defp start_vnc(_controller_state, opts) do
+    case Readiness.backend() do
+      :x11vnc ->
+        X11vnc.start(opts)
+
+      :wayland ->
+        Wayland.start(opts)
+
+      :macos ->
+        MacOS.start(opts)
+
+      :windows ->
+        Windows.start(opts)
+
+      _ ->
+        {:error, :unsupported_platform}
     end
   end
+
+  defp live_grant(%{desktop_lease: lease}) when is_pid(lease),
+    do: if(Process.alive?(lease), do: :ok, else: {:error, :desktop_grant_expired})
+
+  defp live_grant(_), do: :ok
 
   # Skip the startup sleep when a test hook is provided (fast tests)
   defp maybe_sleep(%{vnc_start_fn: fun}) when is_function(fun, 0), do: :ok
@@ -359,6 +422,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
     case os_family() do
       :macos -> MacOS.stop(port_ref)
       :windows -> Windows.stop(port_ref)
+      :linux -> Wayland.stop(port_ref)
       _ -> :ok
     end
   end
@@ -392,6 +456,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
 
         # Stop VNC process if we started it — delegate to the platform adapter
         if session.vnc_pid, do: stop_vnc(session.vnc_pid)
+        if lease = session[:desktop_lease], do: send(lease, :revoke)
 
         %{state | sessions: Map.delete(state.sessions, session_id)}
     end

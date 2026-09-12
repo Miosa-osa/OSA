@@ -21,7 +21,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         fputs("[ScreenShare] stream stopped: \(error)\n", stderr)
-        server?.setFrameSource(.stub)
+        server?.stop()
     }
 
     // MARK: - SCStreamOutput
@@ -38,7 +38,6 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput {
     func consume(_ sampleBuffer: CMSampleBuffer) {
         autoreleasepool {
             guard sampleBuffer.isValid,
-                server?.hasClient == true,
                 let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer)
             else { return }
             CVPixelBufferLockBaseAddress(imageBuffer, .readOnly)

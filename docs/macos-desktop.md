@@ -45,7 +45,41 @@ The macOS release workflow runs this gate before packaging the helper.
 
 Real screen recording is excluded from ordinary `mix test` runs.
 It is opt-in with `--include macos_native` and requires macOS Screen & System Audio Recording permission for the helper or its responsible application.
-When permission is denied, the helper currently serves a stub frame, so a successful handshake alone does not prove live capture.
+Normal startup now checks screen-recording permission without prompting and fails on denial, an unavailable display, or a capture error.
+The loopback listener is announced only after an actual frame arrives.
+`--stub` is explicit synthetic test mode only; permission failure never selects it.
+Do not execute `--check` against an older helper to discover its contract: older helpers ignored unknown flags and could start capture.
+The new helper supports this non-capture check, but automatic macOS readiness remains conservative until the installed helper contract is established.
+
+## Physical input and authorization
+
+Native helpers start read-only by default.
+`--allow-input` additionally requires existing Accessibility trust and event-posting permission; the helper never requests or grants these permissions.
+Conflicting `--read-only`/`--allow-input` flags and synthetic-mode input are rejected.
+The job executor passes input permission only when the request contains `allow_input: true` and the separate trusted caller context contains `input_authorized: true`.
+Never copy that context value from a remote job payload.
+The existing two-argument executor entry point and direct controller sessions remain read-only until their caller supplies a validated authorization path.
+
+`DesktopInput.swift` owns one viewer's pressed-key/button state and emits Core Graphics events through an injectable sink.
+`KeyMapping.swift` maps common modifiers, navigation/function keys, ANSI shortcuts, and Unicode text.
+Non-ANSI shortcut layouts, dead-key composition, and IME behavior still require native QA; unsupported shortcut mappings are ignored rather than mapped to an unrelated key.
+Pointer coordinates scale into the selected display's global bounds, including negative-origin and HiDPI displays.
+Mouse buttons, dragging and wheel input use RFB button masks.
+Disconnect and normal teardown release held input; permission revocation disables further input and attempts release.
+Emergency owner/watchdog teardown gives release a bounded 100 ms opportunity before process exit.
+An OS-level permission revocation or forced kill can prevent delivery of release events; this cannot be represented as a guaranteed system-level key release.
+
+The listener remains loopback-only and uses the existing RFB security contract.
+Loopback is not an isolation boundary against other local processes, and physical desktop control is not an isolated VM desktop.
+
+## Permission-free development evidence
+
+`OSA_CAPTURE_TEST_BUILD_MODE=debug sh native/macos/ScreenShare/test.sh` builds without replacing the tracked release helper.
+The gate runs synthetic permission decisions, input recording sinks, real loopback RFB exchanges, frame conversion/backpressure, lifecycle and watchdog tests.
+None of those tests captures the user's screen or posts input events.
+Live ScreenCaptureKit capture, Accessibility delivery, layout behavior and lock/unlock remain explicit opt-in native QA.
+
+Apple API references: [Accessibility trust](https://developer.apple.com/documentation/applicationservices/1460720-axisprocesstrusted), [screen-recording preflight](https://developer.apple.com/documentation/coregraphics/cgpreflightscreencaptureaccess()), [event-posting preflight](https://developer.apple.com/documentation/coregraphics/cgpreflightposteventaccess()), and [Quartz event services](https://developer.apple.com/documentation/coregraphics/quartz-event-services).
 
 ## September 7, 2026 incident
 

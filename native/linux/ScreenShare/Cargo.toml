@@ -1,0 +1,19 @@
+[package]
+name = "osa-screen-capture-wayland"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+publish = false
+
+[dependencies]
+anyhow = "1"
+ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
+futures-util = "0.3"
+gstreamer = "0.23"
+gstreamer-app = "0.23"
+gstreamer-video = "0.23"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "time", "sync"] }
+
+[profile.release]
+strip = true
+lto = "thin"

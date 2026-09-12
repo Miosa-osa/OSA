@@ -63,6 +63,15 @@ static class FrameEncoder
     /// FramebufferUpdate with a single raw-encoded rectangle.
     public static byte[] FramebufferUpdate(int x, int y, int width, int height, byte[] pixelData)
     {
+        var header = UpdateHeader(x, y, width, height);
+        var msg = new byte[header.Length + pixelData.Length];
+        header.CopyTo(msg, 0);
+        pixelData.CopyTo(msg, header.Length);
+        return msg;
+    }
+
+    public static byte[] UpdateHeader(int x, int y, int width, int height)
+    {
         // Header: type(1) + pad(1) + rect_count(2) = 4 bytes
         // Rect:   x(2)+y(2)+w(2)+h(2)+encoding(4) = 12 bytes
         // Total header = 16 bytes + pixel data
@@ -79,10 +88,7 @@ static class FrameEncoder
         WriteU16(header, ref i, (ushort)height);
         WriteU32(header, ref i, 0);  // encoding: Raw (0)
 
-        var msg = new byte[header.Length + pixelData.Length];
-        header.CopyTo(msg, 0);
-        pixelData.CopyTo(msg, header.Length);
-        return msg;
+        return header;
     }
 
     // ---- Helpers ------------------------------------------------------------
@@ -97,7 +103,7 @@ static class FrameEncoder
     {
         buf[offset++] = (byte)(value >> 24);
         buf[offset++] = (byte)((value >> 16) & 0xFF);
-        buf[offset++] = (byte)((value >> 8)  & 0xFF);
+        buf[offset++] = (byte)((value >> 8) & 0xFF);
         buf[offset++] = (byte)(value & 0xFF);
     }
 
@@ -105,5 +111,5 @@ static class FrameEncoder
         => (ushort)((buf[offset] << 8) | buf[offset + 1]);
 
     public static uint ReadU32(byte[] buf, int offset)
-        => (uint)((buf[offset] << 24) | (buf[offset+1] << 16) | (buf[offset+2] << 8) | buf[offset+3]);
+        => (uint)((buf[offset] << 24) | (buf[offset + 1] << 16) | (buf[offset + 2] << 8) | buf[offset + 3]);
 }

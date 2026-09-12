@@ -39,14 +39,14 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.HelperPath do
   def resolve(helper_name, priv_path, user_path, doc_ref) do
     case override() do
       {:ok, path} ->
-        {:ok, path}
+        executable(path)
 
       {:error, reason} ->
         {:error, {:untrusted_helper, reason}}
 
       :none ->
         if File.exists?(priv_path) do
-          {:ok, priv_path}
+          executable(priv_path)
         else
           {:error, {:missing_helper, missing_message(helper_name, user_path, doc_ref)}}
         end
@@ -74,8 +74,8 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.HelperPath do
             "An unpinned helper override is not executed."
         )
 
-      not File.exists?(path) ->
-        refuse("#{@override_path_env}=#{path} does not exist.")
+      not File.regular?(path) ->
+        refuse("#{@override_path_env}=#{path} is not a regular file.")
 
       true ->
         actual = sha256_file(path)
@@ -89,6 +89,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.HelperPath do
           )
         end
     end
+  rescue
+    error in File.Error ->
+      refuse("Cannot read pinned helper: #{Exception.message(error)}")
   end
 
   @doc "Hex sha256 of a file's contents."
@@ -102,6 +105,14 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.HelperPath do
   end
 
   # ── Private ──
+
+  defp executable(path) do
+    if File.regular?(path) and System.find_executable(path) != nil do
+      {:ok, path}
+    else
+      {:error, {:invalid_helper, "Desktop helper is not a regular executable file: #{path}"}}
+    end
+  end
 
   defp refuse(message) do
     Logger.error("[Desktop.HelperPath] #{message}")
