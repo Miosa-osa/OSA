@@ -233,11 +233,28 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.StallCheckpointTest do
     end
 
     test "the directive names the tools actually being repeated" do
-      state = base_state(%{recent_tool_names: List.duplicate("shell_execute", 12)})
+      # A genuinely non-progress tool (not a read/search/command/write): 12
+      # identical calls with nothing else is a real stall. `shell_execute` is
+      # no longer usable here — it now counts as progress (see the
+      # investigative-command fix), which is the point of the test below.
+      state = base_state(%{recent_tool_names: List.duplicate("send_message", 12)})
       {:ok, state} = tick(state)
 
       assert [%{content: content}] = state.messages
-      assert content =~ "shell_execute"
+      assert content =~ "send_message"
+    end
+
+    test "an all-shell_execute window is NOT a stall (iterative debugging is progress)" do
+      # Bug 3: a fix-the-eslint-errors phase — run the linter, read output, run
+      # it again — is dominated by shell_execute calls that each return NEW
+      # output. Those must count as forward progress; the graded nudge used to
+      # fire ("no forward progress for 12 tool calls") mid-work. A truly stuck
+      # shell loop is still caught by IdenticalCall (exact repeats) and
+      # FailureSignature (same error) — Stall is only for non-progress.
+      state = base_state(%{recent_tool_names: List.duplicate("shell_execute", 12)})
+      {:ok, state} = tick(state)
+
+      assert state.messages == [], "a shell-driven debugging window must not trip the stall nudge"
     end
   end
 

@@ -10,7 +10,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGlob.Handler do
   Logic is verbatim from the original `file_glob.ex` — no semantic changes.
   """
 
+  alias OptimalSystemAgent.Tools.BoundedCmd
   alias OptimalSystemAgent.Tools.Builtins.FileGlob.{Constants, Messages}
+  alias OptimalSystemAgent.Tools.Builtins.FileGrep.Backend, as: FileGrepBackend
   alias OptimalSystemAgent.Tools.UseContext
 
   # ── Stage 1: Input validation ─────────────────────────────────────────
@@ -109,19 +111,132 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGlob.Handler do
     max = Constants.max_results()
     filter_git? = not references_noise_dir?(pattern)
 
-    all =
-      base
-      |> Path.join(pattern)
-      # `match_dot: true` is the whole reason dotfiles are visible at all.
-      # Without it `Path.wildcard/2` refuses to match any component beginning
-      # with `.`, so `**/*` skipped `.github/`, `.env.example`, `.gitignore`
-      # and every dot-directory beneath them — not "returned them ranked low",
-      # but never returned them under any pattern the caller could write.
-      |> Path.wildcard(match_dot: true)
-      |> Enum.reject(&sensitive?/1)
-      |> Enum.reject(fn p -> filter_git? and in_noise_dir?(p) end)
-      |> Enum.sort()
+    case bounded_wildcard(pattern, base) do
+      :timeout ->
+        {:ok, walk_timed_out_message(base)}
 
+      {:ok, matched} ->
+        all =
+          matched
+          |> Enum.reject(&sensitive?/1)
+          |> Enum.reject(fn p -> filter_git? and in_noise_dir?(p) end)
+          |> Enum.sort()
+
+        format_glob_result(all, pattern, base, filter_git?, max)
+    end
+  end
+
+  # `Path.wildcard/2` walks the WHOLE tree under `base`, FOLLOWS symlinks, and
+  # never consults `.gitignore`, so a `**`-rooted pattern over a repo root with a
+  # large symlinked `_build`/`deps` can run for minutes and freeze the turn (the
+  # operator then interrupts, killing all in-flight work) - and it only rejects
+  # the noise dirs AFTER paying to walk into them.
+  #
+  # Prefer ripgrep when it is on the node's PATH. `rg --files` lists matching
+  # files fast, honours `.gitignore`/`.ignore`, skips `.git` by default, and,
+  # with the explicit `!.git/`/`!_build/`/`!deps/`/`!node_modules/` globs, prunes
+  # the noise dirs DURING the descent instead of enumerating a 260MB symlinked
+  # `_build` on every call and discarding it afterwards. Borrowed from Codex
+  # file-search, which drives its walk through the ripgrep `ignore` crate for
+  # exactly these reasons; ripgrep is already a dependency of `file_grep`.
+  # Availability is decided by the SAME detection `file_grep` uses
+  # (`FileGrepBackend.executable/0`), so the two tools never disagree about
+  # whether `rg` is present.
+  #
+  # When ripgrep is absent we fall back to the bounded, throwaway-process
+  # `Path.wildcard/2` walk below, unchanged.
+  defp bounded_wildcard(pattern, base) do
+    case FileGrepBackend.executable() do
+      nil -> wildcard_walk(pattern, base)
+      exe -> ripgrep_files(exe, pattern, base)
+    end
+  end
+
+  # `--hidden` mirrors `Path.wildcard(match_dot: true)`: without it `rg` skips
+  # every dotfile, so `.github/`, `.env.example` and `.gitignore` would go
+  # missing. But `--hidden` also un-skips `.git/`, so the noise-dir globs must
+  # exclude it explicitly, exactly as `file_grep`'s unrestricted pass does. The
+  # exclusions cover the full `Constants.noise_dirs/0` set - a single source of
+  # truth shared with the post-walk `in_noise_dir?/1` reject - and are dropped
+  # when the caller NAMES a noise dir in the pattern, so `.git/**` still works
+  # (matching `filter_git?` in `glob_in/2`).
+  defp ripgrep_files(exe, pattern, base) do
+    args =
+      ["--files", "--hidden", "--glob", pattern] ++
+        noise_exclusion_globs(pattern) ++ [base]
+
+    case BoundedCmd.run(exe, args,
+           label: "file_glob (rg --files)",
+           target: base,
+           stderr_to_stdout: false,
+           timeout_ms: Constants.walk_timeout_ms()
+         ) do
+      {:ok, output, 0} ->
+        {:ok, String.split(output, "\n", trim: true)}
+
+      # `rg --files` exits 1 when it listed nothing - a real, empty answer, not
+      # a fault. Return `[]` so `glob_in/2` renders the "No files matched"
+      # message, identical to an empty `Path.wildcard/2`.
+      {:ok, _output, 1} ->
+        {:ok, []}
+
+      # 2+ (or 127 for a binary that vanished between detection and spawn) means
+      # rg ran and errored. Fall back to the in-BEAM walk rather than report an
+      # engine fault as "no matches".
+      {:ok, _output, _} ->
+        wildcard_walk(pattern, base)
+
+      {:timeout, _} ->
+        :timeout
+    end
+  end
+
+  # Prune the noise dirs DURING the rg descent, not after. Skipped entirely when
+  # the caller's pattern references a noise dir, so an explicit `.git/**` or
+  # `_build/**` is still honoured - the same gate `glob_in/2` applies to the
+  # post-walk reject via `filter_git?`. Trailing `/` restricts each exclusion to
+  # directories, mirroring `file_grep`'s `!.git/`.
+  defp noise_exclusion_globs(pattern) do
+    if references_noise_dir?(pattern) do
+      []
+    else
+      Enum.flat_map(Constants.noise_dirs(), fn dir -> ["--glob", "!" <> dir <> "/"] end)
+    end
+  end
+
+  # Fallback used only when ripgrep is not on the PATH. `Path.wildcard/2` walks
+  # the whole tree and follows symlinks, so it runs under a hard deadline in a
+  # throwaway process: past the deadline the walk is brutally killed and we
+  # return actionable guidance instead of hanging.
+  defp wildcard_walk(pattern, base) do
+    task =
+      Task.async(fn ->
+        base
+        |> Path.join(pattern)
+        # `match_dot: true` is the whole reason dotfiles are visible at all.
+        # Without it `Path.wildcard/2` refuses to match any component beginning
+        # with `.`, so `**/*` skipped `.github/`, `.env.example`, `.gitignore`
+        # and every dot-directory beneath them — not "returned them ranked low",
+        # but never returned them under any pattern the caller could write.
+        |> Path.wildcard(match_dot: true)
+      end)
+
+    case Task.yield(task, Constants.walk_timeout_ms()) || Task.shutdown(task, :brutal_kill) do
+      {:ok, matched} -> {:ok, matched}
+      _ -> :timeout
+    end
+  end
+
+  defp walk_timed_out_message(base) do
+    secs = div(Constants.walk_timeout_ms(), 1000)
+
+    "Search under #{base} was stopped after #{secs}s to avoid freezing the turn. " <>
+      "This path holds a large or symlinked tree (usually _build, deps, .git or " <>
+      "node_modules). Narrow the search: set `path` to a specific subdirectory " <>
+      "(e.g. lib/ or test/), or make the pattern more specific."
+  end
+
+  defp format_glob_result(all, pattern, base, filter_git?, max) do
     total = length(all)
     shown = Enum.take(all, max)
 
@@ -189,5 +304,4 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGlob.Handler do
   defp allowed?(expanded_path) do
     OptimalSystemAgent.Agent.Safety.PathPolicy.within_read_roots?(expanded_path)
   end
-
 end

@@ -95,6 +95,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       |> maybe_add_temperature(model, opts)
       |> maybe_add_tools(opts)
       |> maybe_add_max_tokens(model, opts)
+      |> maybe_add_service_tier(opts)
       |> maybe_add_reasoning(model, opts)
       # LAST: DeepSeek accepts only low/high/max, so this must overwrite the
       # generic "medium" that maybe_add_reasoning/3 would otherwise leave.
@@ -244,9 +245,6 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
           0 -> {:error, "SSE recovery: stream completed without a result"}
         end
 
-      {:ok, result} when is_map(result) ->
-        {:ok, result}
-
       {:error, reason} ->
         {:error, "SSE recovery failed: #{inspect(reason)}"}
 
@@ -281,6 +279,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     |> maybe_add_temperature(model, opts)
     |> maybe_add_tools(opts)
     |> maybe_add_max_tokens(model, opts)
+    |> maybe_add_service_tier(opts)
     |> maybe_add_reasoning(model, opts)
     # LAST: DeepSeek accepts only low/high/max, so this must overwrite the
     # generic "medium" that maybe_add_reasoning/3 would otherwise leave.
@@ -890,6 +889,10 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   defp content_part(%{"text" => t} = b) when is_binary(t),
     do: carry_cache_control(%{"type" => "text", "text" => t}, b)
 
+  # Anything else structured (a stray tool_use block) carries nothing this API
+  # can render.
+  defp content_part(_), do: nil
+
   # `cache_control` is an Anthropic field, but OpenRouter forwards it verbatim
   # on an OpenAI-shaped content part when the upstream model is Anthropic —
   # which is the only case `Registry.anthropic_prompt_cache?/2` lets reach here.
@@ -913,10 +916,6 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   end
 
   defp carry_cache_control(target, _source), do: target
-
-  # Anything else structured (a stray tool_use block) carries nothing this API
-  # can render.
-  defp content_part(_), do: nil
 
   @image_unusable_source "[An image was attached here but its source could not be read, so the image was not sent. Do not describe or reason about it; ask the user to re-share it if it matters.]"
 
@@ -1316,6 +1315,23 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   # field and require `max_completion_tokens`. Every other OpenAI-compatible
   # provider uses `max_tokens`. Route the value to the right key so o-series
   # calls don't 400 ("max_tokens is not supported with this model").
+  # OpenAI processing tier ("flex" ~50% cheaper + slower for non-urgent work,
+  # "priority" faster, "default"/"auto" standard). Added ONLY for the real
+  # OpenAI provider — other OpenAI-compatible backends (xAI/grok, OpenRouter,
+  # local) reject an unknown `service_tier` with a 422, so we never send it
+  # there. Off unless a caller (llm_client, from the task's speed priority) set
+  # :service_tier.
+  defp maybe_add_service_tier(body, opts) do
+    tier = Keyword.get(opts, :service_tier)
+    provider = Keyword.get(opts, :provider, image_provider(opts))
+
+    if is_binary(tier) and tier != "" and provider == :openai do
+      Map.put(body, :service_tier, tier)
+    else
+      body
+    end
+  end
+
   defp maybe_add_max_tokens(body, model, opts) do
     case Keyword.get(opts, :max_tokens) do
       nil ->
@@ -1719,6 +1735,8 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     }
   end
 
+  defp parse_usage(_), do: %{}
+
   # The SSE path's equivalent of `parse_usage/1`.
   #
   # Both streaming branches used to build `%{input_tokens: .., output_tokens: ..}`
@@ -1770,8 +1788,6 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   defp cache_written(%{"cache_creation_input_tokens" => n}) when is_integer(n), do: n
   defp cache_written(%{"cache_write_tokens" => n}) when is_integer(n), do: n
   defp cache_written(_), do: 0
-
-  defp parse_usage(_), do: %{}
 
   # `message` is only usable as a message when it IS one. Some gateways answer
   # with `{"error": {"message": {"detail": ...}}}` or a list of validation

@@ -27,20 +27,25 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
 
     * `:runner`  — 1-arity fun invoked per config. Defaults to
       `Orchestrator.run_subagent/1`.
-    * `:timeout` — per-agent timeout in ms. Defaults to 10 minutes.
+    * `:timeout` — per-agent timeout in ms. Defaults to the shared agent-lifetime
+      backstop (`Orchestrator.subagent_join_timeout_ms/1`, measured in DAYS), so
+      a healthy long-running agent is never killed mid-run. The old minute-scale
+      defaults killed day-long agents; there is no minute-scale cap here now.
   """
   def parallel(parent_id, configs, opts \\ []) do
     Logger.info("[Swarm.Patterns] parallel — #{length(configs)} agents")
 
     runner = Keyword.get(opts, :runner, &Orchestrator.run_subagent/1)
-    timeout = Keyword.get(opts, :timeout, 600_000)
+    timeout = Keyword.get(opts, :timeout, Orchestrator.subagent_join_timeout_ms(%{}))
+    depth = Keyword.get(opts, :depth, 0)
+    priority = Keyword.get(opts, :priority, :standard)
 
     results =
       OptimalSystemAgent.TaskSupervisor
       |> Task.Supervisor.async_stream_nolink(
         configs,
         fn config ->
-          runner.(Map.put(config, :parent_session_id, parent_id))
+          runner.(with_lineage(config, parent_id, depth, priority))
         end,
         # `length(configs)` was no cap at all: a 40-agent swarm started 40
         # concurrent subagent Loops, each with its own provider connection,
@@ -81,8 +86,10 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
   Sequential chain. Each agent receives the previous agent's output prepended
   to its task, enabling iterative refinement.
   """
-  def pipeline(parent_id, configs, _opts \\ []) do
+  def pipeline(parent_id, configs, opts \\ []) do
     Logger.info("[Swarm.Patterns] pipeline — #{length(configs)} agents")
+    depth = Keyword.get(opts, :depth, 0)
+    priority = Keyword.get(opts, :priority, :standard)
 
     {results, _} =
       Enum.map_reduce(configs, nil, fn config, prev_output ->
@@ -93,7 +100,7 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
             config.task
           end
 
-        config = Map.put(config, :parent_session_id, parent_id) |> Map.put(:task, task)
+        config = config |> with_lineage(parent_id, depth, priority) |> Map.put(:task, task)
         result = Orchestrator.run_subagent(config)
 
         output =
@@ -116,12 +123,14 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
   First N-1 agents propose in parallel. Last agent is the critic/evaluator
   and receives all proposals. Falls back to parallel if fewer than 2 agents.
   """
-  def debate(parent_id, configs, _opts \\ []) do
+  def debate(parent_id, configs, opts \\ []) do
     Logger.info("[Swarm.Patterns] debate — #{length(configs)} agents")
+    depth = Keyword.get(opts, :depth, 0)
+    priority = Keyword.get(opts, :priority, :standard)
 
     if length(configs) < 2 do
       Logger.warning("[Swarm.Patterns] debate requires ≥2 agents, falling back to parallel")
-      parallel(parent_id, configs)
+      parallel(parent_id, configs, opts)
     else
       {proposers, [evaluator_config]} = Enum.split(configs, length(configs) - 1)
 
@@ -131,12 +140,12 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
         |> Task.Supervisor.async_stream_nolink(
           proposers,
           fn config ->
-            Orchestrator.run_subagent(Map.put(config, :parent_session_id, parent_id))
+            Orchestrator.run_subagent(with_lineage(config, parent_id, depth, priority))
           end,
           # Same cap as `parallel/3` — an uncapped fan-out here is the identical
           # defect, just reached through a different pattern.
           max_concurrency: min(length(proposers), Orchestrator.delegate_concurrency_cap()),
-          timeout: 600_000,
+          timeout: Orchestrator.subagent_join_timeout_ms(%{}),
           on_timeout: :kill_task
         )
         |> Enum.map(fn
@@ -160,7 +169,7 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
 
       evaluator_config =
         evaluator_config
-        |> Map.put(:parent_session_id, parent_id)
+        |> with_lineage(parent_id, depth, priority)
         |> Map.put(:task, evaluator_task)
 
       evaluator_result = Orchestrator.run_subagent(evaluator_config)
@@ -180,15 +189,24 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
   """
   def review_loop(parent_id, configs, opts \\ []) do
     max_iterations = Keyword.get(opts, :max_iterations, 3)
+    depth = Keyword.get(opts, :depth, 0)
+    priority = Keyword.get(opts, :priority, :standard)
     Logger.info("[Swarm.Patterns] review_loop max_iterations=#{max_iterations}")
 
     case configs do
       [worker_config, reviewer_config | _] ->
-        run_review_loop(parent_id, worker_config, reviewer_config, max_iterations)
+        run_review_loop(
+          parent_id,
+          worker_config,
+          reviewer_config,
+          max_iterations,
+          depth,
+          priority
+        )
 
       [single | _] ->
         Logger.warning("[Swarm.Patterns] review_loop needs ≥2 agents, running single")
-        result = Orchestrator.run_subagent(Map.put(single, :parent_session_id, parent_id))
+        result = Orchestrator.run_subagent(with_lineage(single, parent_id, depth, priority))
         {:ok, [result]}
 
       [] ->
@@ -196,7 +214,8 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
     end
   end
 
-  defp run_review_loop(_parent_id, _worker_cfg, _reviewer_cfg, max_iter) when max_iter < 1 do
+  defp run_review_loop(_parent_id, _worker_cfg, _reviewer_cfg, max_iter, _depth, _priority)
+       when max_iter < 1 do
     Logger.warning(
       "[Swarm.Patterns] review_loop max_iterations=#{max_iter} < 1, returning empty result"
     )
@@ -204,7 +223,7 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
     {:ok, [{:ok, "[no iterations]"}]}
   end
 
-  defp run_review_loop(parent_id, worker_cfg, reviewer_cfg, max_iter) do
+  defp run_review_loop(parent_id, worker_cfg, reviewer_cfg, max_iter, depth, priority) do
     {final_output, _iterations, approved} =
       Enum.reduce_while(1..max_iter, {nil, 0, false}, fn iteration,
                                                          {prev_output, _iter, _approved} ->
@@ -218,7 +237,7 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
 
         worker_result =
           worker_cfg
-          |> Map.put(:parent_session_id, parent_id)
+          |> with_lineage(parent_id, depth, priority)
           |> Map.put(:task, worker_task)
           |> Orchestrator.run_subagent()
 
@@ -234,7 +253,7 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
 
         reviewer_result =
           reviewer_cfg
-          |> Map.put(:parent_session_id, parent_id)
+          |> with_lineage(parent_id, depth, priority)
           |> Map.put(:task, reviewer_task)
           |> Orchestrator.run_subagent()
 
@@ -263,6 +282,22 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
   end
 
   # ---------------------------------------------------------------------------
+  # Lineage
+  # ---------------------------------------------------------------------------
+
+  # Stamp a config with its parent session AND the parent's delegation depth, so
+  # `Orchestrator.run_subagent/1` increments from the true nesting level. Without
+  # the depth, every orchestrate-spawned child started at depth 1 and the
+  # fork-bomb ceiling in `ToolFilter.apply_delegation_depth_guard` was never
+  # reached on this path.
+  defp with_lineage(config, parent_id, depth, priority) do
+    config
+    |> Map.put(:parent_session_id, parent_id)
+    |> Map.put(:delegation_depth, depth)
+    |> Map.put(:priority, priority)
+  end
+
+  # ---------------------------------------------------------------------------
   # Dispatch facade
   # ---------------------------------------------------------------------------
 
@@ -279,8 +314,24 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
   @spec dispatch(String.t() | atom(), String.t(), String.t(), keyword()) ::
           {:ok, String.t()} | {:error, term()}
   def dispatch(pattern, parent_id, task, opts \\ []) when is_binary(task) do
+    norm = normalize_pattern(pattern)
+
+    # Task-level lifecycle so an `orchestrate` swarm is VISIBLE in the TUI, the
+    # same way a `delegate` fan-out is. run_subagent already emits per-AGENT
+    # events, but this path never emitted the outer task grouping that
+    # Orchestrator.run_parallel wraps around a delegate fan-out, so a swarm
+    # showed up as loose agents with no "started / synthesizing / completed"
+    # frame. Best-effort; never affects execution.
+    team_id = "swarm:#{parent_id}:#{normalized_unique(task)}"
+
+    emit_task_event(parent_id, %{
+      event: "orchestrator_task_started",
+      task_id: team_id,
+      strategy: to_string(norm)
+    })
+
     result =
-      case normalize_pattern(pattern) do
+      case norm do
         :parallel -> parallel(parent_id, build_configs(:parallel, task, opts), opts)
         :pipeline -> pipeline(parent_id, build_configs(:pipeline, task, opts), opts)
         :debate -> debate(parent_id, build_configs(:debate, task, opts), opts)
@@ -289,11 +340,40 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
         :auto -> auto_dispatch(parent_id, task, opts)
       end
 
+    emit_task_event(parent_id, %{event: "orchestrator_task_completed", task_id: team_id})
+
     case result do
       {:ok, results} -> {:ok, flatten_results(results)}
       {:error, _} = err -> err
       other -> {:ok, flatten_results(other)}
     end
+  end
+
+  # Broadcast a task-level orchestration event on the parent's session topic,
+  # in the exact shape the TUI's SSE parser expects (see
+  # Orchestrator.emit_event/2). Best-effort — a broadcast failure must never
+  # break a swarm.
+  defp emit_task_event(parent_id, event_data) do
+    full =
+      event_data
+      |> Map.put(:type, :system_event)
+      |> Map.put(:session_id, parent_id)
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{parent_id}",
+      {:osa_event, full}
+    )
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  # A stable-enough id fragment from the task text without Date/System time in
+  # hot equality paths — just a content hash, so the same dispatch reuses one id.
+  defp normalized_unique(task) do
+    :erlang.phash2(task)
   end
 
   @doc "Normalize a pattern name (string/atom) to a known pattern atom; :auto fallback."
@@ -418,7 +498,8 @@ defmodule OptimalSystemAgent.Swarm.Patterns do
           task: task,
           parent_session_id: parent_id,
           role: "agent",
-          tier: :specialist
+          tier: :specialist,
+          priority: Keyword.get(opts, :priority, :standard)
         })
 
       {:ok, [result]}

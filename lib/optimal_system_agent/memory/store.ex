@@ -314,7 +314,12 @@ defmodule OptimalSystemAgent.Memory.Store do
             end
         end
       rescue
-        _ -> :ok
+        e ->
+          Logger.warning(
+            "[Memory.Store] reweave_links failed for #{inspect(existing_id)}: #{Exception.message(e)}"
+          )
+
+          :ok
       end
     end)
   end
@@ -503,7 +508,11 @@ defmodule OptimalSystemAgent.Memory.Store do
           end
       end
     rescue
-      ArgumentError ->
+      e in ArgumentError ->
+        Logger.debug(
+          "[Memory.Store] do_get ETS lookup unavailable for #{inspect(id)}, falling back to Repo: #{Exception.message(e)}"
+        )
+
         case Repo.get(MemoryEntry, id) do
           nil -> {:error, :not_found}
           entry -> {:ok, struct_to_map(entry)}

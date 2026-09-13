@@ -253,15 +253,26 @@ defmodule OptimalSystemAgent.Tools.Registry.SkillLoader do
 
   defp scan_root(scope, root) do
     if File.dir?(root) do
+      # Parallelize the per-file frontmatter reads: each is an independent,
+      # I/O-bound File.read (4KB) + YAML parse, and there can be dozens of
+      # SKILL.md files across scopes. Sequentially this was ~380ms at boot (the
+      # bulk of Tools.Registry init); fanning the reads across schedulers cuts
+      # the wall-clock to the slowest single file. Order does not matter —
+      # merge_by_scope/sort run downstream.
       root
       |> Path.join("**/SKILL.md")
       |> Path.wildcard()
       |> Enum.reject(&vendor_below_root?(&1, root))
-      |> Enum.flat_map(fn path ->
-        case read_frontmatter_entry(path, scope) do
-          {:ok, entry} -> [entry]
-          :error -> []
-        end
+      |> Task.async_stream(
+        fn path -> read_frontmatter_entry(path, scope) end,
+        max_concurrency: max(System.schedulers_online(), 2),
+        ordered: false,
+        timeout: 5_000,
+        on_timeout: :kill_task
+      )
+      |> Enum.flat_map(fn
+        {:ok, {:ok, entry}} -> [entry]
+        _ -> []
       end)
     else
       []

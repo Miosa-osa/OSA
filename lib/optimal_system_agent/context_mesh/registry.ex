@@ -98,7 +98,9 @@ defmodule OptimalSystemAgent.ContextMesh.Registry do
       [] -> nil
     end
   rescue
-    _ -> nil
+    e ->
+      Logger.warning("[ContextMesh.Registry] lookup error: #{Exception.message(e)}")
+      nil
   end
 
   @doc "Return all registered keepers for a given team."
@@ -108,7 +110,9 @@ defmodule OptimalSystemAgent.ContextMesh.Registry do
     |> Enum.map(fn {_, meta} -> meta end)
     |> Enum.sort_by(& &1.created_at)
   rescue
-    _ -> []
+    e ->
+      Logger.warning("[ContextMesh.Registry] list_by_team error: #{Exception.message(e)}")
+      []
   end
 
   @doc "Return all registered keepers across all teams."
@@ -118,7 +122,9 @@ defmodule OptimalSystemAgent.ContextMesh.Registry do
     |> Enum.map(fn {_, meta} -> meta end)
     |> Enum.sort_by(& &1.created_at)
   rescue
-    _ -> []
+    e ->
+      Logger.warning("[ContextMesh.Registry] list_all error: #{Exception.message(e)}")
+      []
   end
 
   # ---------------------------------------------------------------------------
@@ -137,7 +143,9 @@ defmodule OptimalSystemAgent.ContextMesh.Registry do
         :ok
     end
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("[ContextMesh.Registry] update error: #{Exception.message(e)}")
+      :ok
   end
 
   @doc "Refresh the `token_count` and `staleness` fields from a live keeper stats map."

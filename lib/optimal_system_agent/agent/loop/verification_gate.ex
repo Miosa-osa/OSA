@@ -173,8 +173,10 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
     * `NO_RUNNABLE_TEST: <reason>` in the answer releases clause 3 — explicit,
       logged, and unavailable for clause 2.
     * Re-prompts are capped per turn, reset by
-      `TurnPipeline.reset_per_turn_fields/1`. After the cap the gate steps
-      aside unconditionally.
+      `TurnPipeline.reset_per_turn_fields/1`. After the cap the loop no
+      longer re-prompts, but `blocked_finish?/2` still rewrites a text-only
+      "done" into a receipt while `:unchecked_write` or `:failing_check`
+      is live.
 
   This complements `Guardrails.needs_verification_gate?/1` (which targets the
   *zero-successful-tools* case) by covering the *wrote-but-never-checked* case.
@@ -343,6 +345,80 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
   end
 
   def needs_verification?(_, _), do: false
+
+  @doc """
+  True when the re-prompt budget is exhausted AND a file-mutating turn still
+  has unchecked writes or a failing check.
+
+  The loop used to yield after one pushback: the model's "done" sentence
+  became the user-visible answer. This flag is the remaining receipt hole —
+  finish_turn must replace that sentence rather than looping forever.
+  """
+  @spec blocked_finish?(map(), String.t() | nil) :: boolean()
+  def blocked_finish?(state, content) when is_map(state) do
+    sid = Map.get(state, :session_id)
+
+    if is_binary(sid) do
+      reprompts = Map.get(state, :verification_gate_prompts, 0)
+      {reason, scale} = triaged(sid, reprompts, content)
+
+      reason in [:unchecked_write, :failing_check] and
+        reprompts >= cap_for(scale) and
+        (reason == :failing_check or pending_code_writes?(sid))
+    else
+      false
+    end
+  end
+
+  def blocked_finish?(_, _), do: false
+
+  @doc """
+  Operator-visible finish when `blocked_finish?/2` is true. Prefixed so the
+  model's victory sentence cannot be the last thing the user reads.
+  """
+  @spec finish_receipt(map(), String.t() | nil) :: String.t()
+  def finish_receipt(state, content) when is_map(state) do
+    sid = Map.get(state, :session_id)
+    reprompts = Map.get(state, :verification_gate_prompts, 0)
+    {reason, _scale} = if is_binary(sid), do: triaged(sid, reprompts, content), else: {nil, :none}
+
+    body = content |> to_string() |> String.trim()
+
+    case reason do
+      :failing_check ->
+        "Checks are still failing. This is not a verified completion.\n\n" <> body
+
+      _ ->
+        files = (sid && VerificationEvidence.pending_files(sid)) || []
+
+        names =
+          files
+          |> Enum.map(&Path.basename(to_string(&1)))
+          |> Enum.reject(&(&1 == ""))
+          |> Enum.take(6)
+
+        file_bit =
+          case names do
+            [] -> "files this turn"
+            [one] -> one
+            many -> Enum.join(many, ", ")
+          end
+
+        "I edited #{file_bit} and did not run a check. " <>
+          "This is not a verified completion.\n\n" <>
+          body
+    end
+  end
+
+  def finish_receipt(_state, content), do: to_string(content || "")
+
+  defp pending_code_writes?(session_id) do
+    session_id
+    |> VerificationEvidence.pending_files()
+    |> Enum.any?(&VerificationEvidence.code_file?/1)
+  rescue
+    _ -> false
+  end
 
   @doc """
   Which of the three questions is unanswered, in priority order, or `nil`.
@@ -762,52 +838,6 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
       "it later."
   end
 
-  # The agent exit. `task_wait` blocks on chosen agentIds until they reach a
-  # terminal state and returns their reports — the one affordance that both
-  # exists and is permitted here.
-  defp exits(agents, commands) do
-    agent_exit =
-      if agents == [] do
-        ""
-      else
-        ids = agents |> Enum.take(3) |> Enum.map_join(", ", &"\"#{Map.get(&1, :id)}\"")
-
-        "  1. JOIN THE TEAMMATE(S) IN ONE CALL: `task_wait` with " <>
-          "`agent_ids: [#{ids}]`. That blocks until they finish and hands you their " <>
-          "reports, which is what you were going to wait for anyway — then report " <>
-          "what they actually found. Do NOT poll `task_output` and do not read a " <>
-          "running agent's output file; both are forbidden by `delegate` and " <>
-          "neither waits.\n" <>
-          "  2. If their result is not needed for what you are about to say, say " <>
-          "only what you verified yourself and do not characterise their findings " <>
-          "at all.\n"
-      end
-
-    command_exit =
-      if commands == [] do
-        ""
-      else
-        n = if agents == [], do: 1, else: 3
-
-        "  #{n}. BLOCK ON THE COMMAND IN ONE CALL: `bash_output` with the " <>
-          "background_id above and `wait_ms` (e.g. 600000). That waits until it " <>
-          "reaches a terminal status and hands you its exit code and output. Do NOT " <>
-          "call `bash_output` without `wait_ms` in a loop; a bare call returns " <>
-          "instantly and tells you nothing new.\n"
-      end
-
-    agent_exit <> command_exit
-  end
-
-  # The escape is always the last numbered option, so its ordinal depends on how
-  # many exits were actually offered above it: two for agents (join, or decline
-  # to characterise), one for commands.
-  defp escape_ordinal(agents, commands) do
-    agent_exits = if agents == [], do: 0, else: 2
-    command_exits = if commands == [], do: 0, else: 1
-    agent_exits + command_exits + 1
-  end
-
   defp body(:failing_check, session_id, step, cap) do
     failing = VerificationEvidence.failing_check_since_write(session_id)
     cmd = (failing && Map.get(failing, :command)) || "your last check"
@@ -896,6 +926,52 @@ defmodule OptimalSystemAgent.Agent.Loop.VerificationGate do
       "value, no harness in the environment — say so explicitly on its own line, as " <>
       "`NO_RUNNABLE_TEST: <one-line reason>`, and finish. Do not use that to skip work " <>
       "you could have tested."
+  end
+
+  # The agent exit. `task_wait` blocks on chosen agentIds until they reach a
+  # terminal state and returns their reports — the one affordance that both
+  # exists and is permitted here.
+  defp exits(agents, commands) do
+    agent_exit =
+      if agents == [] do
+        ""
+      else
+        ids = agents |> Enum.take(3) |> Enum.map_join(", ", &"\"#{Map.get(&1, :id)}\"")
+
+        "  1. JOIN THE TEAMMATE(S) IN ONE CALL: `task_wait` with " <>
+          "`agent_ids: [#{ids}]`. That blocks until they finish and hands you their " <>
+          "reports, which is what you were going to wait for anyway — then report " <>
+          "what they actually found. Do NOT poll `task_output` and do not read a " <>
+          "running agent's output file; both are forbidden by `delegate` and " <>
+          "neither waits.\n" <>
+          "  2. If their result is not needed for what you are about to say, say " <>
+          "only what you verified yourself and do not characterise their findings " <>
+          "at all.\n"
+      end
+
+    command_exit =
+      if commands == [] do
+        ""
+      else
+        n = if agents == [], do: 1, else: 3
+
+        "  #{n}. BLOCK ON THE COMMAND IN ONE CALL: `bash_output` with the " <>
+          "background_id above and `wait_ms` (e.g. 600000). That waits until it " <>
+          "reaches a terminal status and hands you its exit code and output. Do NOT " <>
+          "call `bash_output` without `wait_ms` in a loop; a bare call returns " <>
+          "instantly and tells you nothing new.\n"
+      end
+
+    agent_exit <> command_exit
+  end
+
+  # The escape is always the last numbered option, so its ordinal depends on how
+  # many exits were actually offered above it: two for agents (join, or decline
+  # to characterise), one for commands.
+  defp escape_ordinal(agents, commands) do
+    agent_exits = if agents == [], do: 0, else: 2
+    command_exits = if commands == [], do: 0, else: 1
+    agent_exits + command_exits + 1
   end
 
   # ---------------------------------------------------------------------------

@@ -35,6 +35,13 @@ pub enum ProcessingPhase {
     Synthesizing,
 }
 
+/// How long the token stream may go silent mid-turn (no thinking or text delta)
+/// before [`Activity::reconcile_stream_silence`] flips the phase to `Waiting` so
+/// the live spinner + elapsed replace the frozen thinking box. Short by design:
+/// the stall it targets is the seconds-long pause a cloud reasoning model takes
+/// between its thinking channel and its first content token.
+const STREAM_SILENCE_FLIP: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Why the turn is currently *blocked*, so the spinner can name the wait
 /// instead of showing a random flavor verb during a multi-minute stall (grok
 /// `WaitingReason::label()`, `acp/tracker.rs:124`). Set from the backend
@@ -69,6 +76,37 @@ impl WaitingReason {
             Self::Sleeping => "Sleeping",
             Self::Compacting => "Compacting",
             Self::Verifying => "Verifying",
+        }
+    }
+}
+
+/// The turn phase the backend named explicitly, from its `phase_changed` signal
+/// (Grok `Event::PhaseChanged` + `Event::FirstToken`). The spinner already shows
+/// THAT the turn is busy; when this is set it can also state WHY - waiting on the
+/// model before the first token, streaming reasoning, or writing the answer -
+/// instead of a bare flavor verb.
+///
+/// Additive by construction: the field holding it defaults to `None`, and `None`
+/// is also the state whenever no phase signal has arrived, so every existing
+/// spinner behaviour (flavor verbs, the >2s silence flip, `WaitingReason`) is the
+/// unchanged fallback. See `set_stream_phase`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamPhase {
+    /// Request sent, no token back yet (`:waiting_for_model`).
+    WaitingModel,
+    /// The reasoning channel is streaming (`:streaming_reasoning`).
+    StreamingReasoning,
+    /// The answer channel is streaming (`:streaming_text`).
+    WritingAnswer,
+}
+
+impl StreamPhase {
+    /// Spinner label for the verb slot. No trailing ellipsis - the row appends it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::WaitingModel => "Waiting on model",
+            Self::StreamingReasoning => "Streaming reasoning",
+            Self::WritingAnswer => "Writing answer",
         }
     }
 }
@@ -326,6 +364,7 @@ fn tool_display(name: &str) -> (&'static str, &'static str) {
         // Task tools
         "task_write" | "TaskWrite" | "TaskCreate" => (">", "planning"),
         "task_read" | "TaskRead" | "TaskList" => (">", "checking"),
+        "task_wait" | "TaskWait" => (">", "waiting on tasks"),
         "ask_user" => ("?", "asking"),
 
         // Diagnostics
@@ -446,6 +485,15 @@ pub struct Activity {
     /// tool edge). Drives the stall→red interpolation: no progress for ~3s bleeds
     /// the spinner/label color toward error-red (CC `stalledIntensity`).
     last_output_at: Option<std::time::Instant>,
+    /// Instant of the last STREAMED delta (a thinking or a text token), tracked
+    /// apart from `last_output_at` so `reconcile_stream_silence` can tell a
+    /// genuine mid-stream stall from other turn progress. Cloud reasoning models
+    /// (glm) emit all their reasoning on the thinking channel, then the server
+    /// PAUSES before content; during that gap the thinking box freezes with no
+    /// spinner and the screen looks wedged. Stamped only by `add_thinking_chars`
+    /// / `add_stream_chars` (the two per-delta accounting points) — NOT by tool
+    /// edges or usage reports, so it measures token silence specifically.
+    last_delta_at: Option<std::time::Instant>,
     /// Eased on-screen token counter — steps toward the real value in `tick()`
     /// (CC token easing) so the count glides instead of snapping on each usage
     /// report. Reset in `start()`.
@@ -478,6 +526,12 @@ pub struct Activity {
     /// Named blocking reason (item 3). When the phase is `Waiting`, this
     /// replaces the flavor verb with e.g. "Waiting on subagent…".
     waiting_reason: Option<WaitingReason>,
+    /// Backend-named turn phase (Grok `PhaseChanged`). When `Some`, the spinner
+    /// states the phase outright ("Waiting on model" / "Streaming reasoning" /
+    /// "Writing answer") instead of a flavor verb. `None` by default and whenever
+    /// no phase signal has arrived, so the existing spinner behaviour is the
+    /// untouched fallback. Set via `set_stream_phase`.
+    named_phase: Option<StreamPhase>,
     /// Whether the turn is parked on the USER (permission prompt / question /
     /// plan approval). Drives the pulsing ◆ "you're the blocker" cue (item 5).
     pending_user: bool,
@@ -602,38 +656,33 @@ pub fn progress_bar(done: u32, total: u32) -> String {
 const FLAVOR_VERB_GRACE_SECS: u64 = 4;
 
 /// How long the backend may say NOTHING before the spinner row states that fact
-/// outright.
+/// outright ("no response for Ns").
 ///
 /// The turn timer answers "how long has this turn been going", which is not the
 /// question a stalled user is asking. A turn that is streaming tokens and a turn
-/// whose provider socket went silent ninety minutes ago render identically:
+/// whose provider socket went silent minutes ago render identically:
 /// `Waiting for response… (1h51m10s · esc to interrupt)`. No amount of patience
 /// distinguishes them, because the only number on screen advances at exactly the
 /// same rate in both cases. That is the reported defect.
 ///
 /// `last_output_at` already knows the answer — every frame that carries turn
 /// progress stamps it (`add_stream_chars`, `add_thinking_chars`, `set_tokens`,
-/// the tool edges, and any non-`Waiting` phase transition) — but until now it
-/// only drove a color ramp that saturates after six seconds, so six seconds of
-/// silence and six thousand looked the same too.
+/// the tool edges, and any non-`Waiting` phase transition) — so the moment output
+/// stops it can start counting the true silence, independent of the turn age.
 ///
-/// The threshold is set ABOVE every bound the backend itself enforces on a
-/// silent model, so a healthy-but-slow turn can never trip it:
+/// 60 seconds, deliberately BELOW the idle watchdog that recovers the turn. A
+/// cloud reasoning model (glm) emits all its reasoning on the thinking channel
+/// and then the server can pause before the first content token; the phase
+/// reconciler flips to `Waiting` after a couple of silent seconds so the live
+/// spinner + elapsed show motion, and this notice then NAMES the wait once it has
+/// run a full minute. The `LLMClient` idle watchdog kills a truly silent
+/// cloud-reasoning request at 120s and RETRIES it, so a stall this row reports is
+/// one the backend is already on course to recover from — the row just stops
+/// looking frozen while it does.
 ///
-/// | backend bound on model silence                                  | value |
-/// |-----------------------------------------------------------------|-------|
-/// | `LLMClient` stream idle watchdog (`@idle_timeout_ms`)            | 300s  |
-/// | `Anthropic.collect_stream` inactivity guard                      | 620s  |
-/// | `openai_compat` / `Anthropic` `receive_timeout` (thinking)       | 600s  |
-///
-/// A provider call that produces nothing for 300s is killed by the watchdog and
-/// the turn reports it. So silence past 600s is not a slow model still working —
-/// it is a turn in a state every one of those guards should already have ended,
-/// which is exactly the state that has no other symptom on screen.
-///
-/// Deliberately NOT a timeout. Nothing is cancelled, nothing is retried, the
-/// turn is untouched. The row gains one true sentence.
-const SILENCE_NOTICE_SECS: u64 = 600;
+/// Deliberately NOT a timeout. Nothing is cancelled, nothing is retried by THIS
+/// row; the turn is untouched. The row gains one true sentence.
+const SILENCE_NOTICE_SECS: u64 = 60;
 
 /// The live threshold, which is [`SILENCE_NOTICE_SECS`] unless
 /// `OSA_SILENCE_NOTICE_SECS` overrides it.
@@ -641,7 +690,7 @@ const SILENCE_NOTICE_SECS: u64 = 600;
 /// A test seam, and the same one `SseClient::idle_timeout` already uses for the
 /// same reason: the only instrument that can prove this notice reaches a REAL
 /// terminal is `test/pty/`, which drives the real binary, and a probe cannot sit
-/// through ten real minutes of silence to see it. Read once — a threshold that
+/// through a full minute of real silence to see it. Read once — a threshold that
 /// changed mid-session would make the row's behaviour unreproducible.
 ///
 /// Out-of-range values are ignored rather than clamped: a caller who sets this
@@ -725,6 +774,7 @@ impl Activity {
             start_time: None,
             phase_since: None,
             last_output_at: None,
+            last_delta_at: None,
             displayed_tokens: 0,
             cancelling: false,
             thinking_since: None,
@@ -733,6 +783,7 @@ impl Activity {
             active_verb: None,
             retry: None,
             waiting_reason: None,
+            named_phase: None,
             pending_user: false,
             interrupt_armed: false,
             queued: 0,
@@ -789,6 +840,18 @@ impl Activity {
         self.waiting_reason = reason;
     }
 
+    /// Set (or clear with `None`) the backend-named turn phase (Grok
+    /// `PhaseChanged`). When `Some`, the spinner states the phase outright
+    /// ("Waiting on model" / "Streaming reasoning" / "Writing answer") in place of
+    /// a flavor verb; a running tool still takes precedence, and the higher-
+    /// priority spinner states (cancelling / pending-user / retry / a `Waiting`
+    /// reason) still win. Additive: `None` - the default until a `phase_changed`
+    /// signal arrives - leaves the spinner exactly as it was, so the >2s silence
+    /// flip and flavor verbs remain the unchanged fallback.
+    pub fn set_stream_phase(&mut self, phase: Option<StreamPhase>) {
+        self.named_phase = phase;
+    }
+
     /// Item 5 — mark/unmark the turn as blocked on the USER (permission prompt,
     /// question, or plan approval), driving the pulsing ◆ cue.
     pub fn set_pending_user(&mut self, pending: bool) {
@@ -836,6 +899,13 @@ impl Activity {
         if self.phase == ProcessingPhase::Waiting {
             if let Some(reason) = self.waiting_reason {
                 return reason.label().to_lowercase();
+            }
+        }
+        // Backend-named phase, mirroring the sighted spinner. A running tool
+        // names itself below, so (like the row) this is skipped during ToolCall.
+        if self.phase != ProcessingPhase::ToolCall {
+            if let Some(p) = self.named_phase {
+                return p.label().to_lowercase();
             }
         }
         // The in-flight tool run, in the words the committed summary line will
@@ -948,6 +1018,7 @@ impl Activity {
         self.thought_for = None;
         self.retry = None;
         self.waiting_reason = None;
+        self.named_phase = None;
         self.pending_user = false;
         self.interrupt_armed = false;
         self.queued = 0;
@@ -973,6 +1044,7 @@ impl Activity {
         self.thought_for = None;
         self.retry = None;
         self.waiting_reason = None;
+        self.named_phase = None;
         self.pending_user = false;
         self.interrupt_armed = false;
         self.queued = 0;
@@ -1288,6 +1360,44 @@ impl Activity {
         self.phase == ProcessingPhase::Thinking
     }
 
+    /// Whether the turn is currently parked in the `Waiting` phase, i.e. blocked
+    /// with no tokens arriving. The draw layer reads this to keep a MOVING
+    /// spinner + elapsed on screen even while a (now static) thinking box would
+    /// otherwise own the row.
+    pub fn is_waiting(&self) -> bool {
+        self.phase == ProcessingPhase::Waiting
+    }
+
+    /// B3-stall — flip a mid-stream turn to `Waiting` once the token stream has
+    /// gone silent for [`STREAM_SILENCE_FLIP`].
+    ///
+    /// glm cloud emits all its reasoning on the thinking channel, then the server
+    /// pauses before the first content token. During that gap nothing streams:
+    /// the thinking box freezes (no spinner, elapsed stuck on `finish()`) and the
+    /// phase would otherwise stay `Thinking`/`Streaming`, so the screen looks
+    /// wedged with no motion. Flipping to `Waiting` + `WaitingReason::Model` lets
+    /// the live spinner + elapsed take over (see the draw swap in `event_loop`).
+    /// A later delta restores `Thinking`/`Streaming` through the existing
+    /// `set_phase` calls on the delta paths. Tool-call phases are left untouched:
+    /// a running tool is work, not a stall, and the row already names it.
+    ///
+    /// Cheap and idempotent — safe to call every tick.
+    pub fn reconcile_stream_silence(&mut self) {
+        if !self.active {
+            return;
+        }
+        if self.phase != ProcessingPhase::Thinking && self.phase != ProcessingPhase::Streaming {
+            return;
+        }
+        let silent = self
+            .last_delta_at
+            .is_some_and(|t| t.elapsed() >= STREAM_SILENCE_FLIP);
+        if silent {
+            self.set_phase(ProcessingPhase::Waiting);
+            self.set_waiting_reason(Some(WaitingReason::Model));
+        }
+    }
+
     pub fn is_active(&self) -> bool {
         self.active
     }
@@ -1298,7 +1408,9 @@ impl Activity {
         // refresh the stall clock (progress means "not frozen").
         if n > 0 {
             self.clear_retry();
-            self.last_output_at = Some(std::time::Instant::now());
+            let now = std::time::Instant::now();
+            self.last_output_at = Some(now);
+            self.last_delta_at = Some(now);
         }
     }
 
@@ -1306,7 +1418,9 @@ impl Activity {
         self.thinking_chars += n;
         if n > 0 {
             self.clear_retry();
-            self.last_output_at = Some(std::time::Instant::now());
+            let now = std::time::Instant::now();
+            self.last_output_at = Some(now);
+            self.last_delta_at = Some(now);
         }
     }
 
@@ -1866,6 +1980,24 @@ impl Component for Activity {
                 Span::styled(format!("{} ", spinner_char), style),
                 vec![Span::styled(format!("{}\u{2026}", label), style)],
             )
+        } else if self.named_phase.is_some() && self.phase != ProcessingPhase::ToolCall {
+            // The backend named the phase (Grok `PhaseChanged`): state it outright
+            // ("Waiting on model" / "Streaming reasoning" / "Writing answer") in
+            // place of a flavor verb. A running tool names itself, so this is
+            // suppressed during `ToolCall`. Reddens with the stall like the other
+            // labels, and is fitted to the same verb budget so the interrupt hint
+            // always survives.
+            let label = self.named_phase.unwrap().label();
+            let style = if silence.is_some() {
+                Style::default().fg(theme.colors.warning)
+            } else {
+                theme.spinner_verb()
+            };
+            let word = fit_verb(label, verb_budget);
+            (
+                Span::styled(format!("{} ", spinner_char), style),
+                vec![Span::styled(format!("{}\u{2026}", word), style)],
+            )
         } else {
             // When a task is in progress, show its concrete active step (Claude
             // Code's activeForm). Otherwise ONE flavor verb per turn (CC parity).
@@ -2330,6 +2462,39 @@ mod activity_tests {
         // Leaving Waiting clears the reason (turn resumed).
         act.set_phase(ProcessingPhase::Streaming);
         assert!(!render_activity_text(&act).contains("Waiting on subagent"));
+    }
+
+    #[test]
+    fn named_phase_states_the_phase_and_is_dormant_when_unset() {
+        // Grok PhaseChanged mapping: each phase gets a distinct, human label.
+        assert_eq!(StreamPhase::WaitingModel.label(), "Waiting on model");
+        assert_eq!(StreamPhase::StreamingReasoning.label(), "Streaming reasoning");
+        assert_eq!(StreamPhase::WritingAnswer.label(), "Writing answer");
+
+        let mut act = Activity::new();
+        act.start();
+        act.set_phase(ProcessingPhase::Streaming);
+
+        // Unset (the default, and the state whenever no phase signal has arrived):
+        // the spinner keeps its flavor verb, unchanged.
+        assert!(!render_activity_text(&act).contains("Writing answer"));
+
+        // Set: the spinner states the phase outright in place of the flavor verb.
+        act.set_stream_phase(Some(StreamPhase::WritingAnswer));
+        assert!(
+            render_activity_text(&act).contains("Writing answer"),
+            "named phase must render on the spinner"
+        );
+
+        // A running tool names itself, so the named phase is suppressed during a
+        // ToolCall (the row shows the tool verb, not the stale answer label).
+        act.set_phase(ProcessingPhase::ToolCall);
+        assert!(!render_activity_text(&act).contains("Writing answer"));
+
+        // Clearing falls back to the unchanged flavor-verb behaviour.
+        act.set_phase(ProcessingPhase::Streaming);
+        act.set_stream_phase(None);
+        assert!(!render_activity_text(&act).contains("Writing answer"));
     }
 
     #[test]

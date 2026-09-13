@@ -954,6 +954,10 @@ defmodule OptimalSystemAgent.Tools.Registry do
 
   @impl true
   def init(:ok) do
+    # False until the maps below are published, so Soul.static_base/1 will not
+    # freeze a tools-empty snapshot against a still-running init.
+    :persistent_term.put({__MODULE__, :toolbox_ready}, false)
+
     builtin_tools = load_builtin_tools()
     skills = SkillLoader.load_skills()
     tools = build_tool_list(builtin_tools, skills)
@@ -962,6 +966,11 @@ defmodule OptimalSystemAgent.Tools.Registry do
     :persistent_term.put({__MODULE__, :tool_aliases}, build_alias_map(builtin_tools))
     :persistent_term.put({__MODULE__, :skills}, skills)
     :persistent_term.put({__MODULE__, :tools}, tools)
+    :persistent_term.put({__MODULE__, :toolbox_ready}, true)
+
+    # Soul.load runs before this GenServer. Any static_base/1 that raced
+    # init is now stale; drop it so the next read holds the session toolbox.
+    OptimalSystemAgent.Soul.invalidate_static_base()
 
     Logger.info(
       "Tools registry: #{map_size(builtin_tools)} tools, #{map_size(skills)} skills, #{length(tools)} LLM tools"

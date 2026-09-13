@@ -257,8 +257,6 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.SshKeys do
         # Set 0700 on the directory
         case set_permissions(ssh_dir, 0o700) do
           :ok -> :ok
-          # Best-effort on Windows or restricted systems
-          {:error, _} -> :ok
         end
 
       {:error, :eacces} ->

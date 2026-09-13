@@ -105,7 +105,9 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
     |> Enum.map(fn {_id, session} -> session end)
     |> Enum.reject(&Session.terminal?/1)
   rescue
-    ArgumentError -> []
+    e in ArgumentError ->
+      Logger.warning("[Healing.Orchestrator] active_sessions failed: #{Exception.message(e)}")
+      []
   end
 
   # -- Server Callbacks --
@@ -542,7 +544,9 @@ defmodule OptimalSystemAgent.Healing.Orchestrator do
 
     :ok
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("[Healing.Orchestrator] enforce_cap failed: #{Exception.message(e)}")
+      :ok
   end
 
   # Stop any ephemeral still attached to this session and drop its bookkeeping.

@@ -67,8 +67,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.SessionSearch do
   def open_world?(input, ctx), do: Tool.open_world?(input, ctx)
 
   @impl true
-
-  @impl true
   def max_result_size_chars, do: Tool.max_result_size_chars()
 
   # ── Two-stage permissioning ───────────────────────────────────────────

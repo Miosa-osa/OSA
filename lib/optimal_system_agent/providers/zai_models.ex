@@ -39,18 +39,20 @@ defmodule OptimalSystemAgent.Providers.ZaiModels do
   the remaining step (deliberately not done in this commit — that file was
   under concurrent edit).
 
-  ## GLM-5.3 is announced but NOT servable — deliberately absent below
+  ## GLM-5.3: the Flash line shipped; the bare `glm-5.3` still has not
 
-  Z.ai's docs carry a GLM-5.3 page stating "GLM-5.3 is now available to all GLM
-  Coding Plan users" and, verbatim, **"The GLM-5.3 API is coming soon."** It
-  publishes a 1M window and a 128K output cap and *nothing else*: no API model
-  id, no pricing, no `reasoning_effort` vocabulary. It is absent from the
-  chat-completion `model` enum, absent from the pricing table, and
-  `ollama.com/library/glm-5.3` is a 404.
+  As of 2026-08-27 the **Flash** variant is servable and is enumerated below as
+  `glm-5.3-flash` — Ollama publishes `ollama.com/library/glm-5.3-flash` with a
+  `glm-5.3-flash:cloud` tag, and Z.ai lists a price ($0.15/$0.50 per 1M) and a
+  low/high/max reasoning-effort ladder. It is the first natively-multimodal GLM
+  text tag (image + video), 320B/18B MoE, 1M window, 131K output cap.
 
-  A model with no id cannot be added, and a model with no published price is
-  exactly what the family-substring guess exists to mis-bill. It goes in here
-  the day Z.ai ships the id — not before.
+  The BARE `glm-5.3` remains unshipped: `ollama.com/library/glm-5.3` is still a
+  404 and Z.ai's own docs still say **"The GLM-5.3 API is coming soon"** with no
+  API model id or pricing for the non-Flash line. A model with no id and no
+  published price is exactly what the family-substring guess would mis-bill, so
+  the bare tag goes in the day Z.ai ships its id — not before. Only the Flash
+  tag, which HAS both, is present.
 
   ## The effort vocabulary is per-model, and only 5.2 has one
 
@@ -127,6 +129,31 @@ defmodule OptimalSystemAgent.Providers.ZaiModels do
       cache_read: 0.26,
       recommended: true,
       note: "1M ctx — Z.ai flagship, long-horizon agentic + coding. Default."
+    },
+    %{
+      id: "glm-5.3-flash",
+      name: "GLM-5.3 Flash",
+      ctx: 1_048_576,
+      max_output: 131_072,
+      reasoning: true,
+      # Reasoning is ALWAYS on and tunable across low/high/max only — not 5.2's
+      # longer none..xhigh..max ladder. `clamp/2` maps OSA's rungs onto these.
+      efforts: ~w(low high max),
+      default_effort: "high",
+      # FIRST natively-multimodal GLM text tag: accepts image AND video inline.
+      # Every glm-N text model before it is vision: false; this one is not.
+      vision: true,
+      tools: true,
+      caching: true,
+      # Z.ai list price: $0.15 in / $0.50 out per 1M, cached input $0.03 —
+      # published on Z.ai's page and cross-checked on multiple trackers. A
+      # 50%-off launch promo ($0.075 / $0.25, cached $0.015) runs through
+      # 2026-09-09; the LIST rate is recorded so spend is not under-counted once
+      # the promo lapses.
+      pricing: {0.15, 0.50},
+      cache_read: 0.03,
+      recommended: true,
+      note: "1M ctx — multimodal (image+video) GLM-5 at flash price; long agent tasks"
     },
     %{
       id: "glm-5.1",

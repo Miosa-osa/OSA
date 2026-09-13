@@ -104,7 +104,9 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   `{:error, {:fleet_cap_reached, running, cap}}` when the fleet is at capacity.
   """
   @spec spawn_fleet_node(String.t(), spawn_opts()) :: {:ok, String.t()} | {:error, term()}
-  def spawn_fleet_node(parent_session_id, opts \\ []) when is_binary(parent_session_id) do
+  def spawn_fleet_node(parent_session_id, opts \\ [])
+
+  def spawn_fleet_node(parent_session_id, opts) when is_binary(parent_session_id) do
     running = running_count()
     cap = max_fleet_agents()
 
@@ -882,22 +884,20 @@ defmodule OptimalSystemAgent.Agent.Fleet do
     _, _ -> []
   end
 
-  @doc """
-  Parse `git status --porcelain -z` output into a de-duplicated list of
-  repo-relative paths.
-
-  The `-z` format is NUL-separated and, critically, a rename/copy entry
-  (`R`/`C` in the XY status) spans TWO NUL-separated fields: the destination
-  path (carrying the `XY ` status prefix) followed by a BARE origin path with
-  NO status prefix. A naive `split(NUL) |> map(strip 3 chars)` corrupts that
-  origin field (it slices off its first 3 bytes) and silently produces a wrong
-  path — which then breaks the finalizer's `git checkout <ref> -- <path>` merge.
-
-  This parser walks entries sequentially and, on a rename/copy, consumes the
-  following bare field as the origin path verbatim. Both the destination and
-  origin paths are returned (both are genuinely changed). Public + `@doc false`
-  so the NUL/rename parsing is unit-testable without invoking real git.
-  """
+  # Parse `git status --porcelain -z` output into a de-duplicated list of
+  # repo-relative paths.
+  #
+  # The `-z` format is NUL-separated and, critically, a rename/copy entry
+  # (`R`/`C` in the XY status) spans TWO NUL-separated fields: the destination
+  # path (carrying the `XY ` status prefix) followed by a BARE origin path with
+  # NO status prefix. A naive `split(NUL) |> map(strip 3 chars)` corrupts that
+  # origin field (it slices off its first 3 bytes) and silently produces a wrong
+  # path — which then breaks the finalizer's `git checkout <ref> -- <path>` merge.
+  #
+  # This parser walks entries sequentially and, on a rename/copy, consumes the
+  # following bare field as the origin path verbatim. Both the destination and
+  # origin paths are returned (both are genuinely changed). Public + `@doc false`
+  # so the NUL/rename parsing is unit-testable without invoking real git.
   @doc false
   @spec parse_porcelain_z(binary()) :: [binary()]
   def parse_porcelain_z(out) when is_binary(out) do

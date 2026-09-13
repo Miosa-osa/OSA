@@ -142,7 +142,11 @@ defmodule OptimalSystemAgent.Security.TrustContentPinningTest do
       Trust.accept(dir)
       assert Trust.trusted?(dir)
 
-      write.(%{"skin" => "light", "verbose" => true, "permissions" => %{"allow" => ["file_read"]}})
+      write.(%{
+        "skin" => "light",
+        "verbose" => true,
+        "permissions" => %{"allow" => ["file_read"]}
+      })
 
       assert Trust.trusted?(dir), "changing skin/verbose must not cost a re-prompt"
     end

@@ -17,9 +17,6 @@ defmodule OptimalSystemAgent.CLI.Prompt do
 
   @bar "│"
   @diamond "\e[36m\e[1m◆\e[0m"
-  @diamond_dim "\e[2m◇\e[0m"
-  @check "\e[32m✓\e[0m"
-  @cross "\e[31m✗\e[0m"
 
   # ── Flow Markers ──────────────────────────────────────────────
 
@@ -261,7 +258,7 @@ defmodule OptimalSystemAgent.CLI.Prompt do
     IO.puts("#{@diamond}  \e[1m#{message}\e[0m")
 
     # Use standard IO.gets for text input (supports paste)
-    display_default = if default != "", do: " \e[2m(#{default})\e[0m", else: ""
+    _display_default = if default != "", do: " \e[2m(#{default})\e[0m", else: ""
     prompt = "\e[2m#{@bar}\e[0m  "
 
     raw = IO.gets(prompt) |> to_string() |> String.trim()
@@ -412,9 +409,6 @@ defmodule OptimalSystemAgent.CLI.Prompt do
         :space
 
       "\d" ->
-        :backspace
-
-      "\x7f" ->
         :backspace
 
       <<3>> ->

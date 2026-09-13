@@ -176,7 +176,9 @@ defmodule OptimalSystemAgent.Peer.Protocol do
       [] -> nil
     end
   rescue
-    _ -> nil
+    e ->
+      Logger.warning("[Peer.Protocol] get_handoff failed: #{Exception.message(e)}")
+      nil
   end
 
   # ---------------------------------------------------------------------------
@@ -186,7 +188,9 @@ defmodule OptimalSystemAgent.Peer.Protocol do
   defp store(%__MODULE__{} = handoff) do
     BoundedTable.insert(@handoffs_table, handoff.id, handoff, max: @max_rows)
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("[Peer.Protocol] store failed: #{Exception.message(e)}")
+      :ok
   end
 
   defp generate_id do

@@ -115,6 +115,7 @@ defmodule OptimalSystemAgent.Test.MockProvider do
   def chat_stream(_messages, callback, _opts) do
     maybe_sleep()
     bump_round_trips()
+    run_after_call_once()
 
     case forced_final_text() do
       nil ->
@@ -195,6 +196,21 @@ defmodule OptimalSystemAgent.Test.MockProvider do
     :ok
   rescue
     ArgumentError -> :ok
+  end
+
+  # One-shot side effect fired from inside a generation, so a test can simulate
+  # something the user does WHILE the model is streaming — e.g. queue a steer
+  # mid-turn. The 0-arity fun runs once, then clears itself so a later
+  # round-trip does not re-fire it.
+  defp run_after_call_once do
+    case Application.get_env(:optimal_system_agent, :mock_provider_after_call_once) do
+      fun when is_function(fun, 0) ->
+        Application.delete_env(:optimal_system_agent, :mock_provider_after_call_once)
+        fun.()
+
+      _ ->
+        :ok
+    end
   end
 
   # The opts of the most recent `chat/2`, in the same public table.

@@ -87,6 +87,11 @@ defmodule OptimalSystemAgent.Channels.DingTalk do
   end
 
   @impl true
+  def handle_cast({:store_webhook, conv_id, url}, state) do
+    {:noreply, %{state | session_webhooks: Map.put(state.session_webhooks, conv_id, url)}}
+  end
+
+  @impl true
   def handle_call({:send, conv_id, text}, _from, state) do
     case Map.get(state.session_webhooks, conv_id) do
       nil -> {:reply, {:error, :no_webhook}, state}
@@ -124,11 +129,6 @@ defmodule OptimalSystemAgent.Channels.DingTalk do
     end
   rescue
     e -> Logger.error("[DingTalk] Processing error: #{Exception.message(e)}")
-  end
-
-  @impl true
-  def handle_cast({:store_webhook, conv_id, url}, state) do
-    {:noreply, %{state | session_webhooks: Map.put(state.session_webhooks, conv_id, url)}}
   end
 
   defp send_via_webhook(webhook_url, text) do

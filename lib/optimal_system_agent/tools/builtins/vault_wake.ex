@@ -25,13 +25,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.VaultWake do
   end
 
   @impl true
-  def execute(%{"session_id" => session_id}) do
-    case OptimalSystemAgent.Vault.wake(session_id) do
-      {:ok, :clean} ->
-        {:ok, "Vault session started cleanly."}
-
-      {:ok, :recovered} ->
-        {:ok, "Vault session started with recovery from previous dirty death."}
-    end
+  def execute(%{"session_id" => _session_id}) do
+    # OptimalSystemAgent.Vault backend is not present in this build.
+    {:error, "Vault backend not present in this build"}
   end
 end

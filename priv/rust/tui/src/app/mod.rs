@@ -264,6 +264,15 @@ pub struct App {
     pub pace_msg_id: Option<String>,
     pub thinking_buf: String,
     pub processing_start: Option<Instant>,
+    /// Last moment the backend showed turn progress (a token, a tool
+    /// heartbeat, an LLM request/response, a goal-verify status). The request
+    /// timeout is measured from HERE, not `processing_start`, so it is an IDLE
+    /// guard against a silent backend rather than a total-turn guillotine —
+    /// which is what its own doc always claimed it was. A long but healthy
+    /// turn (e.g. a multi-call goal-verifier skeptic panel) keeps resetting
+    /// this and is never killed; only genuine silence trips the timeout.
+    /// `processing_start` stays put so the elapsed-time display is unaffected.
+    pub last_turn_activity: Option<Instant>,
     /// Spinner-clock elapsed captured at the agent_response turn-end edge (just
     /// before `activity.stop()`), consumed by the trailing turn_recap event so
     /// "✻ Worked for Ns" prints the same number the live spinner last showed —
@@ -806,6 +815,7 @@ impl App {
             pace_msg_id: None,
             thinking_buf: String::new(),
             processing_start: None,
+            last_turn_activity: None,
             last_turn_client_elapsed_secs: None,
             last_submitted_prompt: None,
             cancelled: false,
@@ -1704,8 +1714,14 @@ mod modal_overlay_tests {
 pub fn open_in_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let candidates: [&str; 1] = ["open"];
+    // NOT `explorer`. explorer.exe is the file manager: handed a URL it
+    // frequently opens a FOLDER window at the working directory instead of
+    // handing the address to the default browser, so the user is sent to a
+    // file listing and the sign-in page never loads. `rundll32
+    // url.dll,FileProtocolHandler` invokes the registered protocol handler
+    // directly, which is what "open this URL" actually means on Windows.
     #[cfg(target_os = "windows")]
-    let candidates: [&str; 1] = ["explorer"];
+    let candidates: [&str; 1] = ["rundll32"];
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let candidates: [&str; 3] = ["xdg-open", "gio", "wslview"];
 
@@ -1715,6 +1731,9 @@ pub fn open_in_browser(url: &str) {
             let mut cmd = std::process::Command::new(bin);
             if bin == "gio" {
                 cmd.arg("open");
+            }
+            if bin == "rundll32" {
+                cmd.arg("url.dll,FileProtocolHandler");
             }
             let spawned = cmd
                 .arg(&url)

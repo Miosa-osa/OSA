@@ -118,6 +118,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Tool do
           "type" => "integer",
           "description" => "Subagent turn cap."
         },
+        "max_budget_usd" => %{
+          "type" => "number",
+          "description" =>
+            "Per-subagent USD spend ceiling. The subagent stops itself once it " <>
+              "crosses this cap. Omit for no cap. Use on wide fan-outs to bound total spend."
+        },
+        "priority" => %{
+          "type" => "string",
+          "enum" => ["immediate", "standard", "loose"],
+          "description" =>
+            "Speed/cost tier. 'loose' (non-urgent, long-horizon work) routes to a " <>
+              "cheaper model and prefers free/local providers to cut cost; 'immediate' " <>
+              "picks the best model; 'standard' (default) is balanced."
+        },
         "model" => %{
           "type" => "string",
           "description" => "Model override for this subagent."

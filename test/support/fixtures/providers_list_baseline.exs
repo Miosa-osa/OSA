@@ -39,6 +39,19 @@
         ctx: 1_000_000,
         recommended: true
       },
+      # DELIBERATE post-snapshot addition, not drift. The GLM-5.3 Flash line
+      # shipped (2026-08-26); `glm-5.3-flash:cloud` was added to
+      # `Providers.OllamaCloud` (first natively-multimodal GLM text tag), so it
+      # flows into `Onboarding.providers_list/0` and the frozen baseline has to
+      # carry it too or the byte-exact comparison reports an intended change.
+      %{
+        id: "glm-5.3-flash:cloud",
+        name: "GLM-5.3 Flash",
+        tools: true,
+        note: "1M ctx, 320B/18B MoE - multimodal (image+video), flash-priced agentic",
+        ctx: 1_048_576,
+        recommended: true
+      },
       # DELIBERATE post-snapshot addition, not drift. `glm-4.7:cloud` carries no
       # `context_length` in Ollama's /api/show model_info, so the probe could
       # not resolve it and it was missing from the catalog entirely — which made
@@ -179,6 +192,21 @@
     base_url: "https://openrouter.ai/api/v1",
     default_model: "anthropic/claude-opus-5",
     models: [
+      %{
+        id: "stealth/ox-alpha",
+        name: "Ox Alpha (free)",
+        ctx: 1_048_576,
+        tools: true,
+        recommended: true,
+        note: "FREE preview — 1M ctx stealth coding model, tops DeepSWE"
+      },
+      %{
+        id: "openai/gpt-oss-20b:free",
+        name: "GPT-OSS 20B (free)",
+        ctx: 131_072,
+        tools: true,
+        note: "free — strong open coding model, ~o3-mini"
+      },
       %{
         id: "anthropic/claude-sonnet-4-6",
         name: "Claude Sonnet 4.6",

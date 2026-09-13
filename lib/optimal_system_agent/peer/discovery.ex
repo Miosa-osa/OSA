@@ -72,7 +72,9 @@ defmodule OptimalSystemAgent.Peer.Discovery do
     :ets.insert(@agents_table, {agent_id, record})
     :ok
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("[Peer.Discovery] register_agent failed: #{Exception.message(e)}")
+      :ok
   end
 
   @doc "Deregister an agent (e.g., when a session ends)."
@@ -81,7 +83,9 @@ defmodule OptimalSystemAgent.Peer.Discovery do
     :ets.delete(@agents_table, agent_id)
     :ok
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("[Peer.Discovery] deregister_agent failed: #{Exception.message(e)}")
+      :ok
   end
 
   # ---------------------------------------------------------------------------
@@ -108,7 +112,9 @@ defmodule OptimalSystemAgent.Peer.Discovery do
     |> Enum.map(fn {_, info} -> info end)
     |> apply_filters(query)
   rescue
-    _ -> []
+    e ->
+      Logger.warning("[Peer.Discovery] discover_agents failed: #{Exception.message(e)}")
+      []
   end
 
   @doc """
@@ -211,7 +217,9 @@ defmodule OptimalSystemAgent.Peer.Discovery do
       [] -> nil
     end
   rescue
-    _ -> nil
+    e ->
+      Logger.warning("[Peer.Discovery] get_query failed: #{Exception.message(e)}")
+      nil
   end
 
   @doc "List all agents on a given team."

@@ -130,9 +130,13 @@ defmodule OptimalSystemAgent.Observability do
   def current_effort do
     OptimalSystemAgent.Agent.Effort.current() |> to_string()
   rescue
-    _ -> nil
+    e ->
+      Logger.debug("[observability] current_effort failed: #{inspect(e)}")
+      nil
   catch
-    _, _ -> nil
+    kind, reason ->
+      Logger.debug("[observability] current_effort caught #{kind}: #{inspect(reason)}")
+      nil
   end
 
   @doc "Emit a `:turn_end` lifecycle event with response size + running spend."
@@ -190,9 +194,16 @@ defmodule OptimalSystemAgent.Observability do
       _ -> 0
     end
   rescue
-    _ -> 0
+    e ->
+      Logger.debug("[observability] announcement_continue_count failed: #{inspect(e)}")
+      0
   catch
-    _, _ -> 0
+    kind, reason ->
+      Logger.debug(
+        "[observability] announcement_continue_count caught #{kind}: #{inspect(reason)}"
+      )
+
+      0
   end
 
   @doc """
@@ -220,9 +231,13 @@ defmodule OptimalSystemAgent.Observability do
       _ -> 0
     end
   rescue
-    _ -> 0
+    e ->
+      Logger.debug("[observability] truncation_count failed: #{inspect(e)}")
+      0
   catch
-    _, _ -> 0
+    kind, reason ->
+      Logger.debug("[observability] truncation_count caught #{kind}: #{inspect(reason)}")
+      0
   end
 
   @doc """
@@ -260,9 +275,16 @@ defmodule OptimalSystemAgent.Observability do
     |> OptimalSystemAgent.Agent.Loop.VerificationGate.unobserved_background()
     |> length()
   rescue
-    _ -> 0
+    e ->
+      Logger.debug("[observability] unobserved_background_count failed: #{inspect(e)}")
+      0
   catch
-    _, _ -> 0
+    kind, reason ->
+      Logger.debug(
+        "[observability] unobserved_background_count caught #{kind}: #{inspect(reason)}"
+      )
+
+      0
   end
 
   @doc """
@@ -344,9 +366,13 @@ defmodule OptimalSystemAgent.Observability do
         nil
     end
   rescue
-    _ -> nil
+    e ->
+      Logger.debug("[observability] current_reasoning failed: #{inspect(e)}")
+      nil
   catch
-    _, _ -> nil
+    kind, reason ->
+      Logger.debug("[observability] current_reasoning caught #{kind}: #{inspect(reason)}")
+      nil
   end
 
   defp normalize_provider(p) when is_atom(p) and not is_nil(p), do: p

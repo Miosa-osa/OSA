@@ -21,13 +21,31 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
       elapses, then format their results
   """
 
+  alias OptimalSystemAgent.Agent.Cancellation
   alias OptimalSystemAgent.Agent.RunStore
   alias OptimalSystemAgent.Tools.Builtins.TaskWait.Depth
   alias OptimalSystemAgent.Tools.UseContext
 
   @terminal_statuses [:completed, :failed, :cancelled]
-  @default_timeout_ms 600_000
   @poll_interval_ms 500
+
+  # Ceiling on the SYNCHRONOUS join wait — NOT the agents' lifetime, which stays
+  # days-scale via `default_timeout_ms/0`. A blocking task_wait must not freeze
+  # the turn for the days-scale backstop, so the effective wait is capped at
+  # 5 min; on cap-expiry (or a user cancel) the still-running agents are returned
+  # as the existing healthy, non-error result and keep running in the background.
+  @max_wait_ms 300_000
+
+  # Default wait bound = the shared agent-LIFETIME backstop, which is measured in
+  # DAYS (see Orchestrator.@default_subagent_timeout_ms / :subagent_join_timeout_ms).
+  # Long-running agents run for days, so a minute-scale default spuriously "timed
+  # out" on healthy agents and drove the coordinator into a re-poll loop. Reading
+  # the same knob means task_wait, the delegate join, and the swarm patterns all
+  # agree on one days-scale number with no stray cap. A caller that wants a
+  # deliberately short bound still passes an explicit `timeout_ms`, and the
+  # timeout branch treats a still-running agent as healthy (not a dead end).
+  defp default_timeout_ms,
+    do: OptimalSystemAgent.Orchestrator.subagent_join_timeout_ms(%{})
 
   # ── Stage 1: Input validation ──────────────────────────────────────────
 
@@ -75,14 +93,29 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
   def execute(%{"agent_ids" => agent_ids} = input, ctx) do
     caller_id = session_id(ctx)
     require_all = Map.get(input, "require_all", true) != false
-    timeout_ms = parse_timeout_ms(Map.get(input, "timeout_ms")) || @default_timeout_ms
+    # Bound ONLY the synchronous wait: the requested/default bound may be days
+    # (the shared agent-lifetime backstop), but the blocking join is capped at
+    # @max_wait_ms so the turn cannot freeze on it.
+    requested_ms = parse_timeout_ms(Map.get(input, "timeout_ms")) || default_timeout_ms()
+    timeout_ms = min(requested_ms, @max_wait_ms)
     deadline = System.monotonic_time(:millisecond) + timeout_ms
+
+    # The launch notice hands the model the full `agent:<parent>:<name>` id, but
+    # in practice it often re-issues a bare `<name>` (or one with a stray `"]`
+    # from a mis-parsed array). A bare name never matches `RunStore.get/1`, so
+    # the join dead-ended as "No run found" and the coordinator looped on the
+    # same bad guess. Resolve each requested id against THIS caller's children —
+    # exact match first, else a unique short-name match — so a bare name joins
+    # on its real run. Unresolvable ids fall through unchanged and get the live
+    # id list appended (below) so the model can self-correct instead of looping.
+    children = RunStore.children_of(caller_id)
+    resolved_ids = Enum.map(agent_ids, &resolve_id(&1, children))
 
     Depth.enter(caller_id)
 
     try do
-      runs = poll(agent_ids, require_all, deadline)
-      {:ok, format_results(agent_ids, runs, require_all)}
+      runs = poll(resolved_ids, require_all, deadline, caller_id)
+      {:ok, format_results(resolved_ids, runs, require_all, children)}
     after
       Depth.exit_wait(caller_id)
     end
@@ -94,7 +127,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
 
   # ── Private ──────────────────────────────────────────────────────────────
 
-  defp poll(agent_ids, require_all, deadline) do
+  defp poll(agent_ids, require_all, deadline, session_id) do
     runs = Map.new(agent_ids, fn id -> {id, RunStore.get(id)} end)
 
     satisfied? =
@@ -109,11 +142,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
       System.monotonic_time(:millisecond) >= deadline ->
         runs
 
+      # Cancel-aware: a user interrupt breaks the blocking join early. The
+      # still-running agents are returned unchanged (non-error) and keep running
+      # in the background — their completion is delivered as a task-notification.
+      cancelled?(session_id) ->
+        runs
+
       true ->
         Process.sleep(@poll_interval_ms)
-        poll(agent_ids, require_all, deadline)
+        poll(agent_ids, require_all, deadline, session_id)
     end
   end
+
+  # Guard for a missing/unknown session id (no session context) — skip the check.
+  defp cancelled?(sid) when is_binary(sid) and sid != "unknown", do: Cancellation.cancelled?(sid)
+  defp cancelled?(_), do: false
 
   # An unknown id (typo, never launched) is treated as terminal so a single
   # bad id can't block the join forever — it is surfaced in the formatted
@@ -122,27 +165,77 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
   defp terminal?(%{status: status}), do: status in @terminal_statuses
   defp terminal?(_), do: true
 
-  defp format_results(agent_ids, runs, require_all) do
-    sections = Enum.map(agent_ids, &format_one(&1, Map.get(runs, &1)))
-
+  defp format_results(agent_ids, runs, require_all, children) do
+    sections = Enum.map(agent_ids, &format_one(&1, Map.get(runs, &1), children))
     mode = if require_all, do: "ALL", else: "ANY"
 
+    still_running =
+      agent_ids
+      |> Enum.filter(fn id -> match?(%{status: :running}, Map.get(runs, id)) end)
+
     header =
-      "Join-barrier wait finished (mode=#{mode}) for #{length(agent_ids)} agent(s):"
+      if still_running == [] do
+        "Join-barrier wait finished (mode=#{mode}) for #{length(agent_ids)} agent(s):"
+      else
+        # Timed out with work still in flight. This is NOT a failure and the
+        # coordinator must NOT re-issue task_wait — background completion is
+        # delivered automatically as a task-notification. Say so explicitly, or
+        # the model falls back into the 10-minute re-poll loop this fix removes.
+        "Join-barrier TIMED OUT with #{length(still_running)} of #{length(agent_ids)} " <>
+          "agent(s) still running: #{Enum.map_join(still_running, ", ", &short_name/1)}. " <>
+          "They are healthy, not failed — do NOT wait on them again. Their results will be " <>
+          "delivered to you automatically when they finish; continue with other work now."
+      end
 
     Enum.join([header | sections], "\n\n")
   end
 
-  defp format_one(id, nil) do
-    "### #{id}\nNo run found for this agent id — nothing to join on."
+  # Clean, human handle for a subagent id: the trailing name segment of
+  # `agent:session-<ts>-<hash>:name`, never the raw session gibberish.
+  defp short_name(id) when is_binary(id), do: id |> String.split(":") |> List.last()
+  defp short_name(id), do: to_string(id)
+
+  # Resolve a requested id to the canonical RunStore id. Exact match wins;
+  # otherwise a UNIQUE short-name match against this caller's children resolves
+  # a bare `<name>` to its full `agent:<parent>:<name>`. A stray-char id (e.g.
+  # `name"]` from a mis-parsed array) is normalized before matching. Ambiguous
+  # or genuinely unknown ids return unchanged so `format_one/3` lists the real
+  # ids instead of silently joining the wrong agent.
+  defp resolve_id(requested, children) when is_binary(requested) do
+    cond do
+      requested in children ->
+        requested
+
+      true ->
+        want = normalize_name(short_name(requested))
+
+        case Enum.filter(children, fn c -> normalize_name(short_name(c)) == want end) do
+          [only] -> only
+          _ -> requested
+        end
+    end
   end
 
-  defp format_one(id, %{status: :running} = run) do
-    "### #{id} (#{run.role}) — still running (timed out waiting)\n" <>
-      "Latest progress: #{Enum.join(run.recent_actions, "; ")}"
+  defp resolve_id(requested, _children), do: requested
+
+  # Strip surrounding whitespace and stray array/quote punctuation a model
+  # sometimes leaks into an id element (`"name"`, `name"]`, `[name`).
+  defp normalize_name(s) when is_binary(s),
+    do: String.replace(s, ~r/^[\s"'\[\]]+|[\s"'\[\]]+$/, "")
+
+  defp normalize_name(s), do: to_string(s)
+
+  defp format_one(id, nil, children) do
+    "### #{short_name(id)}\n" <> no_run_hint(id, children)
   end
 
-  defp format_one(id, run) do
+  defp format_one(id, %{status: :running} = run, _children) do
+    "### #{short_name(id)} (#{run.role}) — still running\n" <>
+      "Latest progress: #{Enum.join(run.recent_actions, "; ")}\n" <>
+      "(Not finished yet — its completion will be delivered automatically; do not re-wait.)"
+  end
+
+  defp format_one(id, run, _children) do
     summary =
       case run.result do
         %{summary: s} when is_binary(s) and s != "" -> s
@@ -152,7 +245,28 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWait.Handler do
     resumed_note =
       if Map.get(run, :resumed_from), do: " (resumed_from=#{run.resumed_from})", else: ""
 
-    "### #{id} (#{run.role})#{resumed_note} — #{run.status}\n#{summary}"
+    "### #{short_name(id)} (#{run.role})#{resumed_note} — #{run.status}\n#{summary}"
+  end
+
+  # Dead end → self-correcting hint. Instead of "nothing to join on", name the
+  # caller's actual live agents so the model re-issues with a real id (or just
+  # continues) rather than looping on the same bad guess.
+  defp no_run_hint(id, children) do
+    case children do
+      [] ->
+        "No run found for '#{short_name(id)}', and this session has no background agents " <>
+          "to join on. Continue — any completions are delivered automatically."
+
+      _ ->
+        list =
+          children
+          |> Enum.map(fn c -> "#{short_name(c)} (#{c})" end)
+          |> Enum.join(", ")
+
+        "No run found for '#{short_name(id)}'. Live agents you can join on: #{list}. " <>
+          "Re-issue task_wait with one of these ids, or just continue — background " <>
+          "completions are delivered automatically."
+    end
   end
 
   defp parse_timeout_ms(nil), do: nil

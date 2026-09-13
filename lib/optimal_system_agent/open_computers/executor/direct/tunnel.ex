@@ -338,7 +338,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Tunnel do
   # Stream response body back to server in chunks.
   # body_prefix: bytes already read past the header separator — emit as first
   # chunk before blocking on the next recv.  Empty string means no prefix.
-  defp read_response_body(server_pid, socket, tunnel_id, req_id, body_prefix \\ "") do
+  defp read_response_body(server_pid, socket, tunnel_id, req_id, body_prefix) do
     # Emit any bytes that were buffered together with the response headers.
     if byte_size(body_prefix) > 0 do
       for chunk <- split_into_frames(body_prefix) do

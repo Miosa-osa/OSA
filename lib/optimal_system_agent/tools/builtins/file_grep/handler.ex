@@ -588,8 +588,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
 
               keep =
                 Enum.filter(dirs, fn d ->
-                  pruned? = Path.basename(d) in @pruned_dirs
-                  if pruned_only?, do: true, else: not pruned?
+                  cond do
+                    # Never descend into a symlinked directory: a self-referential
+                    # _build or a symlink cycle walks unboundedly and hangs the
+                    # turn (ripgrep skips symlink loops the same way).
+                    Backend.symlink?(d) -> false
+                    pruned_only? -> true
+                    true -> Path.basename(d) not in @pruned_dirs
+                  end
                 end)
 
               {Enum.filter(files, &File.regular?/1), keep ++ rest}
@@ -739,5 +745,4 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.Handler do
   defp allowed?(expanded_path) do
     OptimalSystemAgent.Agent.Safety.PathPolicy.within_read_roots?(expanded_path)
   end
-
 end

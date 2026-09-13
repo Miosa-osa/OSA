@@ -40,8 +40,11 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
   @doc false
   def max_total_tool_calls do
     case env_max_tool_calls() do
-      nil -> Application.get_env(:optimal_system_agent, :doom_loop_max_calls, @unbounded_tool_calls)
-      value -> value
+      nil ->
+        Application.get_env(:optimal_system_agent, :doom_loop_max_calls, @unbounded_tool_calls)
+
+      value ->
+        value
     end
   end
 
@@ -80,7 +83,6 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
   defp warn_threshold(:infinity), do: nil
   defp warn_threshold(max) when is_integer(max), do: trunc(max * @warn_threshold_pct)
   defp warn_threshold(_), do: nil
-
 
   @moduledoc """
   Doom loop detection for the agent loop — a coordinator over independent
@@ -155,7 +157,10 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop do
     with {:ok, state} <- IdenticalCall.check(results, tool_calls, state),
          # --- Stall detection ---
          # No newly-distinct tool and no file write/edit over the last N calls.
-         {:ok, state} <- Stall.check(tool_calls, state),
+         # `results` is threaded so write/edit progress is RESULT-AWARE: a
+         # failing/reask/no-op edit executes no write and must not reset the
+         # stall window (it falls back to name-only when results are absent).
+         {:ok, state} <- Stall.check(tool_calls, state, results),
          # --- Reasoning-only / turn-errored detection ---
          # Catches a model spinning in thought with zero tool calls (and/or a
          # turn the caller flags as errored via state.turn_errored) — a loop

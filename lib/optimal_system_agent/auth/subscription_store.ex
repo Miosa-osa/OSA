@@ -211,7 +211,25 @@ defmodule OptimalSystemAgent.Auth.SubscriptionStore do
   # can read a bearer token for the operator's paid account — the failure is
   # invisible precisely when it matters. Refusing turns it into "reconnect this
   # provider", which is a 10-second fix with a clear cause.
+  #
+  # Windows is exempt, and must be. It has no POSIX mode bits: Erlang
+  # synthesises `mode` from the read-only attribute alone, so an ordinary file
+  # always reports 0o100666 and `band(mode, 0o077)` is NEVER 0. `File.chmod/2`
+  # cannot clear those bits either, so the 0600-from-birth write below is a
+  # no-op there — meaning OSA rejects, on every read, a store it just wrote
+  # itself. That is not a hardening failure, it is a permanent lockout of every
+  # subscription provider on the platform (`{:unsafe_read,
+  # :insecure_permissions}` on each sign-in). Access on Windows is governed by
+  # NTFS ACLs, which this check cannot see, so defer to them.
   defp check_permissions(file) do
+    if match?({:win32, _}, :os.type()) do
+      :ok
+    else
+      check_posix_permissions(file)
+    end
+  end
+
+  defp check_posix_permissions(file) do
     case File.stat(file) do
       {:ok, %File.Stat{mode: mode}} ->
         # Low 6 bits = group + other. Anything set is a leak.

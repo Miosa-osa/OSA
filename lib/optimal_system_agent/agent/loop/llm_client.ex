@@ -15,22 +15,31 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   alias OptimalSystemAgent.Utils.Mojibake
 
   # If no streaming token arrives for this long, the connection is treated as
-  # dead. NOT a total-duration cap — an active stream can run indefinitely.
+  # dead. NOT a total-duration cap — an active stream can run indefinitely; the
+  # watchdog resets on EVERY streamed event, so any real progress keeps it open.
   #
-  # Raised from 300s. Five minutes of silence is not reliable evidence of a dead
-  # connection: a loaded provider, a large model on a long multi-tool request, or
-  # a queue behind a rate limit all go quiet for longer than that while perfectly
-  # healthy. Observed failure — a background agent that had ALREADY finished its
-  # work (67 pages built, 157 tests passing, zero type errors) was killed
-  # mid-sentence writing its final report:
-  #
-  #     partial: "Zero TypeScript errors. Let me run the full test suite:"
-  #
-  # The stream died, the agent looked stalled, and two hours later it was
-  # reported as a `:timeout` failure with its completed results discarded. The
-  # cost of waiting longer is a slower report on a genuinely dead socket; the
-  # cost of waiting too little is throwing away finished work.
-  @default_idle_timeout_ms 1_800_000
+  # 5 minutes, matching Codex's `stream_idle_timeout_ms = 300_000`. This was
+  # briefly raised to 30 minutes on the reasoning that a loaded provider can go
+  # quiet while healthy — but 30 minutes does not distinguish a healthy-but-slow
+  # provider from a wedged one; it just lets a token-trickle keep-alive (a socket
+  # that dribbles a byte occasionally while making no real progress) hang the
+  # turn for the whole window before the watchdog notices. Five minutes of TRUE
+  # silence is strong evidence of a dead connection, and a genuinely long tool
+  # call still streams *something* well inside it. A provider that knows it needs
+  # a tighter bound passes a shorter `:idle_timeout` per request, which wins.
+  @default_idle_timeout_ms 300_000
+
+  # Tighter idle window for CLOUD REASONING models (the Ollama Cloud family, e.g.
+  # the default `glm-5.2:cloud`). These emit all their reasoning on the thinking
+  # channel and then the server can PAUSE before the first content token; that
+  # post-reasoning silence is a real gap, not a slow-but-healthy trickle, so the
+  # full 5-minute default makes the turn look wedged for far too long. Thinking
+  # tokens reset the watchdog, so only a TRUE gap counts, and 2 minutes of it on
+  # a hosted model is strong evidence of a stall. RETRYABLE like the default (the
+  # watchdog fire arm is unchanged), so a trip recovers the turn on its own much
+  # sooner. A local model keeps the full 5 minutes (cold-load first token), and
+  # an explicit per-request `:idle_timeout` still wins.
+  @cloud_reasoning_idle_timeout_ms 120_000
 
   defp idle_timeout_ms do
     Application.get_env(
@@ -38,6 +47,25 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       :llm_stream_idle_timeout_ms,
       @default_idle_timeout_ms
     )
+  end
+
+  # The idle window for THIS request. An explicit per-request `:idle_timeout`
+  # always wins; otherwise a cloud reasoning model (detected by the same
+  # `:cloud`/`-cloud` tag convention `Registry.provider_for_model/1` uses) gets
+  # the tighter `@cloud_reasoning_idle_timeout_ms`, floored against any lower
+  # configured default. Every other request keeps the configured default.
+  defp request_idle_timeout_ms(opts, model) do
+    case Keyword.fetch(opts, :idle_timeout) do
+      {:ok, explicit} ->
+        explicit
+
+      :error ->
+        if OptimalSystemAgent.Providers.OllamaCloud.cloud_tag?(model) do
+          min(idle_timeout_ms(), @cloud_reasoning_idle_timeout_ms)
+        else
+          idle_timeout_ms()
+        end
+    end
   end
 
   # Process-dictionary key holding the id of the assistant message currently
@@ -72,6 +100,28 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     do: min(ms, retry_after_cap_ms())
 
   def capped_retry_delay_ms(_), do: 0
+
+  # Map the session's speed priority to an OpenAI processing tier. Only OpenAI
+  # honours `service_tier`; openai_compat gates it to that provider, so setting
+  # it for any provider is safe (ignored elsewhere). :loose → "flex" (~50%
+  # cheaper, slower — right for long-horizon background work); :immediate →
+  # "priority" (faster); :standard / unknown → unset (provider default).
+  defp maybe_put_service_tier(opts, state) do
+    case service_tier_for(state) do
+      nil -> opts
+      tier -> Keyword.put_new(opts, :service_tier, tier)
+    end
+  end
+
+  defp service_tier_for(state) when is_map(state) do
+    case Map.get(state, :priority) do
+      :loose -> "flex"
+      :immediate -> "priority"
+      _ -> nil
+    end
+  end
+
+  defp service_tier_for(_), do: nil
 
   defp retry_after_cap_ms do
     case Application.get_env(:optimal_system_agent, :retry_after_cap_ms, @retry_after_cap_ms) do
@@ -168,6 +218,136 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     id
   end
 
+  # Emit one repaired, non-empty text delta to every consumer: the retry
+  # one-way-door, the partial-recovery buffer, the local event bus, and the
+  # PubSub bridge the TUI reads. Factored out of the `:text_delta` callback arm
+  # so the arm can skip it when the stateful mojibake repair held the whole
+  # delta back as an incomplete sequence.
+  defp emit_text_delta(text, session_id, message_id, heartbeat) do
+    _ = heartbeat
+
+    # One-way door: this byte is about to be on the user's screen. Past this
+    # point a same-provider retry would re-emit it into the SAME live callback
+    # and the user would watch the paragraph appear twice, so the retry budget
+    # for this request collapses to zero. Runs in the stream task process, which
+    # is also the process `Resilience.with_retry/2` is looping in.
+    Resilience.mark_output_observed()
+
+    # WS5 — accumulate the partial text (reverse-prepended iodata; single writer
+    # = this stream task) so a hard abort can persist what the model had already
+    # produced.
+    try do
+      case :ets.lookup(:osa_stream_partial, session_id) do
+        [{^session_id, acc}] when is_list(acc) ->
+          :ets.insert(:osa_stream_partial, {session_id, [text | acc]})
+
+        _ ->
+          :ets.insert(:osa_stream_partial, {session_id, [text]})
+      end
+    rescue
+      ArgumentError -> :ok
+    end
+
+    Bus.emit(:system_event, %{
+      event: :streaming_token,
+      session_id: session_id,
+      message_id: message_id,
+      delta: text
+    })
+
+    # Bridge to PubSub for SSE delivery to TUI. `message_id` marks which
+    # assistant message this delta belongs to — the client starts a fresh buffer
+    # when it changes instead of appending onto the superseded one.
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{session_id}",
+      {:osa_event,
+       %{
+         type: :streaming_token,
+         session_id: session_id,
+         message_id: message_id,
+         text: text
+       }}
+    )
+  end
+
+  # Redact and broadcast one THINKING-channel delta to the local bus and the TUI
+  # PubSub bridge. `text` is already mojibake-repaired by the caller (the
+  # thinking channel threads its own carry). Kept separate from
+  # `emit_text_delta/4` because reasoning rides the thinking channel, not the
+  # answer channel, and carries no partial-recovery buffer.
+  #
+  # Reasoning routinely quotes back the contents of a file the model just read —
+  # .env dumps, Authorization headers, key material. It lands in terminal
+  # scrollback and in persisted session state, so it gets the same redaction
+  # every other user-visible provider text gets.
+  defp emit_thinking_delta("", _session_id), do: :ok
+
+  defp emit_thinking_delta(text, session_id) do
+    text = Trajectory.redact(text)
+
+    Bus.emit(:system_event, %{
+      event: :thinking_delta,
+      session_id: session_id,
+      delta: text
+    })
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{session_id}",
+      {:osa_event, %{type: :thinking_delta, session_id: session_id, text: text}}
+    )
+  end
+
+  # Grok-style phase-transition signal (borrowed: `Event::PhaseChanged` +
+  # `Event::FirstToken`). The spinner already shows THAT the turn is waiting; this
+  # names WHY - waiting on the model, streaming reasoning, or writing the answer -
+  # so the TUI activity row can label the phase instead of animating a flavor
+  # verb. Rides the SAME bus + `osa:session:<id>` PubSub pair every other streamed
+  # event uses, so the existing generic SSE forwarder ships it with no new route.
+  #
+  # Lightweight and additive: one emission per REAL transition, never per token.
+  # The `:streaming_reasoning` / `:streaming_text` transitions are guarded once
+  # per stream by `emit_phase_once/3` so a torrent of deltas fires each exactly
+  # once; `:waiting_for_model` is emitted once at stream start (below), which is
+  # already once per call.
+  defp emit_phase(phase, session_id) do
+    Bus.emit(:system_event, %{
+      event: :phase_changed,
+      session_id: session_id,
+      phase: phase
+    })
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{session_id}",
+      {:osa_event, %{type: :phase_changed, session_id: session_id, phase: phase}}
+    )
+  end
+
+  # Emit `phase` exactly once per stream: fire only when this session's guard flag
+  # is unset, then set it. The flag lives in the stream-task process dictionary
+  # (keyed by session, exactly like the mojibake carries) and is cleared at stream
+  # start AND in the `:done` arm - the same belt-and-suspenders reset the carries
+  # get - so a reused task process starts each stream's phase machine clean.
+  defp emit_phase_once(phase, session_id, flag_key) do
+    case Process.get({flag_key, session_id}) do
+      true ->
+        :ok
+
+      _ ->
+        Process.put({flag_key, session_id}, true)
+        emit_phase(phase, session_id)
+    end
+  end
+
+  # Clear this stream's phase guards. Mirrors the moji-carry deletes so the
+  # once-per-stream transitions cannot leak across streams sharing a task process.
+  defp reset_phase_flags(session_id) do
+    Process.delete({:osa_phase_reasoning_sent, session_id})
+    Process.delete({:osa_phase_text_sent, session_id})
+  end
+
   @doc """
   Synchronous LLM chat — routes through the configured provider/model for this session.
   """
@@ -183,6 +363,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
     opts = if provider, do: Keyword.put(opts, :provider, provider), else: opts
     opts = if model, do: Keyword.put(opts, :model, model), else: opts
+    opts = maybe_put_service_tier(opts, state)
 
     # Session identity for the provider layer: it keys the prompt-cache
     # attributor's per-scope comparison, and on OpenAI it becomes the
@@ -251,13 +432,25 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
   Returns {:ok, result} | {:error, reason}.
   """
-  def llm_chat_stream(%{session_id: session_id, provider: provider, model: model}, messages, opts) do
+  def llm_chat_stream(
+        %{session_id: session_id, provider: provider, model: model} = state,
+        messages,
+        opts
+      ) do
     Logger.debug(
       "[llm] stream — #{length(messages)} messages (sanitized): #{inspect(sanitize_for_log(messages))} session=#{session_id}"
     )
 
-    # Heartbeat: atomics counter incremented on every streaming event.
-    # The watchdog checks if the counter has changed since last poll.
+    # Heartbeat: atomics counter incremented on every streaming event AND on
+    # every raw chunk the provider receives from the wire BEFORE it is parsed
+    # (the provider bumps this SAME atomic via `opts[:heartbeat]`, injected
+    # below). The watchdog checks if the counter has changed since last poll.
+    #
+    # Grok dual idle-timeout: resetting on raw bytes, not only on parsed events,
+    # means a stream that is flowing bytes the parser has not yet turned into an
+    # event never false-times-out. The idle timeout then fires only on a TRULY
+    # silent pipe (no bytes at all for the window), where the retryable restart
+    # is genuinely warranted.
     heartbeat = :atomics.new(1, signed: false)
     :atomics.put(heartbeat, 1, 1)
 
@@ -277,70 +470,85 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       ArgumentError -> :ok
     end
 
+    # Start with empty mojibake carries so a prior stream that aborted before
+    # its `:done` (leaving a held partial sequence in this reused task process)
+    # cannot prepend stale bytes onto this stream's first delta. The thinking
+    # channel gets its OWN carry, independent of the answer carry, so a partial
+    # sequence held on one channel never bleeds into the other.
+    Process.delete({:moji_carry, session_id})
+    Process.delete({:moji_think_carry, session_id})
+
+    # Grok phase signal: the request is going out and not one byte has come back
+    # yet. Clear this stream's phase guards (mirroring the moji-carry reset above)
+    # and announce the wait immediately, so the TUI can label the phase at stream
+    # start instead of after its heuristic grace window.
+    reset_phase_flags(session_id)
+    emit_phase(:waiting_for_model, session_id)
+
     caller = self()
 
     callback = fn
       {:text_delta, text} ->
         :atomics.add(heartbeat, 1, 1)
-        # Every provider's streamed text funnels through here before it reaches
-        # the screen, the partial buffer, or the persisted transcript — so this
-        # is the ONE place to undo the UTF-8-as-Latin-1 corruption some backends
-        # emit (an em-dash arriving as the bytes for "â€""). Doing it per
-        # provider left gaps: the local Ollama path repaired, its cloud path
-        # (glm-*:cloud) did not, and every other provider not at all. `repair/1`
-        # is conservative — it only rewrites text that re-decodes to valid UTF-8
-        # with fewer mojibake markers, so clean tokens and legitimately accented
-        # text pass through untouched.
-        text = Mojibake.repair(text)
-        # One-way door: this byte is about to be on the user's screen. Past this
-        # point a same-provider retry would re-emit it into the SAME live
-        # callback and the user would watch the paragraph appear twice, so the
-        # retry budget for this request collapses to zero. Runs in the stream
-        # task process, which is also the process `Resilience.with_retry/2` is
-        # looping in (providers drive `into: :self` receive loops).
-        Resilience.mark_output_observed()
+        # First answer-channel delta → the model is writing its reply. Fired on
+        # ARRIVAL (once), before the mojibake hold decision below: content is
+        # streaming even when a partial byte sequence is held back this chunk.
+        emit_phase_once(:streaming_text, session_id, :osa_phase_text_sent)
+        # Stateful mojibake repair. Per-delta repair cannot fix a corruption
+        # sequence split across two streamed chunks (a delta ending in a lone
+        # "â" has nothing to re-decode), which is the common case when a
+        # provider streams token-by-token — so we thread a carry buffer through
+        # the stream, holding an in-flight partial sequence until it is whole.
+        # The carry lives in the process dictionary because this callback runs
+        # in the single stream-task process for the whole request; it is flushed
+        # in the `:done` arm below.
+        {text, moji_carry} =
+          Mojibake.repair_stream(Process.get({:moji_carry, session_id}, ""), text)
 
-        # WS5 — accumulate the partial text (reverse-prepended iodata; single
-        # writer = this stream task) so a hard abort can persist what the model
-        # had already produced.
-        try do
-          case :ets.lookup(:osa_stream_partial, session_id) do
-            [{^session_id, acc}] when is_list(acc) ->
-              :ets.insert(:osa_stream_partial, {session_id, [text | acc]})
+        Process.put({:moji_carry, session_id}, moji_carry)
 
-            _ ->
-              :ets.insert(:osa_stream_partial, {session_id, [text]})
-          end
-        rescue
-          ArgumentError -> :ok
+        # Everything below emits to the screen/buffer/transcript; skip it when
+        # this delta was entirely held back as a possibly-incomplete sequence,
+        # so we neither broadcast an empty token nor burn the retry budget on
+        # output the user has not actually seen yet.
+        if text != "" do
+          emit_text_delta(text, session_id, message_id, heartbeat)
         end
-
-        Bus.emit(:system_event, %{
-          event: :streaming_token,
-          session_id: session_id,
-          message_id: message_id,
-          delta: text
-        })
-
-        # Bridge to PubSub for SSE delivery to TUI. `message_id` marks which
-        # assistant message this delta belongs to — the client starts a fresh
-        # buffer when it changes instead of appending a new generation onto the
-        # superseded one.
-        Phoenix.PubSub.broadcast(
-          OptimalSystemAgent.PubSub,
-          "osa:session:#{session_id}",
-          {:osa_event,
-           %{
-             type: :streaming_token,
-             session_id: session_id,
-             message_id: message_id,
-             text: text
-           }}
-        )
 
       {:done, result} ->
         :atomics.add(heartbeat, 1, 1)
         Logger.debug("[stream] done → session:#{session_id}")
+
+        # Flush whatever the stateful mojibake repair was still holding as a
+        # possibly-incomplete sequence, so the live view is not missing the last
+        # few characters of the answer. Emitted as one final repaired delta.
+        case Process.get({:moji_carry, session_id}, "") do
+          "" ->
+            :ok
+
+          carry ->
+            flushed = Mojibake.flush(carry)
+            if flushed != "", do: emit_text_delta(flushed, session_id, message_id, heartbeat)
+        end
+
+        Process.delete({:moji_carry, session_id})
+
+        # Same flush for the THINKING channel's independent carry, so the last
+        # characters of the reasoning are not lost when the stream ends holding a
+        # partial sequence. Emitted as one final thinking delta.
+        case Process.get({:moji_think_carry, session_id}, "") do
+          "" ->
+            :ok
+
+          think_carry ->
+            think_carry |> Mojibake.flush() |> emit_thinking_delta(session_id)
+        end
+
+        Process.delete({:moji_think_carry, session_id})
+
+        # Clear this stream's phase guards so a reused stream-task process starts
+        # the next stream's phase machine clean (mirrors the moji-carry deletes).
+        reset_phase_flags(session_id)
 
         # Repair the FINAL assembled content, not just the live deltas. This is
         # the string that is persisted to the transcript and re-rendered on
@@ -383,27 +591,26 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
       {:thinking_delta, text} ->
         :atomics.add(heartbeat, 1, 1)
+        # First reasoning-channel delta → the model is streaming its reasoning.
+        # Fired on ARRIVAL (once), before the mojibake hold below, for the same
+        # reason as `:streaming_text`.
+        emit_phase_once(:streaming_reasoning, session_id, :osa_phase_reasoning_sent)
         # Reasoning is rendered live in the TUI, so it is user-visible output
         # under exactly the same one-way-door rule as `:text_delta`.
         Resilience.mark_output_observed()
 
-        # Reasoning routinely quotes back the contents of a file the model just
-        # read — .env dumps, Authorization headers, key material. It lands in
-        # terminal scrollback and in persisted session state, so it gets the
-        # same redaction every other user-visible provider text gets.
-        text = text |> Mojibake.repair() |> Trajectory.redact()
+        # Stateful mojibake repair for the THINKING channel, threaded through its
+        # OWN carry buffer (independent of the answer carry above). A corruption
+        # sequence split across two thinking chunks needs the same cross-delta
+        # stitching the answer path gets — a per-delta repair leaves a lone
+        # trailing `â` unrepairable — so hold the in-flight partial and flush it
+        # in the `:done` arm below. Skip the emit when the whole delta was held.
+        {text, think_carry} =
+          Mojibake.repair_stream(Process.get({:moji_think_carry, session_id}, ""), text)
 
-        Bus.emit(:system_event, %{
-          event: :thinking_delta,
-          session_id: session_id,
-          delta: text
-        })
+        Process.put({:moji_think_carry, session_id}, think_carry)
 
-        Phoenix.PubSub.broadcast(
-          OptimalSystemAgent.PubSub,
-          "osa:session:#{session_id}",
-          {:osa_event, %{type: :thinking_delta, session_id: session_id, text: text}}
-        )
+        if text != "", do: emit_thinking_delta(text, session_id)
 
       {:tool_use_block, tool_call} ->
         # Provider detected a complete tool_use block during streaming.
@@ -452,10 +659,18 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
     opts = if provider, do: Keyword.put(opts, :provider, provider), else: opts
     opts = if model, do: Keyword.put(opts, :model, model), else: opts
+    opts = maybe_put_service_tier(opts, state)
     opts = maybe_put_session(opts, session_id)
 
     # TEMP measurement instrumentation (OSA_CONTEXT_TRACE=1). No-op when unset.
     OptimalSystemAgent.Agent.Loop.ContextTrace.dump(session_id, messages, opts, mode: "stream")
+
+    # Hand the watchdog atomic to the provider so it can reset the idle timer on
+    # EVERY raw chunk it receives (before parsing), not only on the parsed events
+    # this module's callback resets it on. Same atomic, same `:atomics.add/3`
+    # reset the `:text_delta` arm uses — the provider just calls it from the wire
+    # chunk point. A stream with any bytes flowing then never false-times-out.
+    opts = Keyword.put(opts, :heartbeat, heartbeat)
 
     Process.put(:osa_stream_start_time, System.monotonic_time(:millisecond))
 
@@ -536,7 +751,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       end)
 
     # Watchdog: polls heartbeat every 10s, kills if no progress for the idle timeout
-    idle_timeout = Keyword.get(opts, :idle_timeout, idle_timeout_ms())
+    idle_timeout = request_idle_timeout_ms(opts, model)
 
     watchdog =
       spawn_link(fn -> watchdog_loop(heartbeat, stream_task, idle_timeout, session_id) end)

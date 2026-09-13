@@ -87,13 +87,17 @@ impl Toasts {
     }
 
     pub fn push(&mut self, message: String, level: ToastLevel) {
-        // Coalesce an immediate duplicate (same text + level) so repeated events
-        // don't stack identical toasts — just refresh its dwell timer.
-        if let Some(last) = self.queue.last_mut() {
-            if last.level == level && last.message == message {
-                last.created = Instant::now();
-                return;
-            }
+        // Coalesce a duplicate (same text + level) against ANY live toast, not
+        // just the most recent one — interleaved identical warnings from two
+        // different tools would otherwise slip past a last-only check and stack.
+        // Refresh the existing toast's dwell timer instead of enqueueing another.
+        if let Some(existing) = self
+            .queue
+            .iter_mut()
+            .find(|t| t.level == level && t.message == message)
+        {
+            existing.created = Instant::now();
+            return;
         }
 
         self.history.push_back(ToastRecord {
@@ -221,4 +225,29 @@ fn fit_to_width(s: &str, max: usize) -> String {
     // RIGHT-aligned, an over-wide string lost its BEGINNING (the first words),
     // not its tail.
     crate::util::fit_cols(s, max)
+}
+
+#[cfg(test)]
+mod dedup_tests {
+    use super::*;
+
+    #[test]
+    fn interleaved_identical_warnings_coalesce_against_any_live_toast() {
+        let mut toasts = Toasts::new();
+        // A, then B, then A again. With a last-only check the second A would
+        // stack (last is B); dedup-across-queue must refresh the existing A.
+        toasts.push("stalled: tool-a".into(), ToastLevel::Warning);
+        toasts.push("stalled: tool-b".into(), ToastLevel::Warning);
+        toasts.push("stalled: tool-a".into(), ToastLevel::Warning);
+
+        assert_eq!(toasts.live_count(), 2, "the repeated warning must not stack a third toast");
+    }
+
+    #[test]
+    fn distinct_messages_are_not_coalesced() {
+        let mut toasts = Toasts::new();
+        toasts.push("one".into(), ToastLevel::Info);
+        toasts.push("two".into(), ToastLevel::Info);
+        assert_eq!(toasts.live_count(), 2);
+    }
 }

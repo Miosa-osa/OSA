@@ -327,7 +327,13 @@ if (-not (Test-Path $ReleaseBat)) {
 }
 
 if ($env:OSA_PORT) { $Port = $env:OSA_PORT } else { $Port = 9089 }
-$HealthUrl = "http://localhost:$Port/health"
+# 127.0.0.1, NOT localhost. The backend binds IPv4 only, but Windows resolves
+# "localhost" to ::1 first and the IPv6 attempt STALLS rather than refusing,
+# consuming the whole -TimeoutSec 2 budget in Test-Health below before IPv4 is
+# ever tried. Test-Health therefore returned $false against a perfectly healthy
+# daemon, so every launch tried to start a SECOND backend on the taken port and
+# died with "port 9089 may already be in use".
+$HealthUrl = "http://127.0.0.1:$Port/health"
 
 function Test-Health {
   param([string]$Url)
@@ -346,6 +352,19 @@ function Get-DaemonProcess {
       if ($proc) { return $proc }
     }
   }
+  # Fall back to whoever actually holds the PORT. The pidfile records the
+  # cmd.exe wrapper, but `erl` is its child and outlives it when the wrapper is
+  # killed alone - leaving a backend that owns :$Port and that `osa stop` could
+  # not see. That is the "No OSA backend is running" / "port may already be in
+  # use" deadlock: stop reports nothing to stop, and start cannot bind.
+  try {
+    $owner = (Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue |
+              Select-Object -First 1).OwningProcess
+    if ($owner) {
+      $proc = Get-Process -Id ([int]$owner) -ErrorAction SilentlyContinue
+      if ($proc) { return $proc }
+    }
+  } catch { }
   return $null
 }
 
@@ -369,7 +388,13 @@ function Start-Daemon {
   # Detached background daemon that SURVIVES this launcher and the TUI.
   $backendLog = Join-Path $LogDir 'backend.log'
   Write-Host "  -> Starting OSA backend on :$Port (background daemon)" -ForegroundColor Cyan
-  $proc = Start-Process -FilePath $ReleaseBat -ArgumentList 'serve' `
+  # The stock release .bat has NO `serve` command (see copy_osagent_wrapper in
+  # mix.exs): it printed "ERROR: Unknown command serve" and exited instantly, so
+  # the daemon never started and Wait-Health's early-exit branch mis-reported it
+  # as a port conflict. Dispatch through `eval`, like the POSIX bin/osagent
+  # wrapper - CLI.serve() also runs migrate!() and seed_workspace(), which a
+  # bare release `start` skips.
+  $proc = Start-Process -FilePath $ReleaseBat -ArgumentList 'eval','OptimalSystemAgent.CLI.serve()' `
     -PassThru -WindowStyle Hidden -RedirectStandardOutput $backendLog
   Set-Content -LiteralPath $PidFile -Value $proc.Id -Encoding ASCII
   return $proc
@@ -1035,7 +1060,11 @@ $overdrive = $false
 # `osa opencomputers ...` owns its own argument vector (a passthrough to the
 # release binary), so it is matched positionally and never enters the verb scan.
 if ($argList.Count -ge 1 -and [string]$argList[0] -eq 'opencomputers') {
-  & $ReleaseBat opencomputers @(Drop-First $argList); exit $LASTEXITCODE
+  # Not a command in the stock release .bat either - build the same Elixir list
+  # the POSIX wrapper builds and hand it to `eval`.
+  $ocQuoted = @(Drop-First $argList) | ForEach-Object { '"' + ([string]$_ -replace '\\', '\\' -replace '"', '\"') + '"' }
+  & $ReleaseBat eval ('OptimalSystemAgent.CLI.opencomputers([' + ($ocQuoted -join ',') + '])')
+  exit $LASTEXITCODE
 }
 
 # Flags that consume the NEXT token as their value. Their argument is never a
@@ -1115,9 +1144,11 @@ switch -Exact ($cmd) {
     }
     exit 0
   }
-  'setup'  { & $ReleaseBat setup;  exit $LASTEXITCODE }
-  'serve'  { & $ReleaseBat serve;  exit $LASTEXITCODE }
-  'doctor' { & $ReleaseBat doctor; exit $LASTEXITCODE }
+  # Dispatched through `eval` because the stock release .bat has no such
+  # commands; these three printed "ERROR: Unknown command <verb>" before.
+  'setup'  { & $ReleaseBat eval 'OptimalSystemAgent.CLI.setup()';  exit $LASTEXITCODE }
+  'serve'  { & $ReleaseBat eval 'OptimalSystemAgent.CLI.serve()';  exit $LASTEXITCODE }
+  'doctor' { & $ReleaseBat eval 'OptimalSystemAgent.CLI.doctor()'; exit $LASTEXITCODE }
   'stop'   { Stop-Daemon; exit 0 }
   'update' {
     # The `update` token was already stripped from $argList by the verb
@@ -1170,7 +1201,7 @@ if ($overdrive) { Warn-Overdrive }
 
 # Launch the TUI. The backend daemon deliberately OUTLIVES this process, so the
 # next `osa` attaches instantly. No cleanup - that is the whole point.
-$env:OSA_URL = "http://localhost:$Port"
+$env:OSA_URL = "http://127.0.0.1:$Port"   # IPv4 literal - see the $HealthUrl note above
 & $TuiBin @argList
 exit $LASTEXITCODE
 '@

@@ -8,6 +8,7 @@ defmodule OptimalSystemAgent.CommandCenter do
   """
 
   alias OptimalSystemAgent.Agent.Roster
+  alias OptimalSystemAgent.Orchestrator
 
   @doc "Top-level dashboard summary."
   @spec dashboard_summary() :: map()
@@ -15,10 +16,15 @@ defmodule OptimalSystemAgent.CommandCenter do
     agents = Roster.all() |> Map.values()
     total = length(agents)
 
+    # Live count of admitted (non-queued) subagent runs. Previously hardcoded to
+    # `running: 0, idle: total`, so the dashboard always reported zero running
+    # agents no matter how many were mid-flight.
+    running = Orchestrator.live_agent_count()
+
     %{
       total_agents: total,
-      running: 0,
-      idle: total,
+      running: running,
+      idle: max(total - running, 0),
       tiers: tier_counts(agents),
       patterns: pattern_list()
     }

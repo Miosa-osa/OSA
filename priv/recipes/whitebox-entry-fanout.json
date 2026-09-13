@@ -1,0 +1,35 @@
+{
+  "name": "Whitebox Entry Fan-out",
+  "description": "Whitebox pass: discover request-handler entry points, fan out one security-auditor child per entry (max 20), parent-review candidates, then independently validate survivors and gate the report. Source only. No live target unless RoE is already in the child prompt.",
+  "steps": [
+    {
+      "name": "Discover entries",
+      "description": "List request-handler files under the repo root via security_intel ci_scan / EntryFanout.plan. Reuse CiScan.discover_entries. Fail closed if the root is missing. No live network.",
+      "signal_mode": "EXECUTE",
+      "tools_needed": ["security_intel", "file_read"],
+      "acceptance_criteria": "Entry list produced (relative paths). Root missing is an error, not an empty clean scan."
+    },
+    {
+      "name": "Fan out one auditor per entry",
+      "description": "Call EntryFanout.plan then delegate one security-auditor child per entry, max 20. Each child is bounded to that file and symbols it calls. Basics first: IDOR/authz, then injection. Children return candidates, not confirmed findings.",
+      "signal_mode": "EXECUTE",
+      "tools_needed": ["delegate", "security_intel"],
+      "delegate_to": "security-auditor",
+      "acceptance_criteria": "At most 20 children spawned. Each prompt names one entry. Each child returns candidates with class, file:line, confidence 0-10 (non-remote cap 6)."
+    },
+    {
+      "name": "Parent review + independent validation",
+      "description": "Parent reads candidate lists. Drop self-confirmed noise. Spawn security_validation per surviving finding. Empty queue for a class is not assessed, not clean. Do not invent RoE. No live target unless RoE is already in the prompt.",
+      "signal_mode": "EXECUTE",
+      "tools_needed": ["delegate", "security_intel", "file_read"],
+      "acceptance_criteria": "Surviving findings each have an independent validation child. Rejected candidates recorded. Classes with empty queues marked not assessed."
+    },
+    {
+      "name": "Report gate + evidence",
+      "description": "Run report_gate on validated findings. Require CVSS, CWE, and a receipt (poc / evidence_path / evidence_id). Attach evidence. Produce SARIF. Rank by severity. No payload generation.",
+      "signal_mode": "ASSIST",
+      "tools_needed": ["security_intel", "file_write"],
+      "acceptance_criteria": "Eligible findings scored with CVSS + CWE + evidence receipt. Ineligible findings dropped or marked needs-evidence. SARIF written."
+    }
+  ]
+}

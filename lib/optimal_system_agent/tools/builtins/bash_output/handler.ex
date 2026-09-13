@@ -10,6 +10,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Handler do
     * `execute/2`           — polls (or kills) the background command by id
   """
 
+  alias OptimalSystemAgent.Agent.Cancellation
   alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Shell.BackgroundManager
   alias OptimalSystemAgent.Tools.UseContext
@@ -20,9 +21,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Handler do
   # replaces.
   @poll_interval_ms 250
 
-  # Ceiling on `wait_ms`. Terminal-Bench's own episode deadline is 1800 s, so a
-  # wait longer than this can only expire against something else first.
-  @max_wait_ms 1_800_000
+  # Ceiling on `wait_ms`. A single blocking wait must not be able to freeze the
+  # turn for long stretches (a 30-min ceiling here caused an observed 415 s
+  # freeze), so it is capped at 2 min. A caller that needs longer simply waits
+  # again, and the wait is now cancel-aware so a user interrupt breaks it early.
+  @max_wait_ms 120_000
 
   # ── Stage 1: Input validation ──────────────────────────────────────────
 
@@ -126,24 +129,36 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Handler do
     # is announced on the same bus the verification gate uses.
     emit_wait(session_id, id, ms)
 
-    result = poll_until(id, started + ms)
+    result = poll_until(id, started + ms, session_id)
     {result, System.monotonic_time(:millisecond) - started}
   end
 
-  defp poll_until(id, deadline) do
+  defp poll_until(id, deadline, session_id) do
     case BackgroundManager.output(id) do
-      {:ok, %{status: :running}} = still_running ->
-        if System.monotonic_time(:millisecond) >= deadline do
-          still_running
-        else
-          Process.sleep(@poll_interval_ms)
-          poll_until(id, deadline)
+      {:ok, %{status: :running} = snap} = still_running ->
+        cond do
+          System.monotonic_time(:millisecond) >= deadline ->
+            still_running
+
+          # Cancel-aware: a user interrupt breaks the blocking wait instead of
+          # holding the turn until the deadline. Tag the running snapshot so the
+          # formatter can say the wait was interrupted (not that it timed out).
+          cancelled?(session_id) ->
+            {:ok, Map.put(snap, :cancelled_wait, true)}
+
+          true ->
+            Process.sleep(@poll_interval_ms)
+            poll_until(id, deadline, session_id)
         end
 
       other ->
         other
     end
   end
+
+  # Guard for a nil session_id (no session context) — skip the check.
+  defp cancelled?(nil), do: false
+  defp cancelled?(session_id), do: Cancellation.cancelled?(session_id)
 
   defp emit_wait(session_id, id, ms) do
     Bus.emit(:system_event, %{
@@ -189,6 +204,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Handler do
   end
 
   defp wait_line(_snap, nil), do: nil
+
+  defp wait_line(%{status: :running, cancelled_wait: true}, waited),
+    do:
+      "- Waited #{waited} ms; the wait was INTERRUPTED by a cancel and it is STILL " <>
+        "RUNNING. This is not a result. Resume the wait with a new wait_ms, or kill it " <>
+        "and do the work in the foreground."
 
   defp wait_line(%{status: :running}, waited),
     do:

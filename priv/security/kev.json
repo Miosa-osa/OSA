@@ -1,0 +1,14 @@
+[
+  {"cve": "CVE-2021-44228", "vendor": "Apache", "product": "Log4j", "shortName": "Log4Shell", "dateAdded": "2021-12-10", "knownRansomwareCampaignUse": "Known"},
+  {"cve": "CVE-2023-34362", "vendor": "Progress", "product": "MOVEit Transfer", "shortName": "MOVEit SQL Injection", "dateAdded": "2023-06-02", "knownRansomwareCampaignUse": "Known"},
+  {"cve": "CVE-2023-22515", "vendor": "Atlassian", "product": "Confluence", "shortName": "Confluence Broken Access Control", "dateAdded": "2023-10-05", "knownRansomwareCampaignUse": "Known"},
+  {"cve": "CVE-2023-3519", "vendor": "Citrix", "product": "NetScaler ADC", "shortName": "NetScaler RCE", "dateAdded": "2023-07-19", "knownRansomwareCampaignUse": "Known"},
+  {"cve": "CVE-2023-38831", "vendor": "RARLAB", "product": "WinRAR", "shortName": "WinRAR Code Execution", "dateAdded": "2023-08-23", "knownRansomwareCampaignUse": "Known"},
+  {"cve": "CVE-2024-3400", "vendor": "Palo Alto Networks", "product": "PAN-OS", "shortName": "PAN-OS Command Injection", "dateAdded": "2024-04-12", "knownRansomwareCampaignUse": "Known"},
+  {"cve": "CVE-2024-4577", "vendor": "PHP", "product": "PHP CGI", "shortName": "PHP CGI Argument Injection", "dateAdded": "2024-06-06", "knownRansomwareCampaignUse": "Known"},
+  {"cve": "CVE-2024-1709", "vendor": "ConnectWise", "product": "ScreenConnect", "shortName": "ScreenConnect Auth Bypass", "dateAdded": "2024-02-22", "knownRansomwareCampaignUse": "Known"},
+  {"cve": "CVE-2024-27198", "vendor": "JetBrains", "product": "TeamCity", "shortName": "TeamCity Auth Bypass", "dateAdded": "2024-03-07", "knownRansomwareCampaignUse": "Known"},
+  {"cve": "CVE-2024-21413", "vendor": "Microsoft", "product": "Outlook", "shortName": "Outlook RCE", "dateAdded": "2024-02-13", "knownRansomwareCampaignUse": "Known"},
+  {"cve": "CVE-2024-21887", "vendor": "Ivanti", "product": "Connect Secure", "shortName": "Ivanti Command Injection", "dateAdded": "2024-01-10", "knownRansomwareCampaignUse": "Known"},
+  {"cve": "CVE-2023-27997", "vendor": "Fortinet", "product": "FortiOS", "shortName": "FortiOS SSL-VPN RCE", "dateAdded": "2023-06-13", "knownRansomwareCampaignUse": "Known"}
+]

@@ -36,6 +36,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
   # Tool schemas ride in a dedicated field of the request body, not in the
   # system-prompt text. See Providers.Behaviour.native_tool_schemas?/0.
+  @impl true
   def native_tool_schemas?, do: true
 
   @impl true
@@ -145,11 +146,34 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     e -> {:error, Exception.message(e)}
   end
 
+  @doc """
+  The URL of the daemon on THIS machine.
+
+  `:ollama_url` is whatever onboarding last wrote — picking a cloud model
+  leaves it at `https://ollama.com`. That is a hosted endpoint, not a local
+  daemon; anything that means "the local daemon" (the picker's reachability
+  probe, `/model list`, routing local weights) must not read it as one.
+  """
+  @spec local_daemon_url() :: String.t()
+  def local_daemon_url do
+    configured = Application.get_env(:optimal_system_agent, :ollama_url, @local_url)
+
+    if is_binary(configured) and String.starts_with?(configured, "https://"),
+      do: Application.get_env(:optimal_system_agent, :ollama_local_url, @local_url),
+      else: configured
+  end
+
   @doc false
+  # A hosted URL (`https://ollama.com`) cannot serve local weights at all, and
+  # it only serves a `:cloud` tag the account is entitled to. So whenever the
+  # local daemon has the model, the local daemon is the right route — the
+  # signed daemon proxies cloud tags key-free, and it is the ONLY thing that
+  # can run a GGUF pulled with `ollama pull hf.co/…`. Before, this only
+  # rerouted cloud tags: a local model selected while `OLLAMA_URL=https://ollama.com`
+  # was sent to ollama.com and failed.
   @spec resolve_request_url(String.t(), String.t() | nil, [String.t()]) :: String.t()
   def resolve_request_url(configured_url, model, local_model_names) do
-    if String.starts_with?(configured_url, "https://") and cloud_model?(model) and
-         model in local_model_names do
+    if String.starts_with?(configured_url, "https://") and model in local_model_names do
       @local_url
     else
       configured_url
@@ -157,7 +181,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   end
 
   defp request_url(configured_url, model) do
-    if String.starts_with?(configured_url, "https://") and cloud_model?(model) do
+    if String.starts_with?(configured_url, "https://") and is_binary(model) do
       local_url = Application.get_env(:optimal_system_agent, :ollama_local_url, @local_url)
 
       # Hosted tags are not guaranteed to appear in /api/tags even when the
@@ -175,7 +199,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
       case resolve_request_url(configured_url, model, local_model_names) do
         @local_url ->
-          Logger.info("[Ollama] Routing hosted tag #{model} through the signed local daemon")
+          Logger.info("[Ollama] Routing #{model} through the local daemon (it serves it)")
 
           local_url
 
@@ -283,28 +307,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       Logger.info("[Ollama] Cloud URL detected — streaming via curl port")
 
       tools = Keyword.get(opts, :tools, [])
-
-      body_map = %{
-        model: model,
-        messages: format_messages(messages),
-        stream: true,
-        keep_alive: keep_alive(),
-        options: build_options(opts, messages, model)
-      }
-
-      body_map =
-        case {tools, tools_decision(model, opts)} do
-          {[], _} ->
-            body_map
-
-          {_, {true, _source}} ->
-            Map.put(body_map, :tools, format_tools(tools))
-
-          {_, {false, source}} ->
-            report_tools_stripped(model, length(tools), source)
-            body_map
-        end
-
+      body_map = build_cloud_body(model, messages, opts, tools)
       body = Jason.encode!(body_map)
       api_key = Application.get_env(:optimal_system_agent, :ollama_api_key, "")
 
@@ -345,7 +348,14 @@ defmodule OptimalSystemAgent.Providers.Ollama do
           # Split inline <think>…</think> reasoning out of the live stream so
           # the tags + reasoning never leak into the visible answer (GLM cloud
           # models such as glm-5.2:cloud inline reasoning in the content field).
-          think: ThinkStreamParser.new()
+          think: ThinkStreamParser.new(),
+          # WS1 (Grok dual idle-timeout): the llm_client idle-watchdog atomic.
+          # Bumped on EVERY raw chunk received from the curl port below — before
+          # parsing, even for keepalive/blank/non-JSON bytes — so the idle timer
+          # measures TRUE silence on the pipe, not just gaps between parsed
+          # events. `nil` when called outside the agent loop (direct provider
+          # test), which `bump_heartbeat/1` treats as a no-op.
+          heartbeat: Keyword.get(opts, :heartbeat)
         })
 
       File.rm(body_file)
@@ -425,6 +435,10 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   defp cloud_stream_loop(port, callback, acc) do
     receive do
       {^port, {:data, {:eol, line}}} ->
+        # Raw bytes arrived → reset the idle watchdog BEFORE parsing, so even a
+        # keepalive or non-JSON line counts as the pipe being alive (WS1).
+        bump_heartbeat(Map.get(acc, :heartbeat))
+
         case Jason.decode(line) do
           {:ok, %{"done" => true} = resp} ->
             # Final chunk — extract usage stats. Tool calls may have arrived in
@@ -489,8 +503,46 @@ defmodule OptimalSystemAgent.Providers.Ollama do
             Logger.info("[Ollama] Cloud stream: got #{length(tool_calls)} tool calls mid-stream")
             cloud_stream_loop(port, callback, %{acc | tool_calls: acc.tool_calls ++ tool_calls})
 
+          {:ok, %{"message" => %{"thinking" => think_token, "content" => token}}}
+          when is_binary(think_token) and think_token != "" and
+                 is_binary(token) and token != "" ->
+            # A SINGLE chunk carrying BOTH native reasoning AND visible content.
+            # The thinking-only arm below matches any chunk with a non-empty
+            # `thinking` key, so without this arm a both-present chunk routed the
+            # reasoning and silently DROPPED the content. Emit the reasoning to
+            # the thinking box, then run the content through the SAME
+            # ThinkStreamParser the content-only arm uses (state threaded), so
+            # the visible answer is never lost.
+            callback.({:thinking_delta, think_token})
+
+            {visible, thinking, think_state} =
+              ThinkStreamParser.feed(acc.think, token)
+
+            if thinking != "", do: callback.({:thinking_delta, thinking})
+            if visible != "", do: callback.({:text_delta, visible})
+
+            cloud_stream_loop(port, callback, %{
+              acc
+              | content: acc.content <> token,
+                think: think_state
+            })
+
+          {:ok, %{"message" => %{"thinking" => think_token}}}
+          when is_binary(think_token) and think_token != "" ->
+            # Native reasoning channel (`think: true`). Reasoning arrives on its
+            # OWN `thinking` field, separate from `content`, so route it straight
+            # to the thinking box and leave the visible answer untouched. Without
+            # this arm the chunk fell to the catch-all and the reasoning was
+            # dropped; the arm exists so a reasoning model shows its reasoning
+            # like the `ollama` CLI does.
+            callback.({:thinking_delta, think_token})
+            cloud_stream_loop(port, callback, acc)
+
           {:ok, %{"message" => %{"content" => token}}} when token != "" ->
             # Streaming token — split inline reasoning tags out before emitting.
+            # (Belt-and-suspenders: with `think: true` reasoning comes on the
+            # `thinking` field above, but a model that still inlines `<think>`
+            # tags is handled here too.)
             {visible, thinking, think_state} =
               ThinkStreamParser.feed(acc.think, token)
 
@@ -520,7 +572,9 @@ defmodule OptimalSystemAgent.Providers.Ollama do
         end
 
       {^port, {:data, {:noeol, _partial}}} ->
-        # Partial line, wait for more
+        # Partial line — raw bytes still flowing, so reset the idle watchdog
+        # (WS1), then wait for more.
+        bump_heartbeat(Map.get(acc, :heartbeat))
         cloud_stream_loop(port, callback, acc)
 
       {^port, {:exit_status, 0}} ->
@@ -587,11 +641,18 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       think: ThinkStreamParser.new()
     })
 
+    # WS1 (Grok dual idle-timeout): the llm_client idle-watchdog atomic. Reset on
+    # EVERY raw chunk Finch delivers — before parsing — so a stream trickling
+    # bytes never false-times-out; only a truly silent socket trips the idle
+    # timer. `nil` outside the agent loop, which `bump_heartbeat/1` no-ops.
+    heartbeat = Keyword.get(opts, :heartbeat)
+
     req_opts =
       [
         json: body,
         receive_timeout: receive_timeout_ms(),
         into: fn {:data, data}, {req, resp} ->
+          bump_heartbeat(heartbeat)
           acc = Process.get(stream_key)
           acc = handle_stream_chunk(data, callback, acc)
           Process.put(stream_key, acc)
@@ -785,10 +846,22 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     # Agent.Context already budgets the assembled prompt against this same
     # effective window, prompt_tokens stays under max_ctx and is never truncated;
     # any leftover room becomes generation headroom.
+    # STABLE num_ctx: request the FULL effective window every turn, not a value
+    # sized to the current prompt. The per-turn sizing grew num_ctx as the
+    # conversation grew, and each bucket crossing forced Ollama to reload the
+    # model — a 30s+ cold read on a 21 GB model — mid-session, and it thrashed
+    # against any externally warmed instance. With a q4_0 KV cache a full-window
+    # allocation is cheap (~700 MiB at 128k), so pin num_ctx to the window and
+    # the model loads once and stays resident. Set :ollama_num_ctx_dynamic true
+    # to restore the old prompt-sized behaviour.
     num_ctx =
-      (prompt_tokens + num_predict + 512)
-      |> round_up_ctx()
-      |> min(max_ctx)
+      if Application.get_env(:optimal_system_agent, :ollama_num_ctx_dynamic, false) == true do
+        (prompt_tokens + num_predict + 512)
+        |> round_up_ctx()
+        |> min(max_ctx)
+      else
+        max_ctx
+      end
 
     # Never advertise a generation cap larger than the window itself.
     num_predict = min(num_predict, num_ctx)
@@ -880,7 +953,44 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   Test seam: the Ollama wire shape for a list of OSA messages.
   """
   def format_messages(messages) do
-    Enum.map(messages, fn
+    messages
+    |> Enum.map(&format_message/1)
+    |> demote_trailing_system()
+  end
+
+  # OSA injects `role: "system"` messages MID-conversation on purpose — the
+  # task brief, background-task notifications, compaction reminders, steer
+  # directives. Most chat templates render those wherever they land. Qwen 3.5's
+  # embedded Jinja template does not: any system message that is not the first
+  # message hits `raise_exception('System message must be at the beginning.')`,
+  # and Ollama surfaces that as a 400 before generation starts. So the
+  # abliterated SuperQwen GGUF answered `curl` fine and 400'd every real OSA
+  # turn.
+  #
+  # Keep the leading system message where it is; every later one becomes a
+  # user turn carrying the same text inside `<system-reminder>` tags. That is
+  # the shape the harness-side reminders already use, every template accepts
+  # it, and the model still reads it as an instruction rather than as chat.
+  @doc false
+  def demote_trailing_system([first | rest]) do
+    [first | Enum.map(rest, &demote_system/1)]
+  end
+
+  def demote_trailing_system([]), do: []
+
+  defp demote_system(%{"role" => "system", "content" => content} = msg) when is_binary(content) do
+    %{
+      msg
+      | "role" => "user",
+        "content" => "<system-reminder>\n" <> content <> "\n</system-reminder>"
+    }
+  end
+
+  defp demote_system(%{"role" => "system"} = msg), do: %{msg | "role" => "user"}
+  defp demote_system(msg), do: msg
+
+  defp format_message(message) do
+    case message do
       # Assistant messages that carry tool_calls must preserve them so that
       # the 2nd+ iteration has accurate conversation history.
       %{role: "assistant", tool_calls: tool_calls} = msg
@@ -940,7 +1050,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
       msg when is_map(msg) ->
         msg
-    end)
+    end
   end
 
   # Ollama's native `/api/chat` carries images as a SIBLING field of `content`:
@@ -1073,6 +1183,43 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   """
   def apply_think(body, model, opts), do: maybe_add_think(body, model, opts)
 
+  @doc false
+  # The Ollama Cloud streaming request body. A SEAM (not inlined in
+  # do_chat_stream) so the reasoning + tool decisions can be asserted directly.
+  #
+  # `maybe_add_think/3` was applied in `chat/2` and the LOCAL streaming path but
+  # MISSING here, so every cloud reasoning model streamed with no `think` field:
+  # glm-5.2 tolerated it by inlining `<think>` tags the parser strips, but
+  # glm-5.3-flash's always-on reasoning jumbled into the visible answer as
+  # fragmented, repetitive garbage. Building the body through this function keeps
+  # the three request paths in agreement and lets a test pin that a cloud
+  # reasoning model gets `think: true`.
+  def build_cloud_body(model, messages, opts, tools) do
+    %{
+      model: model,
+      messages: format_messages(messages),
+      stream: true,
+      keep_alive: keep_alive(),
+      options: build_options(opts, messages, model)
+    }
+    |> apply_cloud_tools(model, opts, tools)
+    |> maybe_add_think(model, opts)
+  end
+
+  defp apply_cloud_tools(body_map, model, opts, tools) do
+    case {tools, tools_decision(model, opts)} do
+      {[], _} ->
+        body_map
+
+      {_, {true, _source}} ->
+        Map.put(body_map, :tools, format_tools(tools))
+
+      {_, {false, source}} ->
+        report_tools_stripped(model, length(tools), source)
+        body_map
+    end
+  end
+
   @doc """
   Test seam: apply the tool-schema decision to a request body, without a live
   HTTP call. Withholding tools is the largest capability loss this provider can
@@ -1121,7 +1268,9 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   | `opts[:think]` set | that value | `:opt` |
   | `:ollama_think` app env set (`OLLAMA_THINK`) | that value | `:config` |
   | not a reasoning model | `nil` (no field) | `:unsupported` |
-  | reasoning model, cloud-served | `true` | `:cloud_default` |
+  | glm cloud model (always-on reasoner), any effort | `true` | `:cloud_default` |
+  | reasoning model, cloud-served, effort `:fast` | `false` | `:fast_effort` |
+  | reasoning model, cloud-served, effort > `:fast` | `true` | `:cloud_default` |
   | reasoning model, locally served | `false` | `:local_stall_guard` |
 
   Both explicit routes override in BOTH directions and for BOTH serving modes:
@@ -1133,7 +1282,8 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   prompt content, so it cannot perturb a cached prompt prefix either way.
   """
   @spec reasoning_decision(String.t() | nil, keyword()) ::
-          {boolean() | nil, :opt | :config | :unsupported | :cloud_default | :local_stall_guard}
+          {boolean() | nil,
+           :opt | :config | :unsupported | :cloud_default | :fast_effort | :local_stall_guard}
   def reasoning_decision(model, opts \\ []) do
     cond do
       is_boolean(val = Keyword.get(opts, :think)) ->
@@ -1145,8 +1295,26 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       not thinking_model?(model) ->
         {nil, :unsupported}
 
-      cloud_model?(model) ->
+      # glm cloud models reason ALWAYS-ON. With think:false they do not emit the
+      # native `thinking` field, so their chain-of-thought spills into `content`
+      # and renders as the visible answer (the reported "whole monologue on
+      # screen"). Keep think:true so reasoning is routed to the collapsible
+      # thinking channel instead of leaking - even on :fast, where the flash
+      # model is already fast enough that the reasoning phase is cheap.
+      cloud_model?(model) and always_on_reasoner?(model) ->
         {true, :cloud_default}
+
+      cloud_model?(model) ->
+        # Effort steers reasoning on cloud models too. With no explicit opt and
+        # no OLLAMA_THINK config (both checked above and still overriding both
+        # ways), consult the current effort: :fast asks for a quick, concise
+        # turn, so disable the extra reasoning phase; any higher effort keeps the
+        # cloud default of think:true. Default effort is :medium, so the
+        # non-fast default is unchanged.
+        case OptimalSystemAgent.Agent.Effort.current() do
+          :fast -> {false, :fast_effort}
+          _ -> {true, :cloud_default}
+        end
 
       true ->
         # Locally served reasoning model: keep the guard against unbounded
@@ -1175,6 +1343,17 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   """
   @spec cloud_model?(String.t() | nil) :: boolean()
   def cloud_model?(model), do: OptimalSystemAgent.Providers.OllamaCloud.cloud_tag?(model)
+
+  # Models whose reasoning is ALWAYS-ON: they reason regardless of `think`, so
+  # `think: false` does not save time - it only removes the native `thinking`
+  # channel, spilling the chain-of-thought into `content` (a visible-answer
+  # leak). For these we keep `think: true` even on :fast so reasoning stays in
+  # the collapsible thinking channel. glm-5.x is the known family.
+  @spec always_on_reasoner?(String.t() | nil) :: boolean()
+  defp always_on_reasoner?(model) when is_binary(model),
+    do: String.contains?(String.downcase(model), "glm")
+
+  defp always_on_reasoner?(_), do: false
 
   # Returns true for models known to enter unbounded thinking phases by default.
   @doc false
@@ -1268,6 +1447,16 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   defp generate_id,
     do: OptimalSystemAgent.Utils.ID.generate()
 
+  # WS1 (Grok dual idle-timeout): bump the llm_client idle-watchdog atomic passed
+  # in via `opts[:heartbeat]`. Called from BOTH streaming receive points — the
+  # cloud curl port and the local Finch `into:` reader — on every raw chunk
+  # BEFORE parsing, so the watchdog resets on ANY bytes flowing, not only on
+  # parsed stream events, and the idle timeout fires only on a genuinely silent
+  # socket. Same `:atomics.add/3` reset the llm_client `:text_delta` arm uses.
+  # `nil` (no agent-loop watchdog, e.g. a direct provider unit test) is a no-op.
+  defp bump_heartbeat(nil), do: :ok
+  defp bump_heartbeat(heartbeat), do: :atomics.add(heartbeat, 1, 1)
+
   defp handle_stream_chunk(data, callback, acc) do
     {lines, new_buffer} = split_ndjson(acc.buffer <> data)
     acc = %{acc | buffer: new_buffer}
@@ -1326,6 +1515,30 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   @doc false
   def process_ndjson_line(line, callback, acc) do
     case Jason.decode(line) do
+      # A SINGLE chunk carrying BOTH native reasoning AND visible content. The
+      # content-only arm below would otherwise match first and DROP the
+      # `thinking` field (native reasoning lost). Emit reasoning to the thinking
+      # box, then run the content through the SAME ThinkStreamParser path so
+      # neither channel is lost. Mirrors `cloud_stream_loop/3`, so the local and
+      # cloud paths agree on a both-present chunk.
+      {:ok, %{"message" => %{"thinking" => think_text, "content" => text}}}
+      when is_binary(think_text) and think_text != "" and
+             is_binary(text) and text != "" ->
+        callback.({:thinking_delta, think_text})
+        text = Mojibake.repair(text)
+
+        case Map.get(acc, :think) do
+          %ThinkStreamParser{} = ts ->
+            {visible, thinking, think_state} = ThinkStreamParser.feed(ts, text)
+            if thinking != "", do: callback.({:thinking_delta, thinking})
+            if visible != "", do: callback.({:text_delta, visible})
+            %{acc | content: acc.content <> text, think: think_state}
+
+          _ ->
+            callback.({:text_delta, text})
+            %{acc | content: acc.content <> text}
+        end
+
       {:ok, %{"message" => %{"content" => text}}} when is_binary(text) and text != "" ->
         text = Mojibake.repair(text)
 

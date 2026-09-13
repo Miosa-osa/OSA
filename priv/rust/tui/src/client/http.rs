@@ -606,6 +606,46 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// GET /api/v1/sessions/:id/steps — list filesystem step snapshots.
+    pub async fn list_step_snapshots(&self, session_id: &str) -> Result<String> {
+        let resp = self
+            .get(&format!("/api/v1/sessions/{}/steps", session_id))
+            .await?;
+        let v: serde_json::Value = resp.json().await?;
+        if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
+            return Ok(msg.to_string());
+        }
+        let steps = v.get("steps").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+        if steps.is_empty() {
+            Ok("No filesystem step snapshots in this session.".into())
+        } else {
+            let lines: Vec<String> = steps
+                .iter()
+                .filter_map(|s| {
+                    let n = s.get("n")?.as_u64()?;
+                    let reference = s.get("ref").and_then(|r| r.as_str()).unwrap_or("");
+                    Some(format!("{n}  {reference}"))
+                })
+                .collect();
+            Ok(format!("Filesystem step snapshots\n{}", lines.join("\n")))
+        }
+    }
+
+    /// POST /api/v1/sessions/:id/revert — restore files N mutating-tool
+    /// steps ago. Transcript stays.
+    pub async fn revert_steps(&self, session_id: &str, steps: u32) -> Result<String> {
+        let body = serde_json::json!({ "steps": steps });
+        let resp = self
+            .post(&format!("/api/v1/sessions/{}/revert", session_id), &body)
+            .await?;
+        let v: serde_json::Value = resp.json().await?;
+        if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
+            Ok(msg.to_string())
+        } else {
+            Ok(format!("Reverted {steps} file step(s). Transcript kept."))
+        }
+    }
+
     // -- Classify --
 
     /// POST /api/v1/classify
@@ -1767,6 +1807,7 @@ mod health_check_retry_tests {
         let req = crate::client::types::ModelSwitchRequest {
             provider: "ollama".to_string(),
             model: "qwen3:8b".to_string(),
+            persist: false,
         };
         let result = client.switch_session_model("session-abc-123", &req).await;
 
@@ -1910,5 +1951,61 @@ mod health_check_retry_tests {
         assert_eq!(percent_encode_query("a&b=c"), "a%26b%3Dc");
         assert_eq!(percent_encode_query("a b"), "a%20b");
         assert_eq!(percent_encode_query("a#b"), "a%23b");
+    }
+}
+
+
+// === Local model manager (/models/local) ===
+impl ApiClient {
+    async fn local_json<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            let msg = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_string()))
+                .unwrap_or_else(|| text.clone());
+            anyhow::bail!("{}", if msg.is_empty() { status.to_string() } else { msg });
+        }
+        Ok(serde_json::from_str(&text)?)
+    }
+
+    /// GET /models/local — hardware, installed + catalog with fit verdicts.
+    pub async fn local_models(&self) -> Result<LocalModelsResponse> {
+        let resp = self.get("/models/local").await?;
+        Self::local_json(resp).await
+    }
+
+    /// GET /models/local/info?ref= — one model, per-quant sizes and fit.
+    pub async fn local_model_info(&self, reff: &str) -> Result<LocalModelInfo> {
+        let resp = self
+            .get(&format!("/models/local/info?ref={}", Self::percent_encode(reff)))
+            .await?;
+        Self::local_json(resp).await
+    }
+
+    /// POST /models/local/install — start a pull job.
+    pub async fn local_model_install(
+        &self,
+        reff: &str,
+        quant: Option<&str>,
+    ) -> Result<LocalInstallStarted> {
+        let body = serde_json::json!({ "ref": reff, "quant": quant });
+        let resp = self.post_allow_status("/models/local/install", &body).await?;
+        Self::local_json(resp).await
+    }
+
+    /// GET /models/local/install/:id — poll a pull job.
+    pub async fn local_model_install_status(&self, id: &str) -> Result<LocalInstallJob> {
+        let resp = self.get(&format!("/models/local/install/{}", id)).await?;
+        Self::local_json(resp).await
+    }
+
+    /// POST /models/local/remove — delete a model from disk.
+    pub async fn local_model_remove(&self, tag: &str) -> Result<String> {
+        let body = serde_json::json!({ "tag": tag });
+        let resp = self.post_allow_status("/models/local/remove", &body).await?;
+        let v: serde_json::Value = Self::local_json(resp).await?;
+        Ok(v.get("removed").and_then(|s| s.as_str()).unwrap_or(tag).to_string())
     }
 }

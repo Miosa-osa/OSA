@@ -359,7 +359,12 @@ defmodule OptimalSystemAgent.Decisions.Graph do
         [] -> :miss
       end
     rescue
-      ArgumentError -> :miss
+      e in ArgumentError ->
+        Logger.debug(
+          "[Decisions.Graph] ets_lookup_node cache miss #{inspect(id)}: #{Exception.message(e)}"
+        )
+
+        :miss
     end
   end
 
@@ -367,7 +372,9 @@ defmodule OptimalSystemAgent.Decisions.Graph do
     try do
       :ets.insert(@nodes_table, {node_map.id, node_map})
     rescue
-      ArgumentError -> :ok
+      e in ArgumentError ->
+        Logger.debug("[Decisions.Graph] cache_node skipped: #{Exception.message(e)}")
+        :ok
     end
   end
 
@@ -388,7 +395,9 @@ defmodule OptimalSystemAgent.Decisions.Graph do
         end
       end
     rescue
-      ArgumentError -> :ok
+      e in ArgumentError ->
+        Logger.debug("[Decisions.Graph] cache_edge skipped: #{Exception.message(e)}")
+        :ok
     end
   end
 
@@ -408,7 +417,12 @@ defmodule OptimalSystemAgent.Decisions.Graph do
             [] -> []
           end
         rescue
-          ArgumentError -> []
+          e in ArgumentError ->
+            Logger.debug(
+              "[Decisions.Graph] load_edges_for_node cache miss #{inspect(key)}: #{Exception.message(e)}"
+            )
+
+            []
         end
       end)
 
@@ -500,6 +514,12 @@ defmodule OptimalSystemAgent.Decisions.Graph do
   end
 
   defp safe_atom(val) when is_atom(val), do: val
-  defp safe_atom(val) when is_binary(val), do: String.to_existing_atom(val)
+
+  defp safe_atom(val) when is_binary(val) do
+    String.to_existing_atom(val)
+  rescue
+    ArgumentError -> nil
+  end
+
   defp safe_atom(_), do: nil
 end

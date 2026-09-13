@@ -485,6 +485,7 @@ defmodule OptimalSystemAgent.FSCheckpoint.Server do
           id: String.slice(hash, 0, 8),
           full_id: hash,
           tool: List.first(parts) || subject,
+          session_id: Enum.at(parts, 1),
           files: List.last(parts) || "",
           date: String.trim(date)
         }

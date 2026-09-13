@@ -50,8 +50,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolArgValidatorTest do
       assert {:reask, m2} = ToolArgValidator.validate(tool_call, state)
       assert m2 =~ "attempt 2 of 2"
 
-      # Attempt 3 is terminal — stop retrying.
-      assert {:reask, m3} = ToolArgValidator.validate(tool_call, state)
+      # Attempt 3 is terminal — a hard tool error, not another reask, so the
+      # loop surfaces it as a failed-tool result instead of re-driving forever.
+      assert {:error, m3} = ToolArgValidator.validate(tool_call, state)
       assert m3 =~ "still invalid"
       assert m3 =~ "Stop retrying"
     end

@@ -154,14 +154,6 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.WgMesh do
     case teardown_interface(mesh_id) do
       :ok ->
         FrameRouter.send_frame({:wg_torn_down, %{mesh_id: mesh_id}})
-
-      {:error, reason} ->
-        Logger.error("[WgMesh] teardown failed mesh=#{mesh_id} reason=#{inspect(reason)}")
-
-        FrameRouter.send_frame({
-          :wg_error,
-          %{mesh_id: mesh_id, reason: :teardown_failed}
-        })
     end
 
     {:noreply, Map.update!(state, :meshes, &Map.delete(&1, mesh_id))}

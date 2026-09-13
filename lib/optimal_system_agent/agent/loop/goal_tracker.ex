@@ -125,7 +125,14 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   @type status :: :active | :paused | :completed | :off_track | :blocked | :abandoned
   @type phase :: :idle | :planning | :executing
   @type pause_reason ::
-          :no_progress | :run_cap | :usage_limits | :off_track | :user | :blocked | :abandoned | nil
+          :no_progress
+          | :run_cap
+          | :usage_limits
+          | :off_track
+          | :user
+          | :blocked
+          | :abandoned
+          | nil
 
   defmodule Snapshot do
     @moduledoc "Persisted per-session goal-tracker state."
@@ -740,8 +747,6 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
     snap
   end
 
-  defp apply_verdict(snap, result, work_marker \\ nil)
-
   defp apply_verdict(snap, %GoalVerifier.Result{verdict: :complete} = result, _work) do
     snap = %{
       snap
@@ -799,7 +804,11 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTracker do
   # Fail-closed default for a malformed/unexpected result — treat as
   # incomplete-with-no-gaps rather than silently completing.
   defp apply_verdict(snap, other, work_marker) do
-    apply_verdict(snap, %GoalVerifier.Result{verdict: :incomplete, reason: inspect(other)}, work_marker)
+    apply_verdict(
+      snap,
+      %GoalVerifier.Result{verdict: :incomplete, reason: inspect(other)},
+      work_marker
+    )
   end
 
   # `count` tracks consecutive occurrences (in a row, ACROSS TURNS) of the

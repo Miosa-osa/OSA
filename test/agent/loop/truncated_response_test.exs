@@ -147,6 +147,27 @@ defmodule OptimalSystemAgent.Agent.Loop.TruncatedResponseTest do
 
       assert OptimalSystemAgent.Observability.truncation_count(state) > 0
     end
+
+    test "an EMPTY reasoning-exhausted generation ends with a clear no-answer message, not a spin" do
+      # grok-4.6 shape (reported "it thinks for a bit then just stops"): the
+      # model burns its whole output budget on hidden reasoning and returns
+      # empty content + a ceiling stop reason. It must NOT nudge-loop forever —
+      # it must attempt recovery with a larger budget and then terminate with an
+      # actionable message naming the cause.
+      {response, state, n} = run_with("", "length")
+
+      assert is_binary(response)
+      assert response =~ "INCOMPLETE"
+      assert response =~ "reasoning", "the message must name the reasoning-budget cause"
+      assert response =~ "length", "the message must name the provider's own stop reason"
+      refute String.trim(response) == "...", "the empty answer must not be masked as '...'"
+
+      # Bounded: it continued (bigger budget) but did not spin to the iteration cap.
+      assert n > 1 and n <= 4,
+             "an empty+length generation must be bounded; the loop made #{n} round-trips"
+
+      assert Map.get(state, :truncations, 0) > 0
+    end
   end
 
   # ── The control ───────────────────────────────────────────────────────────
@@ -184,6 +205,40 @@ defmodule OptimalSystemAgent.Agent.Loop.TruncatedResponseTest do
         assert response == answer,
                "stop_reason=#{reason} must not be treated as truncation"
       end
+    end
+  end
+
+  # ── A steer that lands mid-turn is acted on before the turn ends ────────────
+  describe "a mid-turn steer is not stranded by a text-only turn" do
+    alias OptimalSystemAgent.Agent.Loop.Steer
+
+    test "a steer queued DURING the final generation is drained at finish_turn, not left for next turn" do
+      # Reported: "I sent 'set the goal and lock it in' mid-response and it just
+      # ended asking me to choose." A text-only answer is a SINGLE iteration, so
+      # a steer that arrives after that iteration's start-of-loop drain has no
+      # later step boundary to be folded into. finish_turn must catch it and
+      # continue the turn rather than stranding the directive until next turn.
+      s = sid()
+      state = %{base_state() | session_id: s}
+
+      # Simulate the user steering WHILE the first generation streams — after the
+      # iteration-start drain has already run for this iteration.
+      Application.put_env(:optimal_system_agent, :mock_provider_after_call_once, fn ->
+        Steer.queue(s, "set the goal and lock it in")
+      end)
+
+      on_exit(fn -> Application.delete_env(:optimal_system_agent, :mock_provider_after_call_once) end)
+
+      Application.put_env(:optimal_system_agent, :mock_provider_final_text, "here is the plan")
+      Application.delete_env(:optimal_system_agent, :mock_provider_stop_reason)
+      MockProvider.reset_round_trips()
+
+      {_response, _state} = ReactLoop.run(state)
+
+      assert MockProvider.round_trips() > 1,
+             "the turn ended after one generation without acting on the pending steer"
+
+      assert Steer.count(s) == 0, "the steer was left stranded in the queue"
     end
   end
 end

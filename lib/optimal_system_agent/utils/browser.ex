@@ -64,6 +64,17 @@ defmodule OptimalSystemAgent.Utils.Browser do
   @spec command_for({atom(), atom()}, String.t()) :: {String.t(), [String.t()]}
   def command_for({:unix, :darwin}, url), do: {"open", [url]}
   def command_for({:unix, _}, url), do: {"xdg-open", [url]}
-  def command_for({:win32, _}, url), do: {"cmd", ["/c", "start", url]}
+  # NOT `cmd /c start <url>`. `start` parses its first quoted argument as the
+  # WINDOW TITLE, so the URL is consumed as a title and `start` then opens a
+  # window with no target — the user sees a stray Explorer/console window at
+  # the working directory instead of the sign-in page, and the OAuth flow they
+  # were sent to never loads. `&` in a URL (device-flow codes routinely carry
+  # query parameters) is also a `cmd` command separator, which truncates the
+  # URL even once the title slot is filled.
+  #
+  # `rundll32 url.dll,FileProtocolHandler` hands the URL to the default
+  # protocol handler with no shell in the path at all, so neither the title
+  # slot nor `&` can bite. It ships with every supported Windows version.
+  def command_for({:win32, _}, url), do: {"rundll32", ["url.dll,FileProtocolHandler", url]}
   def command_for(_, url), do: {"true", [url]}
 end

@@ -139,6 +139,15 @@ impl App {
     }
 
     pub(super) fn handle_backend_event(&mut self, event: BackendEvent) -> bool {
+        // Any event from the backend is proof of life for the active turn, so
+        // it resets the request-timeout idle clock. This is what lets a long
+        // but healthy turn survive — most importantly a goal-verifier skeptic
+        // panel, whose subagents each run several minutes and emit lifecycle /
+        // LLM events throughout. Harmless when no turn is processing: the
+        // timeout check is gated on `is_processing()`, and a fresh turn's
+        // `processing_start` dominates any stale value (see the `since`
+        // computation in `update.rs`).
+        self.last_turn_activity = Some(std::time::Instant::now());
         match event {
             BackendEvent::HealthResult(result) => {
                 self.handle_health_result(result);
@@ -392,6 +401,23 @@ impl App {
                     }
                 }
             }
+            // Grok-style phase label: name WHY the spinner is up (waiting on the
+            // model vs streaming reasoning vs writing the answer). Gated on a live
+            // turn like the other stream frames; the >2s silence flip stays the
+            // fallback when no phase frame arrives. A new turn re-emits
+            // `waiting_for_model` at stream start, so the label refreshes itself.
+            BackendEvent::PhaseChanged { phase } => {
+                if self.turn_is_active() {
+                    use crate::components::activity::StreamPhase;
+                    let sp = match phase.as_str() {
+                        "waiting_for_model" => Some(StreamPhase::WaitingModel),
+                        "streaming_reasoning" => Some(StreamPhase::StreamingReasoning),
+                        "streaming_text" => Some(StreamPhase::WritingAnswer),
+                        _ => None,
+                    };
+                    self.activity.set_stream_phase(sp);
+                }
+            }
             BackendEvent::ThinkingDelta { text } => {
                 // U-B4 — gate on the active turn, mirroring `StreamingToken`.
                 // A stray reasoning frame arriving while Idle (e.g. a late
@@ -514,7 +540,28 @@ impl App {
                 // `delegate` calls close each other's row.
                 self.activity
                     .tool_start_with_id(&name, &args, tool_call_id.as_deref());
-                self.activity.set_phase(ProcessingPhase::ToolCall);
+                // A `task_wait` is a tool whose entire job is to block until other
+                // agents finish — it can sit here for minutes with nothing else on
+                // screen. Render it as an explicit WAIT rather than a generic
+                // ToolCall: the Waiting phase names the blocker on the status row
+                // ("Waiting on tasks…") AND re-enables the silence notice, which is
+                // deliberately suppressed during a ToolCall on the theory that "a
+                // running tool is work, not a stall" — untrue for a join, whose
+                // whole point is to do nothing but wait. Without this the row
+                // animates a meaningless verb and the one honest "nothing is
+                // happening" signal is muted exactly when it is needed most.
+                if is_blocking_join_tool(&name) {
+                    self.activity.set_phase(ProcessingPhase::Waiting);
+                    self.activity.set_waiting_reason(Some(
+                        crate::components::activity::WaitingReason::Tasks,
+                    ));
+                } else {
+                    self.activity.set_phase(ProcessingPhase::ToolCall);
+                }
+                // The model-stream phase label is meaningless once a tool is
+                // running; clear it so the row names the tool, not a stale
+                // "Writing answer". The next stream re-emits waiting_for_model.
+                self.activity.set_stream_phase(None);
                 // A shell call with run_in_background counts as a live background
                 // terminal until its `background_command_completed` event lands.
                 // A shell call WITHOUT it is a foreground command that Ctrl+B can
@@ -1026,6 +1073,7 @@ impl App {
                         system_tokens: stats.system_tokens,
                         conversation_tokens: stats.conversation_tokens,
                         tool_result_tokens: stats.tool_result_tokens,
+                        tool_schema_tokens: stats.tool_schema_tokens,
                         max_tokens: stats.max_tokens,
                         used_tokens: stats.used_tokens,
                     });
@@ -1401,9 +1449,22 @@ impl App {
             BackendEvent::ModelSwitched(result) => match result {
                 Ok(resp) => {
                     self.set_identity(&resp.provider, &resp.model);
-                    // Reset context bar with new model's window size
+                    // Keep occupancy. Zeroing used tokens on switch made the
+                    // bar lie: the transcript is still in the session, only
+                    // the ceiling changed (and may have been compacted).
+                    let used = resp
+                        .tokens_after
+                        .or(resp.tokens_before)
+                        .unwrap_or(0);
                     if let Some(ctx) = resp.context_window {
-                        self.status.set_context(0.0, 0, ctx);
+                        let ratio = if ctx > 0 {
+                            used as f64 / ctx as f64
+                        } else {
+                            0.0
+                        };
+                        self.status.set_context(ratio, used, ctx);
+                        self.sidebar.set_context(ratio);
+                        self.sidebar.set_context_window(ctx, used);
                     }
                     // A2 — refresh the effort chip so it reflects the new model's
                     // reasoning effort instead of staying stuck on the previous
@@ -1413,10 +1474,21 @@ impl App {
                         self.status.set_effort(Some(effort));
                     }
                     self.check_health();
-                    self.toasts.push(
-                        format!("Model: {}/{}", resp.provider, resp.model),
-                        crate::components::toast::ToastLevel::Info,
-                    );
+                    let toast = model_switch_toast(&resp);
+                    let level = if resp.compacted.unwrap_or(false) {
+                        crate::components::toast::ToastLevel::Warning
+                    } else {
+                        crate::components::toast::ToastLevel::Info
+                    };
+                    self.toasts.push(toast, level);
+                    if let Some(w) = resp.warning.clone() {
+                        if !w.is_empty() {
+                            self.toasts.push(
+                                w,
+                                crate::components::toast::ToastLevel::Warning,
+                            );
+                        }
+                    }
                 }
                 Err(e) => {
                     self.toasts.push(
@@ -1731,6 +1803,35 @@ impl App {
             }
 
             // === Provider-first picker: dynamic model list loaded ===
+            BackendEvent::LocalCatalogLoaded(result) => {
+                if let Some(picker) = self.model_picker.as_mut() {
+                    picker.set_local_catalog(result);
+                }
+            }
+            BackendEvent::LocalModelInfoLoaded(result) => {
+                if let Some(picker) = self.model_picker.as_mut() {
+                    picker.set_local_info(result);
+                }
+            }
+            BackendEvent::LocalInstallUpdate(result) => {
+                if let Some(picker) = self.model_picker.as_mut() {
+                    picker.set_local_job(result);
+                }
+            }
+            BackendEvent::LocalModelRemoved(result) => {
+                let msg = match &result {
+                    Ok(tag) => Some((format!("Removed {}", tag), crate::components::toast::ToastLevel::Info)),
+                    Err(e) => Some((format!("Remove failed: {}", e), crate::components::toast::ToastLevel::Error)),
+                };
+                if let Some(picker) = self.model_picker.as_mut() {
+                    picker.set_local_removed(result);
+                }
+                if let Some((m, lvl)) = msg {
+                    self.toasts.push(m, lvl);
+                }
+                // The list is stale now; refetch it.
+                self.load_local_catalog();
+            }
             BackendEvent::ProviderModelsLoaded(result) => {
                 if let Some(picker) = self.model_picker.as_mut() {
                     match result {
@@ -3592,6 +3693,13 @@ fn is_shell_tool(name: &str) -> bool {
     )
 }
 
+/// A blocking join-barrier tool: it spends its whole run waiting on OTHER
+/// agents, so the status row should read it as a WAIT (named blocker + silence
+/// notice) instead of a generic in-flight ToolCall.
+fn is_blocking_join_tool(name: &str) -> bool {
+    matches!(name.to_ascii_lowercase().as_str(), "task_wait")
+}
+
 /// True when a shell tool call's JSON args request background execution
 /// (`run_in_background: true`). Mirrors the detection in `tools/bash.rs`.
 fn is_run_in_background(args: &str) -> bool {
@@ -3642,6 +3750,39 @@ fn pending_key(name: &str, tool_call_id: Option<&str>) -> String {
 /// run twice concurrently), so prefer the owning call id.
 fn live_output_key(command: &str, tool_call_id: Option<&str>) -> String {
     tool_call_id.unwrap_or(command).to_string()
+}
+
+fn model_switch_toast(resp: &crate::client::types::ModelSwitchResponse) -> String {
+    let ident = format!("{}/{}", resp.provider, resp.model);
+    let compacted = resp.compacted.unwrap_or(false);
+    let before = resp.tokens_before.unwrap_or(0);
+    let after = resp.tokens_after.unwrap_or(before);
+    let window = resp.context_window.unwrap_or(0);
+
+    if compacted {
+        format!(
+            "Switched to {ident}. Compacted {} → {} to fit {} ctx.",
+            fmt_tokens(before),
+            fmt_tokens(after),
+            fmt_tokens(window)
+        )
+    } else if window > 0 {
+        format!(
+            "Switched to {ident}. Transcript kept ({} / {} ctx).",
+            fmt_tokens(after),
+            fmt_tokens(window)
+        )
+    } else {
+        format!("Switched to {ident}.")
+    }
+}
+
+fn fmt_tokens(n: u64) -> String {
+    if n >= 10_000 {
+        format!("{:.0}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
 }
 
 /// Write a completion ping to the terminal via the channel-selected notifier
@@ -3750,6 +3891,19 @@ pub(crate) fn builtin_command_entries() -> Vec<crate::client::types::CommandEntr
 mod handle_backend_tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// A `task_wait` is a blocking join: the status row must treat it as a WAIT
+    /// (named blocker + re-enabled silence notice), not a generic ToolCall.
+    #[test]
+    fn task_wait_is_a_blocking_join_tool() {
+        assert!(is_blocking_join_tool("task_wait"));
+        assert!(is_blocking_join_tool("TASK_WAIT"));
+        // Not every tool blocks on other agents — only the join barrier does.
+        assert!(!is_blocking_join_tool("task_output"));
+        assert!(!is_blocking_join_tool("task_resume"));
+        assert!(!is_blocking_join_tool("delegate"));
+        assert!(!is_blocking_join_tool("bash"));
+    }
 
     /// `> planning  complete 171c8358` — the feed showed a bare opaque id. The
     /// backend hint cannot do better (it only has the raw arguments), so the TUI

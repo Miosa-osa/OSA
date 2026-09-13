@@ -363,7 +363,9 @@ defmodule OptimalSystemAgent.Peer.Negotiation do
   defp store(%__MODULE__{} = n) do
     BoundedTable.insert(@negotiations_table, n.id, n, max: @max_rows)
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("[Peer.Negotiation] store failed: #{Exception.message(e)}")
+      :ok
   end
 
   defp fetch(negotiation_id) do
@@ -372,7 +374,9 @@ defmodule OptimalSystemAgent.Peer.Negotiation do
       [] -> {:error, "Negotiation #{negotiation_id} not found"}
     end
   rescue
-    _ -> {:error, "Negotiation table unavailable"}
+    e ->
+      Logger.warning("[Peer.Negotiation] fetch failed: #{Exception.message(e)}")
+      {:error, "Negotiation table unavailable"}
   end
 
   defp assert_status(%{status: status}, allowed) do

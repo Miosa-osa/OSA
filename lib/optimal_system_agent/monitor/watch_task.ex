@@ -289,7 +289,7 @@ defmodule OptimalSystemAgent.Monitor.WatchTask do
 
   defp sample(%{"kind" => "process", "target" => target}) do
     pid = parse_pid(target)
-    {:process, pid && Process.alive?(pid)}
+    {:process, pid != nil && Process.alive?(pid)}
   end
 
   defp sample(%{"kind" => "url", "target" => url}) do

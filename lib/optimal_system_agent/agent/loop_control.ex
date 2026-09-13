@@ -48,7 +48,19 @@ defmodule OptimalSystemAgent.Agent.LoopControl do
 
   @impl true
   def init(_) do
-    {:ok, restore_all()}
+    # Return immediately and restore durable /loop timers in handle_continue.
+    # restore_all/0 lists up to 1000 sessions and runs a load_inbox DB query
+    # per session; doing that synchronously here blocked boot for ~1.1s (it
+    # was the single slowest child in the supervision tree). handle_continue
+    # runs as this process's first message — before any /loop call can be
+    # handled — so restored state is in place by the time anything reads it,
+    # while the supervisor is free to start the rest of the tree meanwhile.
+    {:ok, %{}, {:continue, :restore}}
+  end
+
+  @impl true
+  def handle_continue(:restore, _state) do
+    {:noreply, restore_all()}
   end
 
   @impl true

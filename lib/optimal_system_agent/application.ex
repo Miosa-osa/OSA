@@ -26,6 +26,16 @@ defmodule OptimalSystemAgent.Application do
   def start(_type, _args) do
     Application.put_env(:optimal_system_agent, :start_time, System.system_time(:second))
 
+    # Cost-aware routing feedback (#10): learn per-model cost from the
+    # accounting cost telemetry so the router can prefer the cheaper option for
+    # non-urgent work. Best-effort, idempotent attach; the handler never raises.
+    :telemetry.attach(
+      "osa-cost-observations",
+      [:osa, :accounting, :provider_cost],
+      &OptimalSystemAgent.Agent.CostObservations.handle_telemetry/4,
+      nil
+    )
+
     # Separate from :start_time (wall-clock seconds, used for /health uptime):
     # a monotonic reading so the "boot complete" line can report MILLISECONDS.
     # At second granularity the difference between a 400ms boot and a 1400ms one

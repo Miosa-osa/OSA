@@ -69,8 +69,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.TeamDelete.Tool do
   @impl true
   def open_world?(_input, _ctx), do: false
 
-  @impl true
-
   # ── Flat-layout compatibility ─────────────────────────────────────────
   @impl true
   def safety, do: :write_safe

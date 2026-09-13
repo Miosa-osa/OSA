@@ -51,11 +51,46 @@ defmodule OptimalSystemAgent.Providers.OllamaReasoningDefaultTest do
 
     test "the size-qualified '-cloud' tag shape counts as cloud too" do
       assert Ollama.cloud_model?(@cloud_sized)
-      assert {true, :cloud_default} = Ollama.reasoning_decision(@cloud_sized, [])
+
+      # reasoning_decision consults Effort.current() for a non-glm cloud model,
+      # and the ambient effort can be left at :fast by a prior test (it lives in
+      # session settings / app env). Pin :medium so this default-effort
+      # assertion is deterministic instead of order-dependent.
+      Effort.with_process_override(:medium, fn ->
+        assert {true, :cloud_default} = Ollama.reasoning_decision(@cloud_sized, [])
+      end)
     end
 
     test "regression: a cloud reasoning model is NEVER silently sent think: false" do
       refute Ollama.apply_think(%{}, @cloud, [])["think"] == false
+    end
+  end
+
+  # The decision was always correct; the CLOUD STREAMING path never applied it.
+  # `maybe_add_think` was wired into chat/2 and the local path but not the cloud
+  # body, so glm-5.3-flash streamed with no `think` field and its always-on
+  # reasoning garbled the visible answer. These pin the body itself.
+  describe "the cloud streaming body applies the reasoning decision" do
+    @msgs [%{role: "user", content: "hi"}]
+
+    test "a reasoning cloud model's cloud body carries think: true" do
+      assert Ollama.build_cloud_body(@cloud, @msgs, [], [])["think"] == true
+    end
+
+    test "glm-5.3-flash gets think: true in its cloud body" do
+      assert Ollama.build_cloud_body("glm-5.3-flash:cloud", @msgs, [], [])["think"] == true
+    end
+
+    test "the size-qualified '-cloud' tag gets think: true too" do
+      # Pin :medium: a non-glm cloud model's think decision follows effort, which
+      # a prior test can leave at :fast. Deterministic instead of order-dependent.
+      Effort.with_process_override(:medium, fn ->
+        assert Ollama.build_cloud_body(@cloud_sized, @msgs, [], [])["think"] == true
+      end)
+    end
+
+    test "a non-reasoning model's cloud body has no think field" do
+      refute Map.has_key?(Ollama.build_cloud_body(@flat, @msgs, [], []), "think")
     end
   end
 

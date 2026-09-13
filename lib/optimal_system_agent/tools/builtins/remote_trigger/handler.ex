@@ -91,8 +91,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.RemoteTrigger.Handler do
 
     case Scheduler.fire_trigger(id, payload) do
       :ok -> {:ok, "Fired trigger #{id}"}
-      {:ok, _} -> {:ok, "Fired trigger #{id}"}
-      {:error, reason} -> {:error, "Failed to fire #{id}: #{inspect(reason)}"}
     end
   end
 

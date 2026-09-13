@@ -46,12 +46,20 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   alias OptimalSystemAgent.Agent.Loop.ProactiveCompaction
   alias OptimalSystemAgent.Agent.Effort
   alias OptimalSystemAgent.Agent.FastPath
+  alias OptimalSystemAgent.Agent.Cancellation
   alias OptimalSystemAgent.Providers.StopReason
 
   @cancel_table :osa_cancel_flags
 
   # Max auto-continues when a token-budget output target is set (token_target_unmet?/1).
   @max_target_continues 5
+
+  # P0-3: iteration budget for satisfying ONE verification-gate directive. Once
+  # the gate injects a directive, the model may run this many more iterations
+  # chasing it; past that we stop re-driving via the gate (treated like the
+  # NO_RUNNABLE_TEST escape) and let the turn finish, so one gate directive can
+  # never drive an unbounded rabbit hole.
+  @max_gate_directive_iterations 25
 
   # Bound on the zero-successful-tools verification gate (`needs_verification_gate?/1`).
   #
@@ -69,6 +77,15 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # the full note). One: the defect is a turn that ended one step early, and one
   # step is what it gives back.
   @max_announcement_continues 1
+
+  # P4 (v1057): bound on the empty-answer continuation nudge (Hermes parity —
+  # see the clause in `handle_result/3`). When a generation trims to no visible
+  # answer AND calls no tools BUT carried internal reasoning, the model thought
+  # and then stopped without writing its conclusion; re-ask for the final answer
+  # up to this many times before falling through to the reasoning-only halt.
+  # Two: enough to recover a model that just needs one push, few enough that it
+  # can never become a spin (per-turn, reset at turn start).
+  @max_empty_answer_nudges 2
 
   # Should a text-only answer (visible content, no tool calls) be nudged back
   # into the loop on the strength of how its PROSE reads?
@@ -186,7 +203,20 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # count would accumulate for the life of the session and the number on a
     # clean turn would be the previous turn's. Zeroed on turn entry only
     # (`run/1` recurses with `iteration + 1`).
-    state = if iter == 0, do: Map.put(state, :truncations, 0), else: state
+    state =
+      if iter == 0 do
+        # P0-3: the gate-directive iteration budget is per-turn; clear any marker
+        # left by a prior turn so a fresh turn starts with a full budget.
+        # P4 (v1057): `:empty_answer_nudges` is per-turn too — the loop state
+        # lives in the `Loop` GenServer across turns, so a fresh turn must start
+        # with the full empty-answer nudge budget rather than a spent one.
+        state
+        |> Map.put(:truncations, 0)
+        |> Map.put(:empty_answer_nudges, 0)
+        |> Map.delete(:gate_directive_iteration)
+      else
+        state
+      end
 
     cancelled? =
       try do
@@ -615,6 +645,23 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # and guard-safe (no function calls in guards) because the value is
   # normalized before dispatch rather than during it.
   defp canonicalize_stop_reason({:ok, resp}, state, usage) when is_map(resp) do
+    # A ceiling stop reason (Anthropic "max_tokens" / OpenAI-compat "length" /
+    # Gemini "MAX_TOKENS" / …) routes into the BOUNDED recovery below (the
+    # handle_result max_tokens clauses): up to two budget-doubling retries, then
+    # a terminal INCOMPLETE / no-answer message.
+    #
+    # This now covers the EMPTY case too — a reasoning model (grok-4.6, the
+    # OpenRouter reasoners) that burns its whole output budget on hidden
+    # reasoning and returns no visible content. That case used to be excluded
+    # here so the reasoning-only doom-loop guard would count it — but in an
+    # ATTENDED session that guard's halt is suppressed, so an empty+`length`
+    # generation nudge-looped forever at the same starved budget (reported:
+    # "grok thinks for a bit then just stops"). Routing it through the bounded
+    # recovery raises the ceiling (the model may then have room to answer) and,
+    # failing that, terminates with an honest message — a halt that the
+    # suppression cannot defeat, and which the empty-aware branches in the
+    # max_tokens clauses tailor for "no answer produced". Content-ful truncation
+    # (a long answer cut off mid-output) is unchanged.
     if StopReason.truncated?(resp) do
       raw = StopReason.raw(resp) || "unknown"
       output_tokens = Map.get(usage || %{}, :output_tokens, 0)
@@ -689,47 +736,76 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
                  is_nil(:erlang.map_get(:tool_calls, resp)) or
                  :erlang.map_get(:tool_calls, resp) == []) do
     content = Map.get(resp, :content, "")
-    current_max = max_response_tokens()
-    # Clamp so recovery NEVER shrinks the budget below what the model just had
-    # (the default max_response_tokens is now 32_768; a hardcoded 16_384 ceiling
-    # would HALVE it and make truncation loop). Grow-only, doubling up to 64_000.
-    bumped = max(current_max, min(current_max * 2, 64_000))
 
-    Logger.info(
-      "[loop] Response truncated (stop_reason=max_tokens), bumping max_tokens #{current_max} → #{bumped}"
-    )
+    # P2-18: an EMPTY (reasoning-only) generation that hit the output ceiling
+    # gets ONE overflow retry, not two. A model that spent its whole budget
+    # thinking and produced no answer rarely converges on a second doubling, so
+    # hand it straight to the incomplete-delivery path instead of paying for
+    # another max-length round. Content-ful truncation still gets both retries.
+    if String.trim(to_string(content)) == "" and state.overflow_retries >= 1 do
+      deliver_truncated_incomplete(resp, state)
+    else
+      current_max = max_response_tokens()
+      # Clamp so recovery NEVER shrinks the budget below what the model just had
+      # (the default max_response_tokens is now 32_768; a hardcoded 16_384 ceiling
+      # would HALVE it and make truncation loop). Grow-only, doubling up to 64_000.
+      bumped = max(current_max, min(current_max * 2, 64_000))
 
-    # Typed observability event (item 7) so the truncate-and-continue path is
-    # visible instead of a silent re-call.
-    Bus.emit(:system_event, %{
-      event: :response_truncated,
-      session_id: state.session_id,
-      reason: :max_tokens_bump,
-      old_max_tokens: current_max,
-      new_max_tokens: bumped,
-      iteration: state.iteration
-    })
+      Logger.info(
+        "[loop] Response truncated (stop_reason=max_tokens), bumping max_tokens #{current_max} → #{bumped}"
+      )
 
-    # Inject the partial response so the model can continue from where it left off
-    state = %{
-      state
-      | messages:
-          state.messages ++
-            [
-              %{role: "assistant", content: content},
-              %{
-                role: "system",
-                content:
-                  "[Your previous response was truncated due to length. Continue from where you left off.]"
-              }
-            ],
-        overflow_retries: state.overflow_retries + 1,
-        iteration: state.iteration + 1
-    }
+      # Typed observability event (item 7) so the truncate-and-continue path is
+      # visible instead of a silent re-call.
+      Bus.emit(:system_event, %{
+        event: :response_truncated,
+        session_id: state.session_id,
+        reason: :max_tokens_bump,
+        old_max_tokens: current_max,
+        new_max_tokens: bumped,
+        iteration: state.iteration
+      })
 
-    # Store bumped max_tokens for this session
-    Process.put(:osa_bumped_max_tokens, bumped)
-    run(state)
+      # Inject the continuation directive. Two shapes: a partial answer gets
+      # replayed so the model resumes from it; an EMPTY generation (a reasoning
+      # model that spent the whole budget thinking and produced no content) has
+      # nothing to resume — replaying an empty assistant message would also break
+      # role-alternation on stricter providers — so it gets only a budget-raise
+      # directive telling it to answer within the larger ceiling and keep its
+      # internal reasoning brief.
+      injected =
+        if String.trim(to_string(content)) == "" do
+          [
+            %{
+              role: "system",
+              content:
+                "[Your previous attempt reached the output-token limit while reasoning and " <>
+                  "produced no answer. The output budget has been raised to #{bumped}. Give your " <>
+                  "answer now, and keep internal reasoning brief so it fits.]"
+            }
+          ]
+        else
+          [
+            %{role: "assistant", content: content},
+            %{
+              role: "system",
+              content:
+                "[Your previous response was truncated due to length. Continue from where you left off.]"
+            }
+          ]
+        end
+
+      state = %{
+        state
+        | messages: state.messages ++ injected,
+          overflow_retries: state.overflow_retries + 1,
+          iteration: state.iteration + 1
+      }
+
+      # Store bumped max_tokens for this session
+      Process.put(:osa_bumped_max_tokens, bumped)
+      run(state)
+    end
   end
 
   # TRUNCATION, CONTINUATION BUDGET EXHAUSTED — the last honest stop.
@@ -756,6 +832,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
               (is_map_key(resp, :tool_calls) and
                  (is_nil(:erlang.map_get(:tool_calls, resp)) or
                     :erlang.map_get(:tool_calls, resp) == [])) do
+    deliver_truncated_incomplete(resp, state)
+  end
+
+  # Hand a truncated no-tool-call generation to the user MARKED as incomplete
+  # (the last honest stop once the overflow-retry budget is spent). Shared by the
+  # budget-exhausted clause above and the P2-18 empty-generation one-retry cap.
+  defp deliver_truncated_incomplete(resp, state) do
     raw = Map.get(resp, :stop_reason_raw, "max_tokens")
     content = Map.get(resp, :content) || ""
 
@@ -776,11 +859,21 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     })
 
     marked =
-      String.trim_trailing(content) <>
-        "\n\n[INCOMPLETE: this response was cut off at the output-token limit " <>
-        "(#{max_response_tokens()} tokens, provider stop reason `#{raw}`) after " <>
-        "#{state.overflow_retries} continuation attempt(s). It is a fragment, not a " <>
-        "finished answer, and any task it describes should be assumed unfinished.]"
+      if String.trim(content) == "" do
+        # Reasoning-exhausted: no partial answer to hand back. Say WHY there is
+        # nothing, and how to fix it, instead of the silent "..." + nudge-spin
+        # this case used to fall into.
+        "[INCOMPLETE: the model used its entire #{max_response_tokens()}-token output " <>
+          "budget on internal reasoning and produced no answer (provider stop reason " <>
+          "`#{raw}`) after #{state.overflow_retries} continuation attempt(s). Lower the " <>
+          "reasoning effort (e.g. turn thinking off) or raise the output-token cap, then retry.]"
+      else
+        String.trim_trailing(content) <>
+          "\n\n[INCOMPLETE: this response was cut off at the output-token limit " <>
+          "(#{max_response_tokens()} tokens, provider stop reason `#{raw}`) after " <>
+          "#{state.overflow_retries} continuation attempt(s). It is a fragment, not a " <>
+          "finished answer, and any task it describes should be assumed unfinished.]"
+      end
 
     finish_turn(marked, state)
   end
@@ -933,7 +1026,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # Note for compaction: turn boundaries are counted at `role: "user"`, so
   # these injected steers now register as boundaries. That is consistent with
   # how the compact boundary is already handled.
-  defp handle_result({:ok, %{content: content, tool_calls: []}}, state, _context) do
+  #
+  # GROUPING NOTE (compiler warning fix): handle_result/3 is one multi-clause
+  # function spread across this file; the interleaved clauses are intentional
+  # (helpers live between groups), so the compiler's grouping warning for the
+  # remaining clauses is expected and documented rather than mechanically
+  # silenced.
+  defp handle_result({:ok, %{content: content, tool_calls: []} = resp}, state, _context) do
     # Capture whether the model produced NO visible answer (pure reasoning / an
     # empty generation) BEFORE we substitute a "..." placeholder. This is what
     # distinguishes a genuine reasoning-only spin (wasted generation) from a
@@ -983,7 +1082,23 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       })
     end
 
+    # P0-2: the user asked to stop mid-turn (typed a dominant stop, Esc, or
+    # POST /cancel). The current generation has already streamed; do NOT re-drive
+    # it through any continuation clause below. Computed once so the guard clause
+    # at the top of the `cond` short-circuits every re-driving branch in one
+    # place. `run/1`'s own cancel check finalises the interrupt if `finish_turn`
+    # then tries to continue via a stop hook.
+    cancelled? = Cancellation.cancelled?(state.session_id)
+
     cond do
+      cancelled? ->
+        Logger.info(
+          "[loop] Cancelled during final generation - finishing on the answer in hand " <>
+            "instead of re-driving (iteration #{state.iteration})"
+        )
+
+        finish_turn(content, state)
+
       prose_continue?(state) and state.auto_continues < 2 and
           Guardrails.wants_to_continue?(content) ->
         Logger.info(
@@ -1007,6 +1122,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
             iteration: state.iteration + 1
         }
 
+        # P0-4: this continuation follows a COMPLETE answer, so mint a fresh
+        # message segment before the next generation streams - otherwise the two
+        # generations weld into one buffer with no boundary for the TUI.
+        LLMClient.start_new_message_segment()
         run(state)
 
       prose_continue?(state) and state.auto_continues < 3 and Guardrails.code_in_text?(content) ->
@@ -1029,6 +1148,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
             iteration: state.iteration + 1
         }
 
+        # P0-4: fresh message segment before the next generation - see the
+        # auto-continue clause above.
+        LLMClient.start_new_message_segment()
         run(state)
 
       prose_continue?(state) and
@@ -1059,12 +1181,29 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
             Map.get(state, :zero_tool_gate_prompts, 0) + 1
           )
 
+        # P0-4: fresh message segment before the next generation - see the
+        # auto-continue clause above.
+        LLMClient.start_new_message_segment()
         run(state)
 
       # `content` is passed so the gate can read the explicit
       # `NO_RUNNABLE_TEST:` escape out of the answer the turn would end on.
-      VerificationGate.needs_verification?(state, content) ->
+      #
+      # P1-12: if the answer is a user-directed question/choice, it is a genuine
+      # finish - do NOT re-drive it through the gate, let the user answer.
+      # P0-3: once the gate has spent its per-directive iteration budget, stop
+      # re-driving via the gate (like the NO_RUNNABLE_TEST escape) and let the
+      # turn finish - one directive can never fuel an unbounded rabbit hole.
+      VerificationGate.needs_verification?(state, content) and
+        not user_directed_question?(content) and
+          not gate_budget_exhausted?(state) ->
         {directive, state} = VerificationGate.build_directive(state, content)
+
+        # Record the iteration the FIRST gate directive of this (unsatisfied)
+        # sequence fired at, so `gate_budget_exhausted?/1` can bound how long the
+        # model may chase it. `put_new` keeps the original marker across re-fires;
+        # it is cleared on an accepted finish and at turn start.
+        state = Map.put_new(state, :gate_directive_iteration, state.iteration)
 
         state = %{
           state
@@ -1072,6 +1211,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
             iteration: state.iteration + 1
         }
 
+        # P0-4: fresh message segment before the next generation - see the
+        # auto-continue clause above.
+        LLMClient.start_new_message_segment()
         run(state)
 
       # Announcement backstop: the answer ANNOUNCES the next action instead of
@@ -1110,8 +1252,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       # again after being told is choosing to (and says so on the wire —
       # `:announcement_continue_exhausted`, emitted above), and the answer has
       # already streamed to the user either way.
+      # P1-12: a user-directed question/choice is a genuine finish - do NOT fire
+      # the backstop past it, even in overdrive; the turn should pause so the
+      # user can answer rather than the model auto-continuing over its own
+      # question.
       announcement_spent < @max_announcement_continues and
-          match?({:continue, _}, announcement) ->
+        match?({:continue, _}, announcement) and
+          not user_directed_question?(content) ->
         {:continue, reason} = announcement
 
         Logger.info(
@@ -1146,6 +1293,59 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
         state = Map.put(state, :announcement_continues, announcement_spent + 1)
 
+        # P0-4: fresh message segment before the next generation - see the
+        # auto-continue clause above.
+        LLMClient.start_new_message_segment()
+        run(state)
+
+      # P4 (v1057): bounded empty-answer continuation nudge (Hermes parity).
+      # The generation trimmed to NO visible answer AND called no tools BUT
+      # carried internal reasoning (`reasoning_present?/1`) — the model thought
+      # and then stopped without writing its conclusion. Re-ask for the final
+      # answer directly, up to @max_empty_answer_nudges times, BEFORE falling
+      # through to the reasoning-only halt below.
+      #
+      # Bounded three ways so it can never spin: a per-turn counter
+      # (`:empty_answer_nudges`, reset at turn start), the reasoning gate (a
+      # generation with no reasoning is not a "thought-then-stopped" case and
+      # declines here), and the fact that a TRUNCATED empty generation never
+      # reaches this clause at all — it carries `stop_reason: "max_tokens"` and
+      # is handled by the max_tokens clauses far above, so this cannot fight the
+      # overflow/truncation-retry logic. Once the cap is hit we STOP nudging and
+      # fall through to `visible_empty?`, which owns the reasoning-only halt.
+      visible_empty? and reasoning_present?(resp) and
+          Map.get(state, :empty_answer_nudges, 0) < @max_empty_answer_nudges ->
+        spent = Map.get(state, :empty_answer_nudges, 0)
+
+        Logger.info(
+          "[loop] Empty-answer nudge: generation produced only internal reasoning and no " <>
+            "final answer — re-asking for the answer (nudge #{spent + 1}/#{@max_empty_answer_nudges}, " <>
+            "iteration #{state.iteration})"
+        )
+
+        Bus.emit(:system_event, %{
+          event: :empty_answer_nudge,
+          session_id: state.session_id,
+          iteration: state.iteration,
+          nudge: spent + 1,
+          max_nudges: @max_empty_answer_nudges
+        })
+
+        nudge = %{
+          role: "user",
+          content:
+            "[System: your previous response contained only internal reasoning and no " <>
+              "final answer. Provide your final answer now.]"
+        }
+
+        state =
+          %{
+            state
+            | messages: state.messages ++ [%{role: "assistant", content: content}, nudge],
+              iteration: state.iteration + 1
+          }
+          |> Map.put(:empty_answer_nudges, spent + 1)
+
         run(state)
 
       # Reasoning-only spin backstop: the model produced NO visible answer AND no
@@ -1156,7 +1356,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       # nudge for concrete progress and loop; at it we stop with an honest handoff
       # rather than burning the budget in thought.
       visible_empty? ->
-        case DoomLoop.ReasoningOnly.check([], state) do
+        # Tell the guard this generation produced NO visible content, so it is
+        # not mistaken for a conversation and suppressed in an attended session
+        # (the "grok thinks then just stops" nudge-spin). The flag is one-shot —
+        # `check/2` clears it.
+        case DoomLoop.ReasoningOnly.check([], Map.put(state, :generation_empty, true)) do
           {:halt, msg, state} ->
             Bus.emit(:system_event, %{
               event: :reasoning_only_halt,
@@ -1232,6 +1436,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           }
           |> Map.put(:target_continues, Map.get(state, :target_continues, 0) + 1)
 
+        # P0-4: fresh message segment before the next generation - see the
+        # auto-continue clause above.
+        LLMClient.start_new_message_segment()
         run(state)
 
       # Post-compaction auto-continue (opencode parity): a turn that just crossed a
@@ -1401,15 +1608,72 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         finish_turn(content, state)
 
       true ->
+        # P2-17: a real (non-empty) answer is a content-ful finish, so it clears
+        # the empty-generation streak the reasoning-only backstop counts.
+        state =
+          if visible_empty? do
+            state
+          else
+            Map.put(state, :reasoning_only_streak, 0)
+          end
+
+        # P0-3: reaching here with no continuation clause firing is an accepted
+        # finish, so drop the gate-directive iteration marker - a later gate
+        # directive this turn gets a fresh budget.
+        state = Map.delete(state, :gate_directive_iteration)
+
         finish_turn(content, state)
     end
   end
+
+  # P4 (v1057): did THIS generation carry internal reasoning? A reasoner
+  # surfaces it on the result map in one of two shapes — accumulated reasoning
+  # TEXT under `:reasoning` (the OpenAI-compat / OpenRouter / Responses
+  # spelling) or structured Anthropic thinking blocks under `:thinking_blocks`
+  # (the same key `continue_after_tools/…` copies onto the assistant message).
+  # Either present-and-non-empty means the model spent the generation thinking,
+  # which is what distinguishes a "thought then stopped without answering" turn
+  # (worth one bounded re-ask) from a generation that produced literally
+  # nothing. When neither is present we cannot confirm reasoning, so the
+  # empty-answer nudge declines and the existing reasoning-only halt handles it.
+  #
+  # NOTE(v1057): a LOCAL Ollama reasoner strips its `<think>` tokens from
+  # `content` and surfaces reasoning only as live thinking deltas — it does not
+  # populate `:reasoning`/`:thinking_blocks` on the done result — so this
+  # predicate is conservatively false there and such a turn falls through to the
+  # reasoning-only halt (no regression, just no extra nudge). Surfacing a
+  # reasoning marker on the Ollama done result would extend coverage but lives
+  # in the provider, outside this workstream's file.
+  defp reasoning_present?(resp) when is_map(resp) do
+    reasoning_text? =
+      case Map.get(resp, :reasoning) do
+        text when is_binary(text) -> String.trim(text) != ""
+        _ -> false
+      end
+
+    thinking_blocks? =
+      case Map.get(resp, :thinking_blocks) do
+        list when is_list(list) -> list != []
+        _ -> false
+      end
+
+    reasoning_text? or thinking_blocks?
+  end
+
+  defp reasoning_present?(_), do: false
 
   # Terminal finish for a no-tool-call turn: run stop hooks (which may override
   # the response or force continuation), else return the content as the final
   # answer. Extracted so both the clean `true ->` path and the GoalVerifier
   # `{:pass, _}` path share one copy of the stop-hook dispatch.
   defp finish_turn(content, state) do
+    content =
+      if VerificationGate.blocked_finish?(state, content) do
+        VerificationGate.finish_receipt(state, content)
+      else
+        content
+      end
+
     case run_stop_hooks(content, state) do
       {:continue, inject_msg, state} ->
         state = %{
@@ -1424,8 +1688,96 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         {new_content, state}
 
       {:ok, state} ->
-        {content, state}
+        # A steer that arrived DURING this turn's FINAL generation has no later
+        # step boundary to be folded into — a text-only answer has a single
+        # iteration, and `inject_pending_steer` only runs at an iteration START.
+        # Ending here would strand the directive until the next turn (reported:
+        # "I sent 'set the goal and lock it in' mid-response and it just ended
+        # asking me to choose"). So if a steer is queued, commit the answer we
+        # just produced and CONTINUE the turn — the next iteration drains the
+        # steer and acts on it now. Destructive drain + max_iterations bound the
+        # loop; a turn with no pending steer ends exactly as before.
+        #
+        # P0-2: a cancelled turn must NOT re-run here even if a steer is queued -
+        # the user asked to stop. P1-10(b): consult the in-memory ETS steer lane
+        # first (`live_count/1`, no disk read); a steer queued during a live turn
+        # is always in ETS, so this avoids the synchronous durable read on every
+        # ordinary no-steer finish. A steer that exists only on disk (queued
+        # before a restart) is picked up at the next turn start, not here.
+        if not Cancellation.cancelled?(state.session_id) and
+             OptimalSystemAgent.Agent.Loop.Steer.live_count(state.session_id) > 0 do
+          state = %{
+            state
+            | messages: state.messages ++ [%{role: "assistant", content: content}],
+              iteration: state.iteration + 1
+          }
+
+          run(state)
+        else
+          {content, state}
+        end
     end
+  end
+
+  # P0-3: true once the model has run more than @max_gate_directive_iterations
+  # iterations since the first unsatisfied verification-gate directive without an
+  # accepted finish. The marker is set in the gate clause and cleared on an
+  # accepted finish / at turn start.
+  defp gate_budget_exhausted?(state) do
+    case Map.get(state, :gate_directive_iteration) do
+      start when is_integer(start) ->
+        Map.get(state, :iteration, 0) - start > @max_gate_directive_iterations
+
+      _ ->
+        false
+    end
+  end
+
+  # P1-12: true when the model's final answer asks the user something or presents
+  # a choice - a genuine finish the loop must not auto-continue past. Detects a
+  # trailing question mark, a few explicit choice-offering phrases, or a numbered
+  # option list framed as a choice. Conservative: an ordinary numbered plan (no
+  # choice framing) is NOT treated as a question.
+  defp user_directed_question?(content) when is_binary(content) do
+    trimmed = String.trim(content)
+
+    cond do
+      trimmed == "" ->
+        false
+
+      String.ends_with?(trimmed, "?") ->
+        true
+
+      true ->
+        lower = String.downcase(trimmed)
+
+        Enum.any?(
+          [
+            "which do you want",
+            "let me know",
+            "your call",
+            "would you like",
+            "do you want me to",
+            "which option",
+            "which one",
+            "shall i",
+            "should i"
+          ],
+          &String.contains?(lower, &1)
+        ) or numbered_choice?(trimmed)
+    end
+  end
+
+  defp user_directed_question?(_), do: false
+
+  # Two or more numbered list items AND explicit choice-framing language, so a
+  # presented "1. … 2. …" set of OPTIONS trips it while a numbered work plan does
+  # not (the latter is what the announcement backstop legitimately continues).
+  defp numbered_choice?(text) do
+    numbered = Regex.scan(~r/(?m)^\s*\d+[\.\)]\s+\S/, text) |> length()
+
+    numbered >= 2 and
+      Regex.match?(~r/\b(option|options|either|choose|pick|prefer|which)\b/i, text)
   end
 
   # Goal-level verifier gate — smart activation lives in `GoalVerifier` so this
@@ -1731,7 +2083,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       "If the task isn't complete, try breaking it into smaller steps or giving more specific instructions."
   end
 
-  # Tool calls — execute in parallel and loop
+  # Tool calls — execute in parallel and loop.
+  #
+  # GROUPING NOTE (compiler warning fix): this clause and the `:cancelled`
+  # clause at the bottom of the file are part of the same multi-clause
+  # handle_result/3. The clauses in between (handle_fatal_tool_error,
+  # continue_after_tools) are helpers that must be defined after all clauses
+  # reference them, so the clause group is intentionally interleaved with
+  # helper definitions rather than contiguous.
   defp handle_result({:ok, %{content: content, tool_calls: tool_calls} = resp}, state, _context)
        when is_list(tool_calls) do
     # Doom-loop resample snapshot: the loop state BEFORE this turn's assistant
@@ -1796,16 +2155,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     fresh_results =
       ToolOrchestrator.dispatch(need_execution, state,
         max_concurrency: 10,
-        # Raised from a hardcoded 60s to 300s (config `:tool_timeout_ms`) so a
-        # long build/test/install batched into the parallel path isn't killed
-        # before shell_execute's own 300s default gets to run.
-        # No default ceiling. A five-minute cap killed multi-agent dispatches
-        # mid-flight: the wrapper reported a tool timeout and ended the turn
-        # while the agents it launched carried on in the background, so the
-        # turn lost its own work and nothing else stopped. Tools that need a
-        # bound carry their own (shell per-command, provider receive timeouts,
-        # bounded_compaction). Set :tool_timeout_ms to reimpose one.
-        timeout_ms: Application.get_env(:optimal_system_agent, :tool_timeout_ms, :infinity)
+        # 20-minute absolute backstop (was :infinity). A tight cap (the old 60s,
+        # then a 5-min attempt) killed multi-agent dispatches mid-flight while
+        # the agents they launched kept running in the background, so the turn
+        # lost its own work. But :infinity let a single wedged tool freeze the
+        # whole turn forever - the reported multi-minute hangs. 20 minutes is
+        # beyond any legitimate interactive dispatch (the tool-level bounds -
+        # delegate/orchestrate foreground waits, shell per-command, provider
+        # receive timeouts - all fire well before it), so this only catches a
+        # genuine wedge. Set :tool_timeout_ms to override.
+        timeout_ms: Application.get_env(:optimal_system_agent, :tool_timeout_ms, 1_200_000)
       )
 
     # Collect streaming tool results (these may already be done). Pair by
@@ -1916,10 +2275,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # different blocks on screen — the tool's own cell is drawn between them.
     # End the segment so the next generation mints a fresh `message_id`.
     #
-    # Every OTHER re-entry into `run/1` (the verification gate, an output-token
-    # target, a just-crossed compaction boundary, a stop hook) continues the
-    # open id, because the user sees one uninterrupted answer and splitting it
-    # is what tore a single reply into two `◈ OSA` headers mid-thought.
+    # P0-4 extended this: every no-tool continuation that fires AFTER a complete
+    # answer (auto-continue, coding nudge, both verification gates, the
+    # announcement backstop, the output-token target) now also ends the segment,
+    # because two full generations welding into one buffer with no boundary is
+    # exactly the double-ending the TUI could not render apart. A just-crossed
+    # compaction boundary and a stop hook still continue the open id, since those
+    # resume one uninterrupted answer rather than starting a second.
     LLMClient.start_new_message_segment()
 
     # Per-iteration context-pressure emit (mid-turn meter fix): previously

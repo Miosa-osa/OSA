@@ -59,7 +59,10 @@ defmodule OptimalSystemAgent.Agent.LoopControlTest do
     assert :ok = SessionPersistence.save_inbox(session_id, :operator_loop, [stored])
     on_exit(fn -> SessionPersistence.save_inbox(session_id, :operator_loop, []) end)
 
-    assert {:ok, restored} = LoopControl.init(%{})
+    # Restore runs in handle_continue now (kept off the boot path); init just
+    # arms the continue. Drive the restore directly.
+    assert {:ok, %{}, {:continue, :restore}} = LoopControl.init(%{})
+    assert {:noreply, restored} = LoopControl.handle_continue(:restore, %{})
     assert %{timer_ref: nil, last_tick_status: "dispatching"} = restored[session_id]
   end
 end

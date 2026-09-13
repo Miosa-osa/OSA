@@ -320,7 +320,20 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
     #
     # Materialising here makes this consistent with every other session-scoped entry
     # point, and means the choice is applied to the Loop the first turn will use.
-    _ = ensure_loop(session_id)
+    #
+    # Materialise under the session's REAL owner, not the `start_loop` default of
+    # "anonymous". A no-opts `ensure_loop/1` registered the Loop in
+    # `SessionRegistry` owned by "anonymous"; the SSE client authorises as "local",
+    # so the next stream (re)connect saw an owner mismatch → 404 → the TUI dropped
+    # the session ("no longer available") and started a fresh one, losing context.
+    # `start_loop` overwrites the tracked meta, so read the owner BEFORE the call.
+    owner =
+      case tracked_session_meta(session_id) do
+        %{user_id: uid} when is_binary(uid) and uid != "" -> uid
+        _ -> "anonymous"
+      end
+
+    _ = ensure_loop(session_id, user_id: owner, channel: :http)
 
     # Resolve the context window HERE, before the call — not inside it.
     #
@@ -345,8 +358,15 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
     _ = warm_context_window(provider, model)
 
     case lookup_loop(session_id) do
-      {:ok, pid, _owner} -> GenServer.call(pid, {:swap_provider, provider, model})
-      :error -> {:error, :not_found}
+      {:ok, pid, _owner} ->
+        # Compaction on a shrinking window runs inside this call (bounded to
+        # `:compaction_timeout_ms`, default 120s). The 5s GenServer default
+        # would report failure while the swap + compact still landed.
+        timeout = swap_call_timeout()
+        GenServer.call(pid, {:swap_provider, provider, model}, timeout)
+
+      :error ->
+        {:error, :not_found}
     end
   rescue
     e -> {:error, e}
@@ -372,6 +392,27 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
   end
 
   defp warm_context_window(_, _), do: nil
+
+  defp swap_call_timeout do
+    compact = Application.get_env(:optimal_system_agent, :compaction_timeout_ms, 120_000)
+    compact + 30_000
+  end
+
+  @doc """
+  Live token-budget breakdown for `GET /sessions/:id/context`.
+
+  Runs against the session's Loop state so the meter sees the same window,
+  static variant, tool schemas, and conversation the next request will send.
+  """
+  @spec context_budget(session_id()) :: {:ok, map()} | {:error, :not_found} | {:error, term()}
+  def context_budget(session_id) do
+    case lookup_loop(session_id) do
+      {:ok, pid, _owner} -> GenServer.call(pid, :context_budget)
+      :error -> {:error, :not_found}
+    end
+  rescue
+    e -> {:error, e}
+  end
 
   @doc """
   Forget runtime tracking for a session, and release its per-session state.

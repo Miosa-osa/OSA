@@ -41,6 +41,47 @@ defmodule OptimalSystemAgent.Tools.Builtins.MultiFileEditPartialTest do
   defp edit(path, old, new),
     do: %{"path" => path, "old_string" => old, "new_string" => new}
 
+  describe "fuzzy matching parity with file_edit (the false-success bug)" do
+    test "an edit with whitespace/indentation drift APPLIES instead of false-succeeding",
+         %{dir: dir} do
+      # The file uses tabs / different spacing than the model's old_string. The
+      # old exact-only matcher could not find old_string; if new_string happened
+      # to be present it wrongly reported "already applied". It must now match
+      # fuzzily and actually apply the edit, exactly as file_edit does.
+      f = write(dir, "m.ts", "function f() {\n\treturn 1;\n}\n")
+
+      assert {:ok, _msg, meta} =
+               Handler.execute(
+                 %{
+                   "edits" => [
+                     # old_string uses 2 spaces; file uses a tab
+                     edit(f, "function f() {\n  return 1;\n}", "function f() {\n  return 2;\n}")
+                   ]
+                 },
+                 ctx()
+               )
+
+      assert meta.count == 1
+      assert meta.already_applied == []
+      assert File.read!(f) =~ "return 2;", "the edit must actually land, not be skipped"
+    end
+
+    test "a non-additive edit whose new_string is present but old_string is truly absent " <>
+           "is still reported already-applied (idempotency preserved)",
+         %{dir: dir} do
+      f = write(dir, "v.ex", "value = :new\n")
+
+      assert {:ok, _msg, meta} =
+               Handler.execute(
+                 %{"edits" => [edit(f, "value = :old", "value = :new")]},
+                 ctx()
+               )
+
+      assert meta.count == 0
+      assert meta.already_applied == [f]
+    end
+  end
+
   describe "an already-applied hunk no longer kills the batch" do
     test "the remaining hunks still apply", %{dir: dir} do
       # `a` is already in the requested state; `b` is not.

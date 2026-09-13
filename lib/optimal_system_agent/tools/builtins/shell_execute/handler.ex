@@ -524,7 +524,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
 
   # ── Private: execution ────────────────────────────────────────────────
 
-  defp run_command(command, cwd, timeout_ms, session_id \\ nil, tool_call_id \\ nil) do
+  defp run_command(command, cwd, timeout_ms, session_id, tool_call_id) do
     # Spawn via Port (not System.cmd) so that on the timeout path we can kill
     # the underlying OS process — and on Windows its whole tree — instead of
     # only shutting down the BEAM task and leaking an orphaned child.
@@ -1082,7 +1082,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
     ensure_utf8(bounded)
   end
 
-  defp elision_marker(omitted_bytes, omitted_lines, saved_path \\ nil) do
+  defp elision_marker(omitted_bytes, omitted_lines, saved_path) do
     base =
       "\n\n[... output truncated: #{omitted_lines} lines / #{omitted_bytes} bytes omitted from the middle; " <>
         "the head and the tail are shown in full ...]\n\n"

@@ -246,6 +246,23 @@ defmodule OptimalSystemAgent.OnboardingHealthCheckHotfixTest do
                Onboarding.probe_ollama_local(plug: {Req.Test, name}, retry: false)
     end
 
+    test "probes the local daemon even when OLLAMA_URL points at ollama.com" do
+      prev = Application.get_env(:optimal_system_agent, :ollama_url)
+      Application.put_env(:optimal_system_agent, :ollama_url, "https://ollama.com")
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:optimal_system_agent, :ollama_url, prev),
+          else: Application.delete_env(:optimal_system_agent, :ollama_url)
+      end)
+
+      name = stub_name(:probe_hosted)
+      Req.Test.stub(name, fn conn -> Req.Test.json(conn, %{"models" => [%{"name" => "a"}]}) end)
+
+      assert %{reachable: true, url: "http://localhost:11434", model_count: 1} =
+               Onboarding.probe_ollama_local(plug: {Req.Test, name}, retry: false)
+    end
+
     test "probe_ollama_local/0 (arity-0, back-compat) still works" do
       result = Onboarding.probe_ollama_local()
       assert is_boolean(result.reachable)

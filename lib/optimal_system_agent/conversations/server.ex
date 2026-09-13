@@ -396,7 +396,9 @@ defmodule OptimalSystemAgent.Conversations.Server do
       correlation_id: state.id
     )
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("[Conversation] broadcast failed: #{Exception.message(e)}")
+      :ok
   end
 
   defp event_to_bus({:conversation_started, id, topic}) do

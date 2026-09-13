@@ -401,6 +401,8 @@ defmodule OptimalSystemAgent.Providers.CopilotCli do
      }}
   end
 
+  defp finish(acc, status), do: {:error, with_diagnostics({:cli_exit, status, ""}, acc)}
+
   # ── Usage: written since this provider shipped, read by nothing ───────────
   #
   # Same shape as `ClaudeCli`: the `result` event's usage went to a
@@ -486,8 +488,6 @@ defmodule OptimalSystemAgent.Providers.CopilotCli do
 
     :ok
   end
-
-  defp finish(acc, status), do: {:error, with_diagnostics({:cli_exit, status, ""}, acc)}
 
   defp with_diagnostics({tag, code, _}, acc), do: {tag, code, diagnostics(acc)}
   defp with_diagnostics({:cli_error, msg}, _acc), do: {:cli_error, msg}

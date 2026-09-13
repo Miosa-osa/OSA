@@ -158,7 +158,12 @@ defmodule OptimalSystemAgent.Decisions.Cascade do
         {:confidence_updated, node}
       )
     rescue
-      _ -> :ok
+      e ->
+        Logger.warning(
+          "[Decisions.Cascade] broadcast failed for node #{node.id} on #{topic}: #{Exception.message(e)}"
+        )
+
+        :ok
     end
   end
 end

@@ -69,13 +69,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.Github do
     }
   end
 
-  @impl true
   # Deferred: discoverable mid-turn via `tool_search`, absent from the default
   # toolbox. Every schema in the default set is re-sent on EVERY request, so a
   # tool most turns never touch is paid for by all of them.
-  @impl true
   def should_defer?, do: true
 
+  @impl true
   def available? do
     System.find_executable("gh") != nil
   end

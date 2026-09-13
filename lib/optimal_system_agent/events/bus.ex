@@ -299,9 +299,6 @@ defmodule OptimalSystemAgent.Events.Bus do
       |> Enum.each(fn
         {_, _ref, handler} ->
           dispatch_with_dlq(type, payload, handler)
-
-        {_, handler} ->
-          dispatch_with_dlq(type, payload, handler)
       end)
     rescue
       ArgumentError -> :ok

@@ -166,10 +166,6 @@ defmodule OptimalSystemAgent.Channels.CLI.TaskDisplay do
   defp format_tokens(n) when n < 1_000, do: "#{n} ↓"
   defp format_tokens(n), do: "#{Float.round(n / 1_000, 1)}k ↓"
 
-  defp count_width(completed, total) do
-    W.visible("#{completed}/#{total}")
-  end
-
   defp icon_str(task) do
     color = Map.get(@icon_colors, task.status, @dim)
     icon = Map.get(@icons, task.status, "?")

@@ -42,14 +42,22 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
 
   alias OptimalSystemAgent.Security.{
     NotesStore,
-    StructuredNotes,
     ShadowGraph,
     TaskDifficultyAssessment,
     VulnDeduplication,
     Playbook,
     SarifReport,
     CodeFix,
-    ChainSummary
+    ChainSummary,
+    AttackChainReasoner,
+    AttackOrchestrator,
+    LiveExploitRunner,
+    ExploitOracle,
+    ClassQueue,
+    Oob,
+    ThreatIntel,
+    CodeReachable,
+    ReportGate
   }
 
   alias OptimalSystemAgent.Tools.UseContext
@@ -100,7 +108,22 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
             "codefix_list",
             "codefix_report",
             "summary_build",
-            "summary_load"
+            "summary_load",
+            "attack_next_target",
+            "attack_run",
+            "attack_feed",
+            "exploit_deploy",
+            "exploit_judge",
+            "queue_put",
+            "queue_assert",
+            "oob_start",
+            "oob_host",
+            "oob_poll",
+            "threat_kev",
+            "threat_epss",
+            "code_reachable",
+            "chain_find",
+            "report_gate_check"
           ],
           "description" => "Intelligence action to perform"
         },
@@ -258,6 +281,21 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
       "codefix_report" -> do_codefix_report(session_id)
       "summary_build" -> do_summary_build(session_id)
       "summary_load" -> do_summary_load(session_id)
+      "attack_next_target" -> do_attack_next_target(session_id)
+      "attack_run" -> do_attack_run(session_id)
+      "attack_feed" -> do_attack_feed(session_id, input)
+      "exploit_deploy" -> do_exploit_deploy(input)
+      "exploit_judge" -> do_exploit_judge(input)
+      "queue_put" -> do_queue_put(session_id, input)
+      "queue_assert" -> do_queue_assert(session_id, input)
+      "oob_start" -> do_oob_start(session_id)
+      "oob_host" -> do_oob_host(session_id)
+      "oob_poll" -> do_oob_poll(session_id, input)
+      "threat_kev" -> do_threat_kev(input)
+      "threat_epss" -> do_threat_epss(input)
+      "code_reachable" -> do_code_reachable(input)
+      "chain_find" -> do_chain_find(session_id)
+      "report_gate_check" -> do_report_gate_check(session_id, input)
       nil -> {:error, "Missing required parameter: action"}
       other -> {:error, "Unknown action: #{other}"}
     end
@@ -625,6 +663,162 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
       {:error, _} -> {:ok, "No saved summary for this session. Call summary_build first."}
     end
   end
+
+  # ── Attack orchestration ───────────────────────────────────────────────
+
+  defp do_attack_next_target(session_id) do
+    case find_orchestrator(session_id) do
+      {:ok, pid} ->
+        case GenServer.call(pid, :next_target) do
+          nil -> {:ok, "No next target above threshold — feed more findings."}
+          target -> {:ok, target}
+        end
+
+      :not_found ->
+        {:error, "No attack session for #{session_id}. Feed a finding first (attack_feed)."}
+    end
+  end
+
+  defp do_attack_run(session_id) do
+    case find_orchestrator(session_id) do
+      {:ok, pid} -> AttackOrchestrator.run(pid)
+      :not_found -> {:error, "No attack session for #{session_id}. Feed a finding first (attack_feed)."}
+    end
+  end
+
+  defp do_attack_feed(session_id, %{"finding" => finding}) when is_map(finding) do
+    finding = Map.put_new(finding, :session_id, session_id)
+
+    case find_orchestrator(session_id) do
+      {:ok, pid} -> {:ok, AttackOrchestrator.feed(pid, finding)}
+      :not_found ->
+        case AttackOrchestrator.start_link(session_id: session_id) do
+          {:ok, pid} -> {:ok, AttackOrchestrator.feed(pid, finding)}
+          {:error, {:already_started, pid}} -> {:ok, AttackOrchestrator.feed(pid, finding)}
+          {:error, reason} -> {:error, "failed to start orchestrator: #{inspect(reason)}"}
+        end
+    end
+  end
+
+  defp do_attack_feed(_session_id, _), do: {:error, "attack_feed requires a 'finding' object"}
+
+  defp find_orchestrator(session_id) when is_binary(session_id) do
+    # start_link registers as :"osa_attack_ora_<session_id>"
+    case Process.whereis(String.to_atom("osa_attack_ora_#{session_id}")) do
+      nil -> :not_found
+      pid when is_pid(pid) -> {:ok, pid}
+    end
+  end
+
+  # ── Exploit deployment & judgment ──────────────────────────────────────
+
+  defp do_exploit_deploy(%{"weapon" => weapon}) when is_map(weapon) do
+    LiveExploitRunner.deploy(weapon)
+  end
+
+  defp do_exploit_deploy(_), do: {:error, "exploit_deploy requires a 'weapon' object"}
+
+  defp do_exploit_judge(%{"receipt" => receipt}) when is_map(receipt) do
+    ExploitOracle.judge(receipt)
+  end
+
+  defp do_exploit_judge(_), do: {:error, "exploit_judge requires a 'receipt' object"}
+
+  # ── Class queue ────────────────────────────────────────────────────────
+
+  defp do_queue_put(session_id, %{"class" => class, "candidate" => candidate})
+       when is_binary(class) and is_map(candidate) do
+    # ClassQueue.put/3 returns {:ok, candidate_record} on success
+    with {:ok, class_atom} <- to_class_atom(class),
+         {:ok, rec} <- ClassQueue.put(session_id, class_atom, candidate) do
+      {:ok, %{queued: class, id: rec.id, target: rec.target}}
+    end
+  end
+
+  defp do_queue_put(_session_id, _), do: {:error, "queue_put requires 'class' and 'candidate'"}
+
+  defp do_queue_assert(session_id, %{"class" => class}) when is_binary(class) do
+    with {:ok, class_atom} <- to_class_atom(class) do
+      case ClassQueue.assert_exploit(session_id, class_atom) do
+        :ok -> {:ok, "exploitation asserted for #{class} — RoE gate satisfied"}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  defp do_queue_assert(_session_id, _), do: {:error, "queue_assert requires 'class'"}
+
+  defp to_class_atom(class) when is_binary(class) do
+    {:ok, String.to_existing_atom(class)}
+  rescue
+    ArgumentError -> {:error, "unknown class: #{class}"}
+  end
+
+  # ── OOB (out-of-band) listeners ────────────────────────────────────────
+
+  defp do_oob_start(session_id) do
+    case Oob.start(session_id) do
+      {:ok, host} when is_binary(host) -> {:ok, %{oob_host: host}}
+      host when is_binary(host) -> {:ok, %{oob_host: host}}
+      {:error, reason} -> {:error, "oob_start failed: #{reason}"}
+      other -> {:error, "oob_start failed: #{inspect(other)}"}
+    end
+  end
+
+  defp do_oob_host(session_id) do
+    case Oob.host(session_id) do
+      {:ok, host} -> {:ok, %{oob_host: host}}
+      {:error, "no oob session"} -> {:ok, %{oob_host: nil, note: "no listener — call oob_start first"}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_oob_poll(session_id, input) do
+    opts = []
+    opts = if input["wait_ms"], do: Keyword.put(opts, :wait_ms, input["wait_ms"]), else: opts
+    Oob.poll(session_id, opts)
+  end
+
+  # ── Threat intel ───────────────────────────────────────────────────────
+
+  defp do_threat_kev(%{"cve" => cve}) when is_binary(cve) do
+    {:ok, %{cve: cve, known_exploited: ThreatIntel.known_exploited?(cve)}}
+  end
+
+  defp do_threat_kev(_), do: {:error, "threat_kev requires 'cve'"}
+
+  defp do_threat_epss(%{"finding" => finding}) when is_map(finding) do
+    {:ok, ThreatIntel.enrich_epss(finding)}
+  end
+
+  defp do_threat_epss(_), do: {:error, "threat_epss requires a 'finding' object"}
+
+  # ── Reachability ───────────────────────────────────────────────────────
+
+  defp do_code_reachable(%{"finding" => finding}) when is_map(finding) do
+    # CodeReachable.check/1 takes atom-keyed maps; findings from the agent are
+    # string-keyed JSON — normalize before checking.
+    normalized = Map.new(finding, fn {k, v} -> {String.to_atom(k), v} end)
+    {:ok, %{code_reachable: CodeReachable.check(normalized)}}
+  end
+
+  defp do_code_reachable(_), do: {:error, "code_reachable requires a 'finding' object"}
+
+  # ── Attack chains ──────────────────────────────────────────────────────
+
+  defp do_chain_find(session_id) do
+    chains = AttackChainReasoner.find_chains(session_id)
+    {:ok, %{chains: chains, count: length(chains)}}
+  end
+
+  # ── Report gate ────────────────────────────────────────────────────────
+
+  defp do_report_gate_check(session_id, %{"finding" => finding}) when is_map(finding) do
+    ReportGate.evaluate(Map.put(finding, :session_id, session_id))
+  end
+
+  defp do_report_gate_check(_session_id, _),
+    do: {:error, "report_gate_check requires a 'finding' object"}
 
   # ── Helpers ─────────────────────────────────────────────────────────────
 

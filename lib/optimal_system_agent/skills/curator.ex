@@ -183,12 +183,10 @@ defmodule OptimalSystemAgent.Skills.Curator do
 
   # ── Curation pass ──────────────────────────────────────────────────────
 
-  @doc """
-  Run one curation pass and return `{stats, decisions}`.
-
-  Public (`@doc false`) so the decision logic is testable without a running
-  GenServer or a 24h timer.
-  """
+  # Run one curation pass and return `{stats, decisions}`.
+  #
+  # Public (`@doc false`) so the decision logic is testable without a running
+  # GenServer or a 24h timer.
   @doc false
   @spec do_curate() :: {map(), [map()]}
   def do_curate do

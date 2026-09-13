@@ -16,6 +16,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.FleetRoutes do
   alias OptimalSystemAgent.Agent.Tasks
   alias OptimalSystemAgent.Protocol.OSCP
 
+  @compile {:no_warn_undefined,
+            [OptimalSystemAgent.Fleet.Registry, OptimalSystemAgent.Protocol.OSCP]}
+
   plug(:match)
   plug(:dispatch)
 

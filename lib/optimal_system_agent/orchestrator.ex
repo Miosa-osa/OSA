@@ -38,11 +38,15 @@ defmodule OptimalSystemAgent.Orchestrator do
   # agent building 67 pages and running 157 tests hit it and was reported as
   # `:timeout` with its finished results thrown away.
   #
-  # An agent expected to work unattended for a shift needs a backstop measured
-  # in shifts. Still finite so a truly wedged child cannot be held forever, and
-  # still overridable per call (`timeout_ms:` / `await_timeout:`) or globally via
-  # `:subagent_await_timeout_ms` for a deliberately bounded job.
-  @default_subagent_timeout_ms 12 * 60 * 60 * 1000
+  # Long-running agents run for DAYS, not a shift. This backstop is deliberately
+  # measured in days so a healthy multi-day agent is never killed or abandoned
+  # (the whole point of unattended background work). Still finite — 3 days — so a
+  # truly wedged child cannot be held literally forever, and still overridable
+  # per call (`timeout_ms:` / `await_timeout:`) or globally via
+  # `:subagent_join_timeout_ms` / `:subagent_await_timeout_ms`. This is the ONE
+  # agent-lifetime knob; the swarm patterns and task_wait read it too, so there
+  # is no stray minute-scale cap anywhere that could kill a day-long agent.
+  @default_subagent_timeout_ms 3 * 24 * 60 * 60 * 1000
 
   @doc false
   def runner_key(agent_id), do: "subagent-runner:" <> agent_id
@@ -154,38 +158,53 @@ defmodule OptimalSystemAgent.Orchestrator do
         # are re-sorted by original index below.
         cap = delegate_concurrency_cap()
 
-        results =
-          indexed_configs
-          |> Enum.chunk_every(cap)
-          |> Enum.flat_map(fn batch ->
-            # Spawn one batch as async Tasks. Thread the stable batch_id
-            # (team_id) and wave number into each config so run_subagent can
-            # carry them onto lifecycle events — the TUI groups per-workstream
-            # by batch_id and per-wave.
-            tasks =
-              Enum.map(batch, fn {config, original_idx} ->
-                config =
-                  config
-                  |> Map.put(:parent_session_id, parent_id)
-                  |> Map.put(:batch_id, team_id)
-                  |> Map.put(:wave, wave_num)
+        # Sliding-window fan-out. This used to `Enum.chunk_every(cap)` and run
+        # the wave in fixed batches, joining every agent in a batch before
+        # starting the next — so a fast agent stuck in a batch behind a slow one
+        # sat idle until the whole batch drained, wasting up to (batch-1) slots.
+        # `async_stream` instead keeps up to `cap` agents running at ALL times,
+        # refilling a slot the instant one finishes.
+        #
+        # Each stream worker owns its own subagent Task and runs the SAME
+        # two-clock `join_subagent_task/3` ladder it always did, so the
+        # per-config inner timeout and the brutal-kill backstop are preserved
+        # exactly (Task.yield/shutdown require the owner process, which is this
+        # worker). `timeout: :infinity` defers entirely to that inner ladder,
+        # which always returns; `ordered: true` yields results in input order —
+        # already original-index order within a wave — so no post-sort is needed.
+        # batch_id (team_id) + wave are threaded onto each config so the TUI can
+        # group per-workstream and per-wave.
+        OptimalSystemAgent.TaskSupervisor
+        |> Task.Supervisor.async_stream_nolink(
+          indexed_configs,
+          fn {config, _original_idx} ->
+            config =
+              config
+              |> Map.put(:parent_session_id, parent_id)
+              |> Map.put(:batch_id, team_id)
+              |> Map.put(:wave, wave_num)
 
-                {original_idx, subagent_join_timeout_ms(config),
-                 Task.Supervisor.async_nolink(
-                   OptimalSystemAgent.TaskSupervisor,
-                   fn -> run_subagent(config) end
-                 )}
-              end)
+            inner_timeout = subagent_join_timeout_ms(config)
 
-            Enum.map(tasks, fn {original_idx, inner_timeout, task} ->
-              {original_idx, join_subagent_task(task, await_timeout, inner_timeout)}
-            end)
-          end)
+            task =
+              Task.Supervisor.async_nolink(
+                OptimalSystemAgent.TaskSupervisor,
+                fn -> run_subagent(config) end
+              )
 
-        # Sort by original index to maintain order
-        results
-        |> Enum.sort_by(fn {idx, _} -> idx end)
-        |> Enum.map(fn {_, result} -> result end)
+            join_subagent_task(task, await_timeout, inner_timeout)
+          end,
+          max_concurrency: cap,
+          timeout: :infinity,
+          ordered: true
+        )
+        |> Enum.map(fn
+          {:ok, result} -> result
+          # A stream worker crashing (not the child — join_subagent_task already
+          # turns a child crash into {:error, {:crashed, _}}) is still a failure,
+          # never laundered into success.
+          {:exit, reason} -> {:error, {:crashed, reason}}
+        end)
       end)
 
     # Emit synthesizing
@@ -212,6 +231,19 @@ defmodule OptimalSystemAgent.Orchestrator do
   def run_subagent(%{routing_error: reason}), do: {:error, {:no_capable_model, reason}}
 
   def run_subagent(config) do
+    # Cheaper agent wake (#3): if this id belongs to a subagent that finished
+    # recently and is still resident in memory (lingering, see `maybe_linger/5`),
+    # reuse the live Loop directly — no terminate, no transcript replay. This is
+    # only ever reachable when `:subagent_linger_ms` > 0; with the default 0 no
+    # linger record is ever created, so `resume_lingering_if_resident/1` always
+    # returns `:no` and behavior is byte-for-byte identical to before.
+    case resume_lingering_if_resident(config) do
+      {:reused, result} -> result
+      :no -> run_fresh_subagent(config)
+    end
+  end
+
+  defp run_fresh_subagent(config) do
     task = Map.fetch!(config, :task)
     parent_id = Map.fetch!(config, :parent_session_id)
     role = Map.get(config, :role, "agent")
@@ -449,7 +481,16 @@ defmodule OptimalSystemAgent.Orchestrator do
       # the *parent's* depth (0 for a top-level session, set by the delegate
       # handler from its UseContext). ToolFilter strips the child's spawning
       # tools once this reaches the configured max — the fork-bomb ceiling.
-      delegation_depth: Map.get(config, :delegation_depth, 0) + 1
+      delegation_depth: Map.get(config, :delegation_depth, 0) + 1,
+      # Per-subagent spend ceiling. nil = off (the default, so nothing changes
+      # for callers that don't set it); when present the child Loop aborts its
+      # own run mid-loop via `Loop.Limits.budget_exceeded?` once it crosses the
+      # cap, so a wide fan-out cannot burn unbounded spend. Enforced per child;
+      # the parent's own budget is independent.
+      max_budget_usd: Map.get(config, :max_budget_usd),
+      # Speed/cost priority (routes a service_tier for OpenAI; also set the
+      # quality tier + provider order in DelegationRouter).
+      priority: Map.get(config, :priority)
     ]
 
     # Start event forwarder BEFORE spawning the subagent so it catches
@@ -509,11 +550,22 @@ defmodule OptimalSystemAgent.Orchestrator do
           :exit, _ -> :ok
         end
 
-        # Cleanup
+        # Cleanup. Normally the child Loop is terminated now and its worktree
+        # torn down. When linger is enabled and the run SUCCEEDED, ownership of
+        # both is handed to a linger process that keeps the pid resident for a
+        # TTL so a quick resume can reuse it without replay. With linger disabled
+        # (the default) `maybe_linger/5` always returns `:terminate_now`, so this
+        # is exactly the original terminate-then-finish_worktree path.
         stop_event_forwarder(forwarder)
-        safely_terminate(pid)
 
-        finish_worktree(worktree_info, subagent_id, config, result)
+        case maybe_linger(pid, subagent_id, worktree_info, config, result) do
+          :lingering ->
+            :ok
+
+          :terminate_now ->
+            safely_terminate(pid)
+            finish_worktree(worktree_info, subagent_id, config, result)
+        end
 
         result
 
@@ -625,6 +677,196 @@ defmodule OptimalSystemAgent.Orchestrator do
         :subagent_join_timeout_ms,
         @default_subagent_timeout_ms
       )
+  end
+
+  # ── Cheaper agent wake (#3): keep a finished subagent RESIDENT briefly ──
+  #
+  # A terminated subagent Loop is expensive to bring back: `resume_subagent/2`
+  # restarts a fresh Loop and REPLAYS the whole durable transcript as input
+  # tokens. A never-terminated idle Loop, by contrast, costs nothing to wake —
+  # its context is already in memory.
+  #
+  # So on a SUCCESSFUL completion, when `:subagent_linger_ms` > 0, we do NOT
+  # terminate the child immediately. A linger process takes ownership of the
+  # pid + its worktree and:
+  #
+  #   * terminates + tears down after the TTL if no resume arrives, OR
+  #   * hands the pid straight back to a resume that reaches it first (the fast
+  #     path in `resume_lingering/2`), which reuses it with no replay, OR
+  #   * cleans up if the Loop dies on its own in the meantime.
+  #
+  # DEFAULT is 0 — no linger process is ever spawned and every completion takes
+  # the original terminate-immediately path. The resident-reuse path is dead
+  # code until an operator opts in.
+  @default_subagent_linger_ms 0
+
+  @doc false
+  def subagent_linger_ms do
+    Application.get_env(
+      :optimal_system_agent,
+      :subagent_linger_ms,
+      @default_subagent_linger_ms
+    )
+  end
+
+  # Registry key the linger owner process registers itself under. A tuple key
+  # can never collide with the plain-string session ids the Loops register with,
+  # and its stored value is the resident Loop pid.
+  defp linger_key(agent_id), do: {:linger, agent_id}
+
+  # Decide the fate of a just-finished child. `:lingering` means a linger owner
+  # now owns teardown of BOTH the pid and the worktree; `:terminate_now` means
+  # the caller must terminate + finish_worktree itself (the original behavior).
+  defp maybe_linger(pid, subagent_id, worktree_info, config, result) do
+    ttl = subagent_linger_ms()
+
+    if ttl > 0 and match?({:ok, _}, result) and is_pid(pid) and Process.alive?(pid) do
+      start_linger(pid, subagent_id, worktree_info, config, result, ttl)
+      :lingering
+    else
+      :terminate_now
+    end
+  rescue
+    # A linger is a pure optimization; if anything about arming it fails, fall
+    # back to terminating now so a pid is never accidentally leaked.
+    _ -> :terminate_now
+  end
+
+  defp start_linger(pid, subagent_id, worktree_info, config, result, ttl) do
+    spawn(fn ->
+      Registry.register(OptimalSystemAgent.SessionRegistry, linger_key(subagent_id), pid)
+      ref = Process.monitor(pid)
+
+      receive do
+        {:cancel_linger, caller} ->
+          # A resume claimed this resident pid. Hand back the worktree it must
+          # keep running under; DO NOT terminate — the resume owns it now.
+          Process.demonitor(ref, [:flush])
+          send(caller, {:linger_cancelled, worktree_info})
+
+        {:DOWN, ^ref, :process, _, _} ->
+          # The Loop died on its own before the TTL. Only the worktree is left
+          # to clean up.
+          finish_worktree(worktree_info, subagent_id, config, result)
+      after
+        ttl ->
+          Logger.info(
+            "[Orchestrator] Linger TTL (#{ttl}ms) elapsed for #{subagent_id} with no resume — terminating"
+          )
+
+          safely_terminate(pid)
+          finish_worktree(worktree_info, subagent_id, config, result)
+      end
+    end)
+
+    :ok
+  end
+
+  # True only for an id whose linger owner is registered AND whose resident Loop
+  # pid is still alive.
+  defp lingering?(agent_id) do
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, linger_key(agent_id)) do
+      [{_linger_pid, loop_pid}] -> is_pid(loop_pid) and Process.alive?(loop_pid)
+      _ -> false
+    end
+  end
+
+  # Cancel the linger for `agent_id`, taking ownership of its resident pid.
+  # Returns `{:ok, worktree_info}` on success (the linger owner will not
+  # terminate the pid), or `:error` if the linger already fired / is gone.
+  defp cancel_linger(agent_id) do
+    case Registry.lookup(OptimalSystemAgent.SessionRegistry, linger_key(agent_id)) do
+      [{linger_pid, _loop_pid}] ->
+        send(linger_pid, {:cancel_linger, self()})
+
+        receive do
+          {:linger_cancelled, worktree_info} -> {:ok, worktree_info}
+        after
+          5_000 -> :error
+        end
+
+      _ ->
+        :error
+    end
+  end
+
+  # Fast-resume entry point. Reachable only via `run_subagent/1`'s dispatcher,
+  # which only routes here when `lingering?/1` is true. Reuses the resident Loop
+  # with NO terminate + NO transcript replay — the new `message` is delivered to
+  # the live Loop exactly as `execute_and_collect/6` delivers a first turn.
+  defp resume_lingering_if_resident(config) do
+    agent_id = Map.get(config, :agent_id) || Map.get(config, :subagent_id)
+
+    if is_binary(agent_id) and lingering?(agent_id) do
+      {:reused, resume_lingering(agent_id, config)}
+    else
+      :no
+    end
+  end
+
+  defp resume_lingering(agent_id, config) do
+    case cancel_linger(agent_id) do
+      {:ok, worktree_info} ->
+        parent_id = Map.fetch!(config, :parent_session_id)
+        role = Map.get(config, :role, "agent")
+        task = Map.fetch!(config, :task)
+        display_name = config[:name] || role
+        batch_id = Map.get(config, :batch_id)
+        tier = Map.get(config, :tier, :specialist)
+        max_iter = Map.get(config, :max_iterations) || Tier.max_iterations(tier)
+
+        Logger.info(
+          "[Orchestrator] Fast-resume: reusing resident subagent #{agent_id} in memory (no replay)"
+        )
+
+        RunStore.start_run(%{
+          agent_id: agent_id,
+          parent_session_id: parent_id,
+          role: role,
+          task: task,
+          resumed_from: Map.get(config, :resumed_from)
+        })
+
+        ensure_execution_control(agent_id, config, %{
+          parent_session_id: parent_id,
+          task: task,
+          role: role
+        })
+
+        forwarder = start_event_forwarder(agent_id, parent_id, role)
+
+        result =
+          execute_and_collect(agent_id, task, parent_id, role, max_iter, worktree_info,
+            display_name: display_name,
+            batch_id: batch_id,
+            resumed_from: agent_id,
+            timeout_ms: Map.get(config, :timeout_ms)
+          )
+
+        stop_event_forwarder(forwarder)
+
+        pid =
+          case Registry.lookup(OptimalSystemAgent.SessionRegistry, agent_id) do
+            [{p, _}] -> p
+            _ -> nil
+          end
+
+        case maybe_linger(pid, agent_id, worktree_info, config, result) do
+          :lingering ->
+            :ok
+
+          :terminate_now ->
+            if is_pid(pid), do: safely_terminate(pid)
+            finish_worktree(worktree_info, agent_id, config, result)
+        end
+
+        result
+
+      :error ->
+        # The linger fired between `lingering?/1` and here (TTL race). The pid is
+        # gone, so fall back to the original terminate-and-replay spawn.
+        run_fresh_subagent(config)
+    end
   end
 
   # ── Worktree end-of-life ──────────────────────────────────────────────
@@ -999,7 +1241,8 @@ defmodule OptimalSystemAgent.Orchestrator do
                 display_name: display_name,
                 role: role,
                 result: String.slice(response, 0, 500),
-                duration_ms: duration_ms
+                duration_ms: duration_ms,
+                task_completed: true
               })
 
               Phoenix.PubSub.broadcast(
@@ -1016,6 +1259,10 @@ defmodule OptimalSystemAgent.Orchestrator do
                    elapsed_ms: elapsed_ms,
                    usage: usage,
                    cost_usd: cost_usd,
+                   # Whether the run genuinely SUCCEEDED (result was {:ok, _}),
+                   # so $/completed-task can be computed over real completions
+                   # rather than counting failed/timed-out/cancelled runs as done.
+                   task_completed: true,
                    output_file: output_file
                  }}
               )
@@ -1048,7 +1295,8 @@ defmodule OptimalSystemAgent.Orchestrator do
                 display_name: display_name,
                 role: role,
                 error: inspect(reason),
-                duration_ms: duration_ms
+                duration_ms: duration_ms,
+                task_completed: false
               })
 
               Phoenix.PubSub.broadcast(
@@ -1065,6 +1313,9 @@ defmodule OptimalSystemAgent.Orchestrator do
                    elapsed_ms: elapsed_ms,
                    usage: usage,
                    cost_usd: cost_usd,
+                   # This run did NOT complete ({:error, _} — error/timeout/cancel),
+                   # so it must not be counted toward $/completed-task.
+                   task_completed: false,
                    output_file: output_file
                  }}
               )
@@ -1925,17 +2176,31 @@ defmodule OptimalSystemAgent.Orchestrator do
   #               provider that stopped responding mid-run; a much shorter
   #               threshold is appropriate.
   #
-  # It only OBSERVES: it emits `:background_agent_stalled` and stops. It never
-  # kills the child — a long-running-but-alive teammate must not be reaped by a
-  # heuristic, and the existing join timeout remains the only hard stop.
-  # It exits as soon as the run reaches a terminal status or its row disappears.
+  # Mostly OBSERVES: on the first stall it sends ONE non-destructive nudge, then
+  # emits `:background_agent_stalled` and keeps watching. It does NOT reap a
+  # long-running-but-alive teammate on the minute-scale thresholds — a healthy
+  # agent that is slow or in a long provider call must never be killed.
+  #
+  # The ONE exception is a definitely-dead hang: an agent that has made NO
+  # progress for `@stall_hard_stop_ms` (default 2h) AFTER a nudge is not slow,
+  # it is wedged — every legitimate long operation resolves well inside that
+  # window (MCP calls time out at 60s, shell commands background, a stalled
+  # provider call fails over its retries in ~90min), and a healthy multi-day
+  # agent makes SOME progress far sooner. Rather than leave it for the operator
+  # to notice and `task_stop` by hand, the watcher auto-stops it and reports it
+  # cancelled. This is well under the 3-day lifetime backstop (which bounds a
+  # *working* agent) and only ever fires on a genuine no-progress hang.
   @stall_poll_interval_ms 30_000
   @stall_threshold_starting_ms 5 * 60 * 1000
   @stall_threshold_working_ms 15 * 60 * 1000
+  @stall_hard_stop_ms 2 * 60 * 60 * 1000
 
   defp stall_poll_interval_ms,
     do:
       Application.get_env(:optimal_system_agent, :stall_poll_interval_ms, @stall_poll_interval_ms)
+
+  defp stall_hard_stop_ms,
+    do: Application.get_env(:optimal_system_agent, :stall_hard_stop_ms, @stall_hard_stop_ms)
 
   defp stall_threshold_ms(:starting),
     do:
@@ -2022,6 +2287,54 @@ defmodule OptimalSystemAgent.Orchestrator do
           print != last_print ->
             watch_for_stall(parent_id, subagent_id, display_name, role, print, progressing())
 
+          now_ms() - stall.last_change_at >= stall_report_gap_ms(phase, stall.reports) and
+              not stall.nudged ->
+            # FIRST stall for this agent: bounded, non-destructive recovery.
+            #
+            # Before escalating to the parent (which costs it a turn) or giving
+            # up on the run, try ONE nudge — the same idle-wake a parent uses to
+            # resume a child (`Loop.poke/1`). If the child is genuinely idle the
+            # poke becomes a synthetic turn that prods it to continue; if it is
+            # mid-turn the cast waits in the mailbox and no-ops at the next drain
+            # boundary, so a healthy-but-slow teammate is never disrupted. It is
+            # never a kill and never a restart.
+            #
+            # We reset only the report clock (not `since`, so a later stall event
+            # still reports the true elapsed time) and mark `nudged: true` so the
+            # nudge is sent AT MOST ONCE. One more threshold window is granted for
+            # the child to react; if it stalls again we fall through to the
+            # observe-only behavior below.
+            since = stall.since || stall.last_change_at
+
+            nudge_stalled(parent_id, subagent_id, display_name, role, phase)
+
+            watch_for_stall(parent_id, subagent_id, display_name, role, print, %{
+              last_change_at: now_ms(),
+              since: since,
+              reports: stall.reports,
+              nudged: true
+            })
+
+          stall.nudged and
+              now_ms() - (stall.since || stall.last_change_at) >= stall_hard_stop_ms() ->
+            # Definitely-dead hang: no progress for the hard threshold (default
+            # 2h) even AFTER a nudge. Auto-stop it and report it cancelled so the
+            # operator/coordinator doesn't have to notice and `task_stop` it by
+            # hand. Safe against the days requirement: a healthy long/slow agent
+            # makes SOME progress well inside 2h, and every legitimate long call
+            # resolves sooner (MCP 60s, shell backgrounds, provider retries
+            # ~90min). Stop watching once stopped.
+            auto_stop_stalled(
+              parent_id,
+              subagent_id,
+              display_name,
+              role,
+              phase,
+              now_ms() - (stall.since || stall.last_change_at)
+            )
+
+            :ok
+
           now_ms() - stall.last_change_at >= stall_report_gap_ms(phase, stall.reports) ->
             since = stall.since || stall.last_change_at
 
@@ -2045,7 +2358,8 @@ defmodule OptimalSystemAgent.Orchestrator do
             watch_for_stall(parent_id, subagent_id, display_name, role, print, %{
               last_change_at: now_ms(),
               since: since,
-              reports: stall.reports + 1
+              reports: stall.reports + 1,
+              nudged: true
             })
 
           true ->
@@ -2067,7 +2381,115 @@ defmodule OptimalSystemAgent.Orchestrator do
 
   # Fresh watcher state: work just landed (or is yet to land), so nothing is
   # stalled and any earlier stall's backoff is forgotten.
-  defp progressing, do: %{last_change_at: now_ms(), since: nil, reports: 0}
+  defp progressing, do: %{last_change_at: now_ms(), since: nil, reports: 0, nudged: false}
+
+  # Bounded, non-destructive stall recovery: poke the child once to prod it to
+  # continue. `Loop.poke/1` is the parent's normal idle-wake — safe mid-turn (it
+  # no-ops at the next drain boundary) and never a kill/restart. Best-effort:
+  # a dead or unknown session poke is a no-op. Emits a light observability event
+  # so the nudge is visible without spending a parent turn the way a stall report
+  # does.
+  defp nudge_stalled(parent_id, subagent_id, display_name, role, phase) do
+    Logger.info(
+      "[Orchestrator] Background subagent #{subagent_id} idle in :#{phase} — sending one " <>
+        "non-destructive nudge (Loop.poke) before escalating"
+    )
+
+    Loop.poke(subagent_id)
+
+    payload = %{
+      event: :background_agent_nudged,
+      session_id: parent_id,
+      agent_id: subagent_id,
+      display_name: display_name,
+      role: role,
+      phase: phase
+    }
+
+    Bus.emit(:system_event, payload)
+
+    # Same dual-emit as the stalled/completed/failed events, so TUI and SSE
+    # consumers see the nudge on the session topic they already listen to.
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{parent_id}",
+      {:osa_event, Map.put(payload, :type, :background_agent_nudged)}
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  # Auto-stop a subagent that is a confirmed dead hang (no progress for the hard
+  # threshold, after a nudge). Cancels the Loop and records the run as cancelled
+  # with an honest summary — the SAME path `task_stop` takes — then emits a
+  # `:background_agent_auto_stopped` event so the coordinator learns it is done
+  # (and why) without having to poll or stop it by hand. Best-effort.
+  defp auto_stop_stalled(parent_id, subagent_id, display_name, role, phase, stalled_ms) do
+    minutes = div(stalled_ms, 60_000)
+
+    Logger.warning(
+      "[Orchestrator] Background subagent #{subagent_id} made NO progress for #{minutes}m in " <>
+        ":#{phase} even after a nudge — auto-stopping it as an unrecoverable hang"
+    )
+
+    Loop.cancel(subagent_id)
+
+    summary =
+      "Auto-stopped after #{minutes}m with no progress in :#{phase} (unrecoverable hang — " <>
+        "a hung tool or a stalled provider call that never resumed)."
+
+    case RunStore.get(subagent_id) do
+      nil ->
+        :ok
+
+      run ->
+        RunStore.complete(subagent_id, %{
+          agent_id: subagent_id,
+          parent_session_id: run.parent_session_id,
+          role: run.role,
+          status: :cancelled,
+          summary: summary,
+          files_changed: [],
+          commands_run: [],
+          tool_count: Map.get(run, :tool_count, 0),
+          tokens_used: Map.get(run, :tokens_used, 0),
+          duration_ms: nil,
+          errors: ["stall_hard_stop"],
+          next_actions: [],
+          transcript_path: Map.get(run, :transcript_path),
+          worktree: nil
+        })
+    end
+
+    payload = %{
+      event: :background_agent_auto_stopped,
+      session_id: parent_id,
+      agent_id: subagent_id,
+      display_name: display_name,
+      role: role,
+      phase: phase,
+      stalled_ms: stalled_ms,
+      summary: summary
+    }
+
+    Bus.emit(:system_event, payload)
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{parent_id}",
+      {:osa_event, Map.put(payload, :type, :background_agent_auto_stopped)}
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
 
   defp progress_fingerprint(run) do
     {Map.get(run, :tool_count, 0), Map.get(run, :tokens_used, 0),
@@ -2450,18 +2872,47 @@ defmodule OptimalSystemAgent.Orchestrator do
     Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
       # Subscribe INSIDE this process — PubSub subscriptions are per-process
       Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{subagent_id}")
-      forwarder_loop(subagent_id, parent_id, role, 0)
+      forwarder_loop(subagent_id, parent_id, role, 0, 0)
     end)
   end
 
-  defp forwarder_loop(subagent_id, parent_id, role, tool_count) do
+  defp forwarder_loop(subagent_id, parent_id, role, tool_count, tokens) do
     receive do
+      # Token usage from a completed model call. Accumulate the running billed
+      # total and push it so the roster's "N tok" grows LIVE instead of sitting
+      # at 0. The old path read it via `Loop.get_state/1` — a GenServer.call to
+      # the subagent's Loop, which is BLOCKED in its own handle_call for the
+      # whole turn, so the call always timed out and returned 0 (the reported
+      # "still says zero tokens even though it's definitely doing something").
+      {:osa_event, %{type: :llm_response, usage: usage}} ->
+        tokens =
+          tokens + Map.get(usage, :input_tokens, 0) + Map.get(usage, :output_tokens, 0)
+
+        emit_event(
+          parent_id,
+          Map.merge(
+            %{
+              event: "orchestrator_agent_progress",
+              agent_name: subagent_id,
+              current_action: List.first(recent_actions(subagent_id)) || "working",
+              tool_uses: tool_count,
+              tokens_used: tokens,
+              recent_actions: recent_actions(subagent_id),
+              elapsed_ms: run_elapsed_ms(subagent_id),
+              description: ""
+            },
+            execution_event_fields(subagent_id)
+          )
+        )
+
+        forwarder_loop(subagent_id, parent_id, role, tool_count, tokens)
+
       # Tool call START — update action line with what the tool is doing
       {:osa_event, %{type: :tool_call, name: tool_name, phase: phase, args: args}}
       when phase in ["start", :start] ->
         action = format_action(tool_name, args)
         RunStore.progress(subagent_id, action, tool_count)
-        record_execution_progress(subagent_id, action, tool_count)
+        record_execution_progress(subagent_id, action, tool_count, tokens)
 
         emit_event(
           parent_id,
@@ -2471,7 +2922,7 @@ defmodule OptimalSystemAgent.Orchestrator do
               agent_name: subagent_id,
               current_action: action,
               tool_uses: tool_count,
-              tokens_used: forwarder_tokens(subagent_id),
+              tokens_used: tokens,
               recent_actions: recent_actions(subagent_id),
               # The backend's own clock for this run - see `run_elapsed_ms/1`. It
               # rides on every progress frame so a client that connected late, or
@@ -2495,14 +2946,14 @@ defmodule OptimalSystemAgent.Orchestrator do
         # facts. All three are now stated as themselves.
         emit_phase(parent_id, subagent_id, role, :working, action)
 
-        forwarder_loop(subagent_id, parent_id, role, tool_count)
+        forwarder_loop(subagent_id, parent_id, role, tool_count, tokens)
 
       # Tool call END — increment counter
       {:osa_event, %{type: :tool_call, name: tool_name, phase: phase}}
       when phase in ["end", :end] ->
         new_count = tool_count + 1
         RunStore.progress(subagent_id, to_string(tool_name), new_count)
-        record_execution_progress(subagent_id, nil, new_count)
+        record_execution_progress(subagent_id, nil, new_count, tokens)
 
         emit_event(
           parent_id,
@@ -2512,7 +2963,7 @@ defmodule OptimalSystemAgent.Orchestrator do
               agent_name: subagent_id,
               current_action: to_string(tool_name),
               tool_uses: new_count,
-              tokens_used: forwarder_tokens(subagent_id),
+              tokens_used: tokens,
               recent_actions: recent_actions(subagent_id),
               elapsed_ms: run_elapsed_ms(subagent_id),
               description: ""
@@ -2534,10 +2985,10 @@ defmodule OptimalSystemAgent.Orchestrator do
         # subagent is in.
         emit_phase(parent_id, subagent_id, role, :awaiting_model, "thinking after #{tool_name}")
 
-        forwarder_loop(subagent_id, parent_id, role, new_count)
+        forwarder_loop(subagent_id, parent_id, role, new_count, tokens)
 
       _ ->
-        forwarder_loop(subagent_id, parent_id, role, tool_count)
+        forwarder_loop(subagent_id, parent_id, role, tool_count, tokens)
     after
       # Idle safety net: stop forwarding after this many ms of SILENCE (no
       # events). The timer resets on every received event (the receive is
@@ -2562,20 +3013,6 @@ defmodule OptimalSystemAgent.Orchestrator do
   end
 
   defp format_action(tool_name, _), do: to_string(tool_name)
-
-  # Real token count for progress events. The forwarder runs in its own Task
-  # process (not the subagent's Loop), so a synchronous state read is safe and
-  # cannot deadlock. Falls back to 0 rather than a fabricated tool_count*500.
-  defp forwarder_tokens(subagent_id) do
-    case Loop.get_state(subagent_id) do
-      {:ok, %{tokens_used: t}} when is_integer(t) and t >= 0 -> t
-      _ -> 0
-    end
-  rescue
-    _ -> 0
-  catch
-    :exit, _ -> 0
-  end
 
   # Last-N tool actions (newest first) for the TUI trail — the FE renders the
   # last 3 with a "+N more tool uses" counter (CC MAX_PROGRESS_MESSAGES_TO_SHOW).
@@ -2674,14 +3111,14 @@ defmodule OptimalSystemAgent.Orchestrator do
     end
   end
 
-  defp record_execution_progress(agent_id, current_tool, tool_count) do
+  defp record_execution_progress(agent_id, current_tool, tool_count, tokens) do
     skills = ActiveSkills.list(agent_id)
     control = ExecutionControl.get(agent_id) || %{}
 
     ExecutionControl.progress(agent_id, %{
       current_tool: current_tool,
       tool_count: tool_count,
-      tokens_used: forwarder_tokens(agent_id),
+      tokens_used: tokens,
       active_skills: skills,
       skill_reason:
         if(skills == [],

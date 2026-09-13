@@ -133,8 +133,10 @@ defmodule OptimalSystemAgent.MIOSA.Platform do
     with :ok <- File.mkdir_p(Path.dirname(path)),
          {:ok, json} <- Jason.encode(merged, pretty: true),
          :ok <- File.write(path, json) do
-      _ = File.chmod(path, 0o600)
-      {:ok, path}
+      case File.chmod(path, 0o600) do
+        :ok -> {:ok, path}
+        {:error, reason} -> {:error, {:chmod_failed, reason}}
+      end
     end
   end
 

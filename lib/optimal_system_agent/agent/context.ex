@@ -87,8 +87,6 @@ defmodule OptimalSystemAgent.Agent.Context do
   defp response_reserve(max_tok),
     do: min(@response_reserve, max(div(max_tok, @response_reserve_frac), 512))
 
-  defp max_tokens, do: Application.get_env(:optimal_system_agent, :max_context_tokens, 128_000)
-
   # ---------------------------------------------------------------------------
   # Public API
   # ---------------------------------------------------------------------------
@@ -173,18 +171,37 @@ defmodule OptimalSystemAgent.Agent.Context do
 
     # Subagents with a system_prompt_override use that instead of Soul.static_base.
     # This gives each agent role its own focused prompt from AGENT.md.
-    static_base =
+    #
+    # Operator `/system` overrides (`Agent.PromptOverrides`) apply ONLY on the
+    # Soul path: `inject` appends to the cached base, `replace` swaps it out.
+    # Either way the cached token count no longer describes the prompt, so it
+    # is re-estimated from the text actually sent.
+    {static_base, static_tokens} =
       case Map.get(state, :system_prompt_override) do
-        override when override in [nil, ""] -> Soul.static_base(variant)
-        override -> override
+        override when override in [nil, ""] ->
+          base = Soul.static_base(variant)
+
+          case OptimalSystemAgent.Agent.PromptOverrides.apply(base, model) do
+            {^base, :none} -> {base, Soul.static_token_count(variant)}
+            {patched, _applied} -> {patched, estimate_tokens(patched)}
+          end
+
+        override ->
+          {override, estimate_tokens(override)}
       end
 
-    static_tokens =
-      case Map.get(state, :system_prompt_override) do
-        override when override in [nil, ""] -> Soul.static_token_count(variant)
-        override -> estimate_tokens(override)
-      end
 
+    # /jailbreak layer: operator text appended AFTER everything above, for every
+    # model/provider. `""` when disarmed — the common case — so a fresh node's
+    # prompt is byte-identical to before this feature existed.
+    {static_base, static_tokens} =
+      case OptimalSystemAgent.Agent.Jailbreak.system_block() do
+        "" ->
+          {static_base, static_tokens}
+
+        block ->
+          {static_base <> "\n\n" <> block, static_tokens + estimate_tokens(block)}
+      end
     # Tier 2: Dynamic context. Essentials fit into the leftover slack; the
     # RECALL group (memory/project/skills) is additionally capped to a fraction
     # of the REAL window so trivial turns can't balloon into the free space.
@@ -216,7 +233,32 @@ defmodule OptimalSystemAgent.Agent.Context do
         "total=#{total_tokens}/#{max_tok} (#{Float.round(total_tokens / max_tok * 100, 1)}%)"
     )
 
-    system_msg = build_system_message(static_base, world_state, volatile, provider, model)
+    # KV-cache prefix stability for plain-prefix caches (Ollama / lmstudio /
+    # llamacpp). Those runtimes reuse the longest byte-identical PREFIX of the
+    # request; the moment a byte changes, everything after it re-prefills. The
+    # `volatile` block (clock, turn count, recall) changes every turn — and
+    # sitting at the tail of the system message, BEFORE the conversation, it
+    # invalidated the cache for the whole conversation on every turn (~7s of
+    # re-prefill on a local model). This is the same failure `PromptCache`
+    # relocates for the Anthropic route; the plain-prefix route never got it.
+    #
+    # Fix: keep the system message to the STABLE core (static + world_state),
+    # and move `volatile` to a trailing message AFTER the conversation. Now the
+    # system prompt + history form a stable prefix the KV cache reuses in full,
+    # and only the small volatile tail + the new user message re-prefill. The
+    # model sees identical information — this is a reorder, not a removal — and
+    # trailing runtime context reads as recency, which local models attend to
+    # well. Verified informational (nothing parses volatile by position).
+    plain_prefix? =
+      OptimalSystemAgent.Providers.Registry.plain_prefix_cache?(provider, model)
+
+    {system_msg, volatile_tail} =
+      if plain_prefix? and is_binary(volatile) and volatile != "" do
+        {build_system_message(static_base, world_state, "", provider, model),
+         volatile_tail_message(volatile)}
+      else
+        {build_system_message(static_base, world_state, volatile, provider, model), nil}
+      end
 
     # Per-process build counter. Assembling this message is the expensive part
     # of preparing a request — 21 dynamic blocks, each with its own budget —
@@ -226,7 +268,19 @@ defmodule OptimalSystemAgent.Agent.Context do
     # than a belief. See `ReactLoop.cached_context/1`.
     Process.put(:osa_context_builds, Process.get(:osa_context_builds, 0) + 1)
 
-    %{messages: [system_msg | conversation]}
+    messages = [system_msg | conversation]
+    messages = if volatile_tail, do: messages ++ [volatile_tail], else: messages
+
+    %{messages: messages}
+  end
+
+  # The volatile block as a trailing message. Wrapped in <system-reminder> so
+  # the model reads it as operating context, not as something the user typed —
+  # the same convention `Providers.Ollama.demote_trailing_system/1` already
+  # uses. Role "user" because a trailing "system" role is rejected by strict
+  # chat templates (Qwen) and demoted to exactly this shape anyway.
+  defp volatile_tail_message(volatile) do
+    %{role: "user", content: "<system-reminder>\n" <> volatile <> "\n</system-reminder>"}
   end
 
   @doc """
@@ -244,8 +298,24 @@ defmodule OptimalSystemAgent.Agent.Context do
     conversation = state.messages || []
     conversation_tokens = estimate_tokens_messages(conversation)
 
-    max_tok = max_tokens()
-    static_tokens = Soul.static_token_count()
+    provider =
+      Map.get(state, :provider) ||
+        Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+
+    model = Map.get(state, :model) || get_active_model(provider)
+
+    max_tok =
+      case Map.get(state, :effective_context_window) do
+        n when is_integer(n) and n > 0 ->
+          n
+
+        _ ->
+          OptimalSystemAgent.Providers.Registry.effective_context_window(model, provider)
+      end
+
+    lite? = small_window?(model, provider)
+    variant = static_base_variant(provider, lite?)
+    static_tokens = Soul.static_token_count(variant)
 
     # Gather dynamic blocks for individual cost breakdown
     blocks = gather_dynamic_blocks(state)
@@ -271,23 +341,35 @@ defmodule OptimalSystemAgent.Agent.Context do
     {ws, volatile} = assemble_dynamic_context(state, dynamic_budget, max_tok, emit: false)
     dynamic_tokens = estimate_tokens(ws) + estimate_tokens(volatile)
     tool_tokens = tool_schema_tokens()
-    total_tokens = static_tokens + dynamic_tokens + conversation_tokens + reserve + tool_tokens
+    tool_result = tool_result_tokens(conversation)
+    conversation_only = max(conversation_tokens - tool_result, 0)
+    occupied = static_tokens + dynamic_tokens + conversation_only + tool_result + tool_tokens
+    total_tokens = occupied + reserve
 
     %{
       max_tokens: max_tok,
       response_reserve: reserve,
-      conversation_tokens: conversation_tokens,
+      conversation_tokens: conversation_only,
       static_base_tokens: static_tokens,
       dynamic_context_tokens: dynamic_tokens,
       tool_schema_tokens: tool_tokens,
+      tool_result_tokens: tool_result,
+      occupied_tokens: occupied,
       system_prompt_budget: max_tok - reserve - conversation_tokens,
       system_prompt_actual: static_tokens + dynamic_tokens + tool_tokens,
       total_tokens: total_tokens,
-      utilization_pct: Float.round(total_tokens / max_tok * 100, 1),
+      utilization_pct: if(max_tok > 0, do: Float.round(occupied / max_tok * 100, 1), else: 0.0),
       headroom: max_tok - total_tokens,
       blocks: block_details
     }
   end
+
+  @doc """
+  Tokens currently spent on the native `tools` array. Public so `/context`
+  and a model-swap fit check can see the same number the budget uses.
+  """
+  @spec tool_schema_token_count() :: non_neg_integer()
+  def tool_schema_token_count, do: tool_schema_tokens()
 
   # Tokens spent on the native `tools` array of the request.
   #
@@ -325,6 +407,20 @@ defmodule OptimalSystemAgent.Agent.Context do
   rescue
     _ -> 0
   end
+
+  defp tool_result_tokens(messages) when is_list(messages) do
+    Enum.reduce(messages, 0, fn msg, acc ->
+      role = Map.get(msg, :role) || Map.get(msg, "role")
+
+      if role in ["tool", :tool] do
+        acc + estimate_tokens_messages([msg])
+      else
+        acc
+      end
+    end)
+  end
+
+  defp tool_result_tokens(_), do: 0
 
   @doc """
   `true` when the model's REAL resolved context window is small enough to need
@@ -375,15 +471,26 @@ defmodule OptimalSystemAgent.Agent.Context do
   #                    which have no native tool channel at all.
   @doc false
   @spec static_base_variant(atom(), boolean()) :: :lite | :native_tools | :full
-  def static_base_variant(_provider, true), do: :lite
+  # A small window gets the SMALLEST base the transport can carry. MEASURED
+  # with the lean template: :full 17,215 · :lite 13,201 · :native_tools 8,950.
+  # `:lite` used to win here unconditionally, which handed a 32k-window local
+  # model a prefix 4.2k tokens LARGER than the native-schema one — on the
+  # model that could least afford it — for no capability gain: on a native
+  # transport the tool descriptions ride in the request as schemas either
+  # way, and `tool_search` still reaches everything the 10-tool budget
+  # leaves out. `:lite` remains the answer for prompt-text transports, where
+  # the inlined core-tool prose is the only copy the model gets.
+  def static_base_variant(provider, true) do
+    if native_base?(provider), do: :native_tools, else: :lite
+  end
 
   def static_base_variant(provider, _lite?) do
-    if Soul.dedupe_native_tool_prompt?() and
-         OptimalSystemAgent.Providers.Registry.native_tool_schemas?(provider) do
-      :native_tools
-    else
-      :full
-    end
+    if native_base?(provider), do: :native_tools, else: :full
+  end
+
+  defp native_base?(provider) do
+    Soul.dedupe_native_tool_prompt?() and
+      OptimalSystemAgent.Providers.Registry.native_tool_schemas?(provider)
   end
 
   # ---------------------------------------------------------------------------
@@ -1798,16 +1905,17 @@ defmodule OptimalSystemAgent.Agent.Context do
     git_info = cached_git_info()
     date = Date.utc_today() |> Date.to_iso8601()
 
-    # Session-accurate provider/model — NOT the global default. On a
-    # provider-switched session (via /model or state.provider) the global
-    # config default is wrong, which would tell the agent it is running on a
-    # model it is not. Prefer the session's own provider/model, falling back
-    # to the config default only when the session has not pinned them.
-    provider =
-      Map.get(state, :provider) ||
-        Application.get_env(:optimal_system_agent, :default_provider, :unknown)
-
-    model = Map.get(state, :model) || get_active_model(provider)
+    # Resolve identity through the ONE canonical resolver `Runtime.Identity`,
+    # the same one `runtime_block/1` and the TUI status bar use. This block
+    # used to resolve model/provider on its own (`state.model ||
+    # get_active_model/1`), which fell back to the provider's CONFIG DEFAULT
+    # when the session had not pinned `state.model` — so on an OpenRouter
+    # session actually running `stealth/ox-alpha` this line announced
+    # `anthropic/claude-opus-5` (the openrouter default), directly
+    # contradicting the runtime block and the footer. Two identity lines that
+    # disagree let the model pick the wrong one and confidently misreport what
+    # it is. One resolver, one answer.
+    %{model: model, provider: provider} = OptimalSystemAgent.Runtime.Identity.resolve(state)
 
     {os_family, os_name} = :os.type()
     platform = "#{os_family}/#{os_name}"

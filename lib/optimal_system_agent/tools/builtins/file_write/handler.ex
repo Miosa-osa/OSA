@@ -136,6 +136,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileWrite.Handler do
                 operation: operation
               })
 
+            # The :file_changed hook may reformat the file; re-capture the
+            # read-state baseline from the final on-disk bytes so the NEXT write
+            # in a rapid sequence is not falsely flagged stale ("read first").
+            FileEditHandler.refresh_write_baseline(session, expanded)
+
             line_count = content |> String.split("\n") |> length()
             preview = content |> String.split("\n") |> Enum.take(10) |> Enum.join("\n")
 

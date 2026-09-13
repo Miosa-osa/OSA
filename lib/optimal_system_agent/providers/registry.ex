@@ -886,6 +886,25 @@ defmodule OptimalSystemAgent.Providers.Registry do
   def anthropic_prompt_cache?(_target, _model), do: false
 
   @doc """
+  True for providers whose prompt cache is a plain **byte-prefix** match of the
+  request — the local runtimes (Ollama, LM Studio, llama.cpp). Their llama.cpp
+  KV cache reuses the longest identical prefix and re-prefills from the first
+  changed byte; there is no `cache_control` field to place breakpoints with.
+
+  `Agent.Context` uses this to keep the volatile block (clock, turn count,
+  recall) OUT of the system message and in a trailing message instead, so the
+  stable system-prompt-plus-history prefix stays byte-identical turn to turn and
+  the cache reuses all of it — the plain-prefix analogue of what
+  `Providers.PromptCache` does for the Anthropic route. Anthropic itself is
+  excluded here: it has its own `cache_control` path and must not be double-handled.
+  """
+  @spec plain_prefix_cache?(atom() | {:compat, atom()}, String.t() | nil) :: boolean()
+  def plain_prefix_cache?(provider, model \\ nil)
+  def plain_prefix_cache?(p, _model) when p in [:ollama, :lmstudio, :llamacpp], do: true
+  def plain_prefix_cache?({:compat, p}, _model) when p in [:ollama, :lmstudio, :llamacpp], do: true
+  def plain_prefix_cache?(_target, _model), do: false
+
+  @doc """
   The model this request will actually be served by — never the raw `opts` value.
 
   `is_binary(model)` in `anthropic_prompt_cache?/2` is correct as a guard and
@@ -1592,6 +1611,10 @@ defmodule OptimalSystemAgent.Providers.Registry do
   unavailable (e.g. GenServer not started) or does not yet know a model.
   """
   @static_context_windows %{
+    # OpenRouter stealth model (not yet in models.dev): Ox Alpha ships a
+    # 1,048,576-token context window. Without this row the context meter would
+    # fall back to a flat default and badly misreport occupancy on a 1M model.
+    "stealth/ox-alpha" => 1_048_576,
     # Anthropic — all Claude 4.x models have 1M context
     "claude-opus-4-6" => 1_000_000,
     "claude-sonnet-4-6" => 1_000_000,
@@ -1899,7 +1922,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   defp apply_local_ceiling(trained, model, provider) do
     if provider in [:ollama, :lmstudio, :llamacpp] and not ollama_cloud_model?(model) do
-      ceiling = Application.get_env(:optimal_system_agent, :ollama_num_ctx, 32_768)
+      ceiling = OptimalSystemAgent.LocalModels.num_ctx_ceiling(model)
 
       # Floor against the model's REAL trained window too, not just the config
       # ceiling. A static/catalog entry (or a family prefix match) can advertise
@@ -2043,6 +2066,14 @@ defmodule OptimalSystemAgent.Providers.Registry do
       # was routed to :openai.
       OptimalSystemAgent.Providers.OllamaCloud.cloud_tag?(m) ->
         :ollama_cloud
+
+      # A Hugging Face GGUF pulled straight into the daemon
+      # (`ollama pull hf.co/<user>/<repo>:<quant>`) keeps the `hf.co/` prefix as
+      # its tag. Nothing but local Ollama serves those ids; without this branch
+      # they fell to nil and were handed to whatever the node's default provider
+      # was (Ollama Cloud on a `:cloud` default), which does not have the model.
+      String.starts_with?(m, "hf.co/") or String.starts_with?(m, "huggingface.co/") ->
+        :ollama
 
       String.starts_with?(m, "claude") ->
         :anthropic
@@ -2471,12 +2502,24 @@ defmodule OptimalSystemAgent.Providers.Registry do
   def resolved_default_model(provider \\ nil) do
     provider = provider || resolved_default_provider()
 
-    # provider_info/1 replies {:ok, map}. Matching a bare map here silently
-    # yielded nil for every provider — the same tuple-vs-map slip that made
-    # `osa.run --format json` report a cost of 0.
-    case provider_info(provider) do
-      {:ok, %{default_model: model}} when is_binary(model) and model != "" -> model
-      _ -> nil
+    # Honor a persisted per-provider choice first. A model switch writes the
+    # scoped :"#{provider}_model" key (config.json + app-env), and that should
+    # win over the catalog default so a new session picks up what the user last
+    # selected. Ollama already reads :ollama_model; this extends the same
+    # courtesy to every provider. Falls back to the provider's catalog default
+    # (e.g. glm-5.2:cloud) when nothing has been persisted.
+    case Application.get_env(:optimal_system_agent, :"#{provider}_model") do
+      model when is_binary(model) and model != "" ->
+        model
+
+      _ ->
+        # provider_info/1 replies {:ok, map}. Matching a bare map here silently
+        # yielded nil for every provider — the same tuple-vs-map slip that made
+        # `osa.run --format json` report a cost of 0.
+        case provider_info(provider) do
+          {:ok, %{default_model: model}} when is_binary(model) and model != "" -> model
+          _ -> nil
+        end
     end
   rescue
     _ -> nil

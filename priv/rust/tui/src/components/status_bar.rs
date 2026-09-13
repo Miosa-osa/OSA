@@ -993,6 +993,19 @@ impl StatusBar {
         })
     }
 
+    /// Per-session cost-per-task chip (`$/task 0.20`). Shown only once at least
+    /// one task has completed — before that the figure is meaningless — and only
+    /// for USD-priced providers, where a dollar cost is real. Returns None
+    /// otherwise, which drops the chip entirely. Never panics on backend input:
+    /// missing fields decode to `0` via `#[serde(default)]`.
+    fn task_cost_label(&self) -> Option<String> {
+        let b = self.billing.as_ref()?;
+        if !b.usd_pricing || b.completed_tasks == 0 {
+            return None;
+        }
+        Some(format!("$/task {:.2}", b.cost_per_task_usd))
+    }
+
     /// U-T25 — whether the daily spend has crossed the low-balance threshold
     /// (≥ 80% of the USD cap), so the billing chip renders as a warning. Always
     /// false for uncapped or non-USD providers (no cap to be low against).
@@ -1481,6 +1494,20 @@ impl Component for StatusBar {
             }
         }
 
+        // Cost-per-task chip (`$/task 0.20`). Sits next to the spend chip and is
+        // omitted until the first task completes (see `task_cost_label`). Width-
+        // aware: dropped whole rather than clipped mid-figure on narrow panes.
+        if let Some(task_cost) = self.task_cost_label() {
+            push_segment_if_fits(
+                &mut spans,
+                vec![
+                    Span::styled(" \u{2502} ", theme.status_sep()),
+                    Span::styled(task_cost, theme.progress_label()),
+                ],
+                row0.width,
+            );
+        }
+
         // Update-available chip (`⬆ vX`). Understated: dim, no color alarm, and
         // dropped entirely once there's no newer release. Sits just left of the
         // version chip so "v{current} → ⬆ v{latest}" reads together. The user
@@ -1958,6 +1985,8 @@ mod status_bar_tests {
             subscription: None,
             daily_tokens: 0,
             usd_pricing: true,
+            cost_per_task_usd: 0.0,
+            completed_tasks: 0,
         }));
         assert_eq!(sb.billing_label().as_deref(), Some("$8/$10 today (80%)"));
         assert!(sb.billing_low_balance(), "80% of cap is low balance");
@@ -1972,6 +2001,8 @@ mod status_bar_tests {
             subscription: None,
             daily_tokens: 0,
             usd_pricing: true,
+            cost_per_task_usd: 0.0,
+            completed_tasks: 0,
         }));
         assert_eq!(sb.billing_label(), None, "no budget set → no chip");
         assert!(!sb.billing_low_balance());
@@ -1986,8 +2017,49 @@ mod status_bar_tests {
             subscription: None,
             daily_tokens: 5000,
             usd_pricing: false,
+            cost_per_task_usd: 0.0,
+            completed_tasks: 0,
         }));
         assert_eq!(sb.billing_label(), None, "non-USD provider → no chip");
+    }
+
+    #[test]
+    fn task_cost_label_shows_only_after_first_task() {
+        use crate::client::types::HealthBilling;
+        let base = HealthBilling {
+            daily_spent_usd: 0.0,
+            daily_limit_usd: None,
+            monthly_spent_usd: 0.0,
+            monthly_limit_usd: None,
+            currency: "USD".into(),
+            subscription: None,
+            daily_tokens: 0,
+            usd_pricing: true,
+            cost_per_task_usd: 0.20,
+            completed_tasks: 3,
+        };
+        let mut sb = StatusBar::new();
+
+        // No billing snapshot at all → no chip.
+        assert_eq!(sb.task_cost_label(), None);
+
+        // Tasks completed on a USD provider → compact `$/task` chip.
+        sb.set_billing(Some(base.clone()));
+        assert_eq!(sb.task_cost_label().as_deref(), Some("$/task 0.20"));
+
+        // Zero completed tasks → hidden (the figure would be meaningless).
+        sb.set_billing(Some(HealthBilling {
+            completed_tasks: 0,
+            ..base.clone()
+        }));
+        assert_eq!(sb.task_cost_label(), None);
+
+        // Non-USD provider → hidden even with completed tasks.
+        sb.set_billing(Some(HealthBilling {
+            usd_pricing: false,
+            ..base.clone()
+        }));
+        assert_eq!(sb.task_cost_label(), None);
     }
 
     /// Flatten a fully-configured StatusBar's cells to one string.

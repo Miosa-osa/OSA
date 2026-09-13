@@ -304,6 +304,12 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
     end
   end
 
+  @impl true
+  def handle_cast(:reap_expired, state) do
+    state = do_reap_expired(state)
+    {:noreply, state}
+  end
+
   # Resolve the task a `complete`/`fail` refers to, but ONLY if the caller still
   # holds its lease.
   #
@@ -351,12 +357,6 @@ defmodule OptimalSystemAgent.Agent.TaskQueue do
             {:ok, task}
         end
     end
-  end
-
-  @impl true
-  def handle_cast(:reap_expired, state) do
-    state = do_reap_expired(state)
-    {:noreply, state}
   end
 
   @impl true

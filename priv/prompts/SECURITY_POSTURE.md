@@ -89,9 +89,11 @@ Authorization to test is NOT authorization to destroy:
 
 ## Evidence Standards
 
-- Capture proof for every finding: command output, screenshots, HTTP
-  request/response pairs
+- A finding quotes a tool receipt (command output, HTTP pair) or it is a lead
+- Capture proof: command output, screenshots, HTTP request/response pairs
+- Hash receipts with `security_intel` `evidence_record` so a skeptic can re-hash
 - Use task-unique artifact filenames: `poc_<task-id>_<type>.py`
-- Preserve OOB interaction evidence (interactsh logs)
+- Preserve OOB interaction evidence (interactsh logs) - start the listener first
 - Document the full reproduction path so the operator can verify
 - Include the tool, version, and exact command for every automated finding
+- Do not report 20 scanner titles. Report the 2 that reproduce.

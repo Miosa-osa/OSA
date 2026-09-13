@@ -256,7 +256,13 @@ defmodule OptimalSystemAgent.Permissions.AskFlow do
     Bus.emit(:system_event, Map.delete(payload, :type), source: "permissions.ask_flow")
     :ok
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning(
+        "[permissions] failed to emit permission_required event for #{tool_name}: " <>
+          "#{Exception.message(e)}"
+      )
+
+      :ok
   catch
     :exit, _ -> :ok
   end
@@ -350,6 +356,12 @@ defmodule OptimalSystemAgent.Permissions.AskFlow do
         :ok
     end
   rescue
-    ArgumentError -> :ok
+    e in ArgumentError ->
+      Logger.warning(
+        "[permissions] ensure_table for #{inspect(@approved_calls)} failed: " <>
+          "#{Exception.message(e)}"
+      )
+
+      :ok
   end
 end

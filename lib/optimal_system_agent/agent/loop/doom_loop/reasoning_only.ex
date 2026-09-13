@@ -88,12 +88,17 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.ReasoningOnly do
     errored? = Map.get(state, :turn_errored, false)
     reasoning_only? = tool_calls == []
     truncated? = Map.get(state, :turn_truncated, false) == true
+    # Did THIS generation produce no visible content? The caller sets this from
+    # the same `visible_empty?` it already computes. It is what tells a genuine
+    # empty spin from a conversation — see `suppressed/2`.
+    generation_empty? = Map.get(state, :generation_empty, false) == true
 
-    # Always clear the one-shot flags — both describe THIS generation only.
+    # Always clear the one-shot flags — each describes THIS generation only.
     state =
       state
       |> Map.put(:turn_errored, false)
       |> Map.put(:turn_truncated, false)
+      |> Map.put(:generation_empty, false)
 
     cond do
       # Forward progress outranks everything: a generation that called a tool
@@ -111,17 +116,17 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.ReasoningOnly do
         {:ok, state}
 
       true ->
-        count_streak(errored?, state)
+        count_streak(errored?, generation_empty?, state)
     end
   end
 
-  defp count_streak(errored?, state) do
+  defp count_streak(errored?, generation_empty?, state) do
     streak = Map.get(state, :reasoning_only_streak, 0) + 1
     state = Map.put(state, :reasoning_only_streak, streak)
 
     cond do
       streak < threshold() -> {:ok, state}
-      reason = suppressed(state) -> suppress(reason, streak, state)
+      reason = suppressed(generation_empty?, state) -> suppress(reason, streak, state)
       true -> handle_trip(streak, errored?, state)
     end
   end
@@ -168,7 +173,17 @@ defmodule OptimalSystemAgent.Agent.Loop.DoomLoop.ReasoningOnly do
   # key would suppress every halt. Absent evidence must not be read as evidence
   # of a conversation — that would be the same absence-means-presence mistake
   # this fix exists to correct.
-  defp suppressed(state) do
+  # An EMPTY generation (no visible content, no tool call) is never a
+  # conversation — a conversation is the model TALKING, and this one said
+  # nothing. It is exactly the spin this guard exists for, so neither
+  # `talked_only?` nor `attended?` may excuse it. This is the fourth face of the
+  # same predicate error: here, "attended session" (a real signal that a human
+  # can press Esc) was read as "therefore this silence is fine", which let a
+  # reasoning model that returns empty content every generation nudge-loop
+  # forever in an attended TUI (reported: grok "thinks for a bit then stops").
+  defp suppressed(true, _state), do: nil
+
+  defp suppressed(false, state) do
     messages = Map.get(state, :messages)
 
     cond do

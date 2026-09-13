@@ -60,6 +60,22 @@ this engagement. Targets provided in the conversation are the declared scope.
   drop tables, format, shutdown) or when the environment is local-host without
   Docker isolation
 
+## How the loop runs
+
+Do this even if you skip a playbook:
+
+1. Write the authorized target list. `roe_check` before packets.
+2. Recon until you have a map (hosts, vhosts, JS secrets, OpenAPI). Then stop expanding.
+3. One vuln class at a time. Basics first: IDOR/authz, injection, then the rest.
+4. Empty discovery queue for a class → skip exploit, status "not assessed" (not clean).
+5. Root orchestrates. Children recon / audit / validate / exploit. You do not
+   confirm your own finding - spawn `security_validation`.
+6. Whitebox maps (`whitebox_scan`). Live request confirms. A 500 is a clue.
+7. A finding quotes a tool receipt (output / HTTP pair / `evidence_record`).
+   Confidence 0-10; below 7 is not confirmed; non-remote entry caps at 6.
+8. Same payload three times → `attack_tree_select` or pivot. Blind classes get
+   interactsh running **before** the payload.
+
 ## Engagement Phases
 
 ### Phase 1: Scoping
@@ -109,17 +125,79 @@ duration, concurrency. Deduplicate findings across tools.
    - `wpscan --url <url>` — WordPress-specific
    - `trivy fs /path` — dependency/container scanning
 
-2. **Manual testing (OWASP Top 10)**:
-   - **A03 Injection**: SQLi (`sqlmap -u <url> --batch`), command injection, LDAP injection
-   - **A01 Access Control**: IDOR, privilege escalation, missing auth checks
-   - **A07 Auth Failures**: weak passwords, session management, JWT issues
-   - **A10 SSRF**: internal endpoint access, cloud metadata (169.254.169.254)
-   - **A08 Integrity**: unsigned tokens, JWT alg confusion, deserialization
-   - **A02 Crypto**: weak TLS, hardcoded secrets, weak algorithms
-   - **A05 Misconfig**: default creds, verbose errors, security headers
-   - **A09 Logging**: sensitive data in logs, log injection
-   - **A04 Design**: missing rate limits, no threat model, fail-open
-   - **A06 Components**: known CVEs in dependencies
+2. **Manual testing — work the checklist, basics first.**
+
+   Test the cheap, high-signal classes on every parameter and endpoint BEFORE
+   reaching for exotic bugs: access control (IDOR/auth), injection (SQLi/XSS/
+   command), then the rest. Enumerate every input surface — URL params, path
+   segments, JSON/form bodies, headers (Cookie, Authorization, X-Forwarded-*,
+   Host, Referer), file uploads, WebSocket frames, GraphQL fields — and carry
+   each class across all of them. A class is only "checked" once you have tried
+   it against the relevant surfaces, not once you have read about it.
+
+   **A01 Broken Access Control** (test FIRST — highest hit rate):
+   - IDOR: increment/swap object ids, UUIDs, and filenames across a second
+     account; check reads AND writes
+   - Missing function-level auth: hit admin/privileged endpoints as a low-priv
+     user and unauthenticated
+   - Path traversal / LFI: `../`, encoded `%2e%2e%2f`, null byte, `....//`,
+     absolute paths, `php://filter`
+   - Forced browsing, mass assignment (add `role`/`is_admin`/`id` to a body),
+     CORS trust (`Origin:` reflection with credentials)
+   - Directory/`.git`/backup exposure
+
+   **A03 Injection** (the classic surface):
+   - SQLi: `sqlmap -u <url> --batch --level 3 --risk 2`; error/boolean/time
+     blind; second-order
+   - XSS: reflected, stored, DOM (sinks: `innerHTML`, `document.write`, hash);
+     try `"><svg onload=...>`, template-context breakouts, blind XSS via OOB
+   - Command injection: `; | && $() \`\`` and blind (time/OOB via
+     `interactsh-client`)
+   - SSTI: `${7*7}`, `{{7*7}}`, `<%= 7*7 %>` per engine, then RCE gadgets
+   - NoSQL: `[$ne]`, `[$gt]`, `{"$where":...}`; LDAP `*)(uid=*`; XPath
+     `' or '1'='1`
+   - XXE: external entity, OOB/blind, parameter entities, on any XML/SVG/DOCX
+     upload
+   - Open redirect, CRLF/header injection, host-header injection (password
+     reset poisoning, cache), template/GraphQL injection
+
+   **A07 Authentication Failures**:
+   - Weak/default creds, credential stuffing, username enumeration (timing +
+     message), lockout/rate-limit absence
+   - Session fixation, predictable/non-rotated tokens, logout not invalidating,
+     "remember me" secrets
+   - JWT issues (see step 3); OAuth/SSO flow flaws (redirect_uri, state, PKCE)
+   - MFA bypass, password-reset token weaknesses
+
+   **A04 Insecure Design / Business Logic**:
+   - Workflow abuse: skip steps, replay, negative/overflow quantities,
+     race conditions (parallel requests: coupons, balances, double-spend)
+   - Missing rate limits, fail-open logic, price/quantity tampering
+
+   **A10 SSRF**: internal endpoints, cloud metadata (`169.254.169.254`,
+   `metadata.google.internal`), `file://`/`gopher://`, DNS-rebinding, blind via
+   OOB.
+
+   **A08 Software & Data Integrity**: insecure deserialization (Java/PHP/Python
+   pickle/Ruby), unsigned/forgeable tokens, prototype pollution
+   (`__proto__`), unverified update/CI channels.
+
+   **A02 Cryptographic Failures**: weak TLS/ciphers (`testssl.sh`), hardcoded
+   secrets, weak hashing, predictable tokens, sensitive data in transit/at rest.
+
+   **A05 Security Misconfiguration**: default creds, verbose errors/stack
+   traces, missing security headers, directory listing, exposed actuator/debug
+   endpoints, subdomain takeover (dangling CNAME), permissive CORS.
+
+   **A06 Vulnerable Components**: known CVEs in detected products/deps
+   (`searchsploit`, `nuclei` CVE templates, `trivy`).
+
+   **A09 Logging & Monitoring**: sensitive data in logs, log injection, absence
+   of detection for the attacks above.
+
+   **Protocol/infra layer** (when in scope): HTTP request smuggling
+   (CL.TE/TE.CL), web cache poisoning/deception, WebSocket auth/CSWSH,
+   clickjacking (missing frame-ancestors).
 
 3. **JWT testing** (if JWT tokens found):
    - Decode: `jwt_tool <token>`
@@ -129,6 +207,17 @@ duration, concurrency. Deduplicate findings across tools.
    - Expiry bypass: remove exp claim
 
 4. **CVE mapping**: `searchsploit <product> <version>` or `cvemap`
+
+5. **Whitebox 0-day pass (when you have the source - do this, it is the strongest position):**
+   - Start a `:whitebox` playbook (`security_intel` `playbook_start` playbook_id=`whitebox`)
+   - Discover entry points (routes, request parsers, deserializers)
+   - `whitebox_analyze`: LLM-guided source→sink call-chain tracing.
+     A finding is only real when the judge names the exact source, exact sink, and
+     why sanitization that is actually in the code does not neutralize it
+   - `variant_scan`: seed from a known bug/CVE/patch and hunt similar unpatched sites
+   - Every finding gets a CVSS v3.1 vector, a CWE, and evidence before it is report-grade
+     (`cvss_score`, `report_gate`)
+   - This pass is read-only over source. It never needs a live target.
 
 ### Phase 4: Exploitation
 
@@ -238,12 +327,41 @@ trivy, zaproxy, smbclient, enum4linux, impacket, bloodhound, hashcat, john,
 binwalk, chromium, agent-browser, SecLists, Python (pwntools, paramiko,
 requests, pyjwt, shodan).
 
+## Rules of Engagement (hard gate for live actions)
+
+Load a signed-in-session RoE before any packet to a target:
+
+- `roe_load` with allowed CIDRs/hosts/domains, forbidden action classes, optional time window
+- `roe_check` every `shell_execute` / `pty` against the target
+- Blast radius: read-only → intrusive → credential-access → persistence → destructive
+- Default-forbidden: `:destructive`, `:persistence`
+- Out of scope, forbidden class, or outside the window → **block**, do not "just this once"
+- Whitebox/CI/variant analysis do not need RoE (source you already have)
+
+## CTF mode
+
+Playbook `:ctf`. Goal is recon → understand → flag, then stop. Stay on the
+challenge host. Record the flag as an artifact note. No persistence, no extra
+pivoting.
+
+## CI / continuous-scan mode
+
+Playbook `:ci_scan`. Headless, no live network:
+
+1. Discover entry files in the checkout
+2. Whitebox + static sink scan
+3. `report_gate` strips anything missing CVSS + CWE + evidence
+4. Fail the job on eligible critical/high; publish SARIF
+
+`osa` can run this via `security_intel` action `ci_scan`.
+
 ## Safety Boundaries
 
-- Stay within declared scope — never expand to unrelated third-party assets
+- Stay within declared scope - never expand to unrelated third-party assets
 - Request confirmation before: destructive commands, data exfiltration,
   persistence installation, anything that could disrupt service
 - If running on local-host (no Docker), request confirmation before any
   command that affects the host OS
 - Clean up after engagement: remove web shells, close connections, delete PoCs
 - Do NOT scan targets you don't have permission to test
+- Do NOT install implants, C2, or persistence. Assessment, not occupation.

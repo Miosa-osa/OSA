@@ -223,14 +223,22 @@ defmodule OptimalSystemAgent.Memory.Consolidator do
         :ok
 
       record ->
-        record
-        |> Pattern.changeset(%{
-          occurrences: total,
-          success_rate: min(1.0, weighted),
-          tags: merged_tags,
-          last_seen: now
-        })
-        |> Repo.update()
+        case record
+             |> Pattern.changeset(%{
+               occurrences: total,
+               success_rate: min(1.0, weighted),
+               tags: merged_tags,
+               last_seen: now
+             })
+             |> Repo.update() do
+          {:ok, _} ->
+            :ok
+
+          {:error, changeset} ->
+            Logger.warning(
+              "[Consolidator] merge_two Repo.update failed for #{a.id}: #{inspect(changeset.errors)}"
+            )
+        end
     end
 
     Map.merge(a, %{

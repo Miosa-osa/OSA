@@ -24,6 +24,10 @@ defmodule OptimalSystemAgent.Agent.Loop.WS1PermissionHotfixTest do
 
     on_exit(fn ->
       Application.put_env(:optimal_system_agent, :non_interactive_permission_bypass, prior)
+      # Symmetric cleanup: this module saves deny_always rules for
+      # file_write/file_edit; they persist in the shared permissions file and
+      # would leak into whichever module the seed schedules next.
+      if is_binary(file), do: File.rm(file)
     end)
 
     :ok

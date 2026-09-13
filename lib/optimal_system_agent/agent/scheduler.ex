@@ -963,6 +963,7 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
     Process.send_after(self(), :cron_check, @cron_tick_ms)
     %{state | next_cron_at: DateTime.add(DateTime.utc_now(), @cron_tick_ms, :millisecond)}
   end
+
   # ── Keeping the machine awake for work that fires on its own ──────────
   #
   # `Agent.StayAwake` holds an OS sleep inhibitor for the length of a TURN, which
@@ -1031,5 +1032,4 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
       _ -> false
     end
   end
-
 end

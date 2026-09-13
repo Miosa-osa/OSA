@@ -27,6 +27,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   alias OptimalSystemAgent.Agent.TaskNotifications
   alias OptimalSystemAgent.Agent.Loop
 
+  # Foreground fan-out await ceiling (15 min). A foreground (background:false)
+  # wave blocks the parent's turn until the SLOWEST workstream joins, so an
+  # unbounded (days-scale) backstop would freeze the turn; cap the blocking join
+  # here. Background waves are unaffected — they do not hold the turn.
+  @foreground_await_timeout_ms 900_000
+
   # ── Stage 1: Input validation ──────────────────────────────────────────
 
   @spec validate(map(), UseContext.t()) ::
@@ -189,6 +195,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       # so anything a worker drops here is readable by the coordinator and its
       # siblings.
       task: inject_scratchpad(child_task, parent_id),
+      # Clean roster/label preview from the ORIGINAL task, before the shared-
+      # scratchpad preamble is injected — otherwise the agents panel shows
+      # "[shared scratchpad] You are part of a coordinated team..." (the preamble)
+      # as the row's description instead of the actual work.
+      description: child_task |> to_string() |> String.trim() |> String.slice(0, 80),
       parent_session_id: parent_id,
       role: role || "agent",
       # Non-fatal signal: caller named a specific role/subagent_type but no such
@@ -233,7 +244,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       # Per-call override for the subagent JOIN timeout (D1). Applies to both
       # the single-task and fan-out paths; nil lets Orchestrator fall back to
       # `:subagent_join_timeout_ms` / `@default_subagent_timeout_ms`.
-      timeout_ms: parse_timeout_ms(Map.get(args, "timeout_ms"))
+      timeout_ms: parse_timeout_ms(Map.get(args, "timeout_ms")),
+      # Per-subagent USD spend ceiling. nil = off (unchanged default). When set,
+      # the child Loop aborts its own run once it crosses the cap, so a wide
+      # fan-out cannot burn unbounded spend. Each child is capped independently.
+      max_budget_usd:
+        parse_budget_usd(Map.get(args, "max_budget_usd") || Map.get(args, "maxBudgetUsd")),
+      # Speed/cost tier, normalized by DelegationRouter (nil → :standard). Biases
+      # model tier + provider order toward cheaper/local for :loose long-horizon
+      # work and toward the best model for :immediate.
+      priority: Map.get(args, "priority")
     }
 
     DelegationRouter.resolve(child_task, config)
@@ -404,16 +424,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
         build_config(prompt, role, args, parent_id, parent_depth, Map.get(t, :name))
       end)
 
-    # await_timeout defaults to :infinity in run_parallel so long teammates
-    # aren't killed at 10 min; an optional timeout_ms arg bounds it.
-    parallel_opts =
-      [batch_id: batch_id] ++
-        case parse_timeout_ms(Map.get(args, "timeout_ms")) do
-          nil -> []
-          ms -> [await_timeout: ms]
-        end
+    # An explicit timeout_ms always bounds the wave; the DEFAULT differs by
+    # posture (below).
+    explicit_await =
+      case parse_timeout_ms(Map.get(args, "timeout_ms")) do
+        nil -> []
+        ms -> [await_timeout: ms]
+      end
 
     if fanout_background?(args, configs) do
+      # Background wave: it does NOT hold the parent's turn, so its ceiling is
+      # left as-is — only an explicit timeout_ms bounds it, otherwise
+      # run_parallel keeps its own (days-scale) backstop.
       dispatch_fanout_background(
         batch_id,
         umbrella_task,
@@ -422,10 +444,32 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
         parent_id,
         parent_depth,
         configs,
-        parallel_opts
+        [batch_id: batch_id] ++ explicit_await
       )
     else
-      run_fanout(umbrella_task, tasks, args, parent_id, parent_depth, configs, parallel_opts)
+      # Foreground wave: it blocks the parent INSIDE its tool phase until the
+      # SLOWEST workstream joins. run_parallel's await_timeout default is
+      # @default_subagent_timeout_ms (~3 days), NOT :infinity, so an unbounded
+      # join would freeze the turn — cap it at @foreground_await_timeout_ms
+      # (15 min) when the caller gave no explicit timeout_ms.
+      #
+      # NOTE(turn-hardening): the actual blocking (Task.await) lives inside
+      # Orchestrator.run_parallel, so there is no poll loop here to wrap with a
+      # Cancellation.cancelled? check — only the ceiling is reduced at this layer.
+      foreground_await =
+        if explicit_await == [],
+          do: [await_timeout: @foreground_await_timeout_ms],
+          else: explicit_await
+
+      run_fanout(
+        umbrella_task,
+        tasks,
+        args,
+        parent_id,
+        parent_depth,
+        configs,
+        [batch_id: batch_id] ++ foreground_await
+      )
     end
   end
 
@@ -781,6 +825,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
 
   defp resolve_parent_id(_args, %UseContext{session_id: sid}) when is_binary(sid), do: sid
   defp resolve_parent_id(args, _ctx), do: Map.get(args, "__session_id__", "unknown")
+
+  # Parse a per-subagent USD budget. Accepts a positive number or numeric
+  # string; anything else (including 0 / negative) is "no cap".
+  defp parse_budget_usd(n) when is_number(n) and n > 0, do: n * 1.0
+
+  defp parse_budget_usd(s) when is_binary(s) do
+    case Float.parse(s) do
+      {f, _} when f > 0 -> f
+      _ -> nil
+    end
+  end
+
+  defp parse_budget_usd(_), do: nil
 
   defp parse_timeout_ms(nil), do: nil
   defp parse_timeout_ms(ms) when is_integer(ms) and ms > 0, do: ms

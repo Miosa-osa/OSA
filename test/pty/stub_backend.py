@@ -18,13 +18,46 @@ agent behaviour it wants the real backend, not more code here.
 from __future__ import annotations
 
 import json
+import os
+import pathlib
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# Version reported on /health. The TUI only displays it, so any well-formed
-# string does; keeping it obviously fake makes a stray screenshot unambiguous.
-STUB_VERSION = "0.0.0-pty-stub"
+# Version reported on /health. The TUI compares it against its own
+# COMPILE-baked version and paints a multi-row "Version mismatch" banner on
+# any difference, stealing screen rows from the bands under test. The only
+# value guaranteed to match is therefore the one the binary itself reports:
+# the harness reuses a prebuilt osagent, so the repo VERSION file can be
+# ahead of it right after a bump (observed: binary 1.0.145 vs VERSION
+# 1.0.146). Ask the binary; fall back to the VERSION file, then to the old
+# fake string. Every step is guarded so importing this module can never
+# crash version-agnostic probes.
+def _resolve_stub_version() -> str:
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+
+    binary = os.environ.get(
+        "OSA_PTY_BIN",
+        str(repo_root / "priv" / "rust" / "tui" / "target" / "release" / "osagent"),
+    )
+    try:
+        out = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, timeout=10
+        ).stdout.strip()
+        # "osagent 1.0.145" -> "1.0.145"
+        if out:
+            return out.split()[-1]
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    try:
+        return (repo_root / "VERSION").read_text().strip()
+    except OSError:
+        return "0.0.0-pty-stub"
+
+
+STUB_VERSION = _resolve_stub_version()
 
 _HEALTH = {
     "status": "ok",
@@ -281,6 +314,20 @@ def hold_health() -> None:
 
 def release_health() -> None:
     _HEALTH_GATE.set()
+
+
+# Deliberately never a real release number; used by the stale-daemon test to
+# force the TUI's "Version mismatch" banner on demand.
+STALE_VERSION = "0.0.0-pty-stub"
+
+
+def report_stale_version() -> None:
+    """Make `/health` report a fake version, so the TUI sees a stale daemon."""
+    _HEALTH["version"] = STALE_VERSION
+
+
+def report_real_version() -> None:
+    _HEALTH["version"] = STUB_VERSION
 
 
 def hold_turn() -> None:

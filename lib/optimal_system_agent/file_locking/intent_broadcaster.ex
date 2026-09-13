@@ -99,7 +99,15 @@ defmodule OptimalSystemAgent.FileLocking.IntentBroadcaster do
   """
   @spec subscribe_to_file(agent_id :: String.t(), file_path :: String.t()) :: :ok
   def subscribe_to_file(agent_id, file_path) do
-    Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:file_intent:#{file_path}")
+    case Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:file_intent:#{file_path}") do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "[IntentBroadcaster] #{agent_id} PubSub subscribe to #{file_path} failed: #{inspect(reason)}"
+        )
+    end
 
     # Record subscription in ETS — use a composite key to make unsubscribe precise
     # The bag stores {file_path, agent_id}; duplicates from re-subscription are

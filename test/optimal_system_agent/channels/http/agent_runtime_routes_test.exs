@@ -18,7 +18,25 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.AgentRuntimeRoutesTest do
     Application.put_env(:optimal_system_agent, :agent_runs_dir, dir)
 
     on_exit(fn ->
-      File.rm_rf!(dir)
+      # Delete the per-test dir FIRST and keep deleting until it STAYS gone:
+      # late runtime writers re-resolve runs_dir() and mkdir_p it back, so a
+      # single rm (or an env flip) just relocates or revives the write - the
+      # original ordering raised :eexist mid-traversal (CI 2026-08-26), and a
+      # restore-env-first variant let stragglers fall back to the shared test
+      # home where rehydrate/0 could resurrect them as phantom runs. While the
+      # env still points here, any straggler lands in the dir we are watching,
+      # and the poll below only returns once nothing recreated it (bounded at
+      # ~1s; persistent recreation raises loudly instead of leaking silently).
+      Enum.reduce_while(1..50, :ok, fn attempt, _ ->
+        File.rm_rf(dir)
+        Process.sleep(20)
+
+        cond do
+          not File.exists?(dir) -> {:halt, :ok}
+          attempt == 50 -> raise "agent_runs_dir still being recreated after 1s: #{dir}"
+          true -> {:cont, :ok}
+        end
+      end)
 
       if previous,
         do: Application.put_env(:optimal_system_agent, :agent_runs_dir, previous),

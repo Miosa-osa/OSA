@@ -175,7 +175,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # Tri-mode delegation policy (primitive #34): :disabled | :explicit_only |
     # :proactive. nil defers to `config :optimal_system_agent, :delegation_policy`
     # (default :proactive). Read by ToolFilter + the delegate handler.
-    delegation_policy: nil
+    delegation_policy: nil,
+    # Speed/cost priority for this session (:immediate | :standard | :loose),
+    # inherited from the delegating task's config. Read by LLMClient to select a
+    # provider service_tier (OpenAI flex/priority) for cheaper long-horizon work.
+    priority: :standard
   ]
 
   @cancel_table :osa_cancel_flags
@@ -329,6 +333,31 @@ defmodule OptimalSystemAgent.Agent.Loop do
     ArgumentError -> []
   end
 
+  @doc """
+  Best-effort `{cost_per_task_usd, completed_tasks}` from the most active live
+  session, for the session-agnostic `/health` billing snapshot. OSA is normally
+  a single interactive session, so this reports that session's figure; when
+  several are live it picks the one with the most completed tasks. Returns
+  `{0.0, 0}` when nothing is live (the TUI then hides the $/task chip). Never
+  raises.
+  """
+  @spec latest_live_cost_per_task() :: {float(), non_neg_integer()}
+  def latest_live_cost_per_task do
+    :ets.tab2list(@live_table)
+    |> Enum.map(fn {_sid, snap} -> Map.get(snap, :spend, %{}) end)
+    |> Enum.reject(&(&1 == %{}))
+    |> case do
+      [] ->
+        {0.0, 0}
+
+      spends ->
+        best = Enum.max_by(spends, &Map.get(&1, :completed_tasks, 0))
+        {Map.get(best, :cost_per_task_usd, 0.0) * 1.0, Map.get(best, :completed_tasks, 0)}
+    end
+  rescue
+    _ -> {0.0, 0}
+  end
+
   defp monotonic_seconds_since(then_ms) do
     div(System.monotonic_time(:millisecond) - then_ms, 1000)
   end
@@ -468,20 +497,68 @@ defmodule OptimalSystemAgent.Agent.Loop do
   """
   @spec steer(String.t(), String.t()) :: :ok
   def steer(session_id, text) when is_binary(session_id) and is_binary(text) do
-    for target <- steer_targets(session_id) do
-      Steer.queue(target, text)
+    if stop_intent?(text) do
+      # P0-1: a dominant stop command ("stop", "cancel", "abort", ...) with no
+      # follow-on task directive is a HALT, not a course correction. A steer is
+      # injected as CONTINUE guidance, so queueing it here would re-drive the
+      # very work the user asked to end. Route it to the same cooperative cancel
+      # flag Esc/interrupt sets so the loop stops at its next cancel check, and
+      # do NOT also queue it as a continue-steer.
+      Logger.info("[loop] Steer recognised as stop intent for #{session_id} - cancelling turn")
+      _ = cancel(session_id)
+      :ok
+    else
+      for target <- steer_targets(session_id) do
+        Steer.queue(target, text)
 
-      try do
-        GenServer.cast(via(target), {:steer, text})
-      catch
-        :exit, _ -> :ok
+        try do
+          GenServer.cast(via(target), {:steer, text})
+        catch
+          :exit, _ -> :ok
+        end
       end
-    end
 
-    :ok
+      :ok
+    end
   catch
     :exit, _ -> :ok
   end
+
+  # Stop-intent detection (P0-1). A typed steer is normally injected as CONTINUE
+  # guidance, so a bare "stop" would re-drive the very work the user asked to end.
+  # This recognises a message that is PURELY a halt - a stop verb plus only
+  # filler/intensifiers - and routes it to cancel instead. It stays conservative:
+  # a message that names a real target keeps a content word after filler is
+  # stripped ("stop using markdown", "cancel the last edit"), so it remains a
+  # course-correction steer rather than killing the turn.
+  @stop_verbs MapSet.new(~w(stop halt cancel quit abort enough cease stahp stfu))
+
+  # Filler/intensifier/dismissive words that do not change a stop command's
+  # meaning. Stripped before the all-stop test so "stop doing shit please"
+  # reduces to ["stop"] and halts, while a real target word survives and keeps
+  # the message a steer. "wait" is filler (a bare "wait" must not kill a turn).
+  @stop_filler MapSet.new(
+                 ~w(please just now ok okay pls plz dude man bro yo no nah nope
+                    nvm wait the a an of it its that this these those your you u
+                    i we lol like fucking fuckin fuck shit damn hell bullshit
+                    crap ass doing working going already right here so really
+                    actually all everything anything)
+               )
+
+  @doc false
+  @spec stop_intent?(String.t()) :: boolean()
+  def stop_intent?(text) when is_binary(text) do
+    # Downcase, split on non-letters (drops punctuation like "stop!" / "stop,").
+    content =
+      text
+      |> String.downcase()
+      |> String.split(~r/[^a-z]+/u, trim: true)
+      |> Enum.reject(&MapSet.member?(@stop_filler, &1))
+
+    content != [] and Enum.all?(content, &MapSet.member?(@stop_verbs, &1))
+  end
+
+  def stop_intent?(_), do: false
 
   @doc """
   The session itself plus every `:running` descendant subagent of it.
@@ -1197,6 +1274,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
           default_permission_mode(),
       delegation_depth: Keyword.get(opts, :delegation_depth, 0),
       delegation_policy: Keyword.get(opts, :delegation_policy),
+      priority: Keyword.get(opts, :priority) || :standard,
       parent_session_id: Keyword.get(opts, :parent_session_id),
       allowed_tools: Keyword.get(opts, :allowed_tools),
       blocked_tools: Keyword.get(opts, :blocked_tools, []),
@@ -1380,6 +1458,20 @@ defmodule OptimalSystemAgent.Agent.Loop do
     end
   end
 
+  # Accept both an atom (CLI path) and a string (HTTP JSON path) provider, and
+  # only return a provider that is actually registered.
+  defp normalize_provider(provider) when is_atom(provider) and not is_nil(provider) do
+    if provider in OptimalSystemAgent.Providers.Registry.list_providers(), do: provider, else: nil
+  end
+
+  defp normalize_provider(provider) when is_binary(provider) do
+    Enum.find(OptimalSystemAgent.Providers.Registry.list_providers(), fn a ->
+      Atom.to_string(a) == provider
+    end)
+  end
+
+  defp normalize_provider(_), do: nil
+
   @impl true
   def handle_call({:process, message}, from, state) do
     handle_call({:process, message, []}, from, state)
@@ -1484,24 +1576,17 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
         :ets.insert(:osa_session_provider_overrides, {state.session_id, provider_atom, model})
 
-        {:reply, {:ok, %{provider: provider_atom, model: model, context_window: ecw}},
-         %{state | provider: provider_atom, model: model, effective_context_window: ecw}}
+        {new_state, info} =
+          OptimalSystemAgent.Agent.Loop.ModelSwap.apply(state, provider_atom, model, ecw)
+
+        {:reply, {:ok, info}, new_state}
     end
   end
 
-  # Accept both an atom (CLI path) and a string (HTTP JSON path) provider, and
-  # only return a provider that is actually registered.
-  defp normalize_provider(provider) when is_atom(provider) and not is_nil(provider) do
-    if provider in OptimalSystemAgent.Providers.Registry.list_providers(), do: provider, else: nil
+  def handle_call(:context_budget, _from, state) do
+    budget = OptimalSystemAgent.Agent.Context.token_budget(state)
+    {:reply, {:ok, budget}, state}
   end
-
-  defp normalize_provider(provider) when is_binary(provider) do
-    Enum.find(OptimalSystemAgent.Providers.Registry.list_providers(), fn a ->
-      Atom.to_string(a) == provider
-    end)
-  end
-
-  defp normalize_provider(_), do: nil
 
   # Update a live session's working_dir (e.g. a later turn sent from a different
   # folder). Publishes into the process dictionary too so any immediate cwd
@@ -1612,47 +1697,6 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
     {:reply, {:ok, stats},
      republish_context(%{state | messages: compacted}, compacted != messages)}
-  end
-
-  # After a MANUAL compaction, make the meter describe the conversation that now
-  # exists.
-  #
-  # `last_input_tokens` is written in exactly one other place
-  # (`Accounting.maybe_put_last_input/2`) and only when a provider reported a
-  # positive input count, so after a fold it still holds the PRE-compaction
-  # prompt size. `Telemetry.emit_context_pressure/1` prefers that field over any
-  # local estimate, which is why the status bar and the low-context banner both
-  # went on describing a conversation that had just been replaced:
-  #
-  #     ✓ Compacted ~135.4k → ~6.7k tokens (976 messages folded) · 1m 16s
-  #     …
-  #     Context low (6% remaining) · Run /compact to compact & continue
-  #     ⣿⣿⣿⣿⣿⣿⣿░ 88% ctx
-  #
-  # Both loop-driven paths already do exactly this for exactly this reason —
-  # `TurnPipeline.compact_and_refresh_tokens/1` at the turn boundary and
-  # `ReactLoop.refresh_tokens_after_fold/2` mid-turn. These two GenServer
-  # handlers are `/compact`, the form people actually type, and neither was
-  # covered. Re-emitting the pressure event is the other half: without it the
-  # refreshed figure would sit in state until the next turn boundary.
-  #
-  # Skipped when the fold changed nothing, so a declined compaction cannot
-  # replace a provider-reported count with a local estimate.
-  @spec republish_context(map(), boolean()) :: map()
-  defp republish_context(state, false), do: state
-
-  defp republish_context(state, true) do
-    state =
-      Map.put(
-        state,
-        :last_input_tokens,
-        OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
-      )
-
-    Telemetry.emit_context_pressure(state)
-    state
-  rescue
-    _ -> state
   end
 
   def handle_call(:enter_plan_mode, _from, state) do
@@ -1767,6 +1811,47 @@ defmodule OptimalSystemAgent.Agent.Loop do
       end
 
     {:reply, result, state}
+  end
+
+  # After a MANUAL compaction, make the meter describe the conversation that now
+  # exists.
+  #
+  # `last_input_tokens` is written in exactly one other place
+  # (`Accounting.maybe_put_last_input/2`) and only when a provider reported a
+  # positive input count, so after a fold it still holds the PRE-compaction
+  # prompt size. `Telemetry.emit_context_pressure/1` prefers that field over any
+  # local estimate, which is why the status bar and the low-context banner both
+  # went on describing a conversation that had just been replaced:
+  #
+  #     ✓ Compacted ~135.4k → ~6.7k tokens (976 messages folded) · 1m 16s
+  #     …
+  #     Context low (6% remaining) · Run /compact to compact & continue
+  #     ⣿⣿⣿⣿⣿⣿⣿░ 88% ctx
+  #
+  # Both loop-driven paths already do exactly this for exactly this reason —
+  # `TurnPipeline.compact_and_refresh_tokens/1` at the turn boundary and
+  # `ReactLoop.refresh_tokens_after_fold/2` mid-turn. These two GenServer
+  # handlers are `/compact`, the form people actually type, and neither was
+  # covered. Re-emitting the pressure event is the other half: without it the
+  # refreshed figure would sit in state until the next turn boundary.
+  #
+  # Skipped when the fold changed nothing, so a declined compaction cannot
+  # replace a provider-reported count with a local estimate.
+  @spec republish_context(map(), boolean()) :: map()
+  defp republish_context(state, false), do: state
+
+  defp republish_context(state, true) do
+    state =
+      Map.put(
+        state,
+        :last_input_tokens,
+        OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
+      )
+
+    Telemetry.emit_context_pressure(state)
+    state
+  rescue
+    _ -> state
   end
 
   # Mid-session toggles must keep the role allowlist. Rebuilding from
@@ -1923,6 +2008,40 @@ defmodule OptimalSystemAgent.Agent.Loop do
     end
   end
 
+  # A poke that lands on a non-idle loop. The NOTIFICATION is not lost — this
+  # clause drops the announcement, not the queue entry, and `drain/1` is the
+  # only thing that consumes one. What used to be missing was anybody asking
+  # again: the turn in flight would end, go idle, and never look. It looks now,
+  # from the tail of `run_and_reply/1` and from the plan-mode return, via
+  # `TaskNotifications.settle/1`.
+  #
+  # So this stays a no-op deliberately rather than re-queuing or retrying: two
+  # mechanisms racing to start the same synthetic turn is a worse failure than
+  # the one being fixed, and the turn boundary is the point where reading the
+  # result is actually useful.
+  def handle_cast(:poke, state) do
+    Logger.debug(
+      "[loop] poke for #{state.session_id} arrived mid-turn (status #{inspect(state.status)}) — " <>
+        "deferred to the turn boundary, not dropped"
+    )
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_cast({:rewind_conversation, messages, meta}, state) do
+    new_state = %{
+      state
+      | messages: messages,
+        iteration: Map.get(meta, :iteration, state.iteration),
+        plan_mode: Map.get(meta, :plan_mode, state.plan_mode),
+        turn_count: Map.get(meta, :turn_count, state.turn_count)
+    }
+
+    Checkpoint.checkpoint_state(new_state)
+    {:noreply, new_state}
+  end
+
   defp mark_inbox_receipt(messages, receipt) do
     Enum.map(messages, &Map.put(&1, :durable_inbox_ids, receipt))
   end
@@ -1961,40 +2080,6 @@ defmodule OptimalSystemAgent.Agent.Loop do
         Logger.error("[loop] durable inbox delivery failed: #{inspect(reason)}")
         error
     end
-  end
-
-  # A poke that lands on a non-idle loop. The NOTIFICATION is not lost — this
-  # clause drops the announcement, not the queue entry, and `drain/1` is the
-  # only thing that consumes one. What used to be missing was anybody asking
-  # again: the turn in flight would end, go idle, and never look. It looks now,
-  # from the tail of `run_and_reply/1` and from the plan-mode return, via
-  # `TaskNotifications.settle/1`.
-  #
-  # So this stays a no-op deliberately rather than re-queuing or retrying: two
-  # mechanisms racing to start the same synthetic turn is a worse failure than
-  # the one being fixed, and the turn boundary is the point where reading the
-  # result is actually useful.
-  def handle_cast(:poke, state) do
-    Logger.debug(
-      "[loop] poke for #{state.session_id} arrived mid-turn (status #{inspect(state.status)}) — " <>
-        "deferred to the turn boundary, not dropped"
-    )
-
-    {:noreply, state}
-  end
-
-  @impl true
-  def handle_cast({:rewind_conversation, messages, meta}, state) do
-    new_state = %{
-      state
-      | messages: messages,
-        iteration: Map.get(meta, :iteration, state.iteration),
-        plan_mode: Map.get(meta, :plan_mode, state.plan_mode),
-        turn_count: Map.get(meta, :turn_count, state.turn_count)
-    }
-
-    Checkpoint.checkpoint_state(new_state)
-    {:noreply, new_state}
   end
 
   # Termination is split by two independent questions, not by exit reason alone:
@@ -2331,6 +2416,18 @@ defmodule OptimalSystemAgent.Agent.Loop do
     }
   end
 
+  # One-line, on-screen rendering of a crashed turn: the exception's type and
+  # message, collapsed to a single line and truncated so it fits the pane. This
+  # is what the user sees when ReactLoop raises, so it must name the cause
+  # (e.g. an image-encoding error on a provider) rather than hide it.
+  @crash_detail_limit 500
+  defp crash_detail(e) do
+    "#{inspect(e.__struct__)}: #{Exception.message(e)}"
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
+    |> String.slice(0, @crash_detail_limit)
+  end
+
   defp run_and_reply(state) do
     Logger.info("[loop] Entering ReactLoop for session #{state.session_id}")
 
@@ -2369,8 +2466,13 @@ defmodule OptimalSystemAgent.Agent.Loop do
             "[loop] CRASH in ReactLoop: #{Exception.message(e)}\n#{Exception.format_stacktrace(__STACKTRACE__)}"
           )
 
+          # Surface the real cause instead of "check the logs". A user in the TUI
+          # has no access to the server logs, so a bare "an error occurred" left
+          # them (and us) blind - the exception type + message is the single most
+          # useful piece of signal and belongs on screen. Truncated so a giant
+          # message can't flood the pane.
           TerminalSource.halt(
-            "I hit an error processing that request. Check the logs for details.",
+            "I hit an error processing that request: #{crash_detail(e)}",
             Accounting.adopt_partial(state),
             :error
           )
