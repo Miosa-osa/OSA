@@ -52,8 +52,6 @@ defmodule OptimalSystemAgent.Agent.SecurityContext do
 
   @security_skills ~w(penetration-testing security-audit)
 
-  @security_roles ~w(pentester recon-specialist exploit-developer security-auditor)
-
   @doc """
   Check whether a security task is currently active.
 
@@ -116,7 +114,9 @@ defmodule OptimalSystemAgent.Agent.SecurityContext do
         backend not in [OptimalSystemAgent.Sandbox.Host, OptimalSystemAgent.Sandbox.Docker]
 
       sandbox_context = build_sandbox_context(backend_name, is_cloud)
-      posture = security_posture_block(state)
+      # posture is computed for its side effect (log) and future re-inclusion;
+      # the host branch intentionally omits it.
+      _posture = security_posture_block(state)
 
       # The sandbox environment section is only meaningful when not on host
       if is_cloud or backend == OptimalSystemAgent.Sandbox.Docker do
@@ -398,7 +398,7 @@ defmodule OptimalSystemAgent.Agent.SecurityContext do
     """
   end
 
-  defp build_host_context(backend_name) do
+  defp build_host_context(_backend_name) do
     """
     <scan_methodology>
     When running security scans:
