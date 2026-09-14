@@ -89,7 +89,7 @@ defmodule OptimalSystemAgent.Providers.FallbackCostGateTest do
 
       ref =
         OptimalSystemAgent.Events.Bus.register_handler(:system_event, fn payload ->
-          send(test_pid, {:bus, Map.get(payload, :data)})
+          send(test_pid, {:bus, payload})
         end)
 
       on_exit(fn -> OptimalSystemAgent.Events.Bus.unregister_handler(:system_event, ref) end)
@@ -99,7 +99,13 @@ defmodule OptimalSystemAgent.Providers.FallbackCostGateTest do
       # this test is about.
       :persistent_term.erase({FallbackChain, :warned, {:paid_blocked, :ollama}})
 
-      FallbackChain.cost_gated_chain(@builtin -- [:ollama], :ollama)
+      # Events emitted by an earlier test may still be queued when this
+      # subscription is registered. Emission seq is allocated synchronously
+      # by Bus.emit/3, unlike asynchronous handler delivery. Bound this call's
+      # emissions so a late configured/allowed warning cannot satisfy it.
+      before_seq = OptimalSystemAgent.Events.Event.next_seq()
+      assert FallbackChain.cost_gated_chain(@builtin -- [:ollama], :ollama) == []
+      after_seq = OptimalSystemAgent.Events.Event.next_seq()
 
       # `Bus.emit/3` dispatches to handlers via `Task.Supervisor.start_child` —
       # genuinely async, not a synchronous call — so delivery time depends on
@@ -109,7 +115,10 @@ defmodule OptimalSystemAgent.Providers.FallbackCostGateTest do
       # load with the message already in flight; 10s is still a hard ceiling
       # (a real regression that stops emitting still fails, just not on a
       # scheduler hiccup) while giving a loaded Task.Supervisor room to drain.
-      assert_receive {:bus, %{event: :provider_cost_warning, message: message}}, 10_000
+      assert_receive {:bus, %{seq: seq, data: %{event: :provider_cost_warning, message: message}}}
+                     when seq > before_seq and seq < after_seq,
+                     10_000
+
       assert message =~ "fallback_allow_paid"
     end
   end

@@ -100,23 +100,11 @@ jobs:
       - name: Compile
         run: mix compile
 
-      # ADVISORY, not blocking — and deliberately so, for now.
-      #
-      # The tree does not currently pass either of these: there are existing
-      # compiler warnings, and `mix format --check-formatted` exits 1. Landing
-      # them as blocking would make this workflow red on its first run, and a
-      # gate that is always red is a gate everyone learns to ignore — which is
-      # worse than no gate, because it looks like coverage.
-      #
-      # They run and are visible in the log. Promote each to blocking (drop
-      # `continue-on-error`, and add `--warnings-as-errors` to the compile
-      # above) in the same change that cleans up the backlog it is guarding.
-      - name: Compiler warnings (advisory)
-        continue-on-error: true
+      # The warning and formatting backlog is resolved; enforce both on PRs.
+      - name: Compiler warnings
         run: mix compile --force --warnings-as-errors
 
-      - name: Formatting (advisory)
-        continue-on-error: true
+      - name: Formatting
         run: mix format --check-formatted
 
       # A unique port, for the same reason every local run needs one: the

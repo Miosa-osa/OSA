@@ -884,6 +884,49 @@ Authorization is explicit and scoped: OSA operates only within the target and
 mandate you give it, and the capability is meant for work you are permitted to
 perform.
 
+### Cyber defense and isolated exercises
+
+The 1.0.200 source tree adds a `cyber_defense` tool and twelve defense skills:
+attack simulation, detection engineering, incident response, threat hunting,
+log analysis, network defense, email security, endpoint hardening,
+vulnerability management, sandbox triage, SIEM operations, and threat modeling.
+The earlier red-team/OSINT library remains bundled alongside them. The
+`elixir-otp` skill also ships with executable syntax examples and a verifier.
+
+Ask OSA to “run the bundled defense exercises and verify the fixes.” It can
+find `cyber_defense` through `tool_search`, list scenarios with
+`{"action":"scenarios"}`, then run:
+
+```json
+{"action":"run","scenario":"all","remediation":"apply","timeout_seconds":30}
+```
+
+You need Docker running and the lab image installed first:
+
+```bash
+docker pull python:3.12-slim
+```
+
+The three synthetic targets demonstrate SQL injection, path traversal, and
+login rate limiting. Each exercise measures the vulnerable baseline, applies
+a lab control, retests the attack, and checks that benign requests still work.
+Results include detection counts, false positives, remaining gaps, raw JSON
+evidence with a SHA-256 hash, and container cleanup status. Use
+`"remediation":"none"` or `"ineffective"` to verify that missing or ineffective
+fixes are reported as unverified.
+
+Exercises run in disposable, non-root Docker containers with no network,
+host mounts, or published ports, and with resource limits. The tool never
+falls back to running the target on the host. These bundled examples do not
+patch production systems, validate a real SIEM deployment, or provide a
+malware-detonation VM. Skills explain the separate prerequisites for those
+workflows; bounded local JSONL log and static email-header helpers are included.
+
+See the [defense workflow and scope](docs/security/completion-scope.md),
+[research sources and prerequisites](docs/security/defense-sources.md), and
+[completion audit](docs/security/completion-audit.md) for details. Repository
+versioning does not imply that this change has been published or deployed.
+
 ### Identity and Memory
 
 **Soul system:** `IDENTITY.md`, `USER.md`, and `SOUL.md` are loaded at boot and

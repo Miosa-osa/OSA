@@ -6,8 +6,7 @@ defmodule OptimalSystemAgent.Tools.PromptAssemblerNativeDedupTest do
   entry per tool carrying that tool's `name`, `description/0`, and
   `parameters/0`. `Soul.ToolsSection` then rendered the SAME tools a second
   time as prose into `{{TOOL_DEFINITIONS}}`, inside the cached system prompt —
-  each tool's `prompt/1` body (which for every shipped tool is exactly its
-  `description/0`) plus a `Parameters:` line that is `parameters/0` re-encoded.
+  each tool's `prompt/1` body (often its `description/0`) plus a `Parameters:` line that is `parameters/0` re-encoded.
 
   Measured on the live registry at the time this was written: 36 of 37 active
   tools had their description reproduced byte-for-byte, 36,294 bytes of it,
@@ -30,7 +29,7 @@ defmodule OptimalSystemAgent.Tools.PromptAssemblerNativeDedupTest do
 
   # ── Fixtures: three shapes of tool ──────────────────────────────────────
 
-  # The shape EVERY shipped tool has today: prompt/1 renders exactly
+  # A common tool shape: prompt/1 renders exactly
   # description/0, so the whole prose block is a duplicate.
   defmodule EchoTool do
     def name, do: "echo_tool"
@@ -78,6 +77,18 @@ defmodule OptimalSystemAgent.Tools.PromptAssemblerNativeDedupTest do
     def always_load?, do: true
   end
 
+  # Desktop-style tool: operating instructions do not repeat the short schema summary.
+  defmodule DistinctPromptTool do
+    def name, do: "distinct_prompt_tool"
+    def aliases, do: []
+    def search_hint, do: "distinct"
+    def description, do: "A short native summary."
+    def prompt(_opts), do: "Observe the screen before interacting. Verify the result afterward."
+    def parameters, do: %{"type" => "object", "properties" => %{}}
+    def should_defer?, do: false
+    def always_load?, do: true
+  end
+
   @mods [EchoTool, RicherTool, OnlyProseTool]
 
   defp ctx, do: UseContext.new(%{}, tools: @mods, agents: [])
@@ -120,6 +131,23 @@ defmodule OptimalSystemAgent.Tools.PromptAssemblerNativeDedupTest do
   # ── 2. Nothing that exists ONLY in the prose is lost ────────────────────
 
   describe "information preservation" do
+    test "preserves instructions that do not contain the native description" do
+      mods = [DistinctPromptTool]
+      context = UseContext.new(%{}, tools: mods, agents: [])
+      {full, _} = PromptAssembler.assemble(mods, context, [])
+
+      {native, _} =
+        PromptAssembler.assemble(mods, context,
+          native_schema_names: MapSet.new([DistinctPromptTool.name()])
+        )
+
+      refute full =~ DistinctPromptTool.description()
+      assert full =~ DistinctPromptTool.prompt([])
+      assert native =~ DistinctPromptTool.prompt([])
+      assert native =~ "## distinct_prompt_tool"
+      refute native =~ "Parameters: "
+    end
+
     test "keeps every section of prompt/1 that the description does not cover" do
       natives = MapSet.new(["echo_tool", "richer_tool"])
       out = assemble(native_schema_names: natives)
@@ -336,7 +364,17 @@ defmodule OptimalSystemAgent.Tools.PromptAssemblerNativeDedupTest do
         desc = mod.description()
         params_line = "Parameters: " <> Jason.encode!(mod.parameters())
 
-        assert full =~ desc, "precondition: the old prose carried #{mod.name()}'s description"
+        # Some tools (including computer_use) have operating instructions that
+        # differ entirely from their schema description. Preserve those bytes.
+        if full =~ desc do
+          refute native =~ desc
+        else
+          body = mod.prompt(ctx: live_ctx, tools: available, agents: live_ctx.agents)
+          assert String.trim(body) != ""
+          assert full =~ String.trim(body)
+          assert native =~ String.trim(body)
+        end
+
         assert full =~ params_line
 
         refute native =~ desc,

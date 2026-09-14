@@ -183,3 +183,19 @@ explicitly disabled it. Runtime configuration now preserves test ownership;
 production environment/marker enablement is unchanged. RuntimePathsTest guards
 the startup invariant. Failed runs caused by this leak are not reported as
 passes.
+
+## Final review follow-up
+
+The first completed full run after the startup fix reported 11,436 tests and
+2 failures. One live-registry assertion assumed every tool prompt repeated its
+schema description, which the desktop tool does not. The test now verifies
+preservation of distinct operating instructions, with a deterministic fixture
+that runs on headless CI too. A fallback-warning test accepted an older queued
+bus event; it now matches the emission sequence of the call being tested.
+Both suites passed together (25 tests) after correction. These are test repairs,
+not changes to model routing or desktop behavior.
+
+PR CI passed on commit db2961db, including Rust, Windows compilation, the full
+Elixir gate, real Docker exercises, and the helper checks. Warning-free compile
+and formatting also passed; this follow-up promotes both checks from advisory
+to required. The PR records validation against the final revision separately.
