@@ -151,6 +151,22 @@ jobs:
         env:
           OSA_HTTP_PORT: "19087"
 
+      - name: Verify defense helpers and skill examples
+        run: |
+          python3 test/security/defense_skill_helpers_test.py
+          python3 test/skill_reference_preservation_test.py
+          python3 test/elixir_skill_verifier_test.py
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          ERL_FLAGS: "+S 2:2"
+
+      - name: Verify isolated cyber-defense lab
+        run: |
+          docker pull python:3.12-slim
+          mix test test/security/defense_lab_integration_test.exs --include integration
+        env:
+          OSA_HTTP_PORT: "19088"
+
       # Why this exists: eight consecutive red runs went undiagnosed, and by
       # the time anyone looked the raw step logs were no longer retrievable in
       # full through the API — the failing test names survived only as run

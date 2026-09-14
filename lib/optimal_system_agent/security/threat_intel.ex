@@ -73,9 +73,10 @@ defmodule OptimalSystemAgent.Security.ThreatIntel do
     case cve && lookup(cve) do
       {:ok, entry} ->
         ransomware_bonus =
-          case entry["known_ransomware_campaign_use"] || entry["KnownRansomwareCampaignUse"] do
+          case entry["knownRansomwareCampaignUse"] || entry["known_ransomware_campaign_use"] ||
+                 entry["KnownRansomwareCampaignUse"] do
             nil -> 0.0
-            val when is_binary(val) -> String.upcase(val) |> ransomware_score()
+            val when is_binary(val) -> String.downcase(String.trim(val)) |> ransomware_score()
             _ -> 0.0
           end
 
@@ -160,9 +161,10 @@ defmodule OptimalSystemAgent.Security.ThreatIntel do
 
     # KEV bonus: 1.5 base, up to 2.5 if ransomware
     kev_bonus =
-      case epss_f[:ransomware_bonus] do
-        rb when is_number(rb) and rb > 0 -> 2.5
-        _ -> 1.5
+      cond do
+        epss_f[:kev] != true -> 0.0
+        number(epss_f[:ransomware_bonus]) > 0 -> 2.5
+        true -> 1.5
       end
 
     # EPSS weighted: now uses *3.0 for higher impact
@@ -247,8 +249,8 @@ defmodule OptimalSystemAgent.Security.ThreatIntel do
   defp number(n) when is_number(n), do: n * 1.0
   defp number(_), do: 0.0
 
-  defp ransomware_score(nil), do: 0.0
   defp ransomware_score("known"), do: 1.0
+  defp ransomware_score(_), do: 0.0
 
   @doc "Calculate the recency bonus for a KEV entry based on its date_added."
   @spec recency_bonus(map()) :: float()

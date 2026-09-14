@@ -4,15 +4,11 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.PtyTest do
 
   Spawns real PTYs via erlexec — tagged `:unix` to skip on Windows.
 
-  Strategy:
-    - `use ExUnit.Case, async: false` — tests run sequentially so the
-      globally-named FrameRouter and PtyExecutor can be started once per
-      test and torn down cleanly.
-    - Each `setup` block starts a FrameRouter (named) and PtyExecutor (named),
-      registers the test process as the FrameRouter's host_client, then
-      tears everything down in `on_exit`.
-    - Outbound frames arrive as `{:send_frame, frame}` messages to the test
-      process — no mock library needed.
+  The application-owned PTY and FrameRouter children are suspended through their
+  supervisor once for this synchronous module, then restored after all tests.
+  Each test uses ExUnit-owned real processes with the usual registered names.
+  Outbound frames arrive as `{:send_frame, frame}` messages. Shell I/O and exit
+  behavior are exercised through erlexec without mocks.
   """
 
   use ExUnit.Case, async: false
@@ -24,31 +20,46 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.PtyTest do
 
   # ── Setup ────────────────────────────────────────────────────────────────────
 
-  setup do
-    # Stop any leftover named singletons synchronously before starting new ones.
-    # GenServer.stop/3 blocks until the process exits (or timeout), so the next
-    # start_link can safely reuse the same registered name.
-    for mod <- [PtyExecutor, FrameRouter] do
-      case Process.whereis(mod) do
-        nil ->
-          :ok
+  setup_all do
+    supervisor = Process.whereis(OptimalSystemAgent.OpenComputers.Supervisor)
 
-        pid ->
-          try do
-            GenServer.stop(pid, :normal, 2_000)
-          catch
-            :exit, _ -> :ok
+    if is_pid(supervisor) do
+      children = Supervisor.which_children(supervisor)
+
+      suspended =
+        Enum.filter([PtyExecutor, FrameRouter], fn module ->
+          case List.keyfind(children, module, 0) do
+            {^module, pid, _, _} when is_pid(pid) -> true
+            _ -> false
           end
+        end)
+
+      # Explicit supervisor termination leaves the child spec available, but
+      # does not trigger its permanent restart policy or consume restart budget.
+      # Register restoration first so a partial setup failure is also repaired.
+      on_exit(fn ->
+        for module <- Enum.reverse(suspended) do
+          case Supervisor.restart_child(supervisor, module) do
+            {:ok, pid} -> assert is_pid(pid)
+            {:ok, pid, _info} -> assert is_pid(pid)
+            {:error, :running} -> :ok
+            other -> flunk("failed to restore #{inspect(module)}: #{inspect(other)}")
+          end
+        end
+      end)
+
+      for module <- suspended do
+        assert :ok = Supervisor.terminate_child(supervisor, module)
       end
     end
 
-    {:ok, router_pid} = FrameRouter.start_link()
-    {:ok, pty_pid} = PtyExecutor.start_link()
+    :ok
+  end
 
-    # Register the test process as the host_client so outbound frames arrive
-    # as {:send_frame, frame} messages.
+  setup do
+    router_pid = start_supervised!(FrameRouter)
+    pty_pid = start_supervised!(PtyExecutor)
     :ok = FrameRouter.register_host_client(self())
-
     {:ok, pty_pid: pty_pid, router_pid: router_pid}
   end
 

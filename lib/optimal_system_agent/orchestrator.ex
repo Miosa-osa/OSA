@@ -10,7 +10,6 @@ defmodule OptimalSystemAgent.Orchestrator do
   They get their own context window, model selection, and tool access.
   """
   require Logger
-  import Bitwise, only: [bsl: 2]
 
   alias OptimalSystemAgent.Agent.Loop
   alias OptimalSystemAgent.Agent.Tier
@@ -64,21 +63,6 @@ defmodule OptimalSystemAgent.Orchestrator do
   # same window is reused as the post-deadline grace before anything is reaped.
   @join_grace_ms 60_000
 
-  @doc """
-  Run a subagent to completion and return its result.
-
-  Config map keys:
-    - :task (required) — the task description sent to the subagent
-    - :parent_session_id (required) — routes events to parent's SSE stream
-    - :role — display name (e.g., "architect", "backend")
-    - :tier — :elite | :specialist | :utility (default :specialist)
-    - :model — explicit model override (otherwise resolved from tier)
-    - :provider — provider override (otherwise uses app default)
-    - :max_iterations — override tier default
-    - :system_prompt — override from AGENT.md
-    - :tools_allowed — allowlist from AGENT.md (nil = all)
-    - :tools_blocked — denylist from AGENT.md
-  """
   alias OptimalSystemAgent.Team
 
   # Tool inventory a read-only panel spawn is allowed to carry, mirroring
@@ -233,6 +217,21 @@ defmodule OptimalSystemAgent.Orchestrator do
     all_results
   end
 
+  @doc """
+  Run a subagent to completion and return its result.
+
+  Config map keys:
+    - :task (required) — the task description sent to the subagent
+    - :parent_session_id (required) — routes events to parent's SSE stream
+    - :role — display name (e.g., "architect", "backend")
+    - :tier — :elite | :specialist | :utility (default :specialist)
+    - :model — explicit model override (otherwise resolved from tier)
+    - :provider — provider override (otherwise uses app default)
+    - :max_iterations — override tier default
+    - :system_prompt — override from AGENT.md
+    - :tools_allowed — allowlist from AGENT.md (nil = all)
+    - :tools_blocked — denylist from AGENT.md
+  """
   @spec run_subagent(map()) :: {:ok, String.t()} | {:error, term()}
   def run_subagent(%{routing_error: reason}), do: {:error, {:no_capable_model, reason}}
 
@@ -1032,18 +1031,16 @@ defmodule OptimalSystemAgent.Orchestrator do
     end
   end
 
-  @doc """
-  Completion event for a subagent that never STARTED (the `Loop` child failed
-  to spawn), so no usage was ever observed.
-
-  Deliberately carries NO `:tool_uses` / `:tokens_used` keys. Those used to be
-  sent as literal `0`s, and zero is a real wire value: the TUI decodes them as
-  `Some(0)` and applies them, wiping the counters it had already accumulated for
-  that agent. The TUI half distinguishes absent from zero, so ABSENCE is how
-  "no measurement" is expressed — never a zero.
-
-  Public + `@doc false` so the omission is pinned by a test.
-  """
+  # Completion event for a subagent that never STARTED (the `Loop` child failed
+  # to spawn), so no usage was ever observed.
+  #
+  # Deliberately carries NO `:tool_uses` / `:tokens_used` keys. Those used to be
+  # sent as literal `0`s, and zero is a real wire value: the TUI decodes them as
+  # `Some(0)` and applies them, wiping the counters it had already accumulated for
+  # that agent. The TUI half distinguishes absent from zero, so ABSENCE is how
+  # "no measurement" is expressed — never a zero.
+  #
+  # Public + `@doc false` so the omission is pinned by a test.
   @doc false
   @spec start_failure_event(String.t(), term()) :: map()
   def start_failure_event(subagent_id, reason) do
@@ -1944,7 +1941,7 @@ defmodule OptimalSystemAgent.Orchestrator do
          role,
          _max_iter,
          worktree_info,
-         opts \\ []
+         opts
        ) do
     display_name = Keyword.get(opts, :display_name) || role
     batch_id = Keyword.get(opts, :batch_id)
@@ -2749,12 +2746,6 @@ defmodule OptimalSystemAgent.Orchestrator do
   # context rather than a guess. Read-only and best-effort: a missing sidecar
   # returns 0.0 and the note is simply omitted.
   @doc """
-  USD spend of a single completed run, read from its durable spend sidecar.
-
-  Returns `0.0` when the run has no recorded spend (free/local provider, or a
-  sidecar that was never written).
-  """
-  @doc """
   Answer text a background completion carries into the parent channel (the Bus
   `:background_agent_completed` event + the CLI inline print).
 
@@ -2771,6 +2762,12 @@ defmodule OptimalSystemAgent.Orchestrator do
 
   def background_result_text(response), do: to_string(response)
 
+  @doc """
+  USD spend of a single completed run, read from its durable spend sidecar.
+
+  Returns `0.0` when the run has no recorded spend (free/local provider, or a
+  sidecar that was never written).
+  """
   @spec run_cost_usd(String.t()) :: float()
   def run_cost_usd(agent_id) when is_binary(agent_id) do
     case OptimalSystemAgent.Agent.SessionPersistence.load_spend(agent_id) do
@@ -2868,14 +2865,12 @@ defmodule OptimalSystemAgent.Orchestrator do
     }
   end
 
-  @doc """
-  Structured result for a subagent that did NOT finish its task.
-
-  The durable status is derived from the reason via `terminal_status/1`: a
-  deliberate user cancel settles as `:cancelled`, everything else as `:failed`.
-  Public + `@doc false` so the status/summary mapping is unit-testable without
-  booting a full orchestrator run.
-  """
+  # Structured result for a subagent that did NOT finish its task.
+  #
+  # The durable status is derived from the reason via `terminal_status/1`: a
+  # deliberate user cancel settles as `:cancelled`, everything else as `:failed`.
+  # Public + `@doc false` so the status/summary mapping is unit-testable without
+  # booting a full orchestrator run.
   @doc false
   def failure_result(agent_id, parent_id, role, reason, opts \\ []) do
     status = terminal_status(reason)
@@ -3047,15 +3042,13 @@ defmodule OptimalSystemAgent.Orchestrator do
 
   def salvage_text(_), do: nil
 
-  @doc """
-  Terminal `RunStore` status for a non-completion reason.
-
-  `:cancelled` (an explicit user interrupt/Esc reaching the child, see
-  `execute_and_collect/7`'s `:exit, :killed` handling) is a first-class RunStore
-  status — persisting it as `:failed` durably mislabels deliberate user action
-  as a fault. Every other reason (timeout, crash, already_started, ...) is a
-  genuine failure.
-  """
+  # Terminal `RunStore` status for a non-completion reason.
+  #
+  # `:cancelled` (an explicit user interrupt/Esc reaching the child, see
+  # `execute_and_collect/7`'s `:exit, :killed` handling) is a first-class RunStore
+  # status — persisting it as `:failed` durably mislabels deliberate user action
+  # as a fault. Every other reason (timeout, crash, already_started, ...) is a
+  # genuine failure.
   @doc false
   @spec terminal_status(term()) :: :cancelled | :failed
   def terminal_status(:cancelled), do: :cancelled
@@ -3116,22 +3109,20 @@ defmodule OptimalSystemAgent.Orchestrator do
     |> String.trim()
   end
 
-  @doc """
-  Repo-relative paths a subagent modified inside its worktree.
-
-  Uses the NUL-separated `-z` porcelain format and delegates parsing to
-  `OptimalSystemAgent.Agent.Fleet.parse_porcelain_z/1`, which is the single
-  correct implementation of that format (it is public + `@doc false` there
-  precisely so it can be shared/unit-tested; nothing in fleet.ex changes).
-
-  Without `-z`, git QUOTES any path containing a space or a non-ASCII byte
-  (`"my file.txt"`, `"caf\\303\\251.txt"`) and renders a rename as the single
-  bogus field `old -> new` — so the previous
-  `split("\\n") |> slice(3..-1)` here produced paths that do not exist on disk.
-
-  Public + `@doc false` so the porcelain contract is testable against a real
-  throwaway repo without booting an orchestrator run.
-  """
+  # Repo-relative paths a subagent modified inside its worktree.
+  #
+  # Uses the NUL-separated `-z` porcelain format and delegates parsing to
+  # `OptimalSystemAgent.Agent.Fleet.parse_porcelain_z/1`, which is the single
+  # correct implementation of that format (it is public + `@doc false` there
+  # precisely so it can be shared/unit-tested; nothing in fleet.ex changes).
+  #
+  # Without `-z`, git QUOTES any path containing a space or a non-ASCII byte
+  # (`"my file.txt"`, `"caf\\303\\251.txt"`) and renders a rename as the single
+  # bogus field `old -> new` — so the previous
+  # `split("\\n") |> slice(3..-1)` here produced paths that do not exist on disk.
+  #
+  # Public + `@doc false` so the porcelain contract is testable against a real
+  # throwaway repo without booting an orchestrator run.
   @doc false
   @spec changed_files(nil | map()) :: [binary()]
   def changed_files(nil), do: []

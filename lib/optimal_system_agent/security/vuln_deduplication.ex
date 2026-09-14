@@ -218,8 +218,8 @@ defmodule OptimalSystemAgent.Security.VulnDeduplication do
 
   defp similar_title?(a, b) when is_binary(a) and is_binary(b) do
     # Normalize and compare — same vuln type in title = similar
-    a_norm = String.downcase(a)
-    b_norm = String.downcase(b)
+    a_norm = a |> String.trim() |> String.downcase()
+    b_norm = b |> String.trim() |> String.downcase()
 
     # Check for shared vulnerability type keywords
     vuln_types = [
@@ -238,9 +238,10 @@ defmodule OptimalSystemAgent.Security.VulnDeduplication do
       "ssti"
     ]
 
-    Enum.any?(vuln_types, fn vtype ->
-      String.contains?(a_norm, vtype) and String.contains?(b_norm, vtype)
-    end)
+    (a_norm != "" and a_norm == b_norm) or
+      Enum.any?(vuln_types, fn vtype ->
+        String.contains?(a_norm, vtype) and String.contains?(b_norm, vtype)
+      end)
   end
 
   defp similar_title?(_, _), do: false

@@ -102,7 +102,7 @@ defmodule OptimalSystemAgent.Security.WeaponCatalog do
       score: score,
       maturity: maturity,
       cvss_score: Map.get(finding, :cvss_score) || Map.get(finding, "cvss_score"),
-      is_kev: ThreatIntel.known_exploited?(Map.get(finding, :cve)),
+      is_kev: ThreatIntel.known_exploited?(Map.get(finding, :cve) || Map.get(finding, "cve")),
       code_reachable: CodeReachable.check(finding),
       evidence_count:
         Enum.count(Map.get(finding, :evidence, []) || Map.get(finding, "evidence", [])),
@@ -180,14 +180,14 @@ defmodule OptimalSystemAgent.Security.WeaponCatalog do
   """
   @spec promote(weapon()) :: weapon()
   def promote(%{score: s} = weapon) when s >= @production_threshold do
-    %{weapon | maturity: :production}
+    Map.put(weapon, :maturity, :production)
   end
 
   def promote(%{score: s} = weapon) when s >= @reliable_threshold do
-    %{weapon | maturity: :reliable}
+    Map.put(weapon, :maturity, :reliable)
   end
 
-  def promote(weapon), do: weapon
+  def promote(weapon), do: Map.put_new(weapon, :maturity, :poc)
 
   # ── Domain classification ────────────────────────────────────────────────
 
@@ -216,7 +216,10 @@ defmodule OptimalSystemAgent.Security.WeaponCatalog do
     confidence = Map.get(finding, :confidence, Map.get(finding, "confidence", 0.5))
 
     # CVSS contributes ~40%, confidence ~30%, KEV bonus ~1.5
-    kev_bonus = if ThreatIntel.known_exploited?(Map.get(finding, :cve)), do: 1.5, else: 0.0
+    kev_bonus =
+      if ThreatIntel.known_exploited?(Map.get(finding, :cve) || Map.get(finding, "cve")),
+        do: 1.5,
+        else: 0.0
 
     evidence_factor =
       Map.get(finding, :evidence_count, Map.get(finding, "evidence_count", 0)) * 0.3

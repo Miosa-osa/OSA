@@ -176,7 +176,7 @@ defmodule OptimalSystemAgent.Agent.Voice do
   # state-file flip is the primary channel
   defp send_term(_state), do: :ok
 
-  defp orb_alive?(state) do
+  defp orb_alive?(_state) do
     # A live orb holds the vite port; cheap and reliable liveness probe.
     # :binary + connect timeout in the options list — a bare integer as the
     # third arg is :gen_tcp.connect/3's address form and raises :badarg.

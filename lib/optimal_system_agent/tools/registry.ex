@@ -1224,6 +1224,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
       # security tasks. Exposes structured notes, attack-surface graph, TDA,
       # and vulnerability deduplication. See SecurityContext prompt section.
       "security_intel" => OptimalSystemAgent.Tools.Builtins.SecurityIntel,
+      "cyber_defense" => OptimalSystemAgent.Tools.Builtins.CyberDefense,
 
       # ── Workspace shape ────────────────────────────────────────────────
       # Classifies submodules / nested independent repos / workspace members,

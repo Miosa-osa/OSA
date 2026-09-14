@@ -32,8 +32,14 @@ defmodule OptimalSystemAgent.Security.ThreatIntelTest do
         epss: 0.5
       })
 
-    # KEV ransomware entry: 10.0 base + 2.5 KEV/ransomware + 1.5 ransomware bonus + 1.5 EPSS
+    # KEV ransomware entry: 10.0 base + 2.5 KEV/ransomware + 1.0 ransomware bonus + 1.5 EPSS
     assert_in_delta p, 15.0, 0.01
+  end
+
+  test "a non-KEV finding gets no KEV or ransomware bonus" do
+    assert_in_delta ThreatIntel.priority(%{cve: "CVE-2099-9876", cvss_score: 5.0, epss: 0.5}),
+                    6.5,
+                    0.01
   end
 
   test "load_feed merges a temp JSON overlay" do
