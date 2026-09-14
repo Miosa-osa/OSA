@@ -682,7 +682,25 @@ defmodule OptimalSystemAgent.Tools.Registry do
         schema = mod.parameters()
         resolved = apply(ExJsonSchema.Schema, :resolve, [schema])
 
-        case apply(ExJsonSchema.Validator, :validate, [resolved, arguments]) do
+        # Execution context is injected by HTTP/MCP/the agent loop, not part
+        # of a tool's public JSON schema. Preserve it in the returned args for
+        # authority and permission checks; only exclude the exact reserved keys
+        # from validation. Unknown arguments must still fail strict schemas.
+        public_arguments =
+          if is_map(arguments) do
+            Map.drop(arguments, [
+              "__session_id__",
+              :__session_id__,
+              "__tool_use_id__",
+              :__tool_use_id__,
+              "__surface__",
+              :__surface__
+            ])
+          else
+            arguments
+          end
+
+        case apply(ExJsonSchema.Validator, :validate, [resolved, public_arguments]) do
           :ok ->
             :ok
 

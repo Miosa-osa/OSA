@@ -38,6 +38,64 @@ defmodule OptimalSystemAgent.Tools.SchemaValidationTest do
     end
   end
 
+  defmodule StrictTool do
+    def name, do: "strict_tool"
+    def safety, do: :read_only
+
+    def parameters do
+      %{
+        "type" => "object",
+        "additionalProperties" => false,
+        "properties" => %{"limit" => %{"type" => "integer"}},
+        "required" => ["limit"]
+      }
+    end
+  end
+
+  describe "reserved execution context with strict schemas" do
+    test "public arguments are coerced and internal context survives for authority checks" do
+      context = %{
+        "__surface__" => "osa_http",
+        "__session_id__" => "session",
+        "__tool_use_id__" => "call"
+      }
+
+      assert {:ok, result} =
+               Registry.coerce_and_validate(StrictTool, Map.put(context, "limit", "3"))
+
+      assert result == Map.put(context, "limit", 3)
+    end
+
+    test "atom-key context is preserved too" do
+      context = %{__surface__: "mcp", __session_id__: "session", __tool_use_id__: "call"}
+
+      assert {:ok, result} =
+               Registry.coerce_and_validate(StrictTool, Map.put(context, "limit", 3))
+
+      assert result == Map.put(context, "limit", 3)
+    end
+
+    test "unknown private-looking arguments still fail strict validation" do
+      assert {:error, reason} =
+               Registry.coerce_and_validate(
+                 StrictTool,
+                 %{"limit" => 3, "__surface__" => "osa_http", "__unexpected__" => true}
+               )
+
+      assert reason =~ "__unexpected__"
+    end
+
+    test "context does not mask an invalid public argument" do
+      assert {:error, reason} =
+               Registry.coerce_and_validate(
+                 StrictTool,
+                 %{"limit" => "invalid", "__surface__" => "osa_http"}
+               )
+
+      assert reason =~ "limit"
+    end
+  end
+
   # A tool with no required fields (should accept empty map)
   defmodule OptionalTool do
     @behaviour OptimalSystemAgent.Tools.Behaviour
