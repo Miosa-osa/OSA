@@ -7,6 +7,23 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.200] - 2026-09-14
+
+### Added
+- Twelve cyber-defense skills and the `cyber_defense` tool. Three synthetic Docker exercises reproduce SQL injection, path traversal and authentication-rate-limit failures, apply lab controls, retest attacks and benign requests, and return hashed evidence with cleanup status.
+- The red-team/OSINT skill library, organized references for eight oversized skills, and the Elixir/OTP coding skill with executable snippet verification.
+- Opt-in `OSA_SUBAGENT_CLOUD_ONLY=true` policy for delegated agents. Disallowed local selections and delegated provider fallbacks fail closed; manual top-level model selection is unaffected.
+- Explicit `STOP EVERYTHING`, `STOP ALL WORK` and `STOP ALL AGENTS` handling that includes background descendants and their shell jobs. Ordinary parent interrupts retain their existing detached-work behavior.
+
+### Fixed
+- Security catalog, KEV scoring, prioritization, exact-title deduplication, evidence validation and end-to-end reporting regressions.
+- Test lifecycle ownership and delayed-event isolation; compiler warnings and formatting are required CI gates.
+- Missing operator-control instructions in both shipped SOUL templates and inconsistent TUI lockfile versioning.
+
+### Scope
+- Defense exercises use bundled synthetic targets and embedded detectors. They do not patch arbitrary production hosts, certify external SIEM coverage, or detonate malware.
+- Stop handling acts at cancellation boundaries and cannot undo external effects already completed. Cloud-only delegation is opt-in and must be enabled for installations that require it.
+
 ## [Unreleased]
 
 ### Added

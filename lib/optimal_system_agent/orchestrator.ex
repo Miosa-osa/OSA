@@ -86,6 +86,8 @@ defmodule OptimalSystemAgent.Orchestrator do
   """
   @spec run_parallel(String.t(), [map()], keyword()) :: [{:ok, String.t()} | {:error, term()}]
   def run_parallel(parent_id, configs, opts \\ []) when is_list(configs) do
+    configs = Enum.map(configs, &with_stop_ticket(&1, parent_id))
+
     # Group by wave number (default wave 1)
     waves =
       configs
@@ -236,6 +238,19 @@ defmodule OptimalSystemAgent.Orchestrator do
   def run_subagent(%{routing_error: reason}), do: {:error, {:no_capable_model, reason}}
 
   def run_subagent(config) do
+    config = with_stop_ticket(config, Map.get(config, :parent_session_id))
+
+    if launch_stopped?(config, Map.get(config, :parent_session_id)) do
+      {:error, :cancelled}
+    else
+      case enforce_cloud_delegation(config) do
+        %{routing_error: reason} -> {:error, {:no_capable_model, reason}}
+        allowed -> do_run_subagent(allowed)
+      end
+    end
+  end
+
+  defp do_run_subagent(config) do
     # Cheaper agent wake (#3): if this id belongs to a subagent that finished
     # recently and is still resident in memory (lingering, see `maybe_linger/5`),
     # reuse the live Loop directly — no terminate, no transcript replay. This is
@@ -245,6 +260,25 @@ defmodule OptimalSystemAgent.Orchestrator do
     case resume_lingering_if_resident(config) do
       {:reused, result} -> result
       :no -> run_fresh_subagent(config)
+    end
+  end
+
+  defp with_stop_ticket(config, parent_id) do
+    Map.put_new_lazy(config, :stop_ticket, fn ->
+      OptimalSystemAgent.Agent.Cancellation.all_work_ticket(parent_id)
+    end)
+  end
+
+  defp launch_stopped?(config, parent_id) do
+    OptimalSystemAgent.Agent.Cancellation.all_work_stopped?(parent_id) or
+      not OptimalSystemAgent.Agent.Cancellation.all_work_ticket_valid?(config.stop_ticket)
+  end
+
+  defp enforce_cloud_delegation(config) do
+    if OptimalSystemAgent.Agent.SubagentCloudPolicy.enabled?() do
+      OptimalSystemAgent.Agent.DelegationRouter.resolve(Map.get(config, :task, ""), config)
+    else
+      config
     end
   end
 
@@ -522,10 +556,14 @@ defmodule OptimalSystemAgent.Orchestrator do
     # all tool_call events from the first iteration onward.
     forwarder = start_event_forwarder(subagent_id, parent_id, role)
 
-    case DynamicSupervisor.start_child(
-           OptimalSystemAgent.SessionSupervisor,
-           {Loop, subagent_opts}
-         ) do
+    start_result =
+      if launch_stopped?(config, parent_id) do
+        {:error, :cancelled}
+      else
+        DynamicSupervisor.start_child(OptimalSystemAgent.SessionSupervisor, {Loop, subagent_opts})
+      end
+
+    case start_result do
       {:ok, pid} ->
         # The Loop is up and about to make its first provider call. On a real
         # model this is where the minutes go: system prompt assembly plus
@@ -552,7 +590,8 @@ defmodule OptimalSystemAgent.Orchestrator do
             # Per-call override (delegate `timeout_ms` arg) wins; otherwise
             # execute_and_collect falls back to the global config /
             # @default_subagent_timeout_ms backstop.
-            timeout_ms: Map.get(config, :timeout_ms)
+            timeout_ms: Map.get(config, :timeout_ms),
+            stop_ticket: Map.get(config, :stop_ticket)
           )
 
         # Fire subagent_stop hook (learning capture, telemetry)
@@ -914,7 +953,8 @@ defmodule OptimalSystemAgent.Orchestrator do
             batch_id: batch_id,
             resumed_from: agent_id,
             max_iterations: Map.get(config, :max_iterations),
-            timeout_ms: Map.get(config, :timeout_ms)
+            timeout_ms: Map.get(config, :timeout_ms),
+            stop_ticket: Map.get(config, :stop_ticket)
           )
 
         stop_event_forwarder(forwarder)
@@ -1098,6 +1138,19 @@ defmodule OptimalSystemAgent.Orchestrator do
     do: {:error, {:no_capable_model, reason}}
 
   def run_background(parent_id, config) do
+    config = with_stop_ticket(config, parent_id)
+
+    if launch_stopped?(config, parent_id) do
+      {:error, :cancelled}
+    else
+      case enforce_cloud_delegation(config) do
+        %{routing_error: reason} -> {:error, {:no_capable_model, reason}}
+        allowed -> do_run_background(parent_id, allowed)
+      end
+    end
+  end
+
+  defp do_run_background(parent_id, config) do
     config = Map.put(config, :parent_session_id, parent_id)
     role = Map.get(config, :role, "background")
     display_name = config[:name] || role
@@ -1968,6 +2021,7 @@ defmodule OptimalSystemAgent.Orchestrator do
       try do
         Loop.process_message(subagent_id, task,
           timeout: timeout_ms,
+          stop_ticket: Keyword.get(opts, :stop_ticket),
           # Per-turn tool-call ceiling. An EXPLICIT per-agent cap (agent def /
           # delegate call, e.g. `researcher` at 30) binds; otherwise a subagent
           # falls back to the sane default instead of the effectively-unbounded

@@ -609,6 +609,16 @@ config :optimal_system_agent,
       (System.get_env("OSA_OPEN_COMPUTERS_ENABLED") == "true" or
          File.exists?(Path.expand("~/.osa/.open_computers_enabled"))),
 
+  # Operator policy for delegated inference only. Persist in the service env;
+  # a main/manual session remains free to select local models.
+  subagent_cloud_only:
+    (case System.get_env("OSA_SUBAGENT_CLOUD_ONLY") do
+       nil -> Application.compile_env(:optimal_system_agent, :subagent_cloud_only, false)
+       "false" -> false
+       "true" -> true
+       other -> raise "OSA_SUBAGENT_CLOUD_ONLY must be true or false, got: #{inspect(other)}"
+     end),
+
   # Provider failover chain — auto-detected from configured API keys.
   # Override with comma-separated list: OSA_FALLBACK_CHAIN=anthropic,openai,ollama
   fallback_chain:

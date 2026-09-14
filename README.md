@@ -419,10 +419,29 @@ isolated git worktree, in parallel, each with the right model for its step.
 They share a task list and talk over ETS-backed mailboxes. Watch them live in
 the agent tree, and **steer** a running agent mid-turn: send a new directive
 into an in-flight turn and it adapts without being cancelled and restarted.
-Stop or interrupt any agent from the same view. Cancelling an agent cascades
-transitively to every sub-agent it spawned; a sibling can hand its context to
-another via peer-resume, and worktree work is snapshotted to a durable git ref
-before teardown so it stays inspectable even when discarded.
+Stop or interrupt any agent from the same view. Ordinary interrupts cancel
+attached work while preserving detached background agents. Send **STOP
+EVERYTHING**, **STOP ALL WORK**, or **STOP ALL AGENTS** to cancel background
+descendants and their shell jobs too. Cancellation is checked before subsequent
+tool dispatch and delegated launch; completed external effects cannot be undone.
+A sibling can hand its context to another via peer-resume, and worktree work is
+snapshotted to a durable git ref before teardown so it remains inspectable.
+
+For cloud-only subagents, add this to your OSA service environment or
+`~/.osa/.env`, then restart the backend:
+
+```bash
+OSA_SUBAGENT_CLOUD_ONLY=true
+```
+
+The policy validates explicit model choices, automatic routing, and delegated
+provider requests, including retries and fallbacks. Local or unknown routes
+are rejected; Ollama cloud models must end in `:cloud` or `-cloud`. A local
+Ollama daemon may forward those requests to cloud inference. Known cloud
+providers reject explicit localhost/private-address endpoint overrides. This is
+a routing policy, not network isolation or verification of a custom proxy’s backend. The policy defaults to off for
+other installations and does not restrict manual top-level model selection.
+It cannot be disabled through delegate arguments.
 
 Background agents are built to run for a full working day, not minutes. Time
 limits along the whole path are idle guards against a genuinely silent backend,

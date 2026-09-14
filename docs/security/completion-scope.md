@@ -1,8 +1,9 @@
 # OSA 1.0.200 completion scope
 
 This change follows the operator's original OSA session and subsequent handoff.
-The target version remains 1.0.200. The requested deliverable is a reviewable PR;
-publishing, merging, tagging and deployment are paused.
+The target version remains 1.0.200. The initial deliverable was a reviewable PR. The operator subsequently
+authorized runtime stop/cloud-policy fixes, final verification, merging,
+publishing and deployment in that order.
 
 ## Requests carried forward
 

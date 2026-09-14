@@ -19,7 +19,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntelNewActionsTest do
     on_exit(fn ->
       NotesStore.stop(session_id)
       name = String.to_atom("osa_attack_ora_#{session_id}")
-      if pid = Process.whereis(name), do: GenServer.stop(pid)
+
+      if pid = Process.whereis(name) do
+        # The linked orchestrator can exit after lookup when the test process
+        # terminates. Already-stopped is successful cleanup, not a test failure.
+        try do
+          GenServer.stop(pid)
+        catch
+          :exit, {:noproc, _} -> :ok
+        end
+      end
     end)
 
     {:ok, session_id: session_id, ctx: ctx}

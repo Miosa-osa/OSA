@@ -1,7 +1,8 @@
 # 1.0.200 consolidation and local-state audit
 
-Audited 2026-09-14. The single open OSA pull request is #279. Main merging,
-publishing, tagging, and deployment remain paused.
+Audited 2026-09-14. The consolidation used OSA pull request #279. Main merging, publishing,
+tagging and deployment were paused during this inventory; the operator later
+authorized them after the runtime control fixes.
 
 ## Working copies and saved history
 
@@ -69,3 +70,15 @@ change does not claim new runtime enforcement for those behaviors.
 
 Source VERSION, Mix's derived version, TUI manifest, and Cargo lockfile remain
 1.0.200. CI results for the final revision are recorded in PR #279.
+
+## Runtime follow-up authorized after the inventory
+
+The subsequent implementation adds explicit stop-all cancellation of background
+descendants and their jobs, with a launch fence against queued work, while
+preserving ordinary interrupt behavior. An opt-in
+`OSA_SUBAGENT_CLOUD_ONLY=true` policy validates delegated selection and provider
+request boundaries, including fallback attempts. These runtime changes close
+the gaps identified above; the earlier prompt-only test evidence is not used
+as proof of runtime behavior. Regression tests exercise the runtime paths.
+Cancellation is cooperative for already-running root operations and cannot
+undo completed external effects. See README for configuration and usage.

@@ -238,7 +238,32 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   def process_message(session_id, message, opts \\ []) do
-    GenServer.call(via(session_id), {:process, message, opts}, turn_timeout(opts))
+    # This public entry point accepts a fresh externally submitted turn.
+    # ReactLoop continuation/interrupt cleanup never removes the all-work fence,
+    # and a delegated child's process_message must not release its ancestor.
+    if subagent_run?(session_id) do
+      stale_ticket =
+        Keyword.has_key?(opts, :stop_ticket) and
+          not OptimalSystemAgent.Agent.Cancellation.all_work_ticket_valid?(
+            Keyword.get(opts, :stop_ticket)
+          )
+
+      if OptimalSystemAgent.Agent.Cancellation.all_work_stopped?(session_id) or stale_ticket do
+        {:error, :cancelled}
+      else
+        GenServer.call(via(session_id), {:process, message, opts}, turn_timeout(opts))
+      end
+    else
+      if stop_intent?(message) do
+        case cancel(session_id, include_background: stop_all_intent?(message)) do
+          :ok -> {:ok, "Stop requested."}
+          error -> error
+        end
+      else
+        resume_all_work(session_id)
+        GenServer.call(via(session_id), {:process, message, opts}, turn_timeout(opts))
+      end
+    end
   end
 
   # Wall-clock backstop for ONE `{:process, ...}` join.
@@ -512,7 +537,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
       # flag Esc/interrupt sets so the loop stops at its next cancel check, and
       # do NOT also queue it as a continue-steer.
       Logger.info("[loop] Steer recognised as stop intent for #{session_id} - cancelling turn")
-      _ = cancel(session_id)
+      _ = cancel(session_id, include_background: stop_all_intent?(text))
       :ok
     else
       for target <- steer_targets(session_id) do
@@ -553,17 +578,38 @@ defmodule OptimalSystemAgent.Agent.Loop do
   @doc false
   @spec stop_intent?(String.t()) :: boolean()
   def stop_intent?(text) when is_binary(text) do
-    # Downcase, split on non-letters (drops punctuation like "stop!" / "stop,").
-    content =
-      text
-      |> String.downcase()
-      |> String.split(~r/[^a-z]+/u, trim: true)
-      |> Enum.reject(&MapSet.member?(@stop_filler, &1))
+    if quoted_stop?(text) do
+      false
+    else
+      content = stop_words(text) |> Enum.reject(&MapSet.member?(@stop_filler, &1))
 
-    content != [] and Enum.all?(content, &MapSet.member?(@stop_verbs, &1))
+      stop_all_intent?(text) or
+        (content != [] and Enum.all?(content, &MapSet.member?(@stop_verbs, &1)))
+    end
   end
 
   def stop_intent?(_), do: false
+
+  # An explicit all-work halt reaches detached jobs too. Keep ordinary Esc and
+  # targeted corrections ("stop using local models") on their existing paths.
+  # No arbitrary substring match: every remaining word must be a stop verb.
+  defp stop_all_intent?(text) do
+    words = stop_words(text)
+    scope? = Enum.any?(words, &(&1 in ["all", "everything"]))
+
+    remainder =
+      Enum.reject(
+        words,
+        &(MapSet.member?(@stop_filler, &1) or
+            &1 in ~w(work tasks agents jobs processes activity))
+      )
+
+    not quoted_stop?(text) and scope? and remainder != [] and
+      Enum.all?(remainder, &MapSet.member?(@stop_verbs, &1))
+  end
+
+  defp stop_words(text), do: text |> String.downcase() |> String.split(~r/[^a-z]+/u, trim: true)
+  defp quoted_stop?(text), do: String.contains?(text, ["\"", "'", "`", "“", "”", "‘", "’"])
 
   @doc """
   The session itself plus every `:running` descendant subagent of it.
@@ -851,8 +897,10 @@ defmodule OptimalSystemAgent.Agent.Loop do
   Sets a flag in an ETS table that ReactLoop.run/1 checks at each iteration.
   Concurrent-safe: ETS reads work even while handle_call blocks the mailbox.
 
-  Cancelling a parent also cancels its WHOLE subtree: every descendant
-  subagent (children, grandchildren, ...), not just direct
+  By default, cancelling a parent reaches its attached subtree, preserving
+  detached background runs. `include_background: true` is reserved for an
+  explicit all-work halt and reaches every descendant, including detached
+  subagents and their jobs. Both modes walk transitively, not just direct
   `agent:<session_id>:*` children. A grandchild's session id is
   `agent:agent:<session_id>:N:M` and would not match the old flat prefix
   fold, leaving it (and its background shell jobs) running after Esc/interrupt.
@@ -864,11 +912,19 @@ defmodule OptimalSystemAgent.Agent.Loop do
   descendant gets the cooperative cancel flag AND has its background shell
   jobs killed via `BackgroundManager.cancel_for_sessions/1`.
   """
-  def cancel(session_id) do
+  def cancel(session_id, opts \\ []) do
+    include_background = Keyword.get(opts, :include_background, false)
+
+    if include_background do
+      :ets.insert(@cancel_table, {{:all_work_stopped, session_id}, true})
+      epoch_key = {:all_work_epoch, session_id}
+      :ets.update_counter(@cancel_table, epoch_key, {2, 1}, {epoch_key, 0})
+    end
+
     :ets.insert(@cancel_table, {session_id, true})
     Logger.info("[loop] Cancel requested for session #{session_id}")
 
-    descendants = descendant_session_ids(session_id)
+    descendants = descendant_session_ids(session_id, include_background: include_background)
 
     Enum.each(descendants, fn id ->
       :ets.insert(@cancel_table, {id, true})
@@ -898,6 +954,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # `RunStore.start_run/1` yet (registration race) or was launched by a
     # path that doesn't go through RunStore at all.
     #
+    # Ordinary interrupts skip known detached runs; all-work cancellation
+    # deliberately disables that exclusion in both fallback scans below.
     # Both folds additionally skip anything RunStore ALREADY knows is
     # `background: true` — this is a MATCH ON ID PREFIX, not a RunStore walk,
     # so it does not inherit `descendant_session_ids/1`'s exclusion for free.
@@ -915,7 +973,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
     try do
       :ets.foldl(
         fn {key, _val}, acc ->
-          if is_binary(key) and String.starts_with?(key, prefix) and not background_run?(key) do
+          if is_binary(key) and String.starts_with?(key, prefix) and
+               (include_background or not background_run?(key)) do
             :ets.insert(@cancel_table, {key, true})
             Logger.info("[loop] Cancel propagated to sub-agent #{key}")
           end
@@ -932,7 +991,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
     try do
       Registry.select(OptimalSystemAgent.SessionRegistry, [{{:"$1", :_, :_}, [], [:"$1"]}])
       |> Enum.each(fn key ->
-        if is_binary(key) and String.starts_with?(key, prefix) and not background_run?(key) do
+        if is_binary(key) and String.starts_with?(key, prefix) and
+             (include_background or not background_run?(key)) do
           :ets.insert(@cancel_table, {key, true})
           Logger.info("[loop] Cancel propagated to registered sub-agent #{key}")
         end
@@ -991,6 +1051,16 @@ defmodule OptimalSystemAgent.Agent.Loop do
   """
   @spec clear_cancel(String.t()) :: :ok
   def clear_cancel(session_id) when is_binary(session_id) do
+    if OptimalSystemAgent.Agent.Cancellation.all_work_stopped?(session_id) do
+      :ok
+    else
+      clear_cancel_unfenced(session_id)
+    end
+  end
+
+  def clear_cancel(_), do: :ok
+
+  defp clear_cancel_unfenced(session_id) do
     Enum.each([session_id | descendant_session_ids(session_id)], &clear_cancel_key/1)
 
     # Same belt-and-braces sweep `cancel/1` uses to FIND descendants, applied in
@@ -1016,7 +1086,15 @@ defmodule OptimalSystemAgent.Agent.Loop do
     :ok
   end
 
-  def clear_cancel(_), do: :ok
+  # Only a new public root turn removes this marker. In particular,
+  # clear_cancel/1 is also called during interrupt finalization and cannot.
+  @doc false
+  def resume_all_work(session_id) when is_binary(session_id) do
+    :ets.delete(@cancel_table, {:all_work_stopped, session_id})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
 
   defp clear_cancel_key(id) do
     :ets.delete(@cancel_table, id)
@@ -1085,7 +1163,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   # NOT filter on `background`) diverge: interrupting a turn must not kill
   # detached work, but a genuine session teardown must not leak it either.
   @spec descendant_session_ids(String.t()) :: [String.t()]
-  def descendant_session_ids(root_session_id) do
+  def descendant_session_ids(root_session_id, opts \\ []) do
     runs = OptimalSystemAgent.Agent.RunStore.list(limit: 100_000)
 
     children_by_parent =
@@ -1105,7 +1183,9 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # silently surviving one it was never meant to.
     background_ids =
       runs
-      |> Enum.filter(&(Map.get(&1, :background) == true))
+      |> Enum.filter(
+        &(Map.get(&1, :background) == true and not Keyword.get(opts, :include_background, false))
+      )
       |> Enum.map(& &1.agent_id)
       |> MapSet.new()
 
