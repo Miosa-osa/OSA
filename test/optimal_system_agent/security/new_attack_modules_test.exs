@@ -27,7 +27,7 @@ defmodule OptimalSystemAgent.Security.WeaponCatalogTest do
     target: "http://localhost:8080/api/users",
     confidence: 0.75,
     cvss_score: 7.2,
-    cve: "CVE-2024-1234",
+    cve: "CVE-2023-34362",
     code_reachable: true,
     maturity: :reliable,
     score: 8.1,
@@ -389,10 +389,9 @@ defmodule OptimalSystemAgent.Security.WeaponCatalogTest do
   end
 
   describe "AttackChainReasoner.extend/1" do
-    test "extends chain with valid hops" do
+    test "chain without a graph cannot be extended" do
       chain = %{hops: [%{target: "http://test.com"}]}
-      result = AttackChainReasoner.extend(chain)
-      assert is_tuple(result)
+      assert AttackChainReasoner.extend(chain) == :unchanged
     end
 
     test "returns unchanged for empty chain" do
@@ -436,7 +435,17 @@ defmodule OptimalSystemAgent.Security.WeaponCatalogTest do
   describe "LiveExploitRunner.in_scope?/1" do
     test "returns boolean for a target URL" do
       result = LiveExploitRunner.in_scope?("http://localhost:8080")
-      assert is_boolean(result) or result == :error
+      refute result
+
+      assert LiveExploitRunner.in_scope?("http://localhost:8080", %{
+               targets: ["localhost"],
+               max_blast: :access
+             })
+
+      refute LiveExploitRunner.in_scope?("https://outside.example", %{
+               targets: ["localhost"],
+               max_blast: :access
+             })
     end
   end
 
@@ -503,8 +512,9 @@ defmodule OptimalSystemAgent.Security.WeaponCatalogTest do
       poc_weapon = %{id: "x", domain: :rce, score: 0.4}
       assert WeaponCatalog.classify(poc_weapon).maturity == :poc
 
-      promoted = WeaponCatalog.promote(WeaponCatalog.promote(poc_weapon))
-      assert promoted.maturity in [:reliable, :production]
+      assert WeaponCatalog.promote(poc_weapon).maturity == :poc
+      promoted = WeaponCatalog.promote(%{poc_weapon | score: 0.9})
+      assert promoted.maturity == :production
     end
   end
 end

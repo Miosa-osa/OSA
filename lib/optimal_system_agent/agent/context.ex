@@ -927,7 +927,8 @@ defmodule OptimalSystemAgent.Agent.Context do
       # Security context: injected only when a security task is active.
       # Priority 0 so it never loses the budget race to advisory blocks.
       {security_posture_block(state), 0, "security_posture"},
-      {sandbox_environment_block(state), 0, "sandbox_environment"}
+      {sandbox_environment_block(state), 0, "sandbox_environment"},
+      {OptimalSystemAgent.Agent.DefenseContext.block(state), 0, "cyber_defense"}
     ]
     |> Enum.reject(fn {content, _, _} -> is_nil(content) or content == "" end)
   end

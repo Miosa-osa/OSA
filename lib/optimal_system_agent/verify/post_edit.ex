@@ -129,18 +129,16 @@ defmodule OptimalSystemAgent.Verify.PostEdit do
     |> Keyword.get(:enabled, true)
   end
 
-  @doc """
-  Whether to auto-REFORMAT files after an edit (rewrite in place), as opposed to
-  only reporting diagnostics.
-
-  Default OFF. Reformatting a file the agent just wrote is the single biggest
-  churn source in a coding turn: the bytes on disk change under the model, so it
-  re-reads, re-diffs, and re-edits against a moving target. Diagnostics (syntax
-  and parse errors) still run regardless of this flag - only the in-place
-  rewrite is gated. Opt back in with `post_edit_format_enabled: true` in
-  settings.json, or the `:post_edit_format` app env (kept on in the test env so
-  the formatter eval suite still exercises the write path).
-  """
+  # Whether to auto-REFORMAT files after an edit (rewrite in place), as opposed to
+  # only reporting diagnostics.
+  #
+  # Default OFF. Reformatting a file the agent just wrote is the single biggest
+  # churn source in a coding turn: the bytes on disk change under the model, so it
+  # re-reads, re-diffs, and re-edits against a moving target. Diagnostics (syntax
+  # and parse errors) still run regardless of this flag - only the in-place
+  # rewrite is gated. Opt back in with `post_edit_format_enabled: true` in
+  # settings.json, or the `:post_edit_format` app env (kept on in the test env so
+  # the formatter eval suite still exercises the write path).
   @doc false
   def format_enabled? do
     case OptimalSystemAgent.Settings.get("post_edit_format_enabled") do

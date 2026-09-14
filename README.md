@@ -419,10 +419,29 @@ isolated git worktree, in parallel, each with the right model for its step.
 They share a task list and talk over ETS-backed mailboxes. Watch them live in
 the agent tree, and **steer** a running agent mid-turn: send a new directive
 into an in-flight turn and it adapts without being cancelled and restarted.
-Stop or interrupt any agent from the same view. Cancelling an agent cascades
-transitively to every sub-agent it spawned; a sibling can hand its context to
-another via peer-resume, and worktree work is snapshotted to a durable git ref
-before teardown so it stays inspectable even when discarded.
+Stop or interrupt any agent from the same view. Ordinary interrupts cancel
+attached work while preserving detached background agents. Send **STOP
+EVERYTHING**, **STOP ALL WORK**, or **STOP ALL AGENTS** to cancel background
+descendants and their shell jobs too. Cancellation is checked before subsequent
+tool dispatch and delegated launch; completed external effects cannot be undone.
+A sibling can hand its context to another via peer-resume, and worktree work is
+snapshotted to a durable git ref before teardown so it remains inspectable.
+
+For cloud-only subagents, add this to your OSA service environment or
+`~/.osa/.env`, then restart the backend:
+
+```bash
+OSA_SUBAGENT_CLOUD_ONLY=true
+```
+
+The policy validates explicit model choices, automatic routing, and delegated
+provider requests, including retries and fallbacks. Local or unknown routes
+are rejected; Ollama cloud models must end in `:cloud` or `-cloud`. A local
+Ollama daemon may forward those requests to cloud inference. Known cloud
+providers reject explicit localhost/private-address endpoint overrides. This is
+a routing policy, not network isolation or verification of a custom proxy’s backend. The policy defaults to off for
+other installations and does not restrict manual top-level model selection.
+It cannot be disabled through delegate arguments.
 
 Background agents are built to run for a full working day, not minutes. Time
 limits along the whole path are idle guards against a genuinely silent backend,
@@ -883,6 +902,49 @@ nothing below changes behaviour on a normal coding turn.
 Authorization is explicit and scoped: OSA operates only within the target and
 mandate you give it, and the capability is meant for work you are permitted to
 perform.
+
+### Cyber defense and isolated exercises
+
+The 1.0.200 source tree adds a `cyber_defense` tool and twelve defense skills:
+attack simulation, detection engineering, incident response, threat hunting,
+log analysis, network defense, email security, endpoint hardening,
+vulnerability management, sandbox triage, SIEM operations, and threat modeling.
+The earlier red-team/OSINT library remains bundled alongside them. The
+`elixir-otp` skill also ships with executable syntax examples and a verifier.
+
+Ask OSA to “simulate attacks with the bundled defense exercises and verify the fixes.” It can
+find `cyber_defense` through `tool_search`, list scenarios with
+`{"action":"scenarios"}`, then run:
+
+```json
+{"action":"run","scenario":"all","remediation":"apply","timeout_seconds":30}
+```
+
+You need Docker running and the lab image installed first:
+
+```bash
+docker pull python:3.12-slim
+```
+
+The three synthetic targets demonstrate SQL injection, path traversal, and
+login rate limiting. Each exercise measures the vulnerable baseline, applies
+a lab control, retests the attack, and checks that benign requests still work.
+Results include detection counts, false positives, remaining gaps, raw JSON
+evidence with a SHA-256 hash, and container cleanup status. Use
+`"remediation":"none"` or `"ineffective"` to verify that missing or ineffective
+fixes are reported as unverified.
+
+Exercises run in disposable, non-root Docker containers with no network,
+host mounts, or published ports, and with resource limits. The tool never
+falls back to running the target on the host. These bundled examples do not
+patch production systems, validate a real SIEM deployment, or provide a
+malware-detonation VM. Skills explain the separate prerequisites for those
+workflows; bounded local JSONL log and static email-header helpers are included.
+
+See the [defense workflow and scope](docs/security/completion-scope.md),
+[research sources and prerequisites](docs/security/defense-sources.md), and
+[completion audit](docs/security/completion-audit.md) for details. Repository
+versioning does not imply that this change has been published or deployed.
 
 ### Identity and Memory
 

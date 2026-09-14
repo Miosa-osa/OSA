@@ -1,0 +1,10 @@
+{
+  "offensive-bug-identification": "c550c9d995d9d5bc4ab4769a5661c8348d00d1b4ee8d12d8ff220e1010e2acb3",
+  "offensive-fuzzing-course": "3c4d19e6c84c8d17dc331bc996936df2f96583e454d1225b38607529e48b1e7f",
+  "offensive-initial-access": "15439d6bd6f14bc405a1ad57c2840abbee08868d6c2cc37012bcc036a5604084",
+  "offensive-mitigations": "348340bdeab7c2a09ff42306dcf6cad9976f28c52746fae25f6eb393a083023e",
+  "offensive-race-condition": "5fd2add117fb6c67aea378a2b417d945633f3cfa3318fe7f64bf20c408289294",
+  "offensive-rce": "70e122a63d7e2cc5a5a1fc00126a6b080929465cf767b14a16992a8e19456f07",
+  "offensive-ssrf": "d0b199348cce3f06d2296b72605f208c9cbccbf6945637367992c7655b616e8c",
+  "offensive-xxe": "dc282deab56163d8e5f7a89b4375761582cfe4b11e7abf571f7d30f38b9b4d37"
+}

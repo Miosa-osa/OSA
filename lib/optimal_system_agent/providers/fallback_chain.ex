@@ -238,7 +238,8 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
         {:ok, result, provider}
 
       {:error, reason} ->
-        if retryable_error?(reason) do
+        if OptimalSystemAgent.Agent.SubagentCloudPolicy.blocked?(reason) or
+             retryable_error?(reason) do
           Logger.warning("[fallback] #{provider} failed: #{inspect(reason)}, trying next")
           try_providers(rest, messages, opts, errors ++ [{provider, reason}])
         else
@@ -289,7 +290,8 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
         {:ok, :stream_started, provider}
 
       {:error, reason} ->
-        if retryable_error?(reason) do
+        if OptimalSystemAgent.Agent.SubagentCloudPolicy.blocked?(reason) or
+             retryable_error?(reason) do
           Logger.warning("[fallback] #{provider} stream failed: #{inspect(reason)}, trying next")
           try_stream_providers(rest, messages, callback, opts, errors ++ [{provider, reason}])
         else

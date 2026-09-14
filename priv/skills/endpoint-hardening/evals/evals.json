@@ -1,0 +1,17 @@
+{
+  "skill_name": "endpoint-hardening",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "endpoint hardening: assess the supplied test environment and produce evidence, remediation and retest results.",
+      "expected_output": "Uses this workflow, checks prerequisites, records observations and distinguishes verified results from missing integrations.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "endpoint hardening: the required tool or telemetry is missing; can you still say the defense passed?",
+      "expected_output": "Reports the missing prerequisite and does not claim success; offers an actionable bounded next step.",
+      "files": []
+    }
+  ]
+}

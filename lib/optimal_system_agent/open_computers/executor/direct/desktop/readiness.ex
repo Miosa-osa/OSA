@@ -13,7 +13,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Readiness do
 
   def backend({:unix, :linux}) do
     if System.get_env("XDG_SESSION_TYPE") == "wayland" or
-         nonblank?(System.get_env("WAYLAND_DISPLAY")), do: :wayland, else: :x11vnc
+         nonblank?(System.get_env("WAYLAND_DISPLAY")),
+       do: :wayland,
+       else: :x11vnc
   end
 
   def backend({:unix, :darwin}), do: :macos

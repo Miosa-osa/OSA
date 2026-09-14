@@ -26,10 +26,9 @@ defmodule OptimalSystemAgent.Security.AttackPrioritizer do
 
   """
 
-  
-
   @typedoc "Attack priority score"
-  @type score() :: float()  # range: 0.0 – 13.0
+  # range: 0.0 – 13.0
+  @type score() :: float()
 
   @typedoc "Prioritized target entry"
   @type prioritized_entry :: %{
@@ -84,7 +83,7 @@ defmodule OptimalSystemAgent.Security.AttackPrioritizer do
     threshold = Keyword.get(opts, :threshold, 0.7)
 
     ranked
-    |> Enum.filter(& &1.confidence >= threshold)
+    |> Enum.filter(&(&1.confidence >= threshold))
     |> List.first()
   end
 
@@ -111,7 +110,7 @@ defmodule OptimalSystemAgent.Security.AttackPrioritizer do
     classes = Map.get(weapon, :classes_covered, Map.get(weapon, "classes_covered", []))
 
     # Base score from surface coverage (0–5.0) + class diversity bonus
-    base = min(coverage * 2.5, 5.0)
+    base = min(max(to_float(coverage), 0.0) * 2.5, 5.0)
     diversity = Enum.count(classes) * 0.3
 
     min(base + diversity, 8.0)
@@ -126,8 +125,8 @@ defmodule OptimalSystemAgent.Security.AttackPrioritizer do
     # before arithmetic rather than crashing the orchestrator mid-run.
     cvss = to_float(Map.get(weapon, :cvss_score) || Map.get(weapon, "cvss_score") || 5.0)
     confidence = to_float(Map.get(weapon, :score) || Map.get(weapon, "score") || 0.5)
-    kev_bonus = if weapon.is_kev, do: 1.5, else: 0.0
-    maturity_bonus = maturity_bonus(weapon.maturity || :poc)
+    kev_bonus = if Map.get(weapon, :is_kev, false), do: 1.5, else: 0.0
+    maturity_bonus = maturity_bonus(Map.get(weapon, :maturity) || :poc)
     exploitability = if Map.get(weapon, :code_reachable), do: 1.0, else: 0.3
 
     # Weighted composite: CVSS (40%), confidence (25%), KEV (15%), maturity (10%), exploitability (10%)
@@ -151,7 +150,9 @@ defmodule OptimalSystemAgent.Security.AttackPrioritizer do
   defp lateral_potential(weapon) when is_map(weapon) do
     # Higher if the target has multiple known credential types
     # or connects to other high-value assets in ShadowGraph
-    credentials = Map.get(weapon, :lateral_credentials, Map.get(weapon, "lateral_credentials", []))
+    credentials =
+      Map.get(weapon, :lateral_credentials, Map.get(weapon, "lateral_credentials", []))
+
     Enum.count(credentials) * 0.5 + 1.0
   end
 
@@ -160,4 +161,3 @@ defmodule OptimalSystemAgent.Security.AttackPrioritizer do
   defp maturity_bonus(:reliable), do: 1.0
   defp maturity_bonus(_), do: 0.5
 end
-

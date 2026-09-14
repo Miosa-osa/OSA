@@ -681,8 +681,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
 
   defp do_attack_run(session_id) do
     case find_orchestrator(session_id) do
-      {:ok, pid} -> AttackOrchestrator.run(pid)
-      :not_found -> {:error, "No attack session for #{session_id}. Feed a finding first (attack_feed)."}
+      {:ok, pid} ->
+        AttackOrchestrator.run(pid)
+
+      :not_found ->
+        {:error, "No attack session for #{session_id}. Feed a finding first (attack_feed)."}
     end
   end
 
@@ -690,7 +693,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
     finding = Map.put_new(finding, :session_id, session_id)
 
     case find_orchestrator(session_id) do
-      {:ok, pid} -> {:ok, AttackOrchestrator.feed(pid, finding)}
+      {:ok, pid} ->
+        {:ok, AttackOrchestrator.feed(pid, finding)}
+
       :not_found ->
         case AttackOrchestrator.start_link(session_id: session_id) do
           {:ok, pid} -> {:ok, AttackOrchestrator.feed(pid, finding)}
@@ -767,9 +772,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntel do
 
   defp do_oob_host(session_id) do
     case Oob.host(session_id) do
-      {:ok, host} -> {:ok, %{oob_host: host}}
-      {:error, "no oob session"} -> {:ok, %{oob_host: nil, note: "no listener — call oob_start first"}}
-      {:error, reason} -> {:error, reason}
+      {:ok, host} ->
+        {:ok, %{oob_host: host}}
+
+      {:error, "no oob session"} ->
+        {:ok, %{oob_host: nil, note: "no listener — call oob_start first"}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

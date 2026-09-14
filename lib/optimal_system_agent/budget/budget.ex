@@ -398,28 +398,6 @@ defmodule OptimalSystemAgent.Budget do
      }}
   end
 
-  # ── Pause / resume handlers (Tier 3 #12) ────────────────────────────────
-
-  @impl true
-  def handle_call(:pause, _from, state) do
-    {:reply, :ok, %{state | paused: true}}
-  end
-
-  @impl true
-  def handle_call(:resume, _from, state) do
-    {:reply, :ok, %{state | paused: false}}
-  end
-
-  @impl true
-  def handle_call(:toggle_pause, _from, state) do
-    {:reply, :ok, %{state | paused: not state.paused}}
-  end
-
-  @impl true
-  def handle_call(:paused?, _from, state) do
-    {:reply, state.paused, state}
-  end
-
   # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------

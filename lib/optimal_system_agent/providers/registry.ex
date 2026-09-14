@@ -170,7 +170,9 @@ defmodule OptimalSystemAgent.Providers.Registry do
         {:error, "Unknown provider: #{provider}. Available: #{inspect(Map.keys(@providers))}"}
 
       module ->
-        call_with_fallback(provider, module, messages, opts_without_provider)
+        with :ok <- check_delegated_transport(module, opts_without_provider) do
+          call_with_fallback(provider, module, messages, opts_without_provider)
+        end
     end
   end
 
@@ -324,9 +326,11 @@ defmodule OptimalSystemAgent.Providers.Registry do
         {:error, "Unknown provider: #{provider}. Available: #{inspect(Map.keys(@providers))}"}
 
       module ->
-        case stream_with_fallback(provider, module, messages, callback, opts_without_provider) do
-          :ok -> :ok
-          {:error, _} = err -> err
+        with :ok <- check_delegated_transport(module, opts_without_provider) do
+          case stream_with_fallback(provider, module, messages, callback, opts_without_provider) do
+            :ok -> :ok
+            {:error, _} = err -> err
+          end
         end
     end
   end
@@ -406,7 +410,9 @@ defmodule OptimalSystemAgent.Providers.Registry do
           {:cont, {:error, "rate-limited"}}
 
         {:error, reason} ->
-          HealthChecker.record_failure(provider, reason)
+          unless OptimalSystemAgent.Agent.SubagentCloudPolicy.blocked?(reason),
+            do: HealthChecker.record_failure(provider, reason)
+
           Logger.warning("Provider #{provider} failed in fallback chain: #{reason}")
           {:cont, {:error, reason}}
       end
@@ -1032,9 +1038,10 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   > #### Capability-only — never a routing input {: .warning}
   >
-  > This function is consumed only by the prompt-cache capability decision
+  > This function is consumed by the delegated cloud-policy transport check
+  > and by the prompt-cache capability decision
   > (`anthropic_prompt_cache?/2` at the flatten gate, and `Providers.PromptCache`)
-  > and by context-window resolution. It is NEVER read by the code that chooses
+  > and context-window resolution. It is NEVER read by the code that chooses
   > which model runs a request: `OpenAICompat.do_chat/5` takes its `model`
   > argument straight from the caller and independently fills the provider
   > default (refusing outright if neither is present), so the fallback added here
@@ -1483,7 +1490,14 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # `:ok | {:error, reason}` so `Resilience.with_retry/2` can classify the
   # error and decide whether to retry the same provider.
   defp native_stream(target, messages, callback, opts) do
-    do_native_stream(target, normalize_outbound_messages(messages, target, opts), callback, opts)
+    with :ok <- check_delegated_transport(target, opts) do
+      do_native_stream(
+        target,
+        normalize_outbound_messages(messages, target, opts),
+        callback,
+        opts
+      )
+    end
   end
 
   defp do_native_stream({:compat, provider}, messages, callback, opts) do
@@ -1587,12 +1601,14 @@ defmodule OptimalSystemAgent.Providers.Registry do
   defp notify_stream_retry(_callback, _info), do: :ok
 
   defp try_stream_provider(target, messages, callback, opts) do
-    do_try_stream_provider(
-      target,
-      normalize_outbound_messages(messages, target, opts),
-      callback,
-      opts
-    )
+    with :ok <- check_delegated_transport(target, opts) do
+      do_try_stream_provider(
+        target,
+        normalize_outbound_messages(messages, target, opts),
+        callback,
+        opts
+      )
+    end
   end
 
   defp do_try_stream_provider({:compat, provider}, messages, callback, opts) do
@@ -1709,8 +1725,18 @@ defmodule OptimalSystemAgent.Providers.Registry do
 
   defp merge_retry_ctx(opts, _ctx), do: opts
 
+  defp check_delegated_transport(target, opts) do
+    OptimalSystemAgent.Agent.SubagentCloudPolicy.check_request(
+      provider_key(target),
+      resolved_model(target, opts),
+      opts
+    )
+  end
+
   defp apply_provider(target, messages, opts) do
-    do_apply_provider(target, normalize_outbound_messages(messages, target, opts), opts)
+    with :ok <- check_delegated_transport(target, opts) do
+      do_apply_provider(target, normalize_outbound_messages(messages, target, opts), opts)
+    end
   end
 
   defp do_apply_provider({:compat, provider}, messages, opts) do

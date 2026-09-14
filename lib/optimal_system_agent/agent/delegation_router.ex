@@ -9,6 +9,7 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
   """
 
   alias OptimalSystemAgent.Agent.CostObservations
+  alias OptimalSystemAgent.Agent.SubagentCloudPolicy
   alias OptimalSystemAgent.Agent.Tier
   alias OptimalSystemAgent.Providers.{FallbackChain, ImageBudget, ModelLimits, Registry}
 
@@ -39,8 +40,16 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
       |> Map.put(:provider, explicit_provider || default_provider())
       |> Map.put(:model_reason, "explicit model selected by the delegating task")
       |> Map.put(:model_requirements, Enum.map(requirements, &to_string/1))
+      |> enforce_cloud_policy()
     else
       choose(task, config, requirements, opts)
+    end
+  end
+
+  defp enforce_cloud_policy(config) do
+    case SubagentCloudPolicy.check(config.provider, config.model) do
+      :ok -> config
+      {:error, reason} -> Map.put(config, :routing_error, reason)
     end
   end
 
@@ -81,6 +90,7 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
         |> Enum.map(fn provider -> {provider, model_for.(tier, provider)} end)
         |> Enum.filter(fn {provider, model} ->
           configured?.(provider) and
+            SubagentCloudPolicy.check(provider, model) == :ok and
             compatible?(reqs, provider, model, tool_call, context_window, vision_capable)
         end)
 
@@ -130,7 +140,11 @@ defmodule OptimalSystemAgent.Agent.DelegationRouter do
         config
         |> Map.put(
           :routing_error,
-          "no configured model is known to satisfy: #{requirements_text}"
+          "no configured model is known to satisfy: #{requirements_text}" <>
+            if(SubagentCloudPolicy.enabled?(),
+              do: " under the cloud-only delegation policy",
+              else: ""
+            )
         )
         |> Map.put(:model_reason, "delegation blocked because no capable model was found")
         |> Map.put(:model_requirements, Enum.map(requirements, &to_string/1))

@@ -100,23 +100,11 @@ jobs:
       - name: Compile
         run: mix compile
 
-      # ADVISORY, not blocking — and deliberately so, for now.
-      #
-      # The tree does not currently pass either of these: there are existing
-      # compiler warnings, and `mix format --check-formatted` exits 1. Landing
-      # them as blocking would make this workflow red on its first run, and a
-      # gate that is always red is a gate everyone learns to ignore — which is
-      # worse than no gate, because it looks like coverage.
-      #
-      # They run and are visible in the log. Promote each to blocking (drop
-      # `continue-on-error`, and add `--warnings-as-errors` to the compile
-      # above) in the same change that cleans up the backlog it is guarding.
-      - name: Compiler warnings (advisory)
-        continue-on-error: true
+      # The warning and formatting backlog is resolved; enforce both on PRs.
+      - name: Compiler warnings
         run: mix compile --force --warnings-as-errors
 
-      - name: Formatting (advisory)
-        continue-on-error: true
+      - name: Formatting
         run: mix format --check-formatted
 
       # A unique port, for the same reason every local run needs one: the
@@ -150,6 +138,22 @@ jobs:
           fi
         env:
           OSA_HTTP_PORT: "19087"
+
+      - name: Verify defense helpers and skill examples
+        run: |
+          python3 test/security/defense_skill_helpers_test.py
+          python3 test/skill_reference_preservation_test.py
+          python3 test/elixir_skill_verifier_test.py
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          ERL_FLAGS: "+S 2:2"
+
+      - name: Verify isolated cyber-defense lab
+        run: |
+          docker pull python:3.12-slim
+          mix test test/security/defense_lab_integration_test.exs --include integration
+        env:
+          OSA_HTTP_PORT: "19088"
 
       # Why this exists: eight consecutive red runs went undiagnosed, and by
       # the time anyone looked the raw step logs were no longer retrievable in
@@ -261,7 +265,7 @@ jobs:
       # which is exactly how it was missed once.
       - name: Run test suite
         working-directory: priv/rust/tui
-        run: cargo test --release
+        run: cargo test --locked --release
 
   # Windows compiles ONLY in release.yml, i.e. AFTER a tag exists. That gap
   # shipped a broken v1.0.191: a SIGTERM/SIGHUP/SIGQUIT handler used
@@ -298,7 +302,7 @@ jobs:
 
       - name: Check the TUI compiles on Windows
         working-directory: priv/rust/tui
-        run: cargo check --bins
+        run: cargo check --locked --bins
 
   # A single required-status target, so branch protection has one check to
   # point at instead of a list that must be edited whenever a job is added.

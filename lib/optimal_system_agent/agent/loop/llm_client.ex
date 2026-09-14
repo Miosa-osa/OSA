@@ -466,6 +466,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     # `prompt_cache_key` sent to the server. Stable for the whole thread —
     # never regenerated per request.
     opts = maybe_put_session(opts, Map.get(state, :session_id))
+    opts = OptimalSystemAgent.Agent.SubagentCloudPolicy.request_opts(opts, state)
 
     # TEMP measurement instrumentation (OSA_CONTEXT_TRACE=1). No-op when unset.
     OptimalSystemAgent.Agent.Loop.ContextTrace.dump(
@@ -834,6 +835,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     opts = if model, do: Keyword.put(opts, :model, model), else: opts
     opts = maybe_put_service_tier(opts, state)
     opts = maybe_put_session(opts, session_id)
+    opts = OptimalSystemAgent.Agent.SubagentCloudPolicy.request_opts(opts, state)
 
     # TEMP measurement instrumentation (OSA_CONTEXT_TRACE=1). No-op when unset.
     OptimalSystemAgent.Agent.Loop.ContextTrace.dump(session_id, messages, opts, mode: "stream")
