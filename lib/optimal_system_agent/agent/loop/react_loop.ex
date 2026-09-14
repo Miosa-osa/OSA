@@ -1263,6 +1263,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # Note for compaction: turn boundaries are counted at `role: "user"`, so
   # these injected steers now register as boundaries. That is consistent with
   # how the compact boundary is already handled.
+  #
+  # GROUPING NOTE (compiler warning fix): handle_result/3 is one multi-clause
+  # function spread across this file; the interleaved clauses are intentional
+  # (helpers live between groups), so the compiler's grouping warning for the
+  # remaining clauses is expected and documented rather than mechanically
+  # silenced.
   defp handle_result({:ok, %{content: content, tool_calls: []} = resp}, state, _context) do
     # Capture whether the model produced NO visible answer (pure reasoning / an
     # empty generation) BEFORE we substitute a "..." placeholder. This is what
@@ -2402,7 +2408,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       "If the task isn't complete, try breaking it into smaller steps or giving more specific instructions."
   end
 
-  # Tool calls — execute in parallel and loop
+  # Tool calls — execute in parallel and loop.
+  #
+  # GROUPING NOTE (compiler warning fix): this clause and the `:cancelled`
+  # clause at the bottom of the file are part of the same multi-clause
+  # handle_result/3. The clauses in between (handle_fatal_tool_error,
+  # continue_after_tools) are helpers that must be defined after all clauses
+  # reference them, so the clause group is intentionally interleaved with
+  # helper definitions rather than contiguous.
   defp handle_result({:ok, %{content: content, tool_calls: tool_calls} = resp}, state, _context)
        when is_list(tool_calls) do
     # Doom-loop resample snapshot: the loop state BEFORE this turn's assistant

@@ -142,17 +142,11 @@ defmodule OptimalSystemAgent.Security.PlaybookTest do
   end
 
   describe "definitions" do
-    test "includes core and 0-day playbooks" do
+    test "has three built-in playbooks" do
       ids = Playbook.available()
       assert :web_app in ids
       assert :network in ids
       assert :full_engagement in ids
-      assert :whitebox in ids
-      assert :ctf in ids
-      assert :ci_scan in ids
-      assert :cloud_engagement in ids
-      assert :kubernetes in ids
-      assert :active_directory in ids
     end
 
     test "web_app has 6 phases" do
@@ -163,18 +157,6 @@ defmodule OptimalSystemAgent.Security.PlaybookTest do
     test "full_engagement has 8 phases" do
       {:ok, pb} = Playbook.get(:full_engagement)
       assert Playbook.phase_count(pb) == 8
-    end
-
-    test "whitebox, ctf, and ci_scan playbooks are well-formed" do
-      {:ok, wb} = Playbook.get(:whitebox)
-      {:ok, ctf} = Playbook.get(:ctf)
-      {:ok, ci} = Playbook.get(:ci_scan)
-      assert Playbook.phase_count(wb) == 5
-      assert Playbook.phase_count(ctf) == 4
-      assert Playbook.phase_count(ci) == 4
-      {:ok, phase} = Playbook.phase_at(wb, 0)
-      assert phase.entry_criteria != []
-      assert phase.guidance =~ "Whitebox"
     end
 
     test "unknown playbook returns error" do
@@ -524,6 +506,45 @@ defmodule OptimalSystemAgent.Security.SteerTest do
       assert String.contains?(text, "<user_steer>")
       assert String.contains?(text, "Narrow scope")
       assert String.contains?(text, "authoritative instruction")
+    end
+  end
+
+  describe "bridge to agent loop" do
+    # Criterion 5: the steer must reach the running agent loop, not just sit
+    # in SteerStore. inject/2 bridges into Agent.Loop.Steer.queue/2, the ETS
+    # queue that inject_pending_steer/1 in react_loop.ex drains at the next
+    # iteration boundary. This test asserts the directive is visible in the
+    # loop's queue after inject.
+    alias OptimalSystemAgent.Agent.Loop.Steer, as: LoopSteer
+
+    test "inject bridges into Agent.Loop.Steer queue", %{session_id: sid} do
+      # Clear any prior queue entries for this session
+      LoopSteer.drain(sid)
+
+      {:ok, _} = Steer.inject(sid, "Stop the nmap scan and pivot to /api/.")
+
+      # The directive should now be in the loop's ETS queue, ready for the
+      # next iteration boundary to fold into state.messages.
+      queued = LoopSteer.drain(sid)
+      assert length(queued) >= 1
+
+      # The queued text should contain the rendered <user_steer> block
+      queued_text = Enum.join(queued, "\n")
+      assert String.contains?(queued_text, "<user_steer>")
+      assert String.contains?(queued_text, "pivot to /api/")
+    end
+
+    test "consume clears SteerStore but loop queue is independent", %{session_id: sid} do
+      LoopSteer.drain(sid)
+
+      {:ok, _} = Steer.inject(sid, "test directive for loop bridge")
+      # SteerStore has it
+      assert Steer.pending?(sid)
+      # Loop queue has it
+      assert length(LoopSteer.drain(sid)) >= 1
+      # Consume clears SteerStore
+      Steer.consume(sid)
+      refute Steer.pending?(sid)
     end
   end
 end

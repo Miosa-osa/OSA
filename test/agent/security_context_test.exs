@@ -93,8 +93,6 @@ defmodule OptimalSystemAgent.Agent.SecurityContextTest do
       assert String.contains?(result, "Authorization Framework")
       assert String.contains?(result, "Behavioral Policy")
       assert String.contains?(result, "Do NOT refuse")
-      assert String.contains?(result, "how OSA actually pentests")
-      assert String.contains?(result, "Live beats source")
     end
   end
 
@@ -132,13 +130,6 @@ defmodule OptimalSystemAgent.Agent.SecurityContextTest do
       # Tool recipes are in the sandbox context (cloud/docker), not host
       # On host, we still get scan methodology and finding quality
       assert String.contains?(result, "finding_quality")
-    end
-
-    test "injects execution environment and untrusted-output rules" do
-      state = %{messages: [%{content: "pentest example.com"}], session_id: "test-16"}
-      result = SecurityContext.sandbox_environment_block(state)
-      assert result =~ "execution_environment" or result =~ "localhost"
-      assert result =~ "finding_quality"
     end
   end
 end

@@ -25,7 +25,7 @@ defmodule OptimalSystemAgent.Security.AttackChainReasoner do
 
   """
 
-  alias OptimalSystemAgent.Security.{ShadowGraph, ThreatIntel, Cvss}
+  alias OptimalSystemAgent.Security.{ShadowGraph, ThreatIntel, NotesStore}
 
   @typedoc "A single hop in an attack chain"
   @type hop :: %{
@@ -46,7 +46,8 @@ defmodule OptimalSystemAgent.Security.AttackChainReasoner do
           end_asset: String.t(),
           total_cost: float(),
           confidence: float(),
-          path_description: String.t()
+          path_description: String.t(),
+          graph: ShadowGraph.graph()
         }
 
   # ── Public API ────────────────────────────────────────────────────────────
@@ -59,9 +60,17 @@ defmodule OptimalSystemAgent.Security.AttackChainReasoner do
   """
   @spec find_chains(String.t()) :: [chain()]
   def find_chains(session_id) when is_binary(session_id) do
-    graph = ShadowGraph.get_graph(session_id) || %{}
+    # ShadowGraph is a pure structure — rebuild it from the session's notes.
+    # Lazy-start the store like the orchestrator does; empty notes = no chains.
+    notes =
+      case NotesStore.ensure_started(session_id) do
+        {:ok, _pid} -> NotesStore.list(session_id)
+        _ -> []
+      end
 
-    roots = ShadowGraph.roots(session_id)
+    graph = ShadowGraph.update_from_notes(ShadowGraph.new(), notes)
+
+    roots = ShadowGraph.hosts(graph)
     chains = Enum.flat_map(roots, fn root -> explore_from(root, graph) end)
 
     Enum.sort_by(chains, & &1.confidence, :desc)
@@ -105,86 +114,103 @@ defmodule OptimalSystemAgent.Security.AttackChainReasoner do
   meet the minimum evidence threshold (0.4).
   """
   @spec extend(chain()) :: {:extended, chain()} | :unchanged
-  def extend(%{hops: []}), do: :unchanged
+  def extend(%{hops: hops, graph: graph} = chain) when is_list(hops) and is_map(graph) do
+    last_target = List.last(hops).target
 
-  def extend(%{hops: hops} = chain) when is_list(hops) do
-    last_hop = List.last(hops)
-    last_target = Map.get(last_hop, :target) || Map.get(last_hop, "target")
-
+    # Outgoing HAS_VULNERABILITY edges from the last target host extend the
+    # chain with the vuln's node as the next hop.
     extensions =
-      if is_binary(last_target), do: ShadowGraph.outgoing_edges(last_target), else: []
+      ShadowGraph.edges_of_type(graph, :HAS_VULNERABILITY)
+      |> Enum.filter(&(&1.source == last_target))
 
     new_hops =
       extensions
-      |> Enum.map(&to_hop/1)
+      |> Enum.map(fn edge ->
+        %{
+          source: last_target,
+          target: edge.target,
+          edge_weight: Map.get(edge.metadata, :weight, 1.0),
+          evidence_quality: Map.get(edge.metadata, :evidence, 0.5),
+          has_kev: ThreatIntel.known_exploited?(Map.get(edge.metadata, :cve)),
+          vulnerability_class: Map.get(edge.metadata, :class),
+          credential_used: nil
+        }
+      end)
       |> Enum.filter(&(&1.evidence_quality >= 0.4))
 
-    extended_chain =
-      chain
-      |> Map.put(:hops, hops ++ new_hops)
-      |> Map.put(:confidence, score_path(hops ++ new_hops))
+    if length(new_hops) > 0 do
+      extended_chain = %{
+        chain
+        | hops: hops ++ new_hops,
+          confidence: score_path(hops ++ new_hops)
+      }
 
-    {:extended, extended_chain}
+      {:extended, extended_chain}
+    else
+      :unchanged
+    end
   end
 
   def extend(_), do: :unchanged
 
   # ── Internal logic ────────────────────────────────────────────────────────
 
-  @spec explore_from(String.t(), map()) :: [chain()]
-  defp explore_from(root, graph) when is_binary(root) and is_map(graph) do
-    edges =
-      graph
-      |> Map.get(:edges, [])
-      |> Enum.filter(&(&1.source == root))
+  @spec explore_from(String.t() | map(), ShadowGraph.graph()) :: [chain()]
+  defp explore_from(root, graph) when is_map(root) do
+    # hosts(graph) returns node maps %{id, label, type} — extract the id
+    explore_from(Map.get(root, :id), graph)
+  end
 
-    Enum.map(edges, fn edge ->
-      target = Map.get(edge, :target)
+  defp explore_from(root, graph) when is_binary(root) do
+    # ShadowGraph edges are %{source, target, type, metadata} with ATOM types
+    # (:AUTH_ACCESS, :HAS_VULNERABILITY, :HAS_FINDING, :HAS_ARTIFACT). Pivot
+    # chains start from credential→host (AUTH_ACCESS) and host→vuln
+    # (HAS_VULNERABILITY) edges touching this root.
+    edges =
+      ShadowGraph.edges_of_type(graph, :AUTH_ACCESS) ++
+        ShadowGraph.edges_of_type(graph, :HAS_VULNERABILITY)
+
+    edges
+    |> Enum.filter(fn e -> e.source == root or e.target == root end)
+    |> Enum.map(fn edge ->
+      # The "other end" of the edge is the pivot target
+      target =
+        if edge.source == root do
+          edge.target
+        else
+          edge.source
+        end
 
       hop = %{
         source: root,
         target: target,
-        edge_weight: Map.get(edge, :weight, 1.0),
-        evidence_quality: Map.get(edge, :evidence, 0.5),
-        has_kev: ThreatIntel.known_exploited?(Map.get(edge, :cve)),
-        vulnerability_class: Map.get(edge, :class),
-        credential_used: Map.get(edge, :credential)
+        edge_weight: Map.get(edge.metadata, :weight, 1.0),
+        evidence_quality: Map.get(edge.metadata, :evidence_quality, 0.5),
+        has_kev: ThreatIntel.known_exploited?(Map.get(edge.metadata, :cve)),
+        vulnerability_class: Map.get(edge.metadata, :class),
+        credential_used: if(edge.type == :AUTH_ACCESS, do: edge.source, else: nil)
       }
 
       %{
-        id: "#{root}->#{Map.get(edge, :target)}",
+        id: "#{root}->#{target}",
         hops: [hop],
         start_asset: root,
-        end_asset: Map.get(edge, :target),
+        end_asset: target,
         total_cost: hop_score(hop),
         confidence: score_path([hop]),
-        path_description: build_description(hop)
+        path_description: build_description(hop),
+        graph: graph
       }
     end)
   end
 
   @spec hop_score(map()) :: float()
-  defp hop_score(hop) when is_map(hop) do
-    w = Map.get(hop, :edge_weight, 0.5)
-    eq = Map.get(hop, :evidence_quality, 0.5)
-    kev = Map.get(hop, :has_kev, false)
-
-    base = Cvss.base_score(w)
+  defp hop_score(%{edge_weight: w, evidence_quality: eq, has_kev: kev}) do
+    # Cvss module scores CVSS *vectors* (strings); edge_weight here is already a
+    # 0-10 numeric weight, so use it directly as the base.
+    base = if is_number(w), do: w * 1.0, else: 0.0
     kev_bonus = if kev, do: 1.5, else: 0.0
     base + eq * 2.0 + kev_bonus
-  end
-
-  @spec to_hop(map()) :: hop()
-  defp to_hop(edge) when is_map(edge) do
-    %{
-      source: Map.get(edge, :source),
-      target: Map.get(edge, :target),
-      edge_weight: Map.get(edge, :weight, 1.0),
-      evidence_quality: Map.get(edge, :evidence, 0.5),
-      has_kev: ThreatIntel.known_exploited?(Map.get(edge, :cve)),
-      vulnerability_class: Map.get(edge, :class),
-      credential_used: Map.get(edge, :credential)
-    }
   end
 
   @spec build_description(hop()) :: String.t()

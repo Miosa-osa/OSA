@@ -37,7 +37,7 @@ defmodule OptimalSystemAgent.Security.WeaponCatalog do
 
   """
 
-  alias OptimalSystemAgent.Security.{ThreatIntel, Cvss, CodeReachable}
+  alias OptimalSystemAgent.Security.{ThreatIntel, CodeReachable}
 
   @typedoc "Attack domain"
   @type domain() ::
@@ -76,7 +76,6 @@ defmodule OptimalSystemAgent.Security.WeaponCatalog do
         }
 
   # Domain classification thresholds
-  @poc_threshold 0.5
   @reliable_threshold 0.7
   @production_threshold 0.85
 
@@ -89,7 +88,7 @@ defmodule OptimalSystemAgent.Security.WeaponCatalog do
   on confidence. Enriches with KEV data from ThreatIntel if the finding has a CVE.
   """
   @spec classify(map(), [map()]) :: weapon()
-  def classify(finding, current_weapons \\ []) when is_map(finding) do
+  def classify(finding, _current_weapons \\ []) when is_map(finding) do
     domain = classify_domain(finding)
     score = compute_score(finding)
     maturity = determine_maturity(score)
@@ -103,9 +102,7 @@ defmodule OptimalSystemAgent.Security.WeaponCatalog do
       score: score,
       maturity: maturity,
       cvss_score: Map.get(finding, :cvss_score) || Map.get(finding, "cvss_score"),
-      is_kev:
-        Map.get(finding, :is_kev) || Map.get(finding, "is_kev") ||
-          ThreatIntel.known_exploited?(Map.get(finding, :cve)),
+      is_kev: ThreatIntel.known_exploited?(Map.get(finding, :cve)),
       code_reachable: CodeReachable.check(finding),
       evidence_count:
         Enum.count(Map.get(finding, :evidence, []) || Map.get(finding, "evidence", [])),
@@ -141,10 +138,11 @@ defmodule OptimalSystemAgent.Security.WeaponCatalog do
   """
   @spec add(weapon(), [map()]) :: :ok | {:error, String.t()}
   def add(weapon, _current_weapons \\ []) when is_map(weapon) do
-    if Map.has_key?(weapon, :domain) and Map.has_key?(weapon, :score) do
-      :ok
-    else
+    # Validate weapon structure
+    unless Map.has_key?(weapon, :domain) and Map.has_key?(weapon, :score) do
       {:error, "weapon must have :domain and :score"}
+    else
+      :ok
     end
   end
 
@@ -181,19 +179,15 @@ defmodule OptimalSystemAgent.Security.WeaponCatalog do
   the score thresholds defined in this module.
   """
   @spec promote(weapon()) :: weapon()
-  def promote(%{maturity: :poc} = weapon), do: Map.put(weapon, :maturity, :reliable)
-  def promote(%{maturity: :reliable} = weapon), do: Map.put(weapon, :maturity, :production)
-  def promote(%{maturity: :production} = weapon), do: weapon
-
   def promote(%{score: s} = weapon) when s >= @production_threshold do
-    Map.put(weapon, :maturity, :production)
+    %{weapon | maturity: :production}
   end
 
   def promote(%{score: s} = weapon) when s >= @reliable_threshold do
-    Map.put(weapon, :maturity, :reliable)
+    %{weapon | maturity: :reliable}
   end
 
-  def promote(weapon), do: Map.put(weapon, :maturity, Map.get(weapon, :maturity, :poc))
+  def promote(weapon), do: weapon
 
   # ── Domain classification ────────────────────────────────────────────────
 

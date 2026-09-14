@@ -7,6 +7,7 @@ defmodule OptimalSystemAgent.Sandbox.Fallback do
   agent via a context message that the sandbox changed and what the new
   environment can/can't access.
 
+  Adapted from HackerAI's `cloud-sandbox-recovery.ts` and `sandbox-fallback.ts`.
 
   ## Failover order
 

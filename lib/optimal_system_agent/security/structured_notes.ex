@@ -2,7 +2,7 @@ defmodule OptimalSystemAgent.Security.StructuredNotes do
   @moduledoc """
   Schema-validated security notes for penetration testing engagements.
 
-  Notes have categories with required
+  Adapted from PentestAgent's notes system. Notes have categories with required
   fields per category, plus structured metadata (services, endpoints,
   technologies). This is the foundation for the ShadowGraph knowledge graph.
 

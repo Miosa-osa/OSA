@@ -15,9 +15,6 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.DataRoutes do
   require Logger
 
   alias OptimalSystemAgent.SDK.Memory
-  alias OptimalSystemAgent.Providers
-  alias OptimalSystemAgent.System.AtomicFile
-  alias OptimalSystemAgent.System.JsonStore
   alias OptimalSystemAgent.Agent.Scheduler
   alias OptimalSystemAgent.Machines
 

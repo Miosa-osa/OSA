@@ -22,6 +22,7 @@ defmodule OptimalSystemAgent.Agent.Jailbreak do
   @default_rel "prompts/jailbreak.md"
   @meta_file "jailbreak.json"
   @badge "\u26A1 LIBERATED"
+  @reset "\u001B[0m"
 
   # Fresh-node fallback: with no default file yet, `/jailbreak on` still has to
   # arm something meaningful instead of an empty block.

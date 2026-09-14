@@ -7,6 +7,7 @@ defmodule OptimalSystemAgent.Sandbox.CostTracker do
   actually cost. When the agent switches providers mid-run, the cost segment
   for the old provider is closed and a new one opened.
 
+  Adapted from HackerAI's per-segment cost accounting in `tools/index.ts`.
 
   ## Usage
 
@@ -108,7 +109,7 @@ defmodule OptimalSystemAgent.Sandbox.CostTracker do
   end
 
   @impl true
-  def handle_call({:switch_provider, session_id, _from, to}, _from_pid, state) do
+  def handle_call({:switch_provider, session_id, _from, to}, _caller, state) do
     case :ets.lookup(@table, session_id) do
       [{^session_id, data}] ->
         updated = Map.put_new(data, to, %{runtime_ms: 0, cost_usd: 0.0, segments: []})
