@@ -201,7 +201,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.CommandPaletteTest do
       others = Enum.filter(body["results"], fn r -> r["name"] != "reload" end)
 
       if exact && others != [] do
-        max_other_score = Enum.max_by(others, fn r -> r["score"] end).score
+        # results are JSON-encoded (string keys) — the red-team skill entries
+        # exposed this test's atom-key assumption on .score
+        max_other_score = Enum.max_by(others, fn r -> r["score"] end)["score"]
         assert exact["score"] >= max_other_score
       end
     end
