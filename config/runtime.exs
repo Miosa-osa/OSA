@@ -602,9 +602,12 @@ config :optimal_system_agent,
 
   # OpenComputers host daemon mode. The installer sets the env var in the
   # launchd/systemd service; the marker is kept for interactive CLI enablement.
+  # Test fixtures own these registered processes. A developer's marker must not
+  # override config/test.exs and start permanent children behind those fixtures.
   open_computers_enabled:
-    System.get_env("OSA_OPEN_COMPUTERS_ENABLED") == "true" or
-      File.exists?(Path.expand("~/.osa/.open_computers_enabled")),
+    config_env() != :test and
+      (System.get_env("OSA_OPEN_COMPUTERS_ENABLED") == "true" or
+         File.exists?(Path.expand("~/.osa/.open_computers_enabled"))),
 
   # Provider failover chain — auto-detected from configured API keys.
   # Override with comma-separated list: OSA_FALLBACK_CHAIN=anthropic,openai,ollama

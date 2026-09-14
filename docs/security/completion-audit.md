@@ -176,3 +176,10 @@ unused bindings/defaults/imports, and removes exact duplicate unreachable
 budget handlers and the duplicate CVSS helper. No unique function body was
 removed. The changed application compiles with `--warnings-as-errors`.
 Full-suite and PR CI results are recorded in the PR as they complete.
+
+The next full run exposed the underlying environment leak: runtime.exs was
+re-enabling OpenComputers from the operator's home marker after config/test.exs
+explicitly disabled it. Runtime configuration now preserves test ownership;
+production environment/marker enablement is unchanged. RuntimePathsTest guards
+the startup invariant. Failed runs caused by this leak are not reported as
+passes.

@@ -45,6 +45,11 @@ defmodule OptimalSystemAgent.Config.RuntimePathsTest do
            "expected an isolated tmp home, got #{config_dir()}"
   end
 
+  test "runtime configuration preserves test ownership of OpenComputers processes" do
+    refute Application.fetch_env!(@app, :open_computers_enabled),
+           "runtime.exs must not enable application-owned OpenComputers children in tests"
+  end
+
   for {key, suffix} <- @derived_paths do
     test "#{key} is derived from the runtime config_dir, not frozen to ~/.osa" do
       actual = Application.fetch_env!(@app, unquote(key))
