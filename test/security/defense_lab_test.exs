@@ -64,7 +64,11 @@ defmodule OptimalSystemAgent.Security.DefenseLabTest do
     end
 
     pid = spawn(fn -> DefenseLab.run(%{}, runner: runner) end)
-    assert_receive {:running, name}
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+
+    # Full-suite compilation competes for schedulers; startup is not a 100 ms
+    # performance contract. Begin cancellation only once the runner is ready.
+    assert_receive {:running, name}, 5000
     Process.exit(pid, :kill)
     assert_receive {:removed, ^name}, 1000
   end
