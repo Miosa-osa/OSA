@@ -15,11 +15,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntelNewActionsTest do
   setup do
     session_id = "intel-new-#{System.unique_integer([:positive])}"
     ctx = %UseContext{UseContext.empty() | session_id: session_id, permission_tier: :full}
+
     on_exit(fn ->
       NotesStore.stop(session_id)
       name = String.to_atom("osa_attack_ora_#{session_id}")
       if pid = Process.whereis(name), do: GenServer.stop(pid)
     end)
+
     {:ok, session_id: session_id, ctx: ctx}
   end
 
@@ -83,12 +85,19 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntelNewActionsTest do
 
   describe "exploit actions" do
     test "exploit_deploy requires a weapon" do
-      assert {:error, msg} = run("exploit_deploy", %UseContext{UseContext.empty() | permission_tier: :full})
+      assert {:error, msg} =
+               run("exploit_deploy", %UseContext{UseContext.empty() | permission_tier: :full})
+
       assert msg =~ "weapon"
     end
 
     test "exploit_deploy with a weapon map returns a tagged result", %{ctx: _ctx} do
-      ctx = %UseContext{UseContext.empty() | session_id: "intel-deploy-#{System.unique_integer([:positive])}", permission_tier: :full}
+      ctx = %UseContext{
+        UseContext.empty()
+        | session_id: "intel-deploy-#{System.unique_integer([:positive])}",
+          permission_tier: :full
+      }
+
       weapon = %{class: :sqli, target: "http://127.0.0.1:1", score: 0.9, evidence: "test"}
       result = run("exploit_deploy", ctx, %{"weapon" => weapon})
       # deploy returns {:ok, map} or {:error, _} — both are shaped, never a crash
@@ -105,11 +114,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntelNewActionsTest do
 
     test "exploit_judge accepts a well-formed receipt" do
       ctx = %UseContext{UseContext.empty() | permission_tier: :full}
+
       receipt = %{
         "title" => "sqli confirmed",
         "severity" => "high",
         "evidence" => [%{"type" => "output", "content" => "sqlmap: vulnerable parameter 'id'"}]
       }
+
       {status, _} = run("exploit_judge", ctx, %{"receipt" => receipt})
       assert status in [:confirmed, :potential, :rejected]
     end
@@ -130,8 +141,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.SecurityIntelNewActionsTest do
     end
 
     test "queue_put with unknown class errors cleanly" do
-      ctx = %UseContext{UseContext.empty() | session_id: "intel-q-#{System.unique_integer([:positive])}", permission_tier: :full}
-      assert {:error, msg} = run("queue_put", ctx, %{"class" => "not_a_real_class_xyz", "candidate" => %{}})
+      ctx = %UseContext{
+        UseContext.empty()
+        | session_id: "intel-q-#{System.unique_integer([:positive])}",
+          permission_tier: :full
+      }
+
+      assert {:error, msg} =
+               run("queue_put", ctx, %{"class" => "not_a_real_class_xyz", "candidate" => %{}})
+
       assert msg =~ "unknown class"
     end
   end

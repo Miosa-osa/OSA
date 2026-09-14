@@ -196,6 +196,23 @@ Both suites passed together (25 tests) after correction. These are test repairs,
 not changes to model routing or desktop behavior.
 
 PR CI passed on commit db2961db, including Rust, Windows compilation, the full
-Elixir gate, real Docker exercises, and the helper checks. Warning-free compile
-and formatting also passed; this follow-up promotes both checks from advisory
-to required. The PR records validation against the final revision separately.
+Elixir gate, real Docker exercises, and the helper checks. The advisory warning and formatting steps were reported green by the job
+API but did not establish that either check passed. Making it required exposed
+six always-truthy atom expressions in the existing generator. Removing their
+unreachable fallback operands preserves the evaluated map keys and behavior.
+The formatter also corrected remaining whitespace/layout differences. Both
+compiler warnings and formatting are now required checks, and both were run
+locally with successful exit codes after these corrections. The PR records validation against the final revision separately.
+
+The subsequent full local suite at revision 3585c871 completed with **2 doctests,
+11,437 tests, 0 failures, 19 excluded, 3 skipped**. The final follow-up also
+synchronizes the TUI's previously stale lockfile package version to 1.0.200 and
+uses `--locked` in both Rust CI lanes. Results for the final revision are in the PR.
+
+The original model-picker functionality is already present on main: live-turn
+speed metrics and local benchmark cache rendering distinguish measured from
+estimated rates. Historical per-model host cache entries remain intact; no
+local model was loaded for this review, no new benchmark was performed, and
+neither the historical 128K nor 256K context claim was independently certified.
+Cloud-only delegation applies to this development session; this PR does not
+claim to reconfigure every future OSA provider fallback.

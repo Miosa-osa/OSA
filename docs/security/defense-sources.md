@@ -15,7 +15,7 @@ Research date: 2026-09-14. The 12 skills and examples are original OSA material,
 
 ## Sources with retrieval limits
 
-- [CISA KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog): direct browser retrieval returned HTTP 403 during this pass. Do not claim a current KEV membership from these docs. The skill matches an operator-provided dated JSON export, then requires vendor-version confirmation. No catalog data bundled and no bulk-feed reuse license inferred.
+- [CISA KEV catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog): direct browser retrieval returned HTTP 403 during this pass. Do not claim a current KEV membership from these docs. The skill matches an operator-provided dated JSON export, then requires vendor-version confirmation. No new catalog data bundled by this change (the existing `priv/security/kev.json` remains) and no bulk-feed reuse license inferred.
 - [systemd-analyze manual](https://www.freedesktop.org/software/systemd/man/latest/systemd-analyze.html) and [journalctl manual](https://www.freedesktop.org/software/systemd/man/latest/journalctl.html): publisher pages blocked this browser. Verify commands against the target's installed manual/help. These read-only command examples are original; no upstream manual text bundled.
 
 ## Capabilities and prerequisites

@@ -893,7 +893,7 @@ vulnerability management, sandbox triage, SIEM operations, and threat modeling.
 The earlier red-team/OSINT library remains bundled alongside them. The
 `elixir-otp` skill also ships with executable syntax examples and a verifier.
 
-Ask OSA to “run the bundled defense exercises and verify the fixes.” It can
+Ask OSA to “simulate attacks with the bundled defense exercises and verify the fixes.” It can
 find `cyber_defense` through `tool_search`, list scenarios with
 `{"action":"scenarios"}`, then run:
 

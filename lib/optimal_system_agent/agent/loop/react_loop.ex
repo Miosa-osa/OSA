@@ -1072,7 +1072,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     deliver_truncated_incomplete(resp, state)
   end
 
-
   # TRUNCATED-MESSAGE tool-call guard (PI primitive — correctness).
   #
   # When a model response is cut off by the token limit, the provider can hand
@@ -1900,7 +1899,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     end
   end
 
-
   # Tool calls — execute in parallel and loop.
   #
   # All handle_result/3 clauses are grouped before the supporting helpers.
@@ -2046,7 +2044,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       continue_after_tools(results, tool_calls, state, resample_snapshot)
     end
   end
-
 
   # WS5 — hard interrupt: LLMClient killed the in-flight stream. Kill any tool
   # tasks the streaming executor had started (their tool_use blocks were never
@@ -2902,7 +2899,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         end
     end
   end
-
 
   @doc false
   # Turn-level retry budget for a stream idle timeout. Public for tests.

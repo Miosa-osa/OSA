@@ -265,7 +265,7 @@ jobs:
       # which is exactly how it was missed once.
       - name: Run test suite
         working-directory: priv/rust/tui
-        run: cargo test --release
+        run: cargo test --locked --release
 
   # Windows compiles ONLY in release.yml, i.e. AFTER a tag exists. That gap
   # shipped a broken v1.0.191: a SIGTERM/SIGHUP/SIGQUIT handler used
@@ -302,7 +302,7 @@ jobs:
 
       - name: Check the TUI compiles on Windows
         working-directory: priv/rust/tui
-        run: cargo check --bins
+        run: cargo check --locked --bins
 
   # A single required-status target, so branch protection has one check to
   # point at instead of a list that must be edited whenever a job is added.

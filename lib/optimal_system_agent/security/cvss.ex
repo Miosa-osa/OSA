@@ -142,7 +142,6 @@ defmodule OptimalSystemAgent.Security.Cvss do
 
   # ── internals ─────────────────────────────────────────────────────────────
 
-
   defp validate(metrics) do
     missing = Enum.reject(@metric_order, &Map.has_key?(metrics, &1))
 
