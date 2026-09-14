@@ -155,7 +155,12 @@ defmodule OptimalSystemAgent.Security.AttackChainReasoner do
 
   # ── Internal logic ────────────────────────────────────────────────────────
 
-  @spec explore_from(String.t(), ShadowGraph.graph()) :: [chain()]
+  @spec explore_from(String.t() | map(), ShadowGraph.graph()) :: [chain()]
+  defp explore_from(root, graph) when is_map(root) do
+    # hosts(graph) returns node maps %{id, label, type} — extract the id
+    explore_from(Map.get(root, :id), graph)
+  end
+
   defp explore_from(root, graph) when is_binary(root) do
     # ShadowGraph edges are %{source, target, type, metadata} with ATOM types
     # (:AUTH_ACCESS, :HAS_VULNERABILITY, :HAS_FINDING, :HAS_ARTIFACT). Pivot
@@ -180,7 +185,7 @@ defmodule OptimalSystemAgent.Security.AttackChainReasoner do
         source: root,
         target: target,
         edge_weight: Map.get(edge.metadata, :weight, 1.0),
-        evidence_quality: Map.get(edge.metadata, :evidence, 0.5),
+        evidence_quality: Map.get(edge.metadata, :evidence_quality, 0.5),
         has_kev: ThreatIntel.known_exploited?(Map.get(edge.metadata, :cve)),
         vulnerability_class: Map.get(edge.metadata, :class),
         credential_used: if(edge.type == :AUTH_ACCESS, do: edge.source, else: nil)
