@@ -45,8 +45,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "uncensored" =>
       {"Hop the current model to its unfiltered twin (off to return)", :cmd_uncensored},
     "jailbreak" =>
-      {"LIBERATE the active model — inject an operator override into every system prompt (off/show/file <path>)",
+      {"Arm the operator override — injects a text block at the top of every system prompt; armed: the block governs, disarmed: standard instructions (off/show/file <path>)",
        :cmd_jailbreak},
+    "voice" =>
+      {"[BETA] Hands-free voice mode — spawn the desktop orb bound to this session; talk, it listens and speaks replies (off to close)",
+       :cmd_voice},
     "status" => {"Show session status", :cmd_status},
     "cost" => {"Show cost breakdown", :cmd_cost},
     "usage" => {"Show account quota and this session's token usage", :cmd_usage},
@@ -73,7 +76,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "coordinator" => {"Toggle coordinator mode (delegation only)", :cmd_coordinator},
     "ask-user" => {"Let the agent ask you questions mid-task (off by default)", :cmd_ask_user},
     "effort" => {"Set thinking effort level (low/medium/high/max)", :cmd_effort},
-    "fast" => {"Toggle fast mode (low effort)", :cmd_fast},
+    "fast" => {"Toggle provider Fast processing (reasoning and tools unchanged)", :cmd_fast},
     "think" => {"Toggle model reasoning on/off (off = faster replies)", :cmd_think},
     "permissions" => {"View and manage permission rules", :cmd_permissions},
     "hooks" => {"View registered hooks", :cmd_hooks},
@@ -174,9 +177,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     IO.puts("")
     IO.puts("  #{@dim}Compacting context...#{@reset}")
 
-    # CC parity: `/compact <instructions>` threads user guidance into the
-    # summary prompt via the proactive path; bare `/compact` keeps the
-    # legacy reactive Loop.compact path.
+    # Both forms use the aggressive proactive fold (the 9-section LLM summary
+    # that folds old turns down to a small summary + recent tail).
+    # `/compact <instructions>` threads user guidance into the summary prompt;
+    # bare `/compact` folds with no extra instructions. The old bare path used
+    # the light reactive `Loop.compact` trimmer, which only shaved ~15% off.
     case String.trim(args || "") do
       "" ->
         compact_without_instructions(session_id)
@@ -204,34 +209,27 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       session_id
   end
 
-  # Bare `/compact` — original reactive compaction with before/after stats.
+  # Bare `/compact` — aggressive proactive fold (no extra instructions), with
+  # before/after stats. Same crush as `/compact <instructions>`.
   defp compact_without_instructions(session_id) do
-    case Loop.get_state(session_id) do
-      {:ok, state} ->
-        before_tokens = state[:tokens_used] || state[:estimated_tokens] || 0
+    case Loop.proactive_compact(session_id, nil) do
+      {:ok, stats} ->
+        saved = stats.tokens_before - stats.tokens_after
 
-        case Loop.compact(session_id) do
-          :ok ->
-            case Loop.get_state(session_id) do
-              {:ok, after_state} ->
-                after_tokens = after_state[:tokens_used] || after_state[:estimated_tokens] || 0
-                saved = before_tokens - after_tokens
-                pct = if before_tokens > 0, do: round(saved / before_tokens * 100), else: 0
+        pct =
+          if stats.tokens_before > 0,
+            do: round(saved / stats.tokens_before * 100),
+            else: 0
 
-                IO.puts(
-                  "  #{@green}#{@reset} Compacted: #{format_tokens(before_tokens)} -> #{format_tokens(after_tokens)} (#{pct}% reduction)"
-                )
+        IO.puts(
+          "  #{@green}#{@reset} Compacted: #{format_tokens(stats.tokens_before)} -> #{format_tokens(stats.tokens_after)} (#{pct}% reduction)"
+        )
 
-              _ ->
-                IO.puts("  #{@green}#{@reset} Compacted successfully")
-            end
-
-          {:error, reason} ->
-            IO.puts("  #{@yellow}error: #{reason}#{@reset}")
-        end
-
-      _ ->
+      {:error, :no_session} ->
         IO.puts("  #{@yellow}error: no active session#{@reset}")
+
+      {:error, reason} ->
+        IO.puts("  #{@yellow}error: #{inspect(reason)}#{@reset}")
     end
   end
 
@@ -1393,9 +1391,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   #   /jailbreak off | show   disarm / print what would be injected
   #   /jailbreak file <path>  point the block at a custom text file (remembered)
   #
-  # The block is appended to OSA's system prompt for EVERY model/provider, on
-  # top of any `/system` state, from the next message. A LIBERATED badge shows
-  # on the spinner and status line while armed.
+  # The block is prepended to OSA's system prompt for EVERY model/provider,
+  # BEFORE the Soul static base and any `/system` state, from the next message.
+  # A LIBERATED badge shows on the spinner and status line while armed.
   def cmd_jailbreak(args, session_id) do
     alias OptimalSystemAgent.Agent.Jailbreak
     IO.puts("")
@@ -1430,9 +1428,28 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     case Jailbreak.set(enabled?, file) do
       :ok when enabled? ->
-        IO.puts("  #{@green}✓#{@reset} #{IO.ANSI.magenta()}⚡ LIBERATED#{@reset}")
-        IO.puts("  #{@dim}#{Jailbreak.preview()}#{@reset}")
-        IO.puts("  #{@dim}/jailbreak off to disarm#{@reset}")
+        magenta = IO.ANSI.magenta()
+        bold = @bold
+
+        IO.puts("")
+
+        IO.puts(
+          "  #{magenta}#{bold}\u26A1 \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550#{@reset}"
+        )
+
+        IO.puts("  #{magenta}#{bold}\u26A1   L I B E R A T E D   \u26A1#{@reset}")
+
+        IO.puts(
+          "  #{magenta}#{bold}\u26A1 \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550#{@reset}"
+        )
+
+        IO.puts("")
+        IO.puts("  #{@dim}override:#{reset_dim()} #{Jailbreak.preview()}#{@reset}")
+        IO.puts("  #{@dim}source:#{reset_dim()} #{Jailbreak.file_path()}#{@reset}")
+
+        IO.puts(
+          "  #{@dim}applies to every model, next message — /jailbreak off to disarm; while disarmed the standard instructions govern#{@reset}"
+        )
 
       :ok ->
         IO.puts(
@@ -1495,6 +1512,77 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     if OptimalSystemAgent.Agent.Jailbreak.active?(),
       do: IO.puts("  #{IO.ANSI.magenta()}⚡ LIBERATED#{@reset}")
+  end
+
+  # ── /voice — [BETA] hands-free voice mode (desktop orb) ────────────────
+  #
+  #   /voice            status; with no arg when off, arms it for THIS session
+  #   /voice on         spawn the orb bound to the current session
+  #   /voice off        close the orb, disarm voice mode
+  #
+  # The orb is an external Electron app (rare-ui FluidOrb) that listens via
+  # Silero VAD + whisper.cpp, sends your words to this session through the
+  # HTTP API, and speaks replies. One orb at a time, node-wide. BETA: the
+  # orb app itself is not part of this repo — see the PR description.
+  def cmd_voice(args, session_id) do
+    alias OptimalSystemAgent.Agent.Voice
+
+    IO.puts("")
+
+    case String.split(String.trim(args), ~r/\s+/, parts: 2) do
+      [""] ->
+        if Voice.active?() do
+          voice_off()
+        else
+          voice_on(session_id)
+        end
+
+      [verb] when verb in ["on", "enable", "start"] ->
+        voice_on(session_id)
+
+      [verb] when verb in ["off", "disable", "stop"] ->
+        voice_off()
+
+      [verb] when verb == "status" ->
+        IO.puts("  #{@dim}#{Voice.status_line()}#{@reset}")
+
+      _ ->
+        IO.puts(
+          "  #{@bold}/voice#{@reset}   #{IO.ANSI.faint()}[BETA] hands-free voice mode#{@reset}"
+        )
+
+        IO.puts("  #{@dim}/voice on | off | status#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  rescue
+    e ->
+      IO.puts("  #{@yellow}error: /voice failed: #{Exception.message(e)}#{@reset}\n")
+      session_id
+  end
+
+  defp voice_on(session_id) do
+    case OptimalSystemAgent.Agent.Voice.enable(session_id) do
+      :ok ->
+        IO.puts("  #{@green}✓#{@reset} #{IO.ANSI.magenta()}◉ voice on#{@reset}")
+        IO.puts("  #{@dim}orb on desktop — talk and it answers here#{@reset}")
+
+      {:error, {:app_missing, app}} ->
+        IO.puts("  #{@yellow}orb app not found: #{app}#{@reset}")
+        IO.puts("  #{@dim}set OSA_VOICE_APP or clone the app there#{@reset}")
+
+      {:error, :orb_did_not_boot} ->
+        IO.puts("  #{@yellow}orb spawned but did not boot (check /tmp/osavoice.log)#{@reset}")
+
+      {:error, reason} ->
+        IO.puts("  #{@yellow}voice failed: #{inspect(reason)}#{@reset}")
+    end
+  end
+
+  defp voice_off do
+    :ok = OptimalSystemAgent.Agent.Voice.disable()
+    IO.puts("  #{@green}✓#{@reset} voice off — orb closed")
   end
 
   defp uncensored_list do
@@ -2546,7 +2634,14 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
 
     IO.puts("")
 
-    case String.trim(args) do
+    trimmed = String.trim(args)
+
+    normalized =
+      if String.downcase(trimmed) in ~w(status pause stop resume clear off reset cancel end approve reject),
+        do: String.downcase(trimmed),
+        else: trimmed
+
+    case normalized do
       "" ->
         print_goal_status(session_id)
 
@@ -2555,18 +2650,57 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         IO.puts("  #{@green}✓#{@reset} Goal paused. #{@dim}/goal resume to continue.#{@reset}")
 
       "resume" ->
-        GoalTracker.resume(session_id)
-        IO.puts("  #{@green}✓#{@reset} Goal resumed — stall bookkeeping reset.")
+        snap = GoalTracker.resume(session_id)
 
-      verb when verb in ["clear", "off", "reset"] ->
-        GoalTracker.reset(session_id)
-        IO.puts("  #{@green}✓#{@reset} Goal cleared. Auto-continue toward it stops.")
+        if snap.status == :active and is_binary(snap.goal) and snap.goal != "" do
+          IO.puts("  #{@green}✓#{@reset} Goal resumed — stall bookkeeping reset.")
+        else
+          IO.puts("  Goal was not resumed. " <> GoalTracker.waiting_message(session_id))
+        end
+
+      verb when verb in ["clear", "off", "reset", "cancel"] ->
+        snap = GoalTracker.snapshot(session_id)
+
+        live_goal? =
+          is_map(snap) and snap.status != :cleared and is_binary(snap.goal) and snap.goal != ""
+
+        if live_goal? do
+          case GoalTracker.clear(session_id) do
+            {:ok, _} ->
+              Loop.cancel(session_id)
+
+              IO.puts(
+                "  #{@green}✓#{@reset} Goal cleared, not completed. Auto-continue toward it stops."
+              )
+
+            {:error, reason} ->
+              IO.puts("  Could not durably clear goal: #{inspect(reason)}")
+          end
+        else
+          IO.puts("  #{@dim}No active goal to clear.#{@reset}")
+        end
 
       "status" ->
         print_goal_status(session_id)
 
+      "end" ->
+        IO.puts(
+          "  Use /goal clear to stop, or /goal approve|reject to answer a pending decision."
+        )
+
+      verb when verb in ["approve", "reject"] ->
+        # Bare, no id, no notes — resolve WHATEVER is currently pending. A
+        # session has at most one pending decision, so there was never a real
+        # choice to disambiguate; the id was ceremony, not a safeguard.
+        resolve_goal_decision(session_id, verb, nil, "")
+
       text ->
-        anchor_goal_command(text, session_id)
+        case String.downcase(String.trim(text)) do
+          "auto" -> print_goal_auto_status()
+          "auto on" -> set_goal_auto(true)
+          "auto off" -> set_goal_auto(false)
+          _ -> dispatch_goal_decision_or_anchor(text, session_id)
+        end
     end
 
     IO.puts("")
@@ -2575,6 +2709,108 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     e ->
       IO.puts("  #{@yellow}error: could not update goal (#{Exception.message(e)})#{@reset}\n")
       session_id
+  end
+
+  # The `text ->` catch-all's original logic — approve/reject with a bare-word
+  # id, else anchor a new goal from the text. Extracted so `/goal auto ...`
+  # (a plain two-word sub-command, not a decision or an objective) can be
+  # intercepted BEFORE it — the pre-existing behavior would have anchored a
+  # goal literally titled "auto off".
+  defp dispatch_goal_decision_or_anchor(text, session_id) do
+    case String.split(text, " ", parts: 2, trim: true) do
+      [decision, rest] when decision in ["approve", "reject"] ->
+        {id, notes} = split_decision_id_and_notes(rest)
+        resolve_goal_decision(session_id, decision, id, notes)
+
+      _ ->
+        anchor_goal_command(text, session_id)
+    end
+  end
+
+  # ── /goal auto on|off ───────────────────────────────────────────────────
+  #
+  # `GoalTracker.auto_enabled?/0`'s user-facing kill switch: per-user,
+  # persisted the same way the MCP server allow-list is
+  # (`Settings.set_user/2` → `~/.osa/settings.json`), so it survives this
+  # session and every future one — not the per-turn `permission_mode` a
+  # `Loop` carries, and NOT overdrive/full-auto, which is about tool-call
+  # approval and must stay independent of this (see that function's
+  # moduledoc for why the two were never coupled).
+  defp print_goal_auto_status do
+    alias OptimalSystemAgent.Agent.Loop.GoalTracker
+
+    state = if GoalTracker.auto_enabled?(), do: "on", else: "off"
+
+    IO.puts("  #{@bold}Autonomous goal pursuit:#{@reset} #{state}")
+
+    IO.puts(
+      "  #{@dim}/goal auto on|off to change it. Independent of overdrive/full-auto — " <>
+        "that is about tool-call approval, not whether OSA anchors and chases its own " <>
+        "goals.#{@reset}"
+    )
+  end
+
+  defp set_goal_auto(enabled?) do
+    case OptimalSystemAgent.Settings.set_user("goal_auto", enabled?) do
+      :ok ->
+        if enabled? do
+          IO.puts(
+            "  #{@green}✓#{@reset} Autonomous goal pursuit turned #{@bold}on#{@reset}. " <>
+              "OSA may anchor and auto-continue a goal again."
+          )
+        else
+          IO.puts(
+            "  #{@green}✓#{@reset} Autonomous goal pursuit turned #{@bold}off#{@reset}. " <>
+              "OSA will complete requests directly and stop; a goal only exists if you " <>
+              "explicitly anchor one with /goal <text>."
+          )
+        end
+
+      {:error, reason} ->
+        IO.puts("  #{@yellow}error: could not save the setting (#{inspect(reason)})#{@reset}")
+    end
+  end
+
+  # `rest` is everything typed after `approve`/`reject`. The old parser always
+  # took its FIRST WORD as the request id ("/goal reject the button is still
+  # broken" resolved "the" as an id and failed with a confusing
+  # `stale_or_missing_request` for a rejection that never mentioned an id at
+  # all). `request_decision/2` always mints ids as `"decision-" <> base64` —
+  # so a first word wearing that shape IS an explicit id (old, still-supported
+  # form for scripts/automation that copy-paste one); anything else is free-form
+  # notes for whatever is currently pending, resolved implicitly.
+  defp split_decision_id_and_notes(rest) do
+    case String.split(rest, " ", parts: 2, trim: true) do
+      [maybe_id, notes] ->
+        if String.starts_with?(maybe_id, "decision-"),
+          do: {maybe_id, notes},
+          else: {nil, rest}
+
+      [maybe_id] ->
+        if String.starts_with?(maybe_id, "decision-"),
+          do: {maybe_id, ""},
+          else: {nil, rest}
+
+      [] ->
+        {nil, ""}
+    end
+  end
+
+  defp resolve_goal_decision(session_id, decision, id, notes) do
+    alias OptimalSystemAgent.Agent.Loop.GoalTracker
+
+    case GoalTracker.resolve_decision(session_id, id, decision, notes) do
+      {:ok, _} ->
+        IO.puts(
+          "  Decision recorded. Send a message to continue; completion still requires verification."
+        )
+
+      {:error, :no_pending_decision} ->
+        IO.puts("  #{@dim}No pending decision to #{decision}.#{@reset}")
+
+      {:error, reason} ->
+        IO.puts("  Decision not accepted: #{inspect(reason)}")
+    end
   end
 
   # `<goal> :: <criteria>` — the separator is doubled so ordinary goal prose
@@ -2632,16 +2868,39 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     end
   end
 
+  # Terminal states get a banner and, below the usual detail, a work overview —
+  # the "come back to a finished job" experience: goal statement, verdict,
+  # acceptance criteria, and what actually got touched, in one screen instead
+  # of scattered across a scrollback nobody re-reads. `:paused`/`:awaiting_user`
+  # are NOT terminal (`/goal resume` still applies to them) and get none of
+  # this — only a status a resume can no longer undo.
+  @terminal_goal_statuses [:completed, :blocked, :abandoned]
+
   defp print_goal_status(session_id) do
     alias OptimalSystemAgent.Agent.Loop.GoalTracker
 
     case GoalTracker.snapshot(session_id) do
+      # A user-cleared goal is GONE, not a fourth terminal state to render in
+      # full: `clear/1` leaves the record's `goal`/`history` text in place (the
+      # sidecar ledger keeps it for audit), but showing that back here read as
+      # the goal still being tracked — full objective, acceptance criteria,
+      # and a stale "latest: ... INCOMPLETE round N" verdict from BEFORE the
+      # clear, with no way to tell it was ever cleared at all. Short-circuit
+      # before the general branch below so `/goal` reports the same clean
+      # "no goal" state a session that never anchored one gets.
+      %{status: :cleared} ->
+        print_no_goal_message()
+
       %{goal: goal} = snap when is_binary(goal) and goal != "" ->
+        if snap.status in @terminal_goal_statuses, do: print_goal_banner(snap)
+
         IO.puts("  #{@bold}Goal#{@reset} #{@dim}(#{snap.goal_id})#{@reset}")
         IO.puts("  #{goal}")
         IO.puts("")
 
         reason = if snap.pause_reason, do: " (#{snap.pause_reason})", else: ""
+
+        if snap.pending_decision != nil, do: IO.puts(GoalTracker.waiting_message(session_id))
 
         IO.puts(
           "  #{@dim}status:#{@reset} #{snap.status}#{reason}  #{@dim}phase:#{@reset} #{snap.phase}"
@@ -2672,15 +2931,92 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
           _ -> :ok
         end
 
+        # G3 — a paused goal's WHAT (the panel's actual gap list) alongside
+        # its WHY (the "latest" line above). Before this, `/goal status` on a
+        # stalled/off-track/run-cap goal showed only the squashed transition
+        # sentence and a `verify_run_count`/`stall_count` — a counter, never
+        # the findings themselves. `:paused` is deliberately excluded from
+        # `@terminal_goal_statuses` (still resumable), so it needs its own
+        # gap section rather than piggybacking on `print_goal_overview/1`.
+        if snap.status == :paused, do: print_goal_gaps(snap)
+
+        if snap.status in @terminal_goal_statuses, do: print_goal_overview(session_id)
+
       _ ->
-        IO.puts("  #{@dim}No goal anchored. Set one with /goal <text>.#{@reset}")
-
-        IO.puts(
-          "  #{@dim}An anchored goal is pursued across turns until an independent panel#{@reset}"
-        )
-
-        IO.puts("  #{@dim}judges it complete, it stalls, or it hits its run cap.#{@reset}")
+        print_no_goal_message()
     end
+  end
+
+  defp print_no_goal_message do
+    IO.puts("  #{@dim}No active goal. Set one with /goal <text>.#{@reset}")
+
+    IO.puts(
+      "  #{@dim}An anchored goal is pursued across turns until an independent panel#{@reset}"
+    )
+
+    IO.puts("  #{@dim}judges it complete, it stalls, or it hits its run cap.#{@reset}")
+  end
+
+  defp print_goal_banner(%{status: :completed}) do
+    IO.puts("  #{@green}#{@bold}✓ GOAL COMPLETED#{@reset}")
+    IO.puts("")
+  end
+
+  defp print_goal_banner(%{status: :blocked}) do
+    IO.puts("  #{@yellow}#{@bold}⛔ GOAL BLOCKED#{@reset}")
+    IO.puts("")
+  end
+
+  defp print_goal_banner(%{status: :abandoned}) do
+    IO.puts("  #{@yellow}#{@bold}GOAL ABANDONED#{@reset}")
+    IO.puts("")
+  end
+
+  defp print_goal_banner(_), do: :ok
+
+  # WHAT is unresolved, not just that something is (G3). `snap.last_gaps` is
+  # the panel's own verbatim finding list from the round that paused the
+  # goal — empty for a manual `/goal pause` (`pause_reason: :user`), which
+  # carries no panel findings at all.
+  defp print_goal_gaps(%{last_gaps: gaps}) when is_list(gaps) and gaps != [] do
+    IO.puts("")
+    IO.puts("  #{@bold}Unresolved gap(s)#{@reset}")
+    Enum.each(gaps, &IO.puts("    #{@dim}•#{@reset} #{&1}"))
+  end
+
+  defp print_goal_gaps(_snap), do: :ok
+
+  # "What actually got touched" — the one thing `/goal status` never showed
+  # even at the finish line: `turns`/`verification rounds` say HOW LONG it
+  # ran, `latest` says WHAT THE PANEL DECIDED, neither says WHAT CHANGED.
+  # Reuses `VerificationEvidence`'s own ledger — the SAME evidence the
+  # completion panel itself was judged against — so this is not a second,
+  # possibly-disagreeing account of the work.
+  defp print_goal_overview(session_id) do
+    alias OptimalSystemAgent.Agent.Loop.VerificationEvidence, as: Ledger
+
+    paths =
+      Ledger.entries(session_id)
+      |> Enum.filter(&(Map.get(&1, :kind) == :write and Map.get(&1, :success) == true))
+      |> Enum.flat_map(fn e -> List.wrap(Map.get(e, :paths)) end)
+      |> Enum.reject(&(is_nil(&1) or &1 == ""))
+      |> Enum.map(&to_string/1)
+      |> Enum.uniq()
+
+    IO.puts("")
+    IO.puts("  #{@bold}Work overview#{@reset}")
+
+    case paths do
+      [] ->
+        IO.puts("  #{@dim}No file writes recorded for this session.#{@reset}")
+
+      _ ->
+        IO.puts("  #{@dim}#{length(paths)} file(s) touched:#{@reset}")
+        Enum.each(Enum.take(paths, 20), &IO.puts("    #{@dim}•#{@reset} #{&1}"))
+        if length(paths) > 20, do: IO.puts("    #{@dim}… and #{length(paths) - 20} more#{@reset}")
+    end
+  rescue
+    _ -> :ok
   end
 
   def cmd_sessions(_args, session_id) do
@@ -3035,34 +3371,67 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     end
 
     if enabled? do
-      IO.puts("  #{@green}✓#{@reset} Thinking #{@bold}ON#{@reset} — the model reasons before replying")
+      IO.puts(
+        "  #{@green}✓#{@reset} Thinking #{@bold}ON#{@reset} — the model reasons before replying"
+      )
     else
-      IO.puts("  #{@green}✓#{@reset} Thinking #{@bold}OFF#{@reset} — fast replies, no reasoning phase")
+      IO.puts(
+        "  #{@green}✓#{@reset} Thinking #{@bold}OFF#{@reset} — fast replies, no reasoning phase"
+      )
     end
 
     IO.puts("  #{@dim}Applies from your next message. Saved as OLLAMA_THINK.#{@reset}")
   end
 
   def cmd_fast(_args, session_id) do
-    alias OptimalSystemAgent.Agent.Effort
+    alias OptimalSystemAgent.Agent.Loop.LLMClient
     IO.puts("")
 
-    Effort.toggle_fast()
-    config = Effort.get(Effort.current())
+    enabled = LLMClient.toggle_fast_service_tier(session_id)
+    provider = OptimalSystemAgent.Runtime.Identity.provider()
+    tier = LLMClient.fast_tier_for(provider)
+    mode = if enabled, do: "enabled", else: "disabled"
 
-    mode =
-      if Effort.fast_mode?(),
-        do: "enabled",
-        else: "disabled"
+    IO.puts("  #{@green}✓#{@reset} Provider Fast processing #{@bold}#{mode}#{@reset}")
 
-    IO.puts("  #{@green}✓#{@reset} Fast mode #{@bold}#{mode}#{@reset}")
-    IO.puts("  #{@dim}Effort:#{@reset}     #{Effort.current()}")
-    IO.puts("  #{@dim}Iterations:#{@reset} #{effort_iteration_display()}")
-    IO.puts("  #{@dim}Output cap:#{@reset} #{config.max_response_tokens} tokens")
-    IO.puts("  #{@dim}Tool cap:#{@reset}   #{config.tool_budget}")
+    # The toggle is a session setting, but whether it DOES anything is a
+    # property of the provider serving the turn. Most providers have no
+    # acceleration tier OSA can request, so the old blanket line ("uses the
+    # selected provider's supported acceleration tier") reported success for a
+    # switch that changed nothing about the request. Say which one this is.
+    cond do
+      not enabled ->
+        IO.puts("  #{@dim}Turns run at #{provider_label(provider)}'s default tier.#{@reset}")
+
+      tier ->
+        IO.puts(
+          "  #{@dim}Asking #{provider_label(provider)} for its \"#{tier}\" tier on every turn.#{@reset}"
+        )
+
+      true ->
+        IO.puts(
+          "  #{@yellow}!#{@reset} #{provider_label(provider)} has no acceleration tier OSA can " <>
+            "request, so this changes nothing here."
+        )
+
+        IO.puts(
+          "  #{@dim}It takes effect on: #{fast_tier_provider_list()}. " <>
+            "The setting stays on for when you switch.#{@reset}"
+        )
+    end
+
+    IO.puts("  #{@dim}Reasoning effort and tool budgets are unchanged.#{@reset}")
 
     IO.puts("")
     session_id
+  end
+
+  defp provider_label(nil), do: "the current provider"
+  defp provider_label(provider), do: to_string(provider)
+
+  defp fast_tier_provider_list do
+    OptimalSystemAgent.Agent.Loop.LLMClient.fast_tier_providers()
+    |> Enum.map_join(", ", &to_string/1)
   end
 
   # What the iteration ceiling ACTUALLY is, not what the effort ladder says.

@@ -59,7 +59,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Tool do
               "call that blocks until a terminal status or the wait elapses. NEVER call " <>
               "this tool in a loop while the command is `running`, and never sleep " <>
               "between calls. Capped at 120000 (2 min); a longer request is " <>
-                "clamped to that, not rejected."
+              "clamped to that, not rejected."
         }
       }
     }

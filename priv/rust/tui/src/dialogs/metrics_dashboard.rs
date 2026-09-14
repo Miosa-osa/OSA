@@ -106,7 +106,13 @@ impl MetricsDashboard {
 
     /// Largest p99 across the rows (>=1) so bars scale to the worst offender.
     fn max_p99(&self) -> u64 {
-        self.data.rows.iter().map(|r| r.p99_ms).max().unwrap_or(0).max(1)
+        self.data
+            .rows
+            .iter()
+            .map(|r| r.p99_ms)
+            .max()
+            .unwrap_or(0)
+            .max(1)
     }
 
     fn last(&self) -> usize {
@@ -120,7 +126,10 @@ impl MetricsDashboard {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> MetricsAction {
         // Chorded shortcuts belong to the app, not this overlay.
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return MetricsAction::None;
         }
         let last = self.last();
@@ -172,7 +181,10 @@ impl MetricsDashboard {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(c.primary))
             .title(Line::from(vec![
-                Span::styled(" OSA ", Style::default().fg(c.primary).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " OSA ",
+                    Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("\u{00b7} metrics ", Style::default().fg(c.muted)),
             ]))
             .style(Style::default().bg(c.dialog_bg));
@@ -204,39 +216,58 @@ impl MetricsDashboard {
             if base + 1 >= inner.y + inner.height {
                 break;
             }
-            put(frame, Paragraph::new(Line::from(Span::styled(
-                truncate_chars(&card.label.to_uppercase(), card_w),
-                Style::default().fg(c.muted).add_modifier(Modifier::BOLD),
-            ))), Rect::new(cx, base, cw, 1));
+            put(
+                frame,
+                Paragraph::new(Line::from(Span::styled(
+                    truncate_chars(&card.label.to_uppercase(), card_w),
+                    Style::default().fg(c.muted).add_modifier(Modifier::BOLD),
+                ))),
+                Rect::new(cx, base, cw, 1),
+            );
             let vcolor = Self::tone_color(&card.tone, c);
-            put(frame, Paragraph::new(Line::from(vec![
-                Span::styled(
-                    truncate_chars(&card.value, card_w.saturating_sub(1)),
-                    Style::default().fg(vcolor).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    truncate_chars(&format!("  {}", card.note), card_w.saturating_sub(crate::util::cols(&card.value) + 2)),
-                    Style::default().fg(c.dim),
-                ),
-            ])), Rect::new(cx, base + 1, cw, 1));
+            put(
+                frame,
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        truncate_chars(&card.value, card_w.saturating_sub(1)),
+                        Style::default().fg(vcolor).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        truncate_chars(
+                            &format!("  {}", card.note),
+                            card_w.saturating_sub(crate::util::cols(&card.value) + 2),
+                        ),
+                        Style::default().fg(c.dim),
+                    ),
+                ])),
+                Rect::new(cx, base + 1, cw, 1),
+            );
         }
         cy += (card_rows * 3) as u16;
 
         // ── separator ──────────────────────────────────────────────────────
         if cy < inner.y + inner.height {
-            put(frame, Paragraph::new(Span::styled(
-                "\u{2500}".repeat(maxw),
-                Style::default().fg(c.dim),
-            )), Rect::new(inner.x, cy, iw, 1));
+            put(
+                frame,
+                Paragraph::new(Span::styled(
+                    "\u{2500}".repeat(maxw),
+                    Style::default().fg(c.dim),
+                )),
+                Rect::new(inner.x, cy, iw, 1),
+            );
             cy += 1;
         }
 
         // ── latency table header ───────────────────────────────────────────
         if cy < inner.y + inner.height {
-            put(frame, Paragraph::new(Line::from(Span::styled(
-                format!("LATENCY  ({} monitored)", self.data.rows.len()),
-                Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
-            ))), Rect::new(inner.x, cy, iw, 1));
+            put(
+                frame,
+                Paragraph::new(Line::from(Span::styled(
+                    format!("LATENCY  ({} monitored)", self.data.rows.len()),
+                    Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
+                ))),
+                Rect::new(inner.x, cy, iw, 1),
+            );
             cy += 1;
         }
 
@@ -246,30 +277,59 @@ impl MetricsDashboard {
         self.list_viewport.set(list_h.max(1));
 
         if self.data.rows.is_empty() {
-            put(frame, Paragraph::new(Span::styled(
-                "No telemetry recorded yet",
-                Style::default().fg(c.muted),
-            )).alignment(Alignment::Center),
-                Rect::new(inner.x, cy + (list_h as u16) / 2, iw, 1));
+            put(
+                frame,
+                Paragraph::new(Span::styled(
+                    "No telemetry recorded yet",
+                    Style::default().fg(c.muted),
+                ))
+                .alignment(Alignment::Center),
+                Rect::new(inner.x, cy + (list_h as u16) / 2, iw, 1),
+            );
         } else if list_h > 0 {
             let max_p99 = self.max_p99();
             let scroll = crate::dialogs::clamp_scroll_to_cursor(self.scroll, self.cursor, list_h);
             for rel in 0..list_h {
                 let abs = rel + scroll;
-                let Some(r) = self.data.rows.get(abs) else { break };
+                let Some(r) = self.data.rows.get(abs) else {
+                    break;
+                };
                 let ry = cy + rel as u16;
                 let selected = abs == self.cursor;
-                self.draw_row(frame, r, max_p99, selected, maxw, Rect::new(inner.x, ry, iw, 1), &theme, c);
+                self.draw_row(
+                    frame,
+                    r,
+                    max_p99,
+                    selected,
+                    maxw,
+                    Rect::new(inner.x, ry, iw, 1),
+                    &theme,
+                    c,
+                );
             }
         }
 
         // ── footer hint ────────────────────────────────────────────────────
-        put(frame, Paragraph::new(Line::from(vec![
-            Span::styled("\u{2191}\u{2193}", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
-            Span::styled(" scroll  ", Style::default().fg(c.dim)),
-            Span::styled("esc", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
-            Span::styled(" close", Style::default().fg(c.dim)),
-        ])), Rect::new(inner.x, footer_y, iw, 1));
+        put(
+            frame,
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "\u{2191}\u{2193}",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" scroll  ", Style::default().fg(c.dim)),
+                Span::styled(
+                    "esc",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" close", Style::default().fg(c.dim)),
+            ])),
+            Rect::new(inner.x, footer_y, iw, 1),
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -295,11 +355,20 @@ impl MetricsDashboard {
         if selected {
             let raw = format!(
                 "{:<tag$} {:<nw$}  {:>5}x  {:>6.0}ms  p99 {:>5}ms",
-                tag, name, r.count, r.avg_ms, r.p99_ms,
-                tag = 4, nw = name_w,
+                tag,
+                name,
+                r.count,
+                r.avg_ms,
+                r.p99_ms,
+                tag = 4,
+                nw = name_w,
             );
             let s = crate::util::pad_cols(&raw, maxw);
-            put(frame, Paragraph::new(Line::from(Span::styled(s, theme.button_active()))), rect);
+            put(
+                frame,
+                Paragraph::new(Line::from(Span::styled(s, theme.button_active()))),
+                rect,
+            );
             return;
         }
 
@@ -307,12 +376,20 @@ impl MetricsDashboard {
             Span::styled(format!("{tag} "), Style::default().fg(c.dim)),
             Span::styled(
                 format!("{name:<name_w$}  "),
-                Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(c.secondary)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!("{:>5}x ", r.count), Style::default().fg(c.muted)),
             Span::styled("\u{2588}".repeat(filled), Style::default().fg(bar_fg)),
-            Span::styled("\u{2591}".repeat(BAR_W - filled), Style::default().fg(c.dim)),
-            Span::styled(format!(" p99 {:>5}ms", r.p99_ms), Style::default().fg(bar_fg)),
+            Span::styled(
+                "\u{2591}".repeat(BAR_W - filled),
+                Style::default().fg(c.dim),
+            ),
+            Span::styled(
+                format!(" p99 {:>5}ms", r.p99_ms),
+                Style::default().fg(bar_fg),
+            ),
         ];
         put(frame, Paragraph::new(Line::from(spans)), rect);
     }
@@ -337,11 +414,22 @@ mod metrics_dashboard_tests {
     }
 
     fn card(label: &str, value: &str, tone: &str) -> MetricCard {
-        MetricCard { label: label.into(), value: value.into(), note: "note".into(), tone: tone.into() }
+        MetricCard {
+            label: label.into(),
+            value: value.into(),
+            note: "note".into(),
+            tone: tone.into(),
+        }
     }
 
     fn row(name: &str, kind: &str, count: u64, avg: f64, p99: u64) -> LatencyRow {
-        LatencyRow { name: name.into(), kind: kind.into(), count, avg_ms: avg, p99_ms: p99 }
+        LatencyRow {
+            name: name.into(),
+            kind: kind.into(),
+            count,
+            avg_ms: avg,
+            p99_ms: p99,
+        }
     }
 
     fn sample() -> MetricsData {
@@ -364,7 +452,10 @@ mod metrics_dashboard_tests {
     #[test]
     fn draws_at_all_sizes_without_panic() {
         let states = vec![
-            MetricsData { cards: vec![], rows: vec![] },
+            MetricsData {
+                cards: vec![],
+                rows: vec![],
+            },
             sample(),
         ];
         for data in states {
@@ -398,7 +489,10 @@ mod metrics_dashboard_tests {
 
     #[test]
     fn empty_rows_are_safe() {
-        let mut d = MetricsDashboard::new(MetricsData { cards: vec![], rows: vec![] });
+        let mut d = MetricsDashboard::new(MetricsData {
+            cards: vec![],
+            rows: vec![],
+        });
         // Movement on an empty table must not panic or wander.
         d.handle_key(key(KeyCode::Down));
         assert_eq!(d.cursor, 0);

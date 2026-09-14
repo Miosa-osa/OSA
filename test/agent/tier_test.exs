@@ -109,6 +109,76 @@ defmodule OptimalSystemAgent.Agent.TierTest do
     end
   end
 
+  # ── max_budget_usd/1 ──────────────────────────────────────────────
+
+  describe "max_budget_usd/1" do
+    setup do
+      # Snapshot + restore both override knobs so tests don't leak into each
+      # other or into the rest of the suite.
+      flat = Application.get_env(:optimal_system_agent, :subagent_default_budget_usd)
+      per_tier = Application.get_env(:optimal_system_agent, :subagent_max_budget_usd)
+
+      on_exit(fn ->
+        restore(:subagent_default_budget_usd, flat)
+        restore(:subagent_max_budget_usd, per_tier)
+      end)
+
+      :ok
+    end
+
+    test "built-in per-tier defaults are on: elite $8 / specialist $4 / utility $1.50" do
+      Application.delete_env(:optimal_system_agent, :subagent_default_budget_usd)
+      Application.delete_env(:optimal_system_agent, :subagent_max_budget_usd)
+
+      assert Tier.max_budget_usd(:elite) == 8.0
+      assert Tier.max_budget_usd(:specialist) == 4.0
+      assert Tier.max_budget_usd(:utility) == 1.5
+    end
+
+    test "elite has the highest default cap" do
+      Application.delete_env(:optimal_system_agent, :subagent_default_budget_usd)
+      Application.delete_env(:optimal_system_agent, :subagent_max_budget_usd)
+
+      assert Tier.max_budget_usd(:elite) > Tier.max_budget_usd(:specialist)
+      assert Tier.max_budget_usd(:specialist) > Tier.max_budget_usd(:utility)
+    end
+
+    test "flat global override applies to every tier" do
+      Application.delete_env(:optimal_system_agent, :subagent_max_budget_usd)
+      Application.put_env(:optimal_system_agent, :subagent_default_budget_usd, 2.0)
+
+      assert Tier.max_budget_usd(:elite) == 2.0
+      assert Tier.max_budget_usd(:specialist) == 2.0
+      assert Tier.max_budget_usd(:utility) == 2.0
+    end
+
+    test "per-tier map override wins over both the flat knob and the default" do
+      Application.put_env(:optimal_system_agent, :subagent_default_budget_usd, 2.0)
+      Application.put_env(:optimal_system_agent, :subagent_max_budget_usd, %{elite: 25.0})
+
+      # elite: from the per-tier map
+      assert Tier.max_budget_usd(:elite) == 25.0
+      # specialist: no per-tier entry -> falls back to the flat global override
+      assert Tier.max_budget_usd(:specialist) == 2.0
+    end
+
+    test "per-tier entry falls back to built-in default when flat knob unset" do
+      Application.delete_env(:optimal_system_agent, :subagent_default_budget_usd)
+      Application.put_env(:optimal_system_agent, :subagent_max_budget_usd, %{elite: 30.0})
+
+      assert Tier.max_budget_usd(:elite) == 30.0
+      # utility has no entry and no flat override -> built-in default
+      assert Tier.max_budget_usd(:utility) == 1.5
+    end
+
+    test "tier_info exposes the per-tier budget" do
+      Application.delete_env(:optimal_system_agent, :subagent_default_budget_usd)
+      Application.delete_env(:optimal_system_agent, :subagent_max_budget_usd)
+
+      assert Tier.tier_info(:elite).max_budget_usd == 8.0
+    end
+  end
+
   # ── max_response_tokens/1 ─────────────────────────────────────────
 
   describe "max_response_tokens/1" do
@@ -132,4 +202,9 @@ defmodule OptimalSystemAgent.Agent.TierTest do
       assert info.max_agents == 10
     end
   end
+
+  # Restore an application env key to its snapshotted value (nil => delete),
+  # so budget-override tests never leak into the rest of the suite.
+  defp restore(key, nil), do: Application.delete_env(:optimal_system_agent, key)
+  defp restore(key, value), do: Application.put_env(:optimal_system_agent, key, value)
 end

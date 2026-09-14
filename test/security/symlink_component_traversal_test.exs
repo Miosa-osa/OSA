@@ -23,7 +23,11 @@ defmodule OptimalSystemAgent.Security.SymlinkComponentTraversalTest do
   alias OptimalSystemAgent.Tools.UseContext
 
   setup do
-    root = Path.join(System.tmp_dir!(), "osa-symlink-#{System.unique_integer([:positive])}")
+    root =
+      System.tmp_dir!()
+      |> PathCanon.canonicalize()
+      |> Path.join("osa-symlink-#{System.unique_integer([:positive])}")
+
     sandbox = Path.join(root, "sandbox")
     secret_home = Path.join(root, "home")
     ssh = Path.join(secret_home, ".ssh")

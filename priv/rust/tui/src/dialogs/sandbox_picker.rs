@@ -72,7 +72,11 @@ impl SandboxPicker {
     /// present (otherwise row 0).
     pub fn new(backends: Vec<SandboxBackend>, mode: String) -> Self {
         let cursor = backends.iter().position(|b| b.current).unwrap_or(0);
-        Self { backends, cursor, mode }
+        Self {
+            backends,
+            cursor,
+            mode,
+        }
     }
 
     /// Backend under the cursor, if any is registered.
@@ -97,7 +101,9 @@ impl SandboxPicker {
                 self.cursor = (self.cursor + 1).min(last);
                 None
             }
-            KeyCode::Enter => self.selected().map(|b| SandboxAction::Apply(b.name.clone())),
+            KeyCode::Enter => self
+                .selected()
+                .map(|b| SandboxAction::Apply(b.name.clone())),
             KeyCode::Char('s') => self
                 .selected()
                 .filter(|b| !b.available)
@@ -241,7 +247,11 @@ impl SandboxPicker {
         // ── Mode line ──────────────────────────────────────────────────────
         cy += 1;
         if cy < inner.y + inner.height.saturating_sub(1) {
-            let mode = if self.mode.is_empty() { "—" } else { self.mode.as_str() };
+            let mode = if self.mode.is_empty() {
+                "—"
+            } else {
+                self.mode.as_str()
+            };
             let mode_color = if mode == "required" { c.warning } else { c.dim };
             put(
                 frame,
@@ -260,41 +270,49 @@ impl SandboxPicker {
         let hint_y = inner.y + inner.height.saturating_sub(1);
         put(
             frame,
-            Paragraph::new(Line::from(vec![
-                Span::styled(
-                    "\u{2191}/\u{2193}",
-                    Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" move  ", Style::default().fg(c.dim)),
-                Span::styled(
-                    "enter",
-                    Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" apply  ", Style::default().fg(c.dim)),
-            ]
-            .into_iter()
-            .chain(
-                self.selected()
-                    .filter(|b| !b.available)
-                    .map(|_| {
-                        vec![
-                            Span::styled(
-                                "s",
-                                Style::default().fg(c.warning).add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(" set up  ", Style::default().fg(c.dim)),
-                        ]
-                    })
-                    .unwrap_or_default(),
-            )
-            .chain(vec![
-                Span::styled(
-                    "esc",
-                    Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" close", Style::default().fg(c.dim)),
-            ])
-            .collect::<Vec<_>>())),
+            Paragraph::new(Line::from(
+                vec![
+                    Span::styled(
+                        "\u{2191}/\u{2193}",
+                        Style::default()
+                            .fg(c.secondary)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" move  ", Style::default().fg(c.dim)),
+                    Span::styled(
+                        "enter",
+                        Style::default()
+                            .fg(c.secondary)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" apply  ", Style::default().fg(c.dim)),
+                ]
+                .into_iter()
+                .chain(
+                    self.selected()
+                        .filter(|b| !b.available)
+                        .map(|_| {
+                            vec![
+                                Span::styled(
+                                    "s",
+                                    Style::default().fg(c.warning).add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" set up  ", Style::default().fg(c.dim)),
+                            ]
+                        })
+                        .unwrap_or_default(),
+                )
+                .chain(vec![
+                    Span::styled(
+                        "esc",
+                        Style::default()
+                            .fg(c.secondary)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" close", Style::default().fg(c.dim)),
+                ])
+                .collect::<Vec<_>>(),
+            )),
             Rect::new(inner.x, hint_y, iw, 1),
         );
     }
@@ -321,11 +339,36 @@ mod sandbox_picker_tests {
 
     fn sample() -> Vec<SandboxBackend> {
         vec![
-            SandboxBackend { name: "host".into(), display_name: "Host (no sandbox)".into(), available: true, current: false },
-            SandboxBackend { name: "docker".into(), display_name: "Docker".into(), available: false, current: false },
-            SandboxBackend { name: "e2b".into(), display_name: "E2B Cloud".into(), available: false, current: false },
-            SandboxBackend { name: "miosa".into(), display_name: "MIOSA Platform".into(), available: true, current: true },
-            SandboxBackend { name: "\u{4e2d}\u{6587}".into(), display_name: "\u{20ac}".repeat(80), available: false, current: false },
+            SandboxBackend {
+                name: "host".into(),
+                display_name: "Host (no sandbox)".into(),
+                available: true,
+                current: false,
+            },
+            SandboxBackend {
+                name: "docker".into(),
+                display_name: "Docker".into(),
+                available: false,
+                current: false,
+            },
+            SandboxBackend {
+                name: "e2b".into(),
+                display_name: "E2B Cloud".into(),
+                available: false,
+                current: false,
+            },
+            SandboxBackend {
+                name: "miosa".into(),
+                display_name: "MIOSA Platform".into(),
+                available: true,
+                current: true,
+            },
+            SandboxBackend {
+                name: "\u{4e2d}\u{6587}".into(),
+                display_name: "\u{20ac}".repeat(80),
+                available: false,
+                current: false,
+            },
         ]
     }
 
@@ -358,7 +401,10 @@ mod sandbox_picker_tests {
         }
         assert_eq!(p.cursor, p.backends.len() - 1);
         let name = p.backends[p.cursor].name.clone();
-        assert_eq!(p.handle_key(key(KeyCode::Enter)), Some(SandboxAction::Apply(name)));
+        assert_eq!(
+            p.handle_key(key(KeyCode::Enter)),
+            Some(SandboxAction::Apply(name))
+        );
         assert_eq!(p.handle_key(key(KeyCode::Esc)), Some(SandboxAction::Close));
     }
 
@@ -367,7 +413,10 @@ mod sandbox_picker_tests {
         let mut p = SandboxPicker::new(Vec::new(), String::new());
         assert!(p.selected().is_none());
         assert_eq!(p.handle_key(key(KeyCode::Down)), None);
-        assert_eq!(p.handle_key(key(KeyCode::Enter)), Some(SandboxAction::Close));
+        assert_eq!(
+            p.handle_key(key(KeyCode::Enter)),
+            Some(SandboxAction::Close)
+        );
     }
 
     #[test]
@@ -472,5 +521,4 @@ mod sandbox_picker_tests {
             );
         }
     }
-
 }

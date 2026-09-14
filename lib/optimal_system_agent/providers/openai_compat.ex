@@ -19,6 +19,24 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   alias OptimalSystemAgent.Providers.ToolCallParsers
   alias OptimalSystemAgent.Utils.Text
 
+  # Reason string for a 200 (sync) or cleanly-closed SSE stream that carried no
+  # content, no tool calls, and no reasoning — nothing to deliver. Kept in one
+  # place so both the sync and stream paths emit the identical text, which
+  # `ErrorCatalog.classify/1` recognises as `:empty_response` (retryable). See
+  # `empty_result?/1`.
+  @empty_response_reason "Empty response from provider (HTTP 200 with no content, tool calls, or reasoning)"
+
+  # Reason string for a stream (or 200 body) that carried a tool call whose
+  # arguments were cut off mid-JSON — the accumulated `arguments_json` is
+  # NON-BLANK yet will not decode to a map. Observed live on flaky providers
+  # under load: a large tool-call payload (e.g. `delegate`'s self-contained task
+  # brief) is truncated mid-arguments. Emitting the call with `%{}` args silently
+  # STRIPS the arguments → instant tool-validation failure → the model retries →
+  # cut off again → "identical arguments N times" doom halt. Kept in one place so
+  # every path emits identical text, which `ErrorCatalog.classify/1` recognises
+  # as `:partial_tool_call` (retryable). See `partial_args?/1`.
+  @partial_tool_call_reason "Provider returned an incomplete tool call (arguments cut off mid-stream)"
+
   @doc """
   Execute a chat completion against any OpenAI-compatible endpoint.
 
@@ -93,13 +111,14 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       |> OptimalSystemAgent.Providers.ImageBudget.gate_unsupported(image_provider(opts), model)
       |> OptimalSystemAgent.Providers.ImageBudget.apply(provider: image_provider(opts))
       |> maybe_add_temperature(model, opts)
-      |> maybe_add_tools(opts)
+      |> maybe_add_tools(model, opts)
       |> maybe_add_max_tokens(model, opts)
       |> maybe_add_service_tier(opts)
       |> maybe_add_reasoning(model, opts)
       # LAST: DeepSeek accepts only low/high/max, so this must overwrite the
       # generic "medium" that maybe_add_reasoning/3 would otherwise leave.
       |> maybe_add_provider_thinking(model, opts, base_url)
+      |> maybe_disable_thinking(opts)
       |> maybe_add_prompt_cache_key(opts, base_url)
 
     # Fingerprint AFTER every body transform, so what is hashed is what goes on
@@ -140,19 +159,47 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
           # name a cache that never warmed at all. Diagnostics only — cannot
           # fail the request (see CacheAttribution).
           observe_cache(cache_fp, usage, opts)
+          probe_tool_schema_cache(usage, opts, model)
 
           # The sync path had NO reasoning handling of any kind — not even the
           # `reasoning_content` clause the streaming path had. Same normaliser,
           # same separate key, so the two branches cannot drift again (the
           # `cached_tokens` bug lived for months on exactly that asymmetry).
-          {:ok,
-           %{
-             content: content,
-             tool_calls: tool_calls,
-             usage: usage,
-             stop_reason: choice["finish_reason"]
-           }
-           |> ReasoningContent.put_result(ReasoningContent.extract(msg))}
+          result =
+            %{
+              content: content,
+              tool_calls: tool_calls,
+              usage: usage,
+              stop_reason: choice["finish_reason"]
+            }
+            |> ReasoningContent.put_result(ReasoningContent.extract(msg))
+
+          # A 200 with no content, no tool calls, and no reasoning is nothing to
+          # deliver. For the flaky gateways this module talks to it is a
+          # transient failure, not a real empty answer, so surface it as a
+          # retryable error (ErrorCatalog → :empty_response) instead of handing
+          # an empty turn to the agent loop, where three in a row trip the
+          # ReasoningOnly doom guard. A 200 that carries tool_calls with empty
+          # content is NOT empty and passes straight through.
+          cond do
+            # A 200 body whose tool-call arguments were cut off mid-JSON (non-
+            # blank but undecodable) is a truncated generation, not a real turn.
+            # Surface it as the same retryable error the stream path uses instead
+            # of letting `parse_tool_calls/2` silently strip the args to `%{}`.
+            raw_tool_calls_partial?(msg) ->
+              Logger.warning(
+                "OpenAI-compat HTTP 200 with an incomplete tool call (arguments cut off) — retrying"
+              )
+
+              {:error, @partial_tool_call_reason}
+
+            empty_result?(result) ->
+              Logger.warning("OpenAI-compat HTTP 200 with an empty response — retrying")
+              {:error, @empty_response_reason}
+
+            true ->
+              {:ok, result}
+          end
 
         {:ok, %{status: 429, body: resp_body, headers: resp_headers}} ->
           retry_after = parse_retry_after(resp_headers)
@@ -217,6 +264,126 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
   defp reported_usage?(_), do: false
 
+  @doc false
+  # DIAGNOSTIC ONLY — measures whether the tool-schema array is inside the cached
+  # prefix on a WARM turn of a Claude-family compat route (OpenRouter/Surplus →
+  # Anthropic), or is being re-sent as fresh input (~8k tokens) at full rate
+  # every turn. Places no cache hint itself — `maybe_cache_tools/3` is what does
+  # that, gated on the same `Registry.anthropic_prompt_cache?/2` predicate. This
+  # stays in place as a live regression check: a route this probe flags
+  # UNCACHED after the breakpoint shipped means the gateway stopped honouring
+  # the marker (or the two gates drifted apart), not that one was never added.
+  #
+  # The signal: on OpenAI-shaped usage `input_tokens` is INCLUSIVE of the cached
+  # slices, so the genuinely fresh tokens are `input - cache_read - cache_creation`.
+  # In a warm agentic loop the fresh slice should be just the new user/tool
+  # message; if it is as large as the tool array, the tools are not in the cached
+  # prefix. Telemetry fires every warm turn (for aggregation); the human-readable
+  # line logs once per process.
+  def probe_tool_schema_cache(usage, opts, model) do
+    with true <- reported_usage?(usage),
+         tools when is_list(tools) and tools != [] <- Keyword.get(opts, :tools),
+         true <- OptimalSystemAgent.Providers.Registry.anthropic_family_model?(model),
+         cache_read when cache_read > 0 <- Map.get(usage, :cache_read_input_tokens, 0) do
+      tool_tokens =
+        tools
+        |> format_tools()
+        |> Jason.encode!()
+        |> byte_size()
+        |> OptimalSystemAgent.Providers.PromptCache.approx_tokens()
+
+      cache_creation = Map.get(usage, :cache_creation_input_tokens, 0)
+      total_in = Map.get(usage, :input_tokens, 0)
+      fresh = max(total_in - cache_read - cache_creation, 0)
+      tools_cached? = fresh < round(tool_tokens * 0.5)
+
+      :telemetry.execute(
+        [:osa, :prompt_cache, :tool_schema_probe],
+        %{
+          tool_tokens: tool_tokens,
+          fresh_input: fresh,
+          cache_read: cache_read,
+          cache_creation: cache_creation,
+          total_input: total_in
+        },
+        %{model: model, tools_cached: tools_cached?}
+      )
+
+      if probe_once?() do
+        verdict =
+          if tools_cached?,
+            do: "INSIDE the cached prefix (no action needed)",
+            else:
+              "UNCACHED — re-sent at full rate each turn; check whether this route/model still " <>
+                "clears Registry.anthropic_prompt_cache?/2 for the maybe_cache_tools/3 breakpoint"
+
+        Logger.info(
+          "[PromptCache] TOOL-SCHEMA CACHE PROBE (#{model}): tool_schema≈#{tool_tokens} tok, " <>
+            "fresh_input=#{fresh} tok, cache_read=#{cache_read}, cache_creation=#{cache_creation}, " <>
+            "total_input=#{total_in} → tool array appears #{verdict}"
+        )
+      end
+
+      :ok
+    else
+      _ -> :ok
+    end
+  rescue
+    # A diagnostic on the hot path must never fail the request.
+    _ -> :ok
+  end
+
+  defp probe_once? do
+    if Process.get(:osa_tool_schema_probed) == true do
+      false
+    else
+      Process.put(:osa_tool_schema_probed, true)
+      true
+    end
+  end
+
+  @doc false
+  # METRIC ONLY — records this turn's visible-content throughput (tok/s) for
+  # the model picker's "~N tok/s" badge (see `ModelSpeed`'s moduledoc for why
+  # this is measured from real turns instead of a synthetic probe). Public so
+  # it is directly testable without a live HTTP stream — same reason
+  # `observe_cache/3` is public.
+  #
+  # Records nothing unless ALL of:
+  #
+  #   * a visible-generation window exists at all (`gen_first_ts` set) — a
+  #     turn that emitted no visible `{:text_delta, _}` (a reasoning model
+  #     that spent its whole token budget "thinking") has neither timestamp,
+  #     so this is a bogus-number guard, not a rounding nicety.
+  #   * that window has positive duration — a single-chunk answer would
+  #     otherwise divide by ~0 and report an absurd rate.
+  #   * usage was actually REPORTED by the server (`reported_usage?/1`) — an
+  #     `estimate_usage_fallback/3` substitute is not real token evidence.
+  #   * the visible-token estimate (`output_tokens` minus any
+  #     `reasoning_tokens` — a SUBSET per `ReasoningContent`'s "Accounting"
+  #     section) is positive — a turn that was ALL reasoning even though it
+  #     also streamed a stray visible byte would otherwise floor to 0/positive
+  #     duration and report a rate for content that was not really there.
+  @spec record_model_speed(map(), map(), String.t(), keyword()) :: :ok
+  def record_model_speed(acc, usage, model, opts) do
+    with first when is_integer(first) <- Map.get(acc, :gen_first_ts),
+         last when is_integer(last) <- Map.get(acc, :gen_last_ts),
+         gen_ms when gen_ms > 0 <- last - first,
+         true <- reported_usage?(usage),
+         visible_tokens when visible_tokens > 0 <-
+           max(Map.get(usage, :output_tokens, 0) - Map.get(usage, :reasoning_tokens, 0), 0) do
+      provider = Keyword.get(opts, :provider) || :openai_compatible
+      tok_s = visible_tokens / (gen_ms / 1000)
+      OptimalSystemAgent.Providers.ModelSpeed.record(provider, model, tok_s)
+      :ok
+    else
+      _ -> :ok
+    end
+  rescue
+    # A metric on the hot path must never fail the turn.
+    _ -> :ok
+  end
+
   # An SSE payload, not JSON: OpenAI-compatible streams are `data: {...}` lines
   # and terminate with `data: [DONE]`.
   defp sse_body?(body) do
@@ -277,13 +444,14 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     |> OptimalSystemAgent.Providers.ImageBudget.gate_unsupported(image_provider(opts), model)
     |> OptimalSystemAgent.Providers.ImageBudget.apply(provider: image_provider(opts))
     |> maybe_add_temperature(model, opts)
-    |> maybe_add_tools(opts)
+    |> maybe_add_tools(model, opts)
     |> maybe_add_max_tokens(model, opts)
     |> maybe_add_service_tier(opts)
     |> maybe_add_reasoning(model, opts)
     # LAST: DeepSeek accepts only low/high/max, so this must overwrite the
     # generic "medium" that maybe_add_reasoning/3 would otherwise leave.
     |> maybe_add_provider_thinking(model, opts, base_url)
+    |> maybe_disable_thinking(opts)
     |> maybe_add_prompt_cache_key(opts, base_url)
   end
 
@@ -371,7 +539,13 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       # `reasoning_details`), kept separate from `content` for the whole stream.
       reasoning: "",
       # Streaming splitter for inline <think>…</think> reasoning tags (GLM et al.)
-      think: ThinkStreamParser.new()
+      think: ThinkStreamParser.new(),
+      # Monotonic timestamps (ms) of the first/last VISIBLE `{:text_delta, _}`
+      # chunk — never set for a turn that emits none. Bounds the window
+      # `record_model_speed/3` measures tok/s over; see its moduledoc for why
+      # this must stay visible-content-only.
+      gen_first_ts: nil,
+      gen_last_ts: nil
     })
 
     into = fn {:data, data}, {req, resp} ->
@@ -406,6 +580,8 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
           # `estimate_usage_fallback/3` may substitute an estimate — the
           # attributor must only ever see a real measurement.
           observe_cache(cache_fp, Map.get(acc, :usage, %{}), opts)
+          probe_tool_schema_cache(Map.get(acc, :usage, %{}), opts, model)
+          record_model_speed(acc, Map.get(acc, :usage, %{}), model, opts)
           finalize_sse_stream(acc, callback, model, messages)
 
         {:error, reason} ->
@@ -419,6 +595,36 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
         Logger.error("OpenAI-compat stream error: #{Exception.message(e)}")
         {:error, "Stream error: #{Exception.message(e)}"}
     end
+  end
+
+  @doc false
+  # Test seam: drive the same SSE-chunk accumulation `stream_from_sse_chunks/3`
+  # does, but return the raw visible-generation window (`gen_first_ts`,
+  # `gen_last_ts`) instead of finalizing a result. Lets a test assert the
+  # actual stamping in `process_delta/3` (`stamp_visible_gen/2`) — that
+  # invisible reasoning/tool-call-markup chunks leave both `nil`, and only a
+  # visible `{:text_delta, _}` chunk sets them — without hand-constructing a
+  # synthetic accumulator for `record_model_speed/4`.
+  @spec debug_gen_window([String.t()]) :: {integer() | nil, integer() | nil}
+  def debug_gen_window(data_chunks) when is_list(data_chunks) do
+    callback = fn _ -> :ok end
+
+    init_acc = %{
+      buffer: "",
+      content: "",
+      tool_calls: %{},
+      usage: %{},
+      finish_reason: nil,
+      reasoning: "",
+      think: ThinkStreamParser.new(),
+      gen_first_ts: nil,
+      gen_last_ts: nil
+    }
+
+    acc =
+      Enum.reduce(data_chunks, init_acc, fn data, a -> handle_sse_chunk(data, callback, a) end)
+
+    {acc.gen_first_ts, acc.gen_last_ts}
   end
 
   @doc """
@@ -440,18 +646,27 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       usage: %{},
       finish_reason: nil,
       reasoning: "",
-      think: ThinkStreamParser.new()
+      think: ThinkStreamParser.new(),
+      gen_first_ts: nil,
+      gen_last_ts: nil
     }
 
     acc =
       Enum.reduce(data_chunks, init_acc, fn data, a -> handle_sse_chunk(data, callback, a) end)
 
-    finalize_sse_stream(acc, callback, model, messages)
+    # An empty stream now finalizes as `{:error, _}` WITHOUT a `{:done}`
+    # callback (the retryable empty-response path), so return that error
+    # directly rather than blocking on a `{:done}` that will never arrive.
+    case finalize_sse_stream(acc, callback, model, messages) do
+      {:error, _reason} = err ->
+        err
 
-    receive do
-      {:sse_test_callback, {:done, result}} -> result
-    after
-      1_000 -> raise "stream_from_sse_chunks/3: no :done callback received"
+      :ok ->
+        receive do
+          {:sse_test_callback, {:done, result}} -> result
+        after
+          1_000 -> raise "stream_from_sse_chunks/3: no :done callback received"
+        end
     end
   end
 
@@ -546,6 +761,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
             # dialect the backend speaks.
             %{acc | content: full, think: think_state}
             |> Map.put(:reasoning, Map.get(acc, :reasoning, "") <> thinking)
+            |> stamp_visible_gen(visible)
           end
 
         _ ->
@@ -595,6 +811,20 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     end
   end
 
+  # Stamp the visible-generation window used by `record_model_speed/4`: the
+  # first and most recent VISIBLE `{:text_delta, _}` chunk. A chunk with no
+  # visible text (invisible reasoning, or content suppressed as tool-call
+  # markup) never calls this, so a turn that emits nothing visible — a
+  # reasoning model that spends its whole budget "thinking" — leaves both
+  # timestamps `nil` and contributes no speed sample at all.
+  defp stamp_visible_gen(acc, ""), do: acc
+
+  defp stamp_visible_gen(acc, _visible) do
+    now = System.monotonic_time(:millisecond)
+    first = if is_nil(Map.get(acc, :gen_first_ts)), do: now, else: acc.gen_first_ts
+    %{acc | gen_first_ts: first, gen_last_ts: now}
+  end
+
   defp maybe_set_id(tc, %{"id" => id}) when is_binary(id), do: %{tc | id: id}
   defp maybe_set_id(tc, _), do: tc
 
@@ -609,6 +839,52 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   defp maybe_append_args(tc, _), do: tc
 
   defp finalize_sse_stream(acc, callback, model, orig_messages) do
+    # A streamed tool call whose accumulated `arguments_json` is non-blank but
+    # will not decode is a stream that was CUT OFF mid-arguments. Do NOT emit it
+    # with `%{}` (that silently strips the arguments — the bug this fixes).
+    # Instead surface a RETRYABLE error so `Resilience.with_retry/2` re-requests
+    # and the intact tool call arrives on a good attempt — mirroring the empty-
+    # response recovery. A bare cut-off tool call fired no text/thinking delta
+    # (we short-circuit BEFORE the think-tail flush below), so the one-way door
+    # (`mark_output_observed/0`) is not tripped and a retry duplicates nothing.
+    # A blank ("") `arguments_json` is NOT partial (legit no-arg tool call) and
+    # flows through `do_finalize_sse_stream/4` → `%{}` untouched.
+    if partial_tool_call?(acc) do
+      Logger.warning(
+        "OpenAI-compat stream cut off mid tool-call arguments (incomplete JSON) — retrying"
+      )
+
+      {:error, @partial_tool_call_reason}
+    else
+      do_finalize_sse_stream(acc, callback, model, orig_messages)
+    end
+  end
+
+  # True when any accumulated streamed tool call has partial (cut-off) arguments.
+  defp partial_tool_call?(%{tool_calls: tcs}) when is_map(tcs) do
+    Enum.any?(tcs, fn {_idx, tc} -> partial_args?(Map.get(tc, :arguments_json)) end)
+  end
+
+  defp partial_tool_call?(_), do: false
+
+  # The blank-vs-incomplete distinction the whole fix turns on.
+  #
+  # A tool call's arguments are "partial" — the generation was cut off
+  # mid-arguments — when the accumulated payload is NON-BLANK yet does not decode
+  # to a JSON map. That is retryable: re-request and the intact call comes back.
+  #
+  # A BLANK ("" / whitespace) payload is NOT partial: it is a legitimate
+  # no-argument tool call and must still become `%{}` and pass through. A payload
+  # that decodes but to a non-map (array/scalar) is malformed like a cut-off, so
+  # it counts as partial too.
+  defp partial_args?(args) when is_binary(args) do
+    String.trim(args) != "" and
+      not match?({:ok, decoded} when is_map(decoded), Jason.decode(args))
+  end
+
+  defp partial_args?(_), do: false
+
+  defp do_finalize_sse_stream(acc, callback, model, orig_messages) do
     # Drain any tag tail the streaming splitter was holding back, so the live
     # display never loses trailing characters at end-of-stream.
     acc =
@@ -682,9 +958,51 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       # is the double-count `reconcile_prompt_slices/2` exists to prevent.
       |> ReasoningContent.put_result(Map.get(acc, :reasoning, ""))
 
-    callback.({:done, result})
-    :ok
+    # A stream that closed cleanly but produced no content, no tool calls, and
+    # no reasoning is nothing to deliver. Do NOT fire `{:done, result}`: that
+    # would hand the empty turn to the caller (llm_client forwards it as
+    # `{:llm_stream_done, _}`), and any retry would then be ignored because the
+    # caller already consumed a terminal result. Instead return a retryable
+    # error so `Resilience.with_retry/2` re-requests it — no text/thinking delta
+    # was emitted for an empty stream, so the one-way-door
+    # (`mark_output_observed/0`) is not tripped and a retry duplicates nothing.
+    if empty_result?(result) do
+      Logger.warning("OpenAI-compat stream closed with an empty response — retrying")
+
+      # Name the route and what the stream actually carried. Without them this
+      # warning reads identically whether the gateway dropped the connection or
+      # the model answered with nothing, and an incident reported as OSA hanging
+      # and then reporting an empty provider response arrives with no way to
+      # tell the two apart - which is exactly how it was reported on 2026-09-10.
+      # Both facts are in hand here; nothing below is inferred.
+      Logger.warning(
+        "compat route diagnostics:" <>
+          " model=" <>
+          inspect(model) <>
+          " finish_reason=" <>
+          inspect(Map.get(acc, :finish_reason)) <>
+          " usage=" <> inspect(Map.get(acc, :usage, %{}))
+      )
+
+      {:error, @empty_response_reason}
+    else
+      callback.({:done, result})
+      :ok
+    end
   end
+
+  # True when a finalized result carries nothing to deliver: no content, no tool
+  # calls, and no reasoning. A result with tool_calls (even with empty content)
+  # is NOT empty — the tool call IS the turn — so it passes through untouched.
+  defp empty_result?(result) when is_map(result) do
+    blank?(Map.get(result, :content)) and
+      (Map.get(result, :tool_calls) || []) == [] and
+      blank?(Map.get(result, :reasoning))
+  end
+
+  defp blank?(nil), do: true
+  defp blank?(s) when is_binary(s), do: String.trim(s) == ""
+  defp blank?(_), do: false
 
   defp estimate_usage_fallback(usage, messages, content) when is_map(usage) do
     input = Map.get(usage, :input_tokens, 0)
@@ -1045,6 +1363,19 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     end)
   end
 
+  # True when a raw (non-stream) OpenAI message carries a tool call whose
+  # `function.arguments` string was cut off mid-JSON — the same blank-vs-
+  # incomplete distinction as the stream path (`partial_args?/1`). The sync 200
+  # handler uses this to raise a retryable error before `parse_tool_calls/2`
+  # would silently decode the truncated payload to `%{}`.
+  defp raw_tool_calls_partial?(%{"tool_calls" => calls}) when is_list(calls) do
+    Enum.any?(calls, fn call ->
+      partial_args?(get_in(call, ["function", "arguments"]))
+    end)
+  end
+
+  defp raw_tool_calls_partial?(_), do: false
+
   @doc "Parse tool_calls from an OpenAI-style message map."
   def parse_tool_calls(%{"tool_calls" => calls}) when is_list(calls) do
     Enum.map(calls, fn call ->
@@ -1296,7 +1627,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
   # --- Private helpers ---
 
-  defp maybe_add_tools(body, opts) do
+  defp maybe_add_tools(body, model, opts) do
     case Keyword.get(opts, :tools) do
       nil ->
         body
@@ -1308,6 +1639,129 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
         body
         |> Map.put(:tools, format_tools(tools))
         |> Map.put(:tool_choice, "auto")
+        |> maybe_cache_tools(model, opts)
+    end
+  end
+
+  # Places the SAME `cache_control` breakpoint `Anthropic.maybe_add_tools/2`
+  # places natively, on the last tool definition — but only where the wire
+  # honours it. Gated on the identical predicate `Agent.Context.build_system_message/5`
+  # already uses for the system-prompt blocks (`Registry.anthropic_prompt_cache?/2`):
+  # a `{:compat, _}` gateway that forwards content-part fields verbatim
+  # (OpenRouter, Surplus, api.uncensored.com) AND a Claude-family model id.
+  # Tools ride the same wire mechanism as the system prefix — Anthropic has no
+  # automatic prefix caching — so a route that already earns a system-prompt
+  # breakpoint earns this one too, and a route that does not must see the exact
+  # bytes it saw before: `cache_control` is an Anthropic-only field, and handing
+  # it to a non-Anthropic upstream (or a non-Claude id on the same gateway) is a
+  # foreign-field 400 waiting to happen, not a harmless no-op.
+  #
+  # `probe_tool_schema_cache/3` measured this dark: on a warm Claude-family
+  # compat turn the tool array (~8k tokens) was as large as the total fresh
+  # input, meaning it rode OUTSIDE the cached prefix the system-prompt
+  # breakpoint had already established and was rebilled at full rate every
+  # turn. This is the fix the probe's own log line names ("add a cache_control
+  # breakpoint on the last tool def in maybe_add_tools/2 for this route").
+  defp maybe_cache_tools(%{tools: [_ | _] = tools} = body, model, opts) do
+    provider = Keyword.get(opts, :provider)
+
+    if OptimalSystemAgent.Providers.Registry.anthropic_prompt_cache?(provider, model) do
+      {leading, [last]} = Enum.split(tools, -1)
+      marked = leading ++ [Map.put(last, "cache_control", %{"type" => "ephemeral"})]
+      Map.put(body, :tools, marked)
+    else
+      body
+    end
+  end
+
+  defp maybe_cache_tools(body, _model, _opts), do: body
+
+  # Processing tiers are not universally OpenAI-compatible, and the vocabulary
+  # is per-provider even where the FIELD is shared: "priority" is OpenAI's
+  # word, "performance" is Groq's, "standard_only" is Anthropic's. Forwarding
+  # one provider's word to another is not a harmless no-op, because an
+  # unrecognized `service_tier` is a validation error rather than an ignored
+  # field: the turn pays for a rejected request plus the tier-less retry behind
+  # it, every turn, for acceleration the account never receives.
+  #
+  # Hence an allowlist PER PROVIDER, not a list of providers that get whatever
+  # the loop resolved. Same shape as `Anthropic.apply_service_tier/2`. Anything
+  # outside a provider's own vocabulary is dropped, which lands the request on
+  # that provider's default tier: exactly where the fallback retry would have
+  # put it, minus the extra round-trip.
+  #
+  # `:xai` and `:openrouter` are absent on purpose. Neither documents a tier
+  # vocabulary OSA has verified, and an unknown `service_tier` came back from
+  # them as an HTTP 422. Add either one back only with a value checked against
+  # the live API.
+  @service_tiers %{
+    # OpenAI's documented enum.
+    openai: ["auto", "default", "flex", "priority", "scale"],
+    # Groq's own words. "auto" means "use performance capacity when this
+    # account has it, otherwise on-demand", which is why `/fast` resolves to it
+    # for Groq instead of to OpenAI's "priority".
+    groq: ["auto", "on_demand", "flex", "performance"]
+  }
+
+  defp maybe_add_service_tier(body, opts) do
+    tier = Keyword.get(opts, :service_tier)
+    provider = Keyword.get(opts, :provider, image_provider(opts))
+
+    if tier in Map.get(@service_tiers, provider, []) do
+      Map.put(body, :service_tier, tier)
+    else
+      body
+    end
+  end
+
+  # ── Thinking disable: a RECOVERY lever, never a default ──────────────────
+  #
+  # `ReactLoop` sets `:thinking_disabled` when a generation spent its ENTIRE
+  # output budget on internal reasoning and produced no answer. Raising the
+  # ceiling alone does not recover that: the model thinks LONGER, it does not
+  # answer. So the retry asks the provider to stop thinking.
+  #
+  # Allowlisted per provider, exactly like `@service_tiers` above and for the
+  # same reason: this is a foreign field on most of the ~20 providers this
+  # module serves, and an unrecognized field there is a validation error, not
+  # an ignored one. A provider absent from this map sees the exact bytes it
+  # saw before.
+  #
+  # `surplus` is the entry with EVIDENCE behind it. Measured 2026-09-10
+  # against `deepseek-v4.1-flash`, three trials per row:
+  #
+  #     (baseline)                      reason_chars = 2332 / 3906 / 4476
+  #     thinking: {"type":"disabled"}   reason_chars =    0 /    0 /    0
+  #     enable_thinking: false          reason_chars =    0 /    0 /    0
+  #     reasoning_effort: "none"        reason_chars = 2999        <-- IGNORED
+  #     reasoning: {"max_tokens": 512}  reason_chars = 4476        <-- IGNORED
+  #     thinking: {"budget_tokens":512} reason_chars = 4261        <-- IGNORED
+  #
+  # The last three rows are why this is NOT solved by wiring up
+  # `Effort.thinking_budget/0`: that ladder (medium -> 5,000) is real and is
+  # honoured by Bedrock and Google, but this transport has no field for it and
+  # the plausible spellings are dropped silently rather than rejected. A
+  # budget-shaped fix here would have looked correct, changed nothing, and been
+  # untestable without a live call - the exact "silent capability loss" this
+  # codebase has been bitten by before.
+  #
+  # The shape is the same one `Providers.DeepSeekModels.thinking_params/2`
+  # already emits for the `"off"` effort (NOT for the atom `:disabled`, which
+  # `normalize_effort/1` does not match and silently maps to "high"/enabled).
+  # It does not reach a Surplus turn because `maybe_add_provider_thinking/4`
+  # gates on the NATIVE deepseek host.
+  @thinking_disable %{
+    surplus: %{"type" => "disabled"}
+  }
+
+  defp maybe_disable_thinking(body, opts) do
+    provider = Keyword.get(opts, :provider, image_provider(opts))
+
+    with true <- Keyword.get(opts, :thinking_disabled, false),
+         shape when is_map(shape) <- Map.get(@thinking_disable, provider) do
+      Map.put(body, :thinking, shape)
+    else
+      _ -> body
     end
   end
 
@@ -1315,23 +1769,6 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
   # field and require `max_completion_tokens`. Every other OpenAI-compatible
   # provider uses `max_tokens`. Route the value to the right key so o-series
   # calls don't 400 ("max_tokens is not supported with this model").
-  # OpenAI processing tier ("flex" ~50% cheaper + slower for non-urgent work,
-  # "priority" faster, "default"/"auto" standard). Added ONLY for the real
-  # OpenAI provider — other OpenAI-compatible backends (xAI/grok, OpenRouter,
-  # local) reject an unknown `service_tier` with a 422, so we never send it
-  # there. Off unless a caller (llm_client, from the task's speed priority) set
-  # :service_tier.
-  defp maybe_add_service_tier(body, opts) do
-    tier = Keyword.get(opts, :service_tier)
-    provider = Keyword.get(opts, :provider, image_provider(opts))
-
-    if is_binary(tier) and tier != "" and provider == :openai do
-      Map.put(body, :service_tier, tier)
-    else
-      body
-    end
-  end
-
   defp maybe_add_max_tokens(body, model, opts) do
     case Keyword.get(opts, :max_tokens) do
       nil ->
@@ -1756,9 +2193,20 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       input_tokens: inp,
       output_tokens: out,
       cache_read_input_tokens: cached_input(u),
-      cache_creation_input_tokens: cache_written(u)
+      cache_creation_input_tokens: cache_written(u),
+      # A SUBSET of `output_tokens`, per `ReasoningContent`'s "Accounting"
+      # section — collected and never summed into anything billed. Used only
+      # by `record_model_speed/4` to keep an invisible reasoning burst out of
+      # the visible-tok/s estimate for a turn that also produced real content.
+      reasoning_tokens: reasoning_tokens(u)
     }
   end
+
+  defp reasoning_tokens(%{"completion_tokens_details" => %{"reasoning_tokens" => n}})
+       when is_integer(n),
+       do: n
+
+  defp reasoning_tokens(_), do: 0
 
   defp cached_input(%{"prompt_tokens_details" => %{"cached_tokens" => n}}) when is_integer(n),
     do: n

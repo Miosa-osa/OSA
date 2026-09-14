@@ -205,7 +205,15 @@ impl CopyOutcome {
 /// [`crate::components::osc8`] — hyperlinks and clipboard writes are separate
 /// capabilities and must not share an allowlist.
 const OSC52_KNOWN: &[&str] = &[
-    "ghostty", "kitty", "iTerm.app", "iTerm2", "WezTerm", "alacritty", "rio", "foot", "Hyper",
+    "ghostty",
+    "kitty",
+    "iTerm.app",
+    "iTerm2",
+    "WezTerm",
+    "alacritty",
+    "rio",
+    "foot",
+    "Hyper",
 ];
 
 /// Whether OSC 52 on this terminal can be reported as a confirmed copy.
@@ -214,7 +222,8 @@ pub fn osc52_is_known_good(env: impl Fn(&str) -> Option<String>) -> bool {
     // Inside a multiplexer the terminal we can see is the multiplexer, and the
     // copy additionally depends on ITS config (`set-clipboard on` in tmux, off
     // by default in tmux < 3.something). Never claim confirmed through one.
-    if crate::components::osc52::multiplexer_with(&env) != crate::components::osc52::Multiplexer::None
+    if crate::components::osc52::multiplexer_with(&env)
+        != crate::components::osc52::Multiplexer::None
     {
         return false;
     }
@@ -436,7 +445,10 @@ mod tests {
         });
         // native first, then tmux buffer, then OSC 52 always last
         assert_eq!(*chain.last().unwrap(), Transport::Osc52);
-        let tmux_idx = chain.iter().position(|t| *t == Transport::TmuxBuffer).unwrap();
+        let tmux_idx = chain
+            .iter()
+            .position(|t| *t == Transport::TmuxBuffer)
+            .unwrap();
         let osc_idx = chain.iter().position(|t| *t == Transport::Osc52).unwrap();
         assert!(tmux_idx < osc_idx);
         assert!(chain.iter().position(|t| *t == Transport::WlCopy).unwrap() < tmux_idx);
@@ -491,9 +503,7 @@ mod tests {
             ("TERM_PROGRAM", "ghostty"),
         ])));
         assert!(osc52_is_known_good(env_of(&[("TERM", "xterm-kitty")])));
-        assert!(osc52_is_known_good(env_of(&[
-            ("TERM", "foot-extra"),
-        ])));
+        assert!(osc52_is_known_good(env_of(&[("TERM", "foot-extra"),])));
         assert!(osc52_is_known_good(env_of(&[
             ("TERM", "xterm-256color"),
             ("WT_SESSION", "abc"),
@@ -544,7 +554,9 @@ mod tests {
         let unverified = CopyOutcome {
             confidence: Confidence::Unverified,
             transport: Some(Transport::Osc52),
-            fallback_path: Some(std::path::PathBuf::from("/home/u/.osa/clipboard/last-copy.txt")),
+            fallback_path: Some(std::path::PathBuf::from(
+                "/home/u/.osa/clipboard/last-copy.txt",
+            )),
             detail: None,
         };
         let msg = unverified.message();
@@ -559,7 +571,9 @@ mod tests {
         let failed = CopyOutcome {
             confidence: Confidence::Failed,
             transport: None,
-            fallback_path: Some(std::path::PathBuf::from("/home/u/.osa/clipboard/last-copy.txt")),
+            fallback_path: Some(std::path::PathBuf::from(
+                "/home/u/.osa/clipboard/last-copy.txt",
+            )),
             detail: Some("payload is 900 KiB, over the 768 KiB OSC 52 limit".into()),
         };
         let msg = failed.message();
@@ -590,12 +604,18 @@ mod tests {
         // SAFETY: single-threaded assertion over process env; restored below.
         unsafe { std::env::set_var("HOME", &tmp) };
         let path = save_fallback("secret answer text").expect("fallback written");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "secret answer text");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "secret answer text"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "fallback holds copied text; must be owner-only");
+            assert_eq!(
+                mode, 0o600,
+                "fallback holds copied text; must be owner-only"
+            );
         }
         match prev {
             Some(v) => unsafe { std::env::set_var("HOME", v) },

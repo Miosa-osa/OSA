@@ -102,8 +102,14 @@ mod tests {
 
     #[test]
     fn permission_cycle_accepts_all_encodings() {
-        assert!(is_permission_cycle(&ev(KeyCode::BackTab, KeyModifiers::NONE)));
-        assert!(is_permission_cycle(&ev(KeyCode::BackTab, KeyModifiers::SHIFT)));
+        assert!(is_permission_cycle(&ev(
+            KeyCode::BackTab,
+            KeyModifiers::NONE
+        )));
+        assert!(is_permission_cycle(&ev(
+            KeyCode::BackTab,
+            KeyModifiers::SHIFT
+        )));
         assert!(is_permission_cycle(&ev(KeyCode::Tab, KeyModifiers::SHIFT)));
         assert!(!is_permission_cycle(&ev(KeyCode::Tab, KeyModifiers::NONE)));
     }
@@ -117,11 +123,20 @@ mod tests {
             KeyCode::Enter,
             KeyModifiers::SHIFT | KeyModifiers::CONTROL
         )));
-        assert!(is_insert_newline(&ev(KeyCode::Char('j'), KeyModifiers::CONTROL)));
+        assert!(is_insert_newline(&ev(
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL
+        )));
         // Not a newline.
         assert!(!is_insert_newline(&ev(KeyCode::Enter, KeyModifiers::NONE)));
-        assert!(!is_insert_newline(&ev(KeyCode::Enter, KeyModifiers::CONTROL)));
-        assert!(!is_insert_newline(&ev(KeyCode::Char('j'), KeyModifiers::NONE)));
+        assert!(!is_insert_newline(&ev(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_insert_newline(&ev(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE
+        )));
     }
 
     #[test]

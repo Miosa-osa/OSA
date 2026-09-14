@@ -60,6 +60,13 @@ defmodule OptimalSystemAgent.Providers.EffortThinkingMatrixTest do
     Application.put_env(:optimal_system_agent, :thinking_enabled, true)
     Application.put_env(:optimal_system_agent, :default_provider, :anthropic)
 
+    # The "clean no-op" ollama assertions below require `:ollama_think` to be
+    # UNSET: `reasoning_decision/2` answers {false, :config} when it is set and
+    # adds a "think" key to a non-thinking model's body. runtime.exs bakes
+    # `false` for an unset OLLAMA_THINK, so pin the neutral state here; the
+    # on_exit below restores whatever was there before.
+    Application.delete_env(:optimal_system_agent, :ollama_think)
+
     on_exit(fn ->
       restore_session_effort(prev.session)
       restore(:thinking_enabled, prev.thinking_enabled)
@@ -398,6 +405,12 @@ defmodule OptimalSystemAgent.Providers.EffortThinkingMatrixTest do
   describe "ollama — clean no-op regardless of effort tier" do
     for tier <- [:fast, :medium, :high, :xhigh, :ultra] do
       test "effort #{tier} leaves a non-thinking-model body untouched (no crash)" do
+        # The "no thinking wiring" premise requires NO explicit think config:
+        # runtime.exs bakes `ollama_think: false` (the unbounded-stall default),
+        # and reasoning_decision/2 checks that config BEFORE the model's
+        # capability — so a leftover `false` here would put think:false on a
+        # flat model's body. Clear it, exactly as the two tests below do.
+        Application.delete_env(:optimal_system_agent, :ollama_think)
         Effort.set(unquote(tier))
         base = %{model: @ollama_flat, messages: []}
         assert Ollama.apply_think(base, @ollama_flat, []) == base
@@ -423,6 +436,9 @@ defmodule OptimalSystemAgent.Providers.EffortThinkingMatrixTest do
     test "no provider emits a thinking parameter for off" do
       # off normalizes to :fast (lowest / disabled)
       Effort.set("off")
+      # Same premise as the no-op tier tests: no explicit think config may
+      # leak in from runtime.exs's baked `ollama_think: false`.
+      Application.delete_env(:optimal_system_agent, :ollama_think)
 
       # anthropic: fast_mode → thinking_config nil
       assert LLMClient.thinking_config(%{provider: :anthropic, model: @opus}) == nil
@@ -487,6 +503,9 @@ defmodule OptimalSystemAgent.Providers.EffortThinkingMatrixTest do
 
       assert cfg == %{thinkingConfig: %{thinkingBudget: 5_000}}
 
+      # Same premise as the no-op tier tests: no explicit think config may
+      # leak in from runtime.exs's baked `ollama_think: false`.
+      Application.delete_env(:optimal_system_agent, :ollama_think)
       assert Ollama.apply_think(%{}, @ollama_flat, []) == %{}
     end
   end

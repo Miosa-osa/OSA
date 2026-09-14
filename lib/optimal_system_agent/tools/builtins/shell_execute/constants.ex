@@ -29,8 +29,18 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Constants do
   @tool_name "shell_execute"
   def tool_name, do: @tool_name
 
-  @max_output_bytes 102_400
-  def max_output_bytes, do: @max_output_bytes
+  # Byte cap on a single shell command's captured output. Runtime-configurable
+  # (gap #1) via `:bash_output_max_bytes` / OSA_BASH_OUTPUT_MAX_BYTES; default
+  # unchanged (100 KB). This is the tool's OWN capture bound; the loop-layer
+  # per-tool-result cap (`:max_tool_output_bytes`, item 9) is a separate, later
+  # cut before the result enters the transcript.
+  @default_max_output_bytes 102_400
+  def max_output_bytes do
+    case Application.get_env(:optimal_system_agent, :bash_output_max_bytes) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @default_max_output_bytes
+    end
+  end
 
   # How long the AGENT waits inline for a foreground command — a YIELD window,
   # not a kill deadline.

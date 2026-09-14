@@ -36,7 +36,11 @@ pub struct TrustDialog {
 
 impl TrustDialog {
     pub fn new(cwd: String, risks: Vec<String>) -> Self {
-        Self { cwd, risks, selected: 0 }
+        Self {
+            cwd,
+            risks,
+            selected: 0,
+        }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<TrustAction> {
@@ -217,14 +221,25 @@ mod trust_dialog_tests {
         assert_eq!(d.handle_key(key(KeyCode::Enter)), Some(TrustAction::Accept));
         assert_eq!(d.handle_key(key(KeyCode::Down)), None);
         assert_eq!(d.handle_key(key(KeyCode::Enter)), Some(TrustAction::Exit));
-        assert_eq!(d.handle_key(key(KeyCode::Char('1'))), Some(TrustAction::Accept));
-        assert_eq!(d.handle_key(key(KeyCode::Char('2'))), Some(TrustAction::Exit));
+        assert_eq!(
+            d.handle_key(key(KeyCode::Char('1'))),
+            Some(TrustAction::Accept)
+        );
+        assert_eq!(
+            d.handle_key(key(KeyCode::Char('2'))),
+            Some(TrustAction::Exit)
+        );
     }
 
     #[test]
     fn draws_at_all_sizes_with_multibyte_risks_without_panic() {
         let risks: Vec<String> = (0..9)
-            .map(|i| format!("risk \u{20ac}\u{4e2d} number {} with a long label........", i))
+            .map(|i| {
+                format!(
+                    "risk \u{20ac}\u{4e2d} number {} with a long label........",
+                    i
+                )
+            })
             .collect();
         let d = TrustDialog::new("/home/\u{4e2d}\u{6587}/project".into(), risks);
         for (w, h) in [(1u16, 1u16), (10, 3), (40, 12), (80, 24), (200, 60)] {

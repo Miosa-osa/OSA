@@ -17,7 +17,11 @@ use ratatui::{
 
 use crate::client::types::{RewindCheckpoint, RewindScope};
 
-const SCOPES: [RewindScope; 3] = [RewindScope::Both, RewindScope::Conversation, RewindScope::Code];
+const SCOPES: [RewindScope; 3] = [
+    RewindScope::Both,
+    RewindScope::Conversation,
+    RewindScope::Code,
+];
 
 #[derive(Debug, Clone)]
 pub enum RewindAction {
@@ -59,7 +63,10 @@ impl RewindDialog {
     // ── Key handling ─────────────────────────────────────────────────────
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<RewindAction> {
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             // Let Ctrl+C fall through to app-level quit handling.
             return None;
         }
@@ -196,13 +203,7 @@ impl RewindDialog {
             0
         };
 
-        for (i, cp) in self
-            .checkpoints
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(list_h)
-        {
+        for (i, cp) in self.checkpoints.iter().enumerate().skip(start).take(list_h) {
             if cy >= list_bottom {
                 break;
             }
@@ -234,13 +235,13 @@ impl RewindDialog {
 
             let line = Line::from(vec![
                 Span::styled(format!("{} ", marker), label_style),
-                Span::styled(format!("{} ", code_tag), Style::default().fg(theme.colors.success)),
+                Span::styled(
+                    format!("{} ", code_tag),
+                    Style::default().fg(theme.colors.success),
+                ),
                 Span::styled(label, label_style),
             ]);
-            frame.render_widget(
-                Paragraph::new(line),
-                Rect::new(inner.x, cy, inner.width, 1),
-            );
+            frame.render_widget(Paragraph::new(line), Rect::new(inner.x, cy, inner.width, 1));
             cy += 1;
 
             if is_selected && cy < list_bottom {

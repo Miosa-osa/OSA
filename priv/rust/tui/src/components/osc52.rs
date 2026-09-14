@@ -166,7 +166,9 @@ pub fn copy(text: &str) -> Result<(), Osc52Error> {
     }
     let sequence = wrap_for(detected_multiplexer(), build_sequence(text));
     let mut stdout = io::stdout();
-    stdout.write_all(sequence.as_bytes()).map_err(Osc52Error::Io)?;
+    stdout
+        .write_all(sequence.as_bytes())
+        .map_err(Osc52Error::Io)?;
     stdout.flush().map_err(Osc52Error::Io)
 }
 
@@ -257,7 +259,10 @@ mod tests {
             multiplexer_with(env_of(&[("TERM", "xterm-256color")])),
             Multiplexer::None
         );
-        assert_eq!(wrap_for(Multiplexer::None, "\x1b]52;c;YQ==\x07".into()), "\x1b]52;c;YQ==\x07");
+        assert_eq!(
+            wrap_for(Multiplexer::None, "\x1b]52;c;YQ==\x07".into()),
+            "\x1b]52;c;YQ==\x07"
+        );
     }
 
     #[test]

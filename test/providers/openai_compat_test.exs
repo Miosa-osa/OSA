@@ -803,11 +803,206 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatTest do
       assert result.usage.estimated == true
     end
 
-    test "estimate fallback with empty content/messages still returns a map with zero, not a crash" do
+    test "a stream that closes with no content/tool_calls/reasoning is a retryable empty-response error" do
+      # Previously this finalized as a zero-usage result map. A cleanly-closed
+      # stream that produced nothing is a transient failure for the flaky
+      # gateways this module talks to, so it now surfaces as a retryable
+      # :empty_response error instead of being delivered as an empty turn (which
+      # would count toward the ReasoningOnly doom guard).
       chunks = ["data: [DONE]\n\n"]
-      result = OpenAICompat.stream_from_sse_chunks(chunks, "gpt-4o", [])
-      assert result.usage.input_tokens == 0
-      assert result.usage.output_tokens == 0
+      assert {:error, reason} = OpenAICompat.stream_from_sse_chunks(chunks, "gpt-4o", [])
+
+      assert OptimalSystemAgent.Providers.ErrorCatalog.classify(reason) == :empty_response
+
+      assert match?(
+               {:retry_with_client_rebuild, _},
+               OptimalSystemAgent.Providers.RetryClassifier.classify(reason, 0, 3)
+             )
+    end
+
+    test "a stream with tool_calls but empty content is NOT empty (delivers the result)" do
+      chunks = [
+        sse(%{
+          "choices" => [
+            %{
+              "delta" => %{
+                "tool_calls" => [
+                  %{
+                    "index" => 0,
+                    "id" => "call_1",
+                    "function" => %{"name" => "file_read", "arguments" => "{}"}
+                  }
+                ]
+              }
+            }
+          ]
+        }),
+        sse(%{"choices" => [%{"delta" => %{}, "finish_reason" => "tool_calls"}]}),
+        "data: [DONE]\n\n"
+      ]
+
+      result = OpenAICompat.stream_from_sse_chunks(chunks)
+
+      refute match?({:error, _}, result), "a turn that is a tool call is not an empty turn"
+      assert [%{name: "file_read"}] = result.tool_calls
+      assert result.content == ""
+    end
+
+    test "a stream with reasoning but empty content is NOT empty (delivers the result)" do
+      chunks = [
+        sse(%{"choices" => [%{"delta" => %{"reasoning" => "let me think"}}]}),
+        sse(%{"choices" => [%{"delta" => %{}, "finish_reason" => "stop"}]}),
+        "data: [DONE]\n\n"
+      ]
+
+      result = OpenAICompat.stream_from_sse_chunks(chunks)
+
+      refute match?({:error, _}, result)
+      assert result.reasoning == "let me think"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Partial (cut-off) tool-call arguments — the customer-critical fix. A flaky
+  # provider truncates a large tool call mid-arguments; the accumulated
+  # `arguments_json` is non-blank but will not decode. Previously it was emitted
+  # as a tool call with `%{}` args — silently STRIPPED — which fails validation
+  # instantly and drives the "identical arguments N times" doom halt. It must
+  # now surface as a retryable :partial_tool_call error, while a legitimate
+  # no-arg tool call (blank arguments) still passes through as `%{}`.
+  # ---------------------------------------------------------------------------
+  describe "stream_from_sse_chunks/3 — partial tool-call arguments (cut-off recovery)" do
+    test "a tool call cut off mid-arguments is a retryable error, NOT a %{}-args tool call" do
+      # `delegate`-style call whose big `task` brief is truncated mid-stream:
+      # the accumulated arguments JSON never closes.
+      chunks = [
+        sse(%{
+          "choices" => [
+            %{
+              "delta" => %{
+                "tool_calls" => [
+                  %{
+                    "index" => 0,
+                    "id" => "call_delegate",
+                    "function" => %{"name" => "delegate", "arguments" => "{\"task\": \"do the th"}
+                  }
+                ]
+              }
+            }
+          ]
+        }),
+        # Stream cut off here — no closing braces, no [DONE] usefulness.
+        "data: [DONE]\n\n"
+      ]
+
+      # An {:error, _} — never an {:ok}-style result map delivering the tool call
+      # with stripped (empty) arguments.
+      assert {:error, reason} = OpenAICompat.stream_from_sse_chunks(chunks)
+
+      # Classifies as the new retryable category with an actionable message.
+      assert OptimalSystemAgent.Providers.ErrorCatalog.classify(reason) == :partial_tool_call
+
+      assert match?(
+               {:retry_with_client_rebuild, _},
+               OptimalSystemAgent.Providers.RetryClassifier.classify(reason, 0, 3)
+             )
+    end
+
+    test "arguments split across chunks that never complete is still a partial error" do
+      # The realistic wire shape: name+id first, then argument fragments, then
+      # the stream dies before the JSON closes.
+      chunks = [
+        sse(%{
+          "choices" => [
+            %{
+              "delta" => %{
+                "tool_calls" => [
+                  %{"index" => 0, "id" => "call_1", "function" => %{"name" => "delegate"}}
+                ]
+              }
+            }
+          ]
+        }),
+        sse(%{
+          "choices" => [
+            %{
+              "delta" => %{
+                "tool_calls" => [%{"index" => 0, "function" => %{"arguments" => "{\"ta"}}]
+              }
+            }
+          ]
+        }),
+        sse(%{
+          "choices" => [
+            %{
+              "delta" => %{
+                "tool_calls" => [%{"index" => 0, "function" => %{"arguments" => "sk\": \"go"}}]
+              }
+            }
+          ]
+        }),
+        "data: [DONE]\n\n"
+      ]
+
+      assert {:error, reason} = OpenAICompat.stream_from_sse_chunks(chunks)
+      assert OptimalSystemAgent.Providers.ErrorCatalog.classify(reason) == :partial_tool_call
+    end
+
+    test "a no-arg tool call (blank arguments) still passes through as %{} — NOT treated as partial" do
+      chunks = [
+        sse(%{
+          "choices" => [
+            %{
+              "delta" => %{
+                "tool_calls" => [
+                  %{
+                    "index" => 0,
+                    "id" => "call_ls",
+                    "function" => %{"name" => "list_dir", "arguments" => ""}
+                  }
+                ]
+              }
+            }
+          ]
+        }),
+        sse(%{"choices" => [%{"delta" => %{}, "finish_reason" => "tool_calls"}]}),
+        "data: [DONE]\n\n"
+      ]
+
+      result = OpenAICompat.stream_from_sse_chunks(chunks)
+
+      refute match?({:error, _}, result), "blank args is a legit no-arg tool call, not a cut-off"
+      assert [%{name: "list_dir", arguments: %{}}] = result.tool_calls
+    end
+
+    test "a complete tool call decodes normally (no regression)" do
+      chunks = [
+        sse(%{
+          "choices" => [
+            %{
+              "delta" => %{
+                "tool_calls" => [
+                  %{
+                    "index" => 0,
+                    "id" => "call_ok",
+                    "function" => %{
+                      "name" => "delegate",
+                      "arguments" => "{\"task\": \"do the thing\"}"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }),
+        sse(%{"choices" => [%{"delta" => %{}, "finish_reason" => "tool_calls"}]}),
+        "data: [DONE]\n\n"
+      ]
+
+      result = OpenAICompat.stream_from_sse_chunks(chunks)
+
+      refute match?({:error, _}, result)
+      assert [%{name: "delegate", arguments: %{"task" => "do the thing"}}] = result.tool_calls
     end
   end
 
@@ -845,9 +1040,59 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatTest do
       assert body.service_tier == "flex"
     end
 
-    test "NEVER sends service_tier to other OpenAI-compatible backends (422 guard)" do
+    test "sends each provider only a tier from its OWN vocabulary" do
+      groq = OpenAICompat.build_stream_body("llama", @msgs, provider: :groq, service_tier: "auto")
+      assert groq.service_tier == "auto"
+
+      flex = OpenAICompat.build_stream_body("llama", @msgs, provider: :groq, service_tier: "flex")
+      assert flex.service_tier == "flex"
+    end
+
+    test "drops a tier the provider does not define rather than forwarding it" do
+      # "priority" is OpenAI's word. Groq's vocabulary is
+      # on_demand/flex/auto/performance, so sending it there bought a rejected
+      # request plus the tier-less retry behind it on every turn.
+      groq =
+        OpenAICompat.build_stream_body("llama", @msgs, provider: :groq, service_tier: "priority")
+
+      refute Map.has_key?(groq, :service_tier)
+
+      # Anthropic's word, on an OpenAI-compatible route.
+      openai =
+        OpenAICompat.build_stream_body("gpt-5", @msgs,
+          provider: :openai,
+          service_tier: "standard_only"
+        )
+
+      refute Map.has_key?(openai, :service_tier)
+    end
+
+    test "sends no tier to providers with no verified vocabulary" do
+      # Both were observed rejecting an unknown service_tier with HTTP 422, and
+      # neither documents a value OSA has checked against the live API.
+      xai =
+        OpenAICompat.build_stream_body("grok-4.6", @msgs,
+          provider: :xai,
+          service_tier: "priority"
+        )
+
+      refute Map.has_key?(xai, :service_tier)
+
+      openrouter =
+        OpenAICompat.build_stream_body("openai/gpt-5", @msgs,
+          provider: :openrouter,
+          service_tier: "priority"
+        )
+
+      refute Map.has_key?(openrouter, :service_tier)
+    end
+
+    test "never sends service_tier to unsupported compatible backends" do
       body =
-        OpenAICompat.build_stream_body("grok-4.6", @msgs, provider: :xai, service_tier: "flex")
+        OpenAICompat.build_stream_body("local-model", @msgs,
+          provider: :lmstudio,
+          service_tier: "priority"
+        )
 
       refute Map.has_key?(body, :service_tier)
     end

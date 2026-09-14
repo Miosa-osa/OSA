@@ -40,7 +40,7 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   alias OptimalSystemAgent.Scratchpad
   alias OptimalSystemAgent.Workspace.FastWorktree
 
-  @default_max_fleet_agents 16
+  @default_max_fleet_agents 24
   # Run-lifetime kill switch: absolute ceiling on nodes a single fan_out drains.
   @default_max_fleet_total 1000
   # Per-node wall-clock ceiling for a single fan_out item. A hung node is reaped
@@ -1153,11 +1153,29 @@ defmodule OptimalSystemAgent.Agent.Fleet do
     # never the loop; and RunStore.complete/2 above has already recorded the
     # terminal state a waiter polls for. Reached on every terminal path:
     # success, failure, driver crash, and the watcher's idle timeout.
-    stop_node(node_id)
+    #
+    # `retire_node/1`, NOT `stop_node/1`: this node reaching a terminal state is
+    # NOT the same fact as "this branch of the tree is being torn down". A node
+    # can dispatch its OWN background subagent mid-run (`delegate(background:
+    # true)`, registered in RunStore with `parent_session_id: node_id`) that is
+    # explicitly designed to keep running after its dispatcher moves on. Calling
+    # `stop_node/1` here would route through `SessionManager.stop_session/1`,
+    # which unconditionally cascades via `stop_children/1` — cancelling that
+    # still-running grandchild and killing its live Loop the instant THIS node
+    # (its parent) finishes, which is real, silent data loss: work in flight,
+    # thrown away, with nothing failed or logged as an error.
+    retire_node(node_id)
   end
 
   @doc """
-  Stop a fleet node's Loop GenServer and free its transcript.
+  Stop a fleet node's Loop GenServer AND cascade to its own children.
+
+  This is the "this branch of the tree is being torn down" path — used by
+  `stop_children/1`'s own recursion (a child already decided to be cancelled
+  must take its descendants with it) and `RunStore.handle_ownership_loss/1`'s
+  abort (this process no longer owns the run, so it cannot vouch for what is
+  under it either). NOT used for a node's own normal completion — see
+  `retire_node/1` for that.
 
   Idempotent and best-effort: a node whose loop already exited (crash, prior
   stop) is a no-op, and no failure here is allowed to disturb the parent's
@@ -1185,6 +1203,39 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   def stop_node(_), do: :ok
 
   @doc """
+  Retire a fleet node's Loop GenServer WITHOUT cascading to its own children.
+
+  The per-delegation terminal path `finish/3` takes on success, failure,
+  driver crash and idle timeout — a node finishing its own work says nothing
+  about whether something IT dispatched (a background subagent it kicked off
+  mid-run) is done too, so unlike `stop_node/1` this never touches
+  `RunStore.all_running_local/0` or any other run. It stops exactly the one
+  Loop named by `node_id` and releases that session's own ephemeral state
+  (`SessionManager.untrack_session/1`) — the same two steps `stop_session/1`
+  takes for a live loop, minus the `stop_children/1` cascade in front of them.
+
+  Idempotent and best-effort, matching `stop_node/1`.
+  """
+  @spec retire_node(String.t()) :: :ok
+  def retire_node(node_id) when is_binary(node_id) do
+    case SessionManager.lookup_loop(node_id) do
+      {:ok, pid, _owner} ->
+        GenServer.stop(pid, :normal)
+        SessionManager.untrack_session(node_id)
+        :ok
+
+      :error ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  def retire_node(_), do: :ok
+
+  @doc """
   Stop every still-running fleet node spawned under `parent_session_id`.
 
   This is the parent-shutdown half of the leak: `finish/3` retires a node that
@@ -1199,10 +1250,21 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   def stop_children(parent_session_id) when is_binary(parent_session_id) do
     # `all_running_local/0`, not `all_running/0`: cancelling a child that another
     # live `osa` process owns would kill work this process never started.
+    #
+    # That snapshot can go stale by the time this reaches a given node — a
+    # child can reach its OWN terminal state via `finish/3` (success, failure,
+    # driver crash, idle timeout) at any point while this Enum.map is still
+    # walking its siblings. `still_running?/1` re-reads RunStore immediately
+    # before acting on each id, so a node that finished in that window is
+    # skipped rather than re-completed as `:cancelled` and re-stopped — both
+    # of which are silent no-ops on an already-dead loop, but the former
+    # overwrites a real completion's transcript with a contradictory second
+    # `STOP` line for no reason.
     RunStore.all_running_local()
     |> Enum.filter(&(Map.get(&1, :parent_session_id) == parent_session_id))
     |> Enum.map(& &1.agent_id)
     |> Enum.reject(&(&1 == parent_session_id))
+    |> Enum.filter(&still_running?/1)
     |> Enum.map(fn node_id ->
       RunStore.complete(node_id, %{status: :cancelled, summary: "parent session stopped"})
       stop_node(node_id)
@@ -1216,6 +1278,10 @@ defmodule OptimalSystemAgent.Agent.Fleet do
   end
 
   def stop_children(_), do: 0
+
+  defp still_running?(node_id) do
+    match?(%{status: :running}, RunStore.get(node_id))
+  end
 
   defp emit_progress(parent_id, node_id, action, tool_count) do
     emit_fleet_event(parent_id, %{

@@ -349,7 +349,10 @@ impl ClaudeLogin {
 
     /// The child's screen as text. Test support and failure evidence.
     pub fn child_screen(&self) -> String {
-        self.pane.as_ref().map(|p| p.screen_text()).unwrap_or_default()
+        self.pane
+            .as_ref()
+            .map(|p| p.screen_text())
+            .unwrap_or_default()
     }
 
     // ── Drawing ──────────────────────────────────────────────────────────
@@ -401,7 +404,12 @@ impl ClaudeLogin {
                 ];
                 frame.render_widget(
                     Paragraph::new(body).wrap(Wrap { trim: false }),
-                    Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1)),
+                    Rect::new(
+                        inner.x,
+                        inner.y,
+                        inner.width,
+                        inner.height.saturating_sub(1),
+                    ),
                 );
                 self.footer(frame, inner, theme, &[("r", "re-check"), ("Esc", "back")]);
             }
@@ -434,7 +442,8 @@ impl ClaudeLogin {
             inner.width.saturating_sub(2),
             inner.height.saturating_sub(4),
         );
-        self.pane_size.set((pane_area.height.max(1), pane_area.width.max(1)));
+        self.pane_size
+            .set((pane_area.height.max(1), pane_area.width.max(1)));
         if let Some(pane) = self.pane.as_ref() {
             pane.draw(frame, pane_area);
         }
@@ -506,7 +515,12 @@ impl ClaudeLogin {
         if let Some(pane) = self.pane.as_ref() {
             pane.draw(frame, pane_area);
         }
-        self.footer(frame, inner, theme, &[("Enter", "re-check"), ("Esc", "back")]);
+        self.footer(
+            frame,
+            inner,
+            theme,
+            &[("Enter", "re-check"), ("Esc", "back")],
+        );
     }
 
     fn draw_not_installed(&self, frame: &mut Frame, inner: Rect, theme: &crate::style::Theme) {
@@ -553,7 +567,12 @@ impl ClaudeLogin {
         ];
         frame.render_widget(
             Paragraph::new(body),
-            Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1)),
+            Rect::new(
+                inner.x,
+                inner.y,
+                inner.width,
+                inner.height.saturating_sub(1),
+            ),
         );
         self.footer(
             frame,
@@ -606,7 +625,12 @@ impl ClaudeLogin {
         ];
         frame.render_widget(
             Paragraph::new(body),
-            Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1)),
+            Rect::new(
+                inner.x,
+                inner.y,
+                inner.width,
+                inner.height.saturating_sub(1),
+            ),
         );
         self.footer(
             frame,
@@ -641,7 +665,12 @@ impl ClaudeLogin {
         )));
         frame.render_widget(
             Paragraph::new(body),
-            Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1)),
+            Rect::new(
+                inner.x,
+                inner.y,
+                inner.width,
+                inner.height.saturating_sub(1),
+            ),
         );
         self.footer(frame, inner, theme, &[("Enter", "use it"), ("Esc", "back")]);
     }
@@ -829,7 +858,10 @@ mod tests {
     fn backing_out_of_the_success_screen_does_not_silently_select_the_provider() {
         let mut d = ClaudeLogin::new();
         d.apply_state(state(true, true));
-        assert_eq!(d.handle_key(key(KeyCode::Esc)), Some(ClaudeLoginAction::Cancel));
+        assert_eq!(
+            d.handle_key(key(KeyCode::Esc)),
+            Some(ClaudeLoginAction::Cancel)
+        );
     }
 
     #[test]
@@ -924,7 +956,10 @@ mod tests {
     fn esc_backs_out_when_nothing_is_running() {
         let mut d = ClaudeLogin::new();
         d.apply_state(state(true, false));
-        assert_eq!(d.handle_key(key(KeyCode::Esc)), Some(ClaudeLoginAction::Cancel));
+        assert_eq!(
+            d.handle_key(key(KeyCode::Esc)),
+            Some(ClaudeLoginAction::Cancel)
+        );
     }
 
     #[test]

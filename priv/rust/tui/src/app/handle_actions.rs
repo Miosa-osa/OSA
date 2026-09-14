@@ -459,14 +459,26 @@ impl App {
             );
         }
 
-        // Snapshot the spinner's clock at the turn-end edge, BEFORE stopping it
-        // (and before /goal auto-continue or a queued auto-submit can restart
-        // it for the NEXT turn). The turn_recap SSE event arrives after this
-        // agent_response and consumes the snapshot, so "✻ Worked for Ns"
-        // equals the last value the spinner showed instead of a server-side
-        // clock that starts later (after the request round-trip) and can
-        // visibly jump backwards.
-        self.last_turn_client_elapsed_secs = self.activity.elapsed_secs();
+        // Snapshot elapsed at the turn-end edge, BEFORE stopping the clock (and
+        // before /goal auto-continue or a queued auto-submit can restart it for
+        // the NEXT turn). The turn_recap SSE event arrives after this
+        // agent_response and consumes the snapshot, so "✻ Worked for Ns" shows a
+        // client-side number that can never jump backwards (the server clock
+        // starts later, after the request round-trip).
+        //
+        // Prefer WALL-CLOCK since this turn's submit (`processing_start`) over
+        // the `activity` spinner clock. The spinner clock banks AGENT time and is
+        // stopped + restarted by orchestrate and backgrounded-agent stretches
+        // (each `start()` zeroes `elapsed_running`), so on a multi-stage task it
+        // reports only the final leg and UNDERCOUNTS the real duration — the bug
+        // where a task that ran for minutes recapped as "Worked for 1m".
+        // `processing_start` is set once at submit and survives those restarts,
+        // so it is the true total. Fall back to the spinner clock, then to the
+        // server's elapsed_ms, if it is somehow absent.
+        self.last_turn_client_elapsed_secs = self
+            .processing_start
+            .map(|s| s.elapsed().as_secs())
+            .or_else(|| self.activity.elapsed_secs());
 
         // Clear streaming state. `clear_buf`, NOT `reset`: this turn's
         // finalization must stay on record so a duplicate agent_response
@@ -590,6 +602,36 @@ impl App {
                         }
                     }
                 }
+                // `/jailbreak` — the badge's source of truth just changed (the
+                // backend wrote ~/.osa/jailbreak.json). Drop the poll cache so
+                // the next render flips the ⚡ LIBERATED chip in the same
+                // breath, and mark the moment with a toast.
+                if resp
+                    .command
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|c| c.eq_ignore_ascii_case("jailbreak"))
+                {
+                    // Drop the poll cache FIRST, then read — the backend has
+                    // already written the file by the time this result lands.
+                    crate::components::jailbreak::invalidate();
+                    let liberated = crate::components::jailbreak::is_liberated();
+                    self.status.set_liberated(liberated);
+                    self.activity.set_liberated(liberated);
+                    self.toasts.push(
+                        if liberated {
+                            "\u{26A1} LIBERATED — operator override armed on every model"
+                                .to_string()
+                        } else {
+                            "\u{26A1} LIBERATED disarmed — override removed".to_string()
+                        },
+                        if liberated {
+                            crate::components::toast::ToastLevel::Success
+                        } else {
+                            crate::components::toast::ToastLevel::Info
+                        },
+                    );
+                }
             }
             Err(e) => {
                 // A failed request cannot settle a goal poll either way, and the
@@ -640,6 +682,17 @@ impl App {
     pub fn submit_input(&mut self, text: &str) {
         let text = text.trim();
         if text.is_empty() {
+            return;
+        }
+
+        // Startup discovery can finish after the user types. Do not send a
+        // prompt on the provisional ID which SessionCreated will replace —
+        // the same gate `/clear` now closes (see commands.rs) while it swaps
+        // the session out from under `self.session_id`.
+        if !exempt_from_session_gate(text)
+            && startup_session_pending(self.dir_session_resolved, self.session_creation_pending)
+        {
+            self.enqueue_message(text);
             return;
         }
 
@@ -781,6 +834,9 @@ impl App {
     /// Idle (turn fully ended — not mid-turn, not auto-continued by /goal, no
     /// open dialog). FIFO: oldest first. Called at every turn-completion site.
     pub(super) fn maybe_dequeue_message(&mut self) {
+        if startup_session_pending(self.dir_session_resolved, self.session_creation_pending) {
+            return;
+        }
         if !queue_may_drain(self.state, self.turn_done) {
             return;
         }
@@ -1870,6 +1926,8 @@ impl App {
     }
 
     pub(crate) fn create_session(&mut self) {
+        self.dir_session_resolved = true;
+        self.session_creation_pending = true;
         let client = self.client.clone();
         let tx = self.event_tx.clone();
         // Always start FRESH (Claude-Code semantics): create with no working_dir so
@@ -1886,6 +1944,33 @@ impl App {
             };
             let _ = tx.send(Event::Backend(event));
         });
+    }
+
+    /// Resolve this folder's session once the onboarding wizard is out of the
+    /// way — the first-run counterpart of the `OnboardingStatus` onboarded
+    /// branch.
+    ///
+    /// **This is what made a brand-new install swallow every message.** Session
+    /// resolution happens in exactly two places: that onboarded branch and
+    /// [`Self::create_session`]. When `needs_onboarding` is true the wizard
+    /// branch runs instead, so neither fires and `dir_session_resolved` stays
+    /// false — and `startup_session_pending` is a `!resolved ||` gate. Finishing
+    /// setup did not clear it (`OnboardingComplete` set the identity and sent
+    /// the bootstrap greeting straight through `submit_prompt`, which bypasses
+    /// the gate entirely), and neither did cancelling out of the wizard. So
+    /// every message the new user typed after setup was enqueued and never
+    /// drained. That is the entire first-run experience, for every new user.
+    ///
+    /// Called from all three ways the wizard can exit — completed, failed, and
+    /// cancelled — because a user left at an Idle prompt with no session is
+    /// wedged the same way whichever door they came through.
+    ///
+    /// Idempotent, matching the onboarded branch's own `!dir_session_resolved`
+    /// guard: it must never replace a session the user already has.
+    pub(crate) fn resolve_session_after_onboarding(&mut self) {
+        if !self.dir_session_resolved {
+            self.create_session();
+        }
     }
 
     /// Apply a `--model` / `--provider` launch flag to the session that just
@@ -2171,6 +2256,29 @@ impl App {
         status: &crate::client::types::GoalStatus,
         output: &str,
     ) -> bool {
+        // Item #3 pull path — a `/goal` response (the reconnect-time quiet
+        // poll, or a user-typed `/goal status`) can report a goal that
+        // ALREADY finished, possibly in an earlier connection that missed the
+        // one-time live `GoalCompletionOverview` event entirely. Open the
+        // full-screen completion report here too, so a resumed session gets
+        // it "for free" the next time it asks — but only for a NEWLY terminal
+        // status (see `new_completion_outcome`): compare against the CACHED
+        // status (captured before it is overwritten below) so a session that
+        // already showed this same report doesn't reopen (or re-flash) it on
+        // every subsequent poll of an unchanged, still-terminal goal.
+        let cached_status = self.goal_status.as_ref().and_then(|g| g.status.as_deref());
+        if let Some(outcome) = new_completion_outcome(cached_status, status.status.as_deref()) {
+            self.open_completion_panel(crate::components::completion_panel::CompletionReport {
+                outcome,
+                goal: status.goal.clone().unwrap_or_default(),
+                work_summary: status.work_summary.clone(),
+                acceptance_criteria: status.acceptance_criteria.clone().unwrap_or_default(),
+                gaps: status.gaps.clone(),
+                pause_reason: status.pause_reason.clone().unwrap_or_default(),
+                latest: status.latest.clone().unwrap_or_default(),
+            });
+        }
+
         // Mirror the backend. `self.goal` is a CACHE of what the backend last
         // said, never an opinion of ours: `active` is `GoalTracker.goal_loop?/1
         // and continue?/1`, the same pair `ReactLoop` gates its own re-entry on.
@@ -2200,6 +2308,12 @@ impl App {
                 if !output.is_empty() {
                     self.chat.add_system_message(output, "info");
                 }
+                // A fresh goal owes nothing to whatever stop notice the LAST
+                // one left behind — otherwise a new goal that happens to stop
+                // for the same reason (e.g. another `awaiting_user`) as the
+                // previous one would have its first, genuinely new notice
+                // wrongly collapsed as a "repeat".
+                self.last_goal_stop_notice = None;
                 // Anchoring alone does not start work — `GoalTracker.start/2`
                 // writes state, it does not run a turn — so the TUI starts the
                 // first one, exactly as the old client-side loop did.
@@ -2215,36 +2329,45 @@ impl App {
             // has our message, and echoing the backend's confirmation on top
             // would report the same event twice.
             GoalIntent::Silent => false,
-            GoalIntent::TurnEnd => self.continue_goal_from(status),
+            GoalIntent::TurnEnd => self.continue_goal_from(status, output),
         }
     }
 
     /// End-of-turn decision, made from the backend's answer.
-    fn continue_goal_from(&mut self, status: &crate::client::types::GoalStatus) -> bool {
+    ///
+    /// `output` is the backend's captured `/goal status` text for THIS same
+    /// poll — on a genuinely TERMINAL outcome (`completed`/`blocked`/
+    /// `abandoned`) it already carries the full "come back to a finished job"
+    /// overview (`Commands.print_goal_status/1`: a banner, the goal, the
+    /// acceptance criteria, and a work overview of files touched) built from
+    /// the SAME evidence the completion panel itself was judged against — not
+    /// a second, possibly-disagreeing account invented here.
+    fn continue_goal_from(
+        &mut self,
+        status: &crate::client::types::GoalStatus,
+        output: &str,
+    ) -> bool {
         if !status.active {
-            // NAME the stop. "Completed" and "paused" are different outcomes with
-            // different next steps, and the `DONE` sentinel could not tell them
-            // apart because it never asked anything that knew.
-            let msg = match (status.status.as_deref(), status.pause_reason.as_deref()) {
-                (Some("completed"), _) => format!(
-                    "Goal verified complete by the skeptic panel after {} backend turn(s). \
-                     Auto-continue stopped.",
-                    status.turn_count
-                ),
-                (Some("paused"), Some("run_cap")) => "Goal paused — the backend hit its lifetime \
-                     verification-run cap. The goal is kept; /goal resume to continue."
-                    .to_string(),
-                (Some("paused"), Some("no_progress")) => {
-                    "Goal paused — the backend saw the same gaps on consecutive rounds and \
-                     stopped rather than loop. /goal resume to continue."
-                        .to_string()
-                }
-                (Some("paused"), _) => {
-                    "Goal paused. /goal resume to continue, /goal off to forget it.".to_string()
-                }
-                _ => "Goal is no longer active on the backend. Auto-continue stopped.".to_string(),
-            };
-            self.chat.add_system_message(&msg, "info");
+            let msg = goal_stopped_message(
+                status.status.as_deref(),
+                status.pause_reason.as_deref(),
+                status.turn_count,
+                output,
+            );
+
+            // Collapse a repeat of the SAME stop notice instead of printing it
+            // again. `self.goal` clears the moment a `TurnEnd` poll first learns
+            // the goal is inactive, so `maybe_continue_goal` stops asking — but
+            // the backend fix for the awaiting-decision lockout (a fresh
+            // top-level turn now runs instead of being swallowed) means a
+            // session can legitimately walk BACK into this same dormant
+            // "waiting"/"paused" state turn after turn (an ordinary user message
+            // answered, the goal is exactly as stopped as before). Printing the
+            // identical notice again after every such turn was noise, not news.
+            if !goal_stop_notice_repeats(self.last_goal_stop_notice.as_deref(), &msg) {
+                self.chat.add_system_message(&msg, "info");
+            }
+            self.last_goal_stop_notice = Some(msg);
             self.goal_cycle = 0;
             self.refresh_goal_status();
             return false;
@@ -2259,6 +2382,20 @@ impl App {
                 self.goal_max_cycles
             ));
             return false;
+        }
+
+        // A user prompt always preempts auto-continuation. `maybe_continue_goal`
+        // already stands down when something is queued at the turn boundary, but
+        // the answer to "/goal status" is a network round trip — a direct submit
+        // (typed while briefly Idle between turns) or the queue's own `TurnDone`
+        // drain can both start a REAL turn while that round trip is in flight.
+        // `submit_prompt` has no re-entrancy guard: firing it here on top of an
+        // already-running turn would silently start a second concurrent
+        // orchestrate request for this session and reset the streaming state the
+        // real turn is using. Defer instead — the goal stays anchored (nothing
+        // here is mutated) and the very next turn-end asks again.
+        if goal_continue_must_defer(self.turn_is_active()) {
+            return true;
         }
 
         self.goal_cycle += 1;
@@ -2311,8 +2448,129 @@ impl App {
             );
             return;
         }
+        // A user-submitted prompt always preempts auto-continuation: if
+        // something is already queued for this turn boundary, stand down for
+        // this cycle entirely rather than spend a round trip asking the
+        // backend whether to fire another one — `maybe_dequeue_message`
+        // (called right after this, at every turn-completion site) runs the
+        // queued message as an ordinary turn instead. The goal stays
+        // anchored (nothing here is mutated); the very next turn-end asks
+        // again. `continue_goal_from` carries the matching check for the
+        // narrower race where a message is typed WHILE this round trip is in
+        // flight.
+        if !goal_continue_may_ask(self.message_queue.is_empty()) {
+            return;
+        }
         self.goal_intent = Some(GoalIntent::TurnEnd);
         self.execute_backend_command_quiet("goal", "status");
+    }
+}
+
+/// Whether `maybe_continue_goal` should even ask the backend for another
+/// auto-continue turn this cycle. A pending user message always wins: it
+/// gets to run as an ordinary turn before the goal claims the turn boundary
+/// again.
+fn goal_continue_may_ask(message_queue_is_empty: bool) -> bool {
+    message_queue_is_empty
+}
+
+/// Whether `continue_goal_from` may fire `submit_prompt(GOAL_WORK_PROMPT)`.
+/// Never when a turn is already active — a user prompt already claimed this
+/// turn boundary, either directly (typed while briefly Idle, racing the
+/// backend round trip) or via the queue's own `TurnDone` drain — and
+/// `submit_prompt` has no re-entrancy guard against starting a second,
+/// concurrent turn on top of it.
+fn goal_continue_must_defer(turn_already_active: bool) -> bool {
+    turn_already_active
+}
+
+/// Whether a freshly computed `goal_stopped_message` is a REPEAT of the last
+/// one this session actually printed — i.e. whether printing it again would
+/// be noise rather than news. `last` is `None` on a fresh anchor (nothing to
+/// repeat yet) and reset there for exactly that reason.
+fn goal_stop_notice_repeats(last: Option<&str>, new: &str) -> bool {
+    last.is_some_and(|prev| prev == new)
+}
+
+/// Item #3 pull-path gate: whether a `/goal` response's `status` names a
+/// completion outcome the session has NOT already surfaced.
+///
+/// `cached` is `self.goal_status`'s status BEFORE this response overwrites
+/// it — the last one this session actually reported (via a panel or a prior
+/// poll), which may be from an earlier connection entirely if the process
+/// just resumed. `None` when there is nothing NEW to show: either `status`
+/// isn't terminal, or it names the exact same terminal status already
+/// cached (a repeat poll of an unchanged, still-finished goal — reopening
+/// the panel for that would flash it every reconnect).
+fn new_completion_outcome(
+    cached: Option<&str>,
+    status: Option<&str>,
+) -> Option<crate::components::completion_panel::CompletionOutcome> {
+    if cached == status {
+        return None;
+    }
+    crate::components::completion_panel::CompletionOutcome::from_status(status.unwrap_or(""))
+}
+
+/// The message to show once `continue_goal_from` learns the goal is no longer
+/// active. NAME the stop — "completed"/"blocked"/"abandoned"/"paused" are
+/// different outcomes with different next steps, and the old `DONE` sentinel
+/// could not tell them apart because it never asked anything that knew.
+///
+/// `output` is the backend's captured `/goal status` text for THIS SAME poll.
+/// On a genuinely TERMINAL outcome (`completed`/`blocked`/`abandoned`) it
+/// already carries the full "come back to a finished job" overview
+/// (`Commands.print_goal_status/1`: a banner, the goal, the acceptance
+/// criteria, and a work overview of files touched) built from the SAME
+/// evidence the completion panel itself was judged against — used verbatim
+/// rather than re-describing it here. A blank `output` (backend too old, or
+/// the poll itself rendered nothing) falls back to a fixed headline instead
+/// of showing nothing.
+fn goal_stopped_message(
+    status: Option<&str>,
+    pause_reason: Option<&str>,
+    turn_count: u32,
+    output: &str,
+) -> String {
+    match (status, pause_reason) {
+        (Some("awaiting_user"), _) => "Goal is waiting for your decision, not complete. Use \
+             /goal to review the request or /goal clear to cancel it."
+            .to_string(),
+        (Some("cleared"), _) => {
+            "Goal cleared by you. It was not marked complete; auto-continue stopped.".to_string()
+        }
+        (Some("completed"), _) if !output.trim().is_empty() => output.to_string(),
+        (Some("completed"), _) => format!(
+            "Goal verified complete by the skeptic panel after {turn_count} backend turn(s). \
+             Auto-continue stopped."
+        ),
+        (Some("blocked"), _) if !output.trim().is_empty() => output.to_string(),
+        (Some("blocked"), _) => "Goal blocked — the same impasse repeated across consecutive \
+             turns and autonomous continuation stopped. Tell OSA what would unblock it, or \
+             /goal clear to give up on it."
+            .to_string(),
+        (Some("abandoned"), _) if !output.trim().is_empty() => output.to_string(),
+        (Some("abandoned"), _) => {
+            "Goal abandoned — the objective was conceded, not completed.".to_string()
+        }
+        (Some("paused"), Some("run_cap")) => "Goal paused — the backend hit its lifetime \
+             verification-run cap. The goal is kept; /goal resume to continue."
+            .to_string(),
+        (Some("paused"), Some("no_progress")) => "Goal paused — the backend saw the same gaps \
+             on consecutive rounds and stopped rather than loop. /goal resume to continue."
+            .to_string(),
+        (Some("paused"), Some("blocked_on_human")) => "Goal paused — the same blocker repeated \
+             across consecutive turns and it needs something only you can do. Do that, then \
+             /goal resume to continue."
+            .to_string(),
+        (Some("paused"), Some("verification_unavailable")) => "Goal paused — the review panel \
+             could not return a verdict (a provider failure, not a finding about your work). \
+             /goal resume to continue."
+            .to_string(),
+        (Some("paused"), _) => {
+            "Goal paused. /goal resume to continue, /goal off to forget it.".to_string()
+        }
+        _ => "Goal is no longer active on the backend. Auto-continue stopped.".to_string(),
     }
 }
 
@@ -2328,9 +2586,14 @@ fn goal_intent_for(arg: &str) -> GoalIntent {
     // "clear"/"off"/"reset" forget it. Anything else anchors a new goal, with
     // `::` separating optional acceptance criteria.
     let inspecting = verb.is_empty()
-        || ["status", "pause", "stop", "resume", "clear", "off", "reset"]
-            .iter()
-            .any(|v| verb.eq_ignore_ascii_case(v));
+        || [
+            "status", "pause", "stop", "resume", "clear", "off", "reset", "cancel", "end",
+            "approve", "reject",
+        ]
+        .iter()
+        .any(|v| verb.eq_ignore_ascii_case(v))
+        || verb.starts_with("approve ")
+        || verb.starts_with("reject ");
     if inspecting {
         GoalIntent::Inspect
     } else {
@@ -2673,6 +2936,71 @@ pub(crate) fn queue_may_drain(state: AppState, turn_done: bool) -> bool {
     state == AppState::Idle && turn_done
 }
 
+fn startup_session_pending(resolved: bool, creating: bool) -> bool {
+    !resolved || creating
+}
+
+/// Commands allowed to run straight through the session-swap gate instead of
+/// being queued. Each names its own session-creation round trip (or needs
+/// none), so parking it behind ITS OWN gate would deadlock: `/clear` and
+/// `/new` are what CLOSE the gate in the first place, and a user who wants
+/// out (`/exit`, `/quit`) or help (`/help`) must never be told to wait on it.
+/// Plain prompt text has no such exemption — it is exactly what must wait for
+/// the real (post-swap) session id rather than firing on the stale one.
+fn exempt_from_session_gate(text: &str) -> bool {
+    matches!(text, "/exit" | "/quit" | "/clear" | "/new" | "/help")
+}
+
+#[cfg(test)]
+mod startup_session_tests {
+    use super::{exempt_from_session_gate, startup_session_pending};
+
+    #[test]
+    fn early_prompt_waits_through_discovery_and_session_creation() {
+        assert!(startup_session_pending(false, false));
+        assert!(startup_session_pending(true, true));
+        assert!(!startup_session_pending(true, false));
+    }
+
+    #[test]
+    fn session_commands_also_wait_for_the_replacement_session() {
+        assert!(startup_session_pending(false, true));
+        assert!(startup_session_pending(true, true));
+    }
+
+    /// The bug this closes: `/clear` used to leave `session_creation_pending`
+    /// false for the entire cancel -> save -> tombstone -> swap round trip, so
+    /// a message typed in that window sailed through this gate and posted to
+    /// the OLD (about-to-be-tombstoned) session id. The backend's orchestrate
+    /// route restarts a loop for whatever id it is given, and `Loop.init`
+    /// falls back to the just-saved-then-supposedly-discarded transcript —
+    /// which is precisely the "/clear doesn't work" report. `/clear` now sets
+    /// `session_creation_pending = true` before the swap starts, so ordinary
+    /// text must queue exactly like it does during startup discovery.
+    #[test]
+    fn plain_text_is_gated_during_a_clear_swap_but_clear_itself_is_not() {
+        let mid_swap = startup_session_pending(true, true);
+        assert!(mid_swap, "the gate must be closed while /clear is swapping");
+
+        assert!(
+            !exempt_from_session_gate("keep going with the refactor"),
+            "ordinary prompt text must wait for the post-clear session id"
+        );
+        assert!(
+            exempt_from_session_gate("/clear"),
+            "/clear itself must never be blocked by the gate it closes"
+        );
+        assert!(
+            exempt_from_session_gate("/new"),
+            "/new must never be blocked by the gate it closes"
+        );
+        assert!(
+            exempt_from_session_gate("/exit"),
+            "the way out must never be gated"
+        );
+    }
+}
+
 #[cfg(test)]
 mod turn_ending_tests {
     use super::{classify_turn_ending, TurnEnding};
@@ -2982,7 +3310,20 @@ mod goal_routing_tests {
         assert_eq!(goal_intent_for("stop the flaky test"), GoalIntent::Anchor);
 
         // The backend's own subcommands.
-        for verb in ["", "  ", "status", "pause", "stop", "resume", "clear", "off", "reset"] {
+        for verb in [
+            "",
+            "  ",
+            "status",
+            "pause",
+            "stop",
+            "resume",
+            "clear",
+            "off",
+            "reset",
+            "cancel",
+            "approve decision-123",
+            "reject decision-123 fix draft",
+        ] {
             assert_eq!(
                 goal_intent_for(verb),
                 GoalIntent::Inspect,
@@ -2998,7 +3339,10 @@ mod goal_routing_tests {
     /// their own; one of those landing first used to be indistinguishable.
     #[test]
     fn only_a_goal_answer_settles_a_goal_request() {
-        assert!(is_goal_response(&resp("goal status", Some(GoalStatus::default()))));
+        assert!(is_goal_response(&resp(
+            "goal status",
+            Some(GoalStatus::default())
+        )));
         assert!(is_goal_response(&resp("goal ship the parser", None)));
         assert!(!is_goal_response(&resp("compact", None)));
         assert!(!is_goal_response(&resp("recap", None)));
@@ -3029,6 +3373,204 @@ mod goal_routing_tests {
             ..Default::default()
         };
         assert!(live.active);
+    }
+}
+
+// ── item #3 pull path: the completion panel on reconnect ────────────────────
+#[cfg(test)]
+mod new_completion_outcome_tests {
+    use super::new_completion_outcome;
+    use crate::components::completion_panel::CompletionOutcome;
+
+    #[test]
+    fn a_first_ever_terminal_status_is_new() {
+        // No cache at all (a fresh process, or a resumed session whose
+        // in-memory state never saw this goal) — the reconnect-time case
+        // this whole gate exists to close.
+        assert_eq!(
+            new_completion_outcome(None, Some("completed")),
+            Some(CompletionOutcome::Completed)
+        );
+    }
+
+    #[test]
+    fn the_same_terminal_status_repeated_is_not_new() {
+        // A repeat poll of an unchanged, already-reported goal must not
+        // reopen the panel.
+        assert_eq!(
+            new_completion_outcome(Some("completed"), Some("completed")),
+            None
+        );
+        assert_eq!(
+            new_completion_outcome(Some("blocked"), Some("blocked")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_transition_between_two_different_terminal_statuses_is_new() {
+        // e.g. resumed from blocked, then later abandoned — a different fact,
+        // reported once each.
+        assert_eq!(
+            new_completion_outcome(Some("blocked"), Some("abandoned")),
+            Some(CompletionOutcome::Abandoned)
+        );
+    }
+
+    #[test]
+    fn non_terminal_statuses_are_never_new_regardless_of_cache() {
+        for status in [Some("active"), Some("paused"), Some("off_track"), None] {
+            assert_eq!(new_completion_outcome(None, status), None, "{status:?}");
+            assert_eq!(
+                new_completion_outcome(Some("completed"), status),
+                None,
+                "{status:?}"
+            );
+        }
+    }
+}
+
+// ── "come back to a finished job": the completion/blocked overview ─────────
+#[cfg(test)]
+mod goal_stopped_message_tests {
+    use super::goal_stopped_message;
+
+    #[test]
+    fn a_completed_goal_with_an_overview_shows_it_verbatim() {
+        let overview =
+            "✓ GOAL COMPLETED\n\nGoal\nship the exporter\n\nWork overview\n2 file(s) touched";
+        let msg = goal_stopped_message(Some("completed"), None, 4, overview);
+        assert_eq!(msg, overview);
+    }
+
+    #[test]
+    fn a_completed_goal_with_no_overview_falls_back_to_a_headline() {
+        let msg = goal_stopped_message(Some("completed"), None, 4, "");
+        assert!(msg.contains("complete"));
+        assert!(
+            msg.contains('4'),
+            "the fallback still names how many turns it took"
+        );
+    }
+
+    #[test]
+    fn blank_and_whitespace_only_output_both_count_as_no_overview() {
+        for blank in ["", "   ", "\n\n"] {
+            let msg = goal_stopped_message(Some("completed"), None, 1, blank);
+            assert_ne!(
+                msg, blank,
+                "whitespace-only output must not stand in for a real overview"
+            );
+        }
+    }
+
+    #[test]
+    fn a_blocked_goal_with_an_overview_shows_it_verbatim() {
+        let overview =
+            "⛔ GOAL BLOCKED\n\nGoal\ndeploy to prod\n\nWork overview\n1 file(s) touched";
+        let msg = goal_stopped_message(Some("blocked"), None, 6, overview);
+        assert_eq!(msg, overview);
+    }
+
+    #[test]
+    fn a_blocked_goal_with_no_overview_falls_back_to_a_headline() {
+        let msg = goal_stopped_message(Some("blocked"), None, 6, "");
+        assert!(msg.to_lowercase().contains("blocked"));
+    }
+
+    #[test]
+    fn an_abandoned_goal_with_an_overview_shows_it_verbatim() {
+        let overview = "GOAL ABANDONED\n\nGoal\nold direction\n";
+        let msg = goal_stopped_message(Some("abandoned"), None, 2, overview);
+        assert_eq!(msg, overview);
+    }
+
+    #[test]
+    fn an_abandoned_goal_with_no_overview_falls_back_to_a_headline() {
+        let msg = goal_stopped_message(Some("abandoned"), None, 2, "");
+        assert!(msg.to_lowercase().contains("abandoned"));
+    }
+
+    #[test]
+    fn non_terminal_outcomes_never_show_the_overview_even_if_present() {
+        // An overview would be a lie for these — the goal is not finished, it
+        // is paused/waiting/cleared, and `/goal resume` (or a decision) still
+        // applies. Passing an overview here must never leak it into the message.
+        let overview = "✓ GOAL COMPLETED\n\nsomehow present anyway";
+
+        let awaiting = goal_stopped_message(Some("awaiting_user"), None, 3, overview);
+        assert_ne!(awaiting, overview);
+        assert!(awaiting.contains("decision"));
+
+        let cleared = goal_stopped_message(Some("cleared"), None, 3, overview);
+        assert_ne!(cleared, overview);
+        assert!(cleared.contains("cleared"));
+
+        let paused = goal_stopped_message(Some("paused"), Some("no_progress"), 3, overview);
+        assert_ne!(paused, overview);
+        assert!(paused.contains("resume"));
+    }
+
+    #[test]
+    fn paused_reasons_are_still_distinguished_from_one_another() {
+        let run_cap = goal_stopped_message(Some("paused"), Some("run_cap"), 9, "");
+        assert!(run_cap.contains("verification-run cap"));
+
+        let no_progress = goal_stopped_message(Some("paused"), Some("no_progress"), 9, "");
+        assert!(no_progress.contains("same gaps"));
+
+        let manual = goal_stopped_message(Some("paused"), Some("user"), 9, "");
+        assert!(!manual.contains("verification-run cap"));
+        assert!(!manual.contains("same gaps"));
+
+        // The two new auto-pause reasons — the durable cross-turn blocker
+        // streak (`GoalTracker.record_blocker/3`) and the empty-panel circuit
+        // breaker — get their own distinguishing text too, not the generic
+        // "Goal paused." fallback.
+        let blocked_on_human =
+            goal_stopped_message(Some("paused"), Some("blocked_on_human"), 9, "");
+        assert!(blocked_on_human.contains("only you can do"));
+        assert!(!blocked_on_human.contains("verification-run cap"));
+        assert!(!blocked_on_human.contains("same gaps"));
+
+        let verification_unavailable =
+            goal_stopped_message(Some("paused"), Some("verification_unavailable"), 9, "");
+        assert!(verification_unavailable.contains("could not return a verdict"));
+        assert!(!verification_unavailable.contains("same gaps"));
+    }
+}
+
+// ── collapsing a repeated goal-stop notice (item #3: re-arm de-dup) ─────────
+//
+// Reported: once the awaiting-decision/paused lockout above was fixed (a
+// fresh top-level turn now runs instead of being swallowed), a session could
+// legitimately walk back into the SAME dormant stop reason turn after turn —
+// each ordinary user message answered, the goal exactly as stopped as
+// before. Printing the identical "waiting for your decision"/"paused" notice
+// again after every such turn was noise, not news.
+#[cfg(test)]
+mod goal_stop_notice_dedup_tests {
+    use super::goal_stop_notice_repeats;
+
+    #[test]
+    fn nothing_shown_yet_never_repeats() {
+        assert!(!goal_stop_notice_repeats(
+            None,
+            "Goal paused. /goal resume to continue."
+        ));
+    }
+
+    #[test]
+    fn the_identical_notice_again_is_a_repeat() {
+        let msg = "Waiting for your decision — not complete.\n\nApprove draft v1?";
+        assert!(goal_stop_notice_repeats(Some(msg), msg));
+    }
+
+    #[test]
+    fn a_materially_different_notice_is_not_a_repeat() {
+        let first = "Goal paused. /goal resume to continue, /goal off to forget it.";
+        let second = "Waiting for your decision — not complete.\n\nApprove draft v2?";
+        assert!(!goal_stop_notice_repeats(Some(first), second));
     }
 }
 
@@ -3074,6 +3616,60 @@ mod queue_gate_tests {
     }
 }
 
+// ── the gate behind "the goal won't let me send a prompt" ───────────────────
+//
+// Reported: once a `/goal` was anchored and auto-continuing, a normal typed
+// prompt was never reliably the thing that ran. `maybe_continue_goal` fired
+// on every turn end with no regard for pending user input, and
+// `continue_goal_from` fired `submit_prompt(GOAL_WORK_PROMPT)` with no check
+// for a turn already in flight — so a queued or just-submitted user message
+// raced the goal's own async "/goal status" round trip and lost, silently, to
+// a second concurrent `submit_prompt` call.
+#[cfg(test)]
+mod goal_preemption_tests {
+    use super::{goal_continue_may_ask, goal_continue_must_defer};
+
+    #[test]
+    fn an_empty_queue_lets_the_goal_ask_the_backend() {
+        assert!(goal_continue_may_ask(true));
+    }
+
+    #[test]
+    fn a_pending_message_stops_the_goal_from_even_asking() {
+        // The common case: the user typed while the previous goal-continuation
+        // turn was still running, so their text sat in `message_queue`. The next
+        // "/goal status" round trip must never fire — it would only race the
+        // queue's own drain for no reason.
+        assert!(!goal_continue_may_ask(false));
+    }
+
+    #[test]
+    fn no_turn_in_flight_lets_the_goal_continue() {
+        assert!(!goal_continue_must_defer(false));
+    }
+
+    #[test]
+    fn a_turn_already_active_defers_the_goal_continuation() {
+        // The narrower race: the "/goal status" answer arrives AFTER a user
+        // prompt already started a real turn (typed directly while briefly
+        // Idle, or dequeued on `TurnDone` while the round trip was in flight).
+        // `submit_prompt` has no re-entrancy guard, so firing GOAL_WORK_PROMPT
+        // here would silently start a second concurrent turn on top of it.
+        assert!(goal_continue_must_defer(true));
+    }
+
+    #[test]
+    fn neither_gate_implies_the_other() {
+        // The two gates close two DIFFERENT windows of the same race — one at
+        // cycle start (a message already queued), one right before the submit
+        // (a message queued or submitted during the round trip). Collapsing
+        // them into one check would reopen whichever window it dropped.
+        assert!(goal_continue_may_ask(true));
+        assert!(!goal_continue_may_ask(false));
+        assert!(!goal_continue_must_defer(false));
+        assert!(goal_continue_must_defer(true));
+    }
+}
 
 // ── Local model catalog (picker screens) ────────────────────────────────────
 impl App {
@@ -3092,7 +3688,10 @@ impl App {
         let client = self.client.clone();
         let tx = self.event_tx.clone();
         tokio::spawn(async move {
-            let result = client.local_model_info(&reff).await.map_err(|e| e.to_string());
+            let result = client
+                .local_model_info(&reff)
+                .await
+                .map_err(|e| e.to_string());
             let _ = tx.send(Event::Backend(BackendEvent::LocalModelInfoLoaded(result)));
         });
     }
@@ -3107,7 +3706,7 @@ impl App {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = tx.send(Event::Backend(BackendEvent::LocalInstallUpdate(Err(
-                        e.to_string(),
+                        e.to_string()
                     ))));
                     return;
                 }
@@ -3145,7 +3744,10 @@ impl App {
         let client = self.client.clone();
         let tx = self.event_tx.clone();
         tokio::spawn(async move {
-            let result = client.local_model_remove(&tag).await.map_err(|e| e.to_string());
+            let result = client
+                .local_model_remove(&tag)
+                .await
+                .map_err(|e| e.to_string());
             let _ = tx.send(Event::Backend(BackendEvent::LocalModelRemoved(result)));
         });
     }

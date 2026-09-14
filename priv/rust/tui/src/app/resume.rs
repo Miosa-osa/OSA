@@ -113,6 +113,13 @@ pub enum ExitOutcome {
     /// Today this is only "the session id you asked to resume does not exist",
     /// which previously degraded into a blank conversation that looked fine.
     Failed(String),
+    /// The event loop quit because SIGTERM, SIGHUP or SIGQUIT arrived (see
+    /// `Event::TerminateSignal`). The chrome is already erased and the
+    /// terminal already restored by the time `main` sees this — carried out
+    /// only so `main` can re-raise the SAME raw signal number with its
+    /// default disposition, so a supervisor or `$?` sees the real cause of
+    /// death instead of a laundered clean exit.
+    TerminatedBySignal(i32),
 }
 
 impl ExitOutcome {
@@ -146,8 +153,14 @@ mod tests {
     fn overdrive_is_replayed_before_the_subcommand() {
         // The exact ordering the launcher must accept, and the one the user
         // asked for: `osa --overdrive resume <id>`.
-        let m = LaunchMode { overdrive: true, ..mode() };
-        assert_eq!(resume_command("sess-1", &m), "osa --overdrive resume sess-1");
+        let m = LaunchMode {
+            overdrive: true,
+            ..mode()
+        };
+        assert_eq!(
+            resume_command("sess-1", &m),
+            "osa --overdrive resume sess-1"
+        );
     }
 
     #[test]
@@ -167,7 +180,10 @@ mod tests {
             permission_mode: Some("plan".into()),
             ..mode()
         };
-        assert_eq!(resume_command("s", &m), "osa --permission-mode plan resume s");
+        assert_eq!(
+            resume_command("s", &m),
+            "osa --permission-mode plan resume s"
+        );
     }
 
     #[test]
@@ -233,7 +249,12 @@ mod tests {
         for alias in ["--overdrive", "--yolo", "--dangerously-skip-permissions"] {
             let cli = Cli::parse_from([alias]).unwrap();
             let m = LaunchMode::from_cli(&cli);
-            assert_eq!(resume_command("s", &m), "osa --overdrive resume s", "{}", alias);
+            assert_eq!(
+                resume_command("s", &m),
+                "osa --overdrive resume s",
+                "{}",
+                alias
+            );
         }
     }
 

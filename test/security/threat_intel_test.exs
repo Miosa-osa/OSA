@@ -24,7 +24,7 @@ defmodule OptimalSystemAgent.Security.ThreatIntelTest do
     assert cold.kev_entry == nil
   end
 
-  test "priority adds 1.5 for KEV and 2*epss" do
+  test "priority adds 1.5 for KEV and 3*epss (EPSS-weighted formula)" do
     p =
       ThreatIntel.priority(%{
         cve: "CVE-2021-44228",
@@ -32,7 +32,8 @@ defmodule OptimalSystemAgent.Security.ThreatIntelTest do
         epss: 0.5
       })
 
-    assert_in_delta p, 12.5, 0.01
+    # KEV ransomware entry: 10.0 base + 2.5 KEV/ransomware + 1.5 ransomware bonus + 1.5 EPSS
+    assert_in_delta p, 15.0, 0.01
   end
 
   test "load_feed merges a temp JSON overlay" do

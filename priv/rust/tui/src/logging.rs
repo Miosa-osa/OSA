@@ -1,7 +1,7 @@
 use anyhow::Result;
+use std::sync::OnceLock;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-use std::sync::OnceLock;
 
 use crate::config::cli::Cli;
 

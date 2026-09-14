@@ -158,8 +158,21 @@ defmodule OptimalSystemAgent.Tools.PrimitiveFailureQualityTest do
       File.mkdir_p!(Path.join(dir, "sub"))
       File.write!(Path.join(dir, "f.txt"), "x")
 
+      # The ripgrep engine (`rg --files`) lists FILES only — a directory can
+      # never appear in its result, so the trailing-slash decoration only
+      # applies to the pure-Elixir fallback walk (`Path.wildcard/2` includes
+      # directories). Assert the decoration contract the fallback guarantees;
+      # under rg the same query returns f.txt and no directory entry, which is
+      # correct for that engine.
       assert {:ok, result} = FileGlob.execute(%{"pattern" => "*", "path" => dir})
-      assert result =~ "sub/"
+      assert result =~ "f.txt"
+
+      if String.contains?(result, "sub/") do
+        :ok
+      else
+        # rg served the search — no directory entries exist to decorate.
+        refute result =~ "sub"
+      end
     end
 
     test "a non-string path is rejected by name rather than crashing" do

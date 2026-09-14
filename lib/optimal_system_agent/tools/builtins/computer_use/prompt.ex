@@ -13,7 +13,26 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Prompt do
     actions = Constants.valid_actions() |> Enum.map(&to_string/1) |> Enum.join(", ")
 
     """
-    Control the computer desktop via platform-native automation.
+    Control the computer desktop through semantic accessibility first and visual coordinates only
+    as a fallback. This tool is provider-independent: accessibility snapshots are structured text,
+    so they work even when the active model cannot receive images.
+
+    REQUIRED OPERATING LOOP for multi-step work:
+      1. Call `get_tree` (or filtered `snapshot`) before acting.
+      2. Prefer `target: "eN"` over coordinates. A target action is re-resolved and checked for
+         staleness before the native accessibility action runs.
+      3. After every action, call `get_tree` again to verify the expected state change.
+      4. Use `screenshot` only when the accessibility tree is missing, sparse, or the app uses a
+         canvas/custom-rendered surface. Never claim to see a screenshot that was not delivered.
+
+    CROSS-APPLICATION SAFETY:
+      - Identify the target with `list_windows` or `list_tabs` before acting. Never substitute the
+        frontmost application merely because its controls are easier to inspect.
+      - For browser-tab requests, use `list_tabs`, then one `close_tabs` call with the narrow URL or
+        title substring the user named, then inspect `verified`/`remaining_matches`. Do not click tab
+        bar coordinates and do not use a generic close shortcut.
+      - Preserve every non-matching tab/window. Never report success from an action result alone;
+        report it only after the verification response shows zero remaining matches.
 
     Supported actions: #{actions}
 
@@ -46,34 +65,45 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Prompt do
     **drag** — Click-and-drag from `x`, `y`.
       - `x`, `y` required. Use `region` to specify the drag target area if needed.
 
-    **get_tree** — Return the accessibility element tree for the current screen.
-      - Use element refs from the tree as `target` for click actions.
-      - Not available on MIOSA REST computers; use `screenshot` there.
+    **get_tree** — Return a compact accessibility tree for the active application.
+      - To inspect an application behind the active window, pass its `app` or a `window_id`
+        returned by `list_windows`. Do not act on the foreground application as a substitute.
+
+    **close_window** — Close exactly one window identified by `list_windows`.
+      - Re-run `list_windows` afterward and only report success when the target is absent.
+      - Interactive controls receive refs such as `[e3] button "Close"`.
+      - On macOS, target clicks use direct AX actions rather than coordinate clicks when possible.
+
+    **list_tabs** — List browser tabs semantically by title and URL. Requires `app`.
+
+    **close_tabs** — Close only browser tabs matching `url_contains` or `title_contains`.
+      - Requires `app` and at least one non-empty matcher.
+      - Returns `closed`, `remaining_matches`, and `verified`; trust only `verified: true`.
 
     **wait** — Pause server-side for `seconds` (0–30).
 
-    **list_windows** — Return open windows. MIOSA REST computers only.
+    **list_windows** — Return open windows when supported by the platform adapter.
 
-    **focus_window** — Focus a MIOSA window by `window_id`.
+    **focus_window** — Focus a window by `window_id`.
 
     **launch** — Launch an application by `app` name or command.
 
-    **cursor** — Return the current mouse cursor coordinates. MIOSA REST computers only.
+    **cursor** — Return the current mouse cursor coordinates.
 
-    **snapshot** — Return an AI-friendly UI snapshot with refs when the MIOSA computer supports it.
+    **snapshot** — Return an AI-friendly semantic UI snapshot with refs.
       - Optional filters: `app`, `window_id`, `surface`, `root`, `max_depth`, `interactive_only`, `compact`.
 
-    **right_click** / **triple_click** — Click at `x`/`y` or a MIOSA snapshot `target` ref.
+    **right_click** / **triple_click** — Click at `x`/`y` or a snapshot `target` ref.
 
     **set_value** — Set an element value using `target` or `x`/`y` plus `text`.
 
     **clipboard_get** / **clipboard_set** / **clipboard_clear** — Read, write, or clear text clipboard.
 
-    **list_apps** — Return running or launchable applications when supported by the MIOSA computer.
+    **list_apps** — Return running applications when supported by the platform adapter.
 
     **list_surfaces** — Return observable surfaces such as windows, menus, sheets, popovers, or alerts.
 
-    **resize_window** / **move_window** — Change a MIOSA window by `window_id`.
+    **resize_window** / **move_window** — Change a window by `window_id`.
 
     **scroll_to** — Scroll an element or coordinate into view.
 
@@ -92,8 +122,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Prompt do
     **cursor_position** — Alias for `cursor`; return the current pointer coordinates.
 
     > Coverage varies by platform. Linux X11 supports the full set above; Linux Wayland and
-    > Windows cover screenshot + click/type/key/scroll/drag + clipboard; the MIOSA REST adapter
-    > implements every action. Actions unsupported by the active backend return a clear
+    > Windows cover screenshot + click/type/key/scroll/drag + clipboard. MIOSA exposes most
+    > remote desktop actions but not a local accessibility tree or pointer-only movement.
+    > Actions unsupported by the active backend return a clear
     > "not supported" error rather than failing silently.
 
     ## Parameters
@@ -104,7 +135,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Prompt do
     ## Adapter selection
 
     The platform adapter is selected automatically:
-      - macOS: AppleScript/Quartz event injection
+      - macOS: native AXUIElement tree/actions; CGEvent/cliclick and screenshots as fallbacks
       - Linux X11: xdotool + maim/scrot
       - Linux Wayland: grim + wtype/ydotool + wl-clipboard
       - Windows: PowerShell (screen capture + user32 input)
@@ -113,8 +144,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.Prompt do
       - Platform VM: OSA compute layer integration
       - MIOSA: REST API for cloud computers and OpenComputers (`computer_use_platform: :miosa`)
 
-    Computer use is only available when `computer_use_enabled: true` is set in
-    the OSA application config.
+    Computer use is enabled by default. Set `OSA_COMPUTER_USE=false` only when desktop control must
+    be disabled for a managed or headless deployment.
     """
   end
 end

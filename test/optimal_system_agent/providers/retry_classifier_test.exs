@@ -122,6 +122,85 @@ defmodule OptimalSystemAgent.Providers.RetryClassifierTest do
     end
   end
 
+  describe "classify/4 — empty-response is retryable (flaky-provider guard)" do
+    test "an empty SSE stream (\"stream completed without a result\") is retried" do
+      err = "SSE recovery: stream completed without a result"
+      assert {:retry_with_client_rebuild, _} = RC.classify(err, 0, @max)
+      # And backs off on the second attempt like any other transient error.
+      assert {:retry, _} = RC.classify(err, 1, @max)
+    end
+
+    test "the Anthropic empty-stream recovery string is retried too" do
+      err = "Anthropic SSE recovery: stream completed without a result. Original body: {...}"
+      assert {:retry_with_client_rebuild, _} = RC.classify(err, 0, @max)
+    end
+
+    test "a synthesised empty-200 response is retried" do
+      err = "Empty response from provider (HTTP 200 with no content, tool calls, or reasoning)"
+      assert {:retry_with_client_rebuild, _} = RC.classify(err, 0, @max)
+    end
+
+    test "empty-response becomes fatal once the retry budget is exhausted (bounded)" do
+      err = "Empty response from provider (HTTP 200 with no content, tool calls, or reasoning)"
+      assert {:fatal, ^err} = RC.classify(err, @max - 1, @max)
+    end
+  end
+
+  describe "classify/4 — empty-response retries on its OWN (tight) budget" do
+    # The category covers two shapes the reason string cannot tell apart: a
+    # gateway that dropped the connection (retry generously — the next attempt
+    # usually answers) and a provider that ANSWERED with `finish_reason` set
+    # and zero completion tokens (it decides the same way every time). Measured
+    # 2026-09-10 against Surplus: five of the 27 featured models did the latter
+    # deterministically for OSA's own system prompt, and a full budget spent
+    # ~4.5 minutes of a turn that could never succeed. The cap below bounds the
+    # second shape to seconds without taking the first shape's retries away.
+    @empty_cap RC.empty_response_retry_threshold()
+
+    test "the cap is tighter than the generic budget (or it would be no cap at all)" do
+      assert @empty_cap < @max
+    end
+
+    test "a retry is still granted below the cap" do
+      err = "Empty response from provider (HTTP 200 with no content, tool calls, or reasoning)"
+      assert {:retry_with_client_rebuild, _} = RC.classify(err, 0, @max)
+      assert {:retry, _} = RC.classify(err, @empty_cap - 2, @max)
+    end
+
+    test "the cap — not the generic budget — ends the retries" do
+      err = "Empty response from provider (HTTP 200 with no content, tool calls, or reasoning)"
+      # `@max` attempts remain available; the empty-response cap still stops it.
+      assert {:fatal, ^err} = RC.classify(err, @empty_cap - 1, @max)
+    end
+
+    test "a caller-supplied threshold overrides it (same knob shape as 429)" do
+      err = "Empty response from provider (HTTP 200 with no content, tool calls, or reasoning)"
+      assert {:retry, _} = RC.classify(err, 1, @max, empty_response_threshold: 10)
+      assert {:fatal, ^err} = RC.classify(err, 1, @max, empty_response_threshold: 2)
+    end
+
+    test "the tightening is scoped to empty-response, not to other transient errors" do
+      # A plain transport error keeps the full budget — the cap must not leak.
+      err = "econnrefused"
+      assert {:retry, _} = RC.classify(err, @empty_cap - 1, @max)
+      assert {:retry, _} = RC.classify(err, @max - 2, @max)
+    end
+  end
+
+  describe "classify/4 — partial-tool-call is retryable (cut-off arguments guard)" do
+    @partial "Provider returned an incomplete tool call (arguments cut off mid-stream)"
+
+    test "a tool call cut off mid-arguments is retried" do
+      assert {:retry_with_client_rebuild, _} = RC.classify(@partial, 0, @max)
+      # And backs off on the second attempt like any other transient error.
+      assert {:retry, _} = RC.classify(@partial, 1, @max)
+    end
+
+    test "it becomes fatal once the retry budget is exhausted (bounded)" do
+      assert {:fatal, @partial} = RC.classify(@partial, @max - 1, @max)
+    end
+  end
+
   describe "classify/4 — :fail_fast_categories override (P1: local-provider connection refusal)" do
     test "connection refused is normally retryable" do
       err = "econnrefused"

@@ -29,7 +29,9 @@ impl VoiceProvider {
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::event::Event>>,
     ) -> Result<String> {
         match self {
-            VoiceProvider::Local(local) => local.transcribe_with_progress(buffer, progress_tx).await,
+            VoiceProvider::Local(local) => {
+                local.transcribe_with_progress(buffer, progress_tx).await
+            }
             VoiceProvider::Cloud(cloud) => cloud.transcribe(buffer).await,
             VoiceProvider::Groq(groq) => groq.transcribe(buffer).await,
         }
@@ -71,12 +73,15 @@ impl LocalTranscriber {
                     .unwrap_or_else(|| std::path::PathBuf::from(".osa"))
             });
 
-        let model_name = std::env::var("WHISPER_MODEL")
-            .unwrap_or_else(|_| "tiny".to_string());
+        let model_name = std::env::var("WHISPER_MODEL").unwrap_or_else(|_| "tiny".to_string());
 
         let lang = whisper_lang();
 
-        Self { osa_dir, model_name, lang }
+        Self {
+            osa_dir,
+            model_name,
+            lang,
+        }
     }
 
     fn bin_dir(&self) -> std::path::PathBuf {
@@ -88,29 +93,43 @@ impl LocalTranscriber {
     }
 
     fn whisper_bin(&self) -> std::path::PathBuf {
-        let name = if cfg!(windows) { "whisper-cli.exe" } else { "whisper-cli" };
+        let name = if cfg!(windows) {
+            "whisper-cli.exe"
+        } else {
+            "whisper-cli"
+        };
         self.bin_dir().join(name)
     }
 
     fn model_path(&self) -> std::path::PathBuf {
-        self.models_dir().join(format!("ggml-{}.bin", self.model_name))
+        self.models_dir()
+            .join(format!("ggml-{}.bin", self.model_name))
     }
 
     /// Ensure a whisper-cli binary is available: use the one in `~/.osa/bin`, one
     /// already on PATH, or auto-provision a pre-built binary for this platform.
-    async fn ensure_binary(&self, progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::event::Event>>) -> Result<std::path::PathBuf> {
+    async fn ensure_binary(
+        &self,
+        progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::event::Event>>,
+    ) -> Result<std::path::PathBuf> {
         let bin = self.whisper_bin();
         if bin.exists() {
             return Ok(bin);
         }
 
         // Check if whisper-cli is already on the system PATH
-        if let Ok(output) = std::process::Command::new(if cfg!(windows) { "where" } else { "which" })
-            .arg("whisper-cli")
-            .output()
+        if let Ok(output) =
+            std::process::Command::new(if cfg!(windows) { "where" } else { "which" })
+                .arg("whisper-cli")
+                .output()
         {
             if output.status.success() {
-                let path_str = String::from_utf8_lossy(&output.stdout).trim().lines().next().unwrap_or("").to_string();
+                let path_str = String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
                 if !path_str.is_empty() {
                     let system_bin = std::path::PathBuf::from(&path_str);
                     if system_bin.exists() {
@@ -132,7 +151,10 @@ impl LocalTranscriber {
     /// Cross-platform: on Windows this pulls the upstream whisper.cpp release
     /// zip; on macOS/Linux it succeeds only when `OSA_WHISPER_URL` points at a
     /// compatible archive (upstream publishes no macOS/Linux CLI binaries).
-    async fn download_whisper_binary(&self, progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::event::Event>>) -> Result<std::path::PathBuf> {
+    async fn download_whisper_binary(
+        &self,
+        progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::event::Event>>,
+    ) -> Result<std::path::PathBuf> {
         let bin = self.whisper_bin();
 
         std::fs::create_dir_all(self.bin_dir())
@@ -153,7 +175,8 @@ impl LocalTranscriber {
                  have been renamed or removed \u{2014} override the release tag with \
                  OSA_WHISPER_TAG, point OSA_WHISPER_URL at a working archive, or use \
                  cloud transcription (export VOICE_PROVIDER=cloud).",
-                response.status(), url
+                response.status(),
+                url
             );
         }
 
@@ -177,12 +200,18 @@ impl LocalTranscriber {
                 }
             }
         }
-        info!("Downloaded {:.1}MB, extracting...", body.len() as f64 / 1_048_576.0);
+        info!(
+            "Downloaded {:.1}MB, extracting...",
+            body.len() as f64 / 1_048_576.0
+        );
 
         self.extract_whisper_archive(&body)?;
 
         if !bin.exists() {
-            anyhow::bail!("whisper-cli binary not found in the downloaded archive ({})", url);
+            anyhow::bail!(
+                "whisper-cli binary not found in the downloaded archive ({})",
+                url
+            );
         }
 
         info!("whisper-cli installed to {:?}", bin);
@@ -195,8 +224,8 @@ impl LocalTranscriber {
     /// shared objects, and marks them executable.
     fn extract_whisper_archive(&self, body: &[u8]) -> Result<()> {
         let cursor = std::io::Cursor::new(body);
-        let mut archive = zip::ZipArchive::new(cursor)
-            .context("Failed to open whisper zip archive")?;
+        let mut archive =
+            zip::ZipArchive::new(cursor).context("Failed to open whisper zip archive")?;
 
         for i in 0..archive.len() {
             let mut file = archive.by_index(i)?;
@@ -253,14 +282,16 @@ impl LocalTranscriber {
     }
 
     /// Download the ggml model if not present
-    async fn ensure_model(&self, progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::event::Event>>) -> Result<std::path::PathBuf> {
+    async fn ensure_model(
+        &self,
+        progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::event::Event>>,
+    ) -> Result<std::path::PathBuf> {
         let path = self.model_path();
         if path.exists() {
             return Ok(path);
         }
 
-        std::fs::create_dir_all(self.models_dir())
-            .context("Failed to create ~/.osa/models")?;
+        std::fs::create_dir_all(self.models_dir()).context("Failed to create ~/.osa/models")?;
 
         let url = format!(
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{}.bin",
@@ -281,8 +312,8 @@ impl LocalTranscriber {
 
         let total_size = response.content_length().unwrap_or(0);
         let mut downloaded: u64 = 0;
-        let mut file = std::fs::File::create(&path)
-            .context("Failed to create whisper model file")?;
+        let mut file =
+            std::fs::File::create(&path).context("Failed to create whisper model file")?;
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("Error reading model download stream")?;
@@ -302,7 +333,10 @@ impl LocalTranscriber {
             }
         }
 
-        info!("Whisper model downloaded: {:.1}MB", downloaded as f64 / 1_048_576.0);
+        info!(
+            "Whisper model downloaded: {:.1}MB",
+            downloaded as f64 / 1_048_576.0
+        );
         Ok(path)
     }
 
@@ -325,25 +359,29 @@ impl LocalTranscriber {
         // contamination, or EACCES on a stale root-owned file in a shared /tmp).
         let wav_bytes = buffer.to_wav_bytes()?;
         let tmp_dir = self.osa_dir.join("tmp");
-        std::fs::create_dir_all(&tmp_dir)
-            .context("Failed to create the OSA tmp directory")?;
+        std::fs::create_dir_all(&tmp_dir).context("Failed to create the OSA tmp directory")?;
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let wav_path = tmp_dir.join(format!("osa_voice_{}_{}.wav", std::process::id(), nonce));
-        std::fs::write(&wav_path, &wav_bytes)
-            .context("Failed to write temp WAV file")?;
+        std::fs::write(&wav_path, &wav_bytes).context("Failed to write temp WAV file")?;
 
-        info!("Running whisper-cli on {:.1}KB audio", wav_bytes.len() as f64 / 1024.0);
+        info!(
+            "Running whisper-cli on {:.1}KB audio",
+            wav_bytes.len() as f64 / 1024.0
+        );
 
         // Run whisper-cli: outputs plain text to stdout
         let output = tokio::process::Command::new(&bin)
-            .arg("-m").arg(&model)
-            .arg("-f").arg(&wav_path)
-            .arg("-l").arg(&self.lang)
+            .arg("-m")
+            .arg(&model)
+            .arg("-f")
+            .arg(&wav_path)
+            .arg("-l")
+            .arg(&self.lang)
             .arg("--no-timestamps")
-            .arg("-nt")  // no timestamps in output
+            .arg("-nt") // no timestamps in output
             .output()
             .await
             .context("Failed to run whisper-cli")?;
@@ -356,9 +394,7 @@ impl LocalTranscriber {
             anyhow::bail!("whisper-cli failed: {}", stderr);
         }
 
-        let text = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .to_string();
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
         info!("Local transcription complete: {} chars", text.len());
         Ok(text)
@@ -385,9 +421,17 @@ fn whisper_tag() -> String {
 /// `OSA_WHISPER_URL`.
 fn platform_archive_name() -> &'static str {
     if cfg!(target_os = "windows") {
-        if cfg!(target_arch = "x86_64") { "x64" } else { "Win32" }
+        if cfg!(target_arch = "x86_64") {
+            "x64"
+        } else {
+            "Win32"
+        }
     } else if cfg!(target_os = "macos") {
-        if cfg!(target_arch = "aarch64") { "macos-arm64" } else { "macos-x64" }
+        if cfg!(target_arch = "aarch64") {
+            "macos-arm64"
+        } else {
+            "macos-x64"
+        }
     } else if cfg!(target_arch = "aarch64") {
         "linux-arm64"
     } else {
@@ -411,7 +455,8 @@ fn resolve_binary_download_url() -> Result<String> {
         let archive = format!("whisper-bin-{}.zip", platform_archive_name());
         Ok(format!(
             "https://github.com/ggerganov/whisper.cpp/releases/download/{}/{}",
-            whisper_tag(), archive
+            whisper_tag(),
+            archive
         ))
     } else {
         anyhow::bail!(
@@ -432,7 +477,11 @@ fn wanted_archive_member(basename: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
         const NEEDED: &[&str] = &[
-            "whisper-cli.exe", "whisper.dll", "ggml.dll", "ggml-base.dll", "ggml-cpu.dll",
+            "whisper-cli.exe",
+            "whisper.dll",
+            "ggml.dll",
+            "ggml-base.dll",
+            "ggml-cpu.dll",
         ];
         NEEDED.contains(&basename)
     }
@@ -485,7 +534,10 @@ pub struct CloudTranscriber {
 
 impl CloudTranscriber {
     pub fn new(api_key: String) -> Self {
-        Self { api_key, lang: whisper_lang() }
+        Self {
+            api_key,
+            lang: whisper_lang(),
+        }
     }
 
     pub fn api_key(&self) -> &str {
@@ -499,7 +551,10 @@ impl CloudTranscriber {
             return Ok(String::new());
         }
 
-        info!("Sending {:.1}KB audio to OpenAI Whisper API", wav_bytes.len() as f64 / 1024.0);
+        info!(
+            "Sending {:.1}KB audio to OpenAI Whisper API",
+            wav_bytes.len() as f64 / 1024.0
+        );
 
         let client = reqwest::Client::new();
         let part = reqwest::multipart::Part::bytes(wav_bytes)
@@ -543,7 +598,10 @@ pub struct GroqTranscriber {
 
 impl GroqTranscriber {
     pub fn new(api_key: String) -> Self {
-        Self { api_key, lang: whisper_lang() }
+        Self {
+            api_key,
+            lang: whisper_lang(),
+        }
     }
 
     pub fn api_key(&self) -> &str {
@@ -557,7 +615,10 @@ impl GroqTranscriber {
             return Ok(String::new());
         }
 
-        info!("Sending {:.1}KB audio to Groq Whisper API", wav_bytes.len() as f64 / 1024.0);
+        info!(
+            "Sending {:.1}KB audio to Groq Whisper API",
+            wav_bytes.len() as f64 / 1024.0
+        );
 
         let client = reqwest::Client::new();
         let part = reqwest::multipart::Part::bytes(wav_bytes)

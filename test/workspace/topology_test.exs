@@ -13,6 +13,7 @@ defmodule OptimalSystemAgent.Workspace.TopologyTest do
   use ExUnit.Case, async: true
 
   alias OptimalSystemAgent.Agent.ContextDiscovery
+  alias OptimalSystemAgent.Agent.Safety.PathCanon
   alias OptimalSystemAgent.Workspace.Topology
   alias OptimalSystemAgent.Workspace.Topology.Render
   alias OptimalSystemAgent.Workspace.Topology.Role
@@ -292,7 +293,11 @@ defmodule OptimalSystemAgent.Workspace.TopologyTest do
 
       # git itself stops at the inner repo…
       {git_answer, 0} = git(["rev-parse", "--show-toplevel"], inner)
-      assert Path.expand(String.trim(git_answer)) == Path.expand(inner)
+      # Both sides canonicalized: on macOS git answers with the PHYSICAL path
+      # (/private/var/...) while the fixture was built from the raw
+      # /var/... spelling — Path.expand/1 does not resolve that symlink.
+      assert PathCanon.canonicalize(String.trim(git_answer)) ==
+               PathCanon.canonicalize(inner)
 
       # …the topology resolver does not.
       assert Topology.workspace_root(inner) == Path.expand(root)

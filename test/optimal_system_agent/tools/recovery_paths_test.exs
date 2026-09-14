@@ -194,34 +194,33 @@ defmodule OptimalSystemAgent.Tools.RecoveryPathsTest do
 
       # BEFORE: the tail past `limit` was dropped with no way back to it.
       assert out =~ "The COMPLETE output is saved at"
-      assert out =~ "Next step: read the rest with file_read"
+      assert out =~ "read any part with file_read"
       assert out =~ ~s("offset":)
 
       [path] = Regex.run(~r{saved at (\S+)\.}, out, capture: :all_but_first)
       assert File.read!(path) == big
       on_exit(fn -> File.rm(path) end)
 
-      # The message itself still respects the cap.
-      assert byte_size(out) < limit + 800
+      # The message itself still respects the cap (head + marker + tail).
+      assert byte_size(out) < limit + 1_200
     end
 
-    test "the offset points at the first line NOT shown" do
+    test "keeps BOTH the head and the tail, eliding the middle" do
       big = Enum.map_join(1..5_000, "\n", fn i -> "line #{i}" end)
 
       out = ToolExecutor.spill_or_truncate(big, 2_000, %{name: "t", id: "c"})
 
-      [path, offset] =
-        Regex.run(~r{saved at (\S+)\..*"offset": (\d+)}s, out, capture: :all_but_first)
-
+      [path] = Regex.run(~r{saved at (\S+)\.}, out, capture: :all_but_first)
       on_exit(fn -> File.rm(path) end)
 
-      offset = String.to_integer(offset)
-      head = out |> String.split("\n\n[Output truncated") |> List.first()
-
-      # Lines 1..N were shown; the next unread line is N+1.
-      assert offset == length(String.split(head, "\n")) + 1
-      # And that line really is the continuation.
-      assert Enum.at(String.split(big, "\n"), offset - 1) == "line #{offset}"
+      # The head shows the FIRST lines and the tail shows the LAST line — the
+      # end of a build/test run is where the pass/fail verdict lives, and a
+      # head-only cut threw it away.
+      assert out =~ "line 1\n"
+      assert out =~ "line 5000"
+      assert out =~ "omitted from the middle"
+      # The full output is on disk, byte-identical, for reading any part on demand.
+      assert File.read!(path) == big
     end
 
     test "the spill is content-hashed, so a replay reuses one file" do

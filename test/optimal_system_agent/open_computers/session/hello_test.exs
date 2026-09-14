@@ -11,15 +11,14 @@ defmodule OptimalSystemAgent.OpenComputers.Session.HelloTest do
       assert :osa_runtime in caps
     end
 
-    test "vm_dispatch mode includes :firecracker" do
+    test "vm_dispatch configuration does not invent an OSA job executor" do
       caps = Hello.derive_capabilities(["vm_dispatch"])
-      assert :firecracker in caps
+      assert caps == []
     end
 
-    test "slicing mode returns a backend atom" do
+    test "slicing configuration does not infer virtualization from OS" do
       caps = Hello.derive_capabilities(["slicing"])
-      assert length(caps) == 1
-      assert is_atom(hd(caps))
+      assert caps == []
     end
 
     test "unknown mode returns empty list" do
@@ -34,7 +33,7 @@ defmodule OptimalSystemAgent.OpenComputers.Session.HelloTest do
     test "multiple modes are unioned" do
       caps = Hello.derive_capabilities(["direct", "vm_dispatch"])
       assert :native_desktop in caps
-      assert :firecracker in caps
+      refute :firecracker in caps
     end
 
     test "duplicate modes produce unique capabilities" do
@@ -42,9 +41,9 @@ defmodule OptimalSystemAgent.OpenComputers.Session.HelloTest do
       assert caps == Enum.uniq(caps)
     end
 
-    test "direct + vm_dispatch have at least 4 capabilities" do
+    test "unimplemented VM configuration cannot expand direct dispatch authority" do
       caps = Hello.derive_capabilities(["direct", "vm_dispatch"])
-      assert length(caps) >= 4
+      assert caps == Hello.derive_capabilities(["direct"])
     end
 
     test "unknown modes do not add to capability list" do

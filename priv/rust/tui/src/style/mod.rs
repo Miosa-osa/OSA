@@ -174,6 +174,14 @@ impl Theme {
         Style::default().fg(self.colors.error)
     }
 
+    /// Amber caution tone: an agent that is not failed but is not making
+    /// progress either (queued, blocked waiting on a model). Distinct from both
+    /// the healthy running tone and the red failure tone so a stuck subagent
+    /// stands out at a glance without being mistaken for an error.
+    pub fn warning(&self) -> Style {
+        Style::default().fg(self.colors.warning)
+    }
+
     // === Status Bar ===
     pub fn status_bar(&self) -> Style {
         Style::default().fg(self.colors.muted)
@@ -474,9 +482,7 @@ impl Theme {
     }
 
     pub fn button_inactive(&self) -> Style {
-        Style::default()
-            .fg(self.colors.muted)
-            .bg(self.colors.dim)
+        Style::default().fg(self.colors.muted).bg(self.colors.dim)
     }
 
     pub fn button_danger(&self) -> Style {
@@ -610,7 +616,9 @@ impl Theme {
         ) {
             return Style::default();
         }
-        Style::default().bg(crate::render::colors::quantize_for_terminal(self.colors.code_bg))
+        Style::default().bg(crate::render::colors::quantize_for_terminal(
+            self.colors.code_bg,
+        ))
     }
 
     /// Untagged / unknown-language code text: body-weight foreground on the
@@ -624,7 +632,9 @@ impl Theme {
         ) {
             return base;
         }
-        base.fg(crate::render::colors::quantize_for_terminal(self.colors.code_fg))
+        base.fg(crate::render::colors::quantize_for_terminal(
+            self.colors.code_fg,
+        ))
     }
 
     /// Inline `` `code` `` — the code foreground plus BOLD, and deliberately
@@ -639,7 +649,9 @@ impl Theme {
         ) {
             return s;
         }
-        s.fg(crate::render::colors::quantize_for_terminal(self.colors.code_fg))
+        s.fg(crate::render::colors::quantize_for_terminal(
+            self.colors.code_fg,
+        ))
     }
 
     pub fn table_rule(&self) -> Style {

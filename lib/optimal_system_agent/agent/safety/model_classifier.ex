@@ -60,7 +60,7 @@ defmodule OptimalSystemAgent.Agent.Safety.ModelClassifier do
   # rules found nothing: they execute commands or mutate the workspace/system.
   @review_tools ~w(
     shell_execute shell run_command bash code_sandbox repl
-    file_write file_edit multi_file_edit file_create file_delete file_move
+    file_write file_edit multi_file_edit structural_edit file_create file_delete file_move
     git download
   )
 

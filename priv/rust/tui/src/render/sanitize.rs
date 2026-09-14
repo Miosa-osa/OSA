@@ -142,6 +142,26 @@ pub fn scrub_untrusted_document(text: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Terminal output needs whole escape sequences removed *before* word wrapping
+/// or URL detection. Keeping an OSC URI after dropping just ESC duplicates links.
+pub fn scrub_terminal_output(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('\u{1b}') {
+        return scrub_untrusted_document(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while !rest.is_empty() {
+        if let Some(len) = crate::util::escape_len_at(rest, 0) {
+            rest = &rest[len..];
+        } else {
+            let ch = rest.chars().next().unwrap();
+            out.push(ch);
+            rest = &rest[ch.len_utf8()..];
+        }
+    }
+    std::borrow::Cow::Owned(scrub_untrusted_document(&out).into_owned())
+}
+
 // ─── Rendered-span scrubbing (the tool-output backstop) ──────────────────────
 //
 // Markdown, syntax and diff each have a single text entry to scrub. The ~15
@@ -304,7 +324,8 @@ mod tests {
     #[test]
     fn the_whole_trojan_source_family_is_covered() {
         for ch in [
-            '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', // embeddings/overrides
+            '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+            '\u{202E}', // embeddings/overrides
             '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', // isolates
             '\u{200E}', '\u{200F}', '\u{061C}', // marks
         ] {
@@ -326,7 +347,10 @@ mod tests {
     /// lets untrusted text drive the terminal directly.
     #[test]
     fn control_characters_are_stripped_from_a_line() {
-        assert_eq!(scrub_untrusted_line("safe\x1b]0;pwn\x07tail"), "safe]0;pwntail");
+        assert_eq!(
+            scrub_untrusted_line("safe\x1b]0;pwn\x07tail"),
+            "safe]0;pwntail"
+        );
         assert_eq!(scrub_untrusted_line("a\tb\nc\rd"), "abcd");
     }
 
@@ -341,14 +365,21 @@ mod tests {
             "/Users/rhl/projects/osa/priv/rust/tui",
             "grep -rn 'a|b' --include=*.rs .",
         ] {
-            assert_eq!(scrub_untrusted_line(s), s, "must pass through unchanged: {s:?}");
+            assert_eq!(
+                scrub_untrusted_line(s),
+                s,
+                "must pass through unchanged: {s:?}"
+            );
         }
     }
 
     /// The block variant keeps line structure but nothing else.
     #[test]
     fn the_block_variant_keeps_newlines_only() {
-        assert_eq!(scrub_untrusted_block("one\ntwo\tthree\rfour"), "one\ntwothreefour");
+        assert_eq!(
+            scrub_untrusted_block("one\ntwo\tthree\rfour"),
+            "one\ntwothreefour"
+        );
         assert_eq!(scrub_untrusted_block("a\u{202E}b\nc"), "ab\nc");
     }
 
@@ -360,7 +391,10 @@ mod tests {
             &*scrub_untrusted_document("a\n\tb\rc\u{1b}d\u{7}e"),
             "a\n\tbcde"
         );
-        assert_eq!(&*scrub_untrusted_document("rm -rf /\u{202E}# ohce"), "rm -rf /# ohce");
+        assert_eq!(
+            &*scrub_untrusted_document("rm -rf /\u{202E}# ohce"),
+            "rm -rf /# ohce"
+        );
     }
 
     /// Emoji joiners and variation selectors are invisible but not dangerous:
@@ -499,6 +533,44 @@ mod tests {
         ));
     }
 
+    /// **ESC followed by a multi-byte char must not abort the session.**
+    ///
+    /// Both escape scrubbers advance by `util::escape_len_at`'s byte length, and
+    /// the catch-all two-byte escape returned 2 whatever followed ESC. When that
+    /// was a UTF-8 lead byte the slice landed mid-codepoint:
+    ///
+    /// ```text
+    /// byte index 2 is not a char boundary; it is inside '✓' (bytes 1..4)
+    /// ```
+    ///
+    /// This path carries RAW tool output (`tools::bash` → `collapse` →
+    /// `scrub_terminal_output`), so `printf '\033✓'` in a command, or an ANSI
+    /// sequence a log clipped mid-escape, killed the TUI.
+    #[test]
+    fn an_escape_before_a_multibyte_char_does_not_panic() {
+        // The reported string, exactly.
+        assert_eq!(&*scrub_terminal_output("\u{1b}\u{2713} done"), " done");
+
+        // The same input through the span backstop, the other escape scrubber.
+        assert_eq!(scrub_rendered_span("\u{1b}\u{2713} done"), " done");
+
+        // Every multi-byte width, at the head, in the middle and at the end —
+        // and a clipped CSI/OSC whose parameters run into non-ASCII text.
+        for hostile in [
+            "\u{1b}\u{2713}",
+            "a\u{1b}\u{20ac}b",
+            "a\u{1b}\u{1f600}",
+            "\u{1b}\u{e9}tape",
+            "a\u{1b}[38;5;\u{2713}b",
+            "a\u{1b}]0;\u{2713}",
+            "\u{1b}\u{2713}\u{1b}\u{2713}\u{1b}",
+        ] {
+            let out = scrub_terminal_output(hostile);
+            assert!(!out.contains('\u{1b}'), "ESC survived: {out:?}");
+            let _ = scrub_rendered_span(hostile);
+        }
+    }
+
     #[test]
     fn the_optional_variant_preserves_none() {
         assert_eq!(scrub_untrusted_line_opt(None), None);
@@ -508,4 +580,3 @@ mod tests {
         );
     }
 }
-

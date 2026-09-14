@@ -318,6 +318,8 @@ class _Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/health":
             return self._json(_HEALTH)
+        if path == "/onboarding/status":
+            return self._json({"needs_onboarding": False, "providers": []})
         if path.startswith("/api/v1/stream/"):
             return self._sse()
         if path == "/api/v1/commands":
@@ -634,6 +636,8 @@ def main() -> int:
         failures += check_sentinels(end, "settled")
         failures += check_region_bleed(end, "settled")
         failures += check_escape_leakage(end, "settled")
+        if any(row.count("http://localhost:5173") > 1 for row in end):
+            failures.append("settled: tool hyperlink target was printed twice")
 
         # ── second turn: markdown that must wrap inside its own constructs ──
         type_and_submit(s, "why did it regress")
@@ -658,6 +662,9 @@ def main() -> int:
         print(s.dump())
 
     srv.shutdown()
+
+    if TURN["n"] < 2:
+        failures.append(f"coverage: expected two submitted turns, observed {TURN['n']}")
 
     print(f"\n{'=' * 78}\nVERDICT\n{'=' * 78}")
     if failures:

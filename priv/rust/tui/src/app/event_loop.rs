@@ -9,7 +9,6 @@ use crossterm::{
 use ratatui::layout::{Constraint, Direction, Layout as RLayout};
 use ratatui::prelude::*;
 use ratatui::{TerminalOptions, Viewport};
-use std::io::Write as _;
 use std::time::Duration;
 use tokio::time;
 use tracing::info;
@@ -112,7 +111,42 @@ fn spawn_animation_timer(
     })
 }
 
-type Term = Terminal<crate::app::inline_backend::InlineBackend<std::io::Stdout>>;
+/// Forward one OS signal (SIGTERM/SIGHUP/SIGQUIT) into the event channel as
+/// `Event::TerminateSignal(signum)`.
+///
+/// `tokio::signal::unix::signal` does the only part that actually needs to be
+/// async-signal-safe (a self-pipe under the hood), so everything on this side
+/// — including `signum`, passed through as a plain value rather than read back
+/// out of the signal machinery — runs as ordinary async Rust. One task per
+/// signal, exactly like `spawn_tick_timer` / `spawn_animation_timer` above:
+/// each event source in this file owns its own small spawn, rather than one
+/// task juggling all of them.
+///
+/// Exits quietly (no event sent) if the OS refuses to let us listen for this
+/// signal at all, which does not happen in practice for SIGTERM/SIGHUP/SIGQUIT
+/// on any unix platform this binary ships for.
+///
+/// unix-only: `tokio::signal::unix` and the raw `libc::SIG*` constants it is
+/// called with (see `App::run`) do not exist on Windows. There is no
+/// equivalent listener spawned on Windows at all — see the module doc on
+/// `Event::TerminateSignal` for what that means for that platform.
+#[cfg(unix)]
+fn spawn_signal_listener(
+    tx: tokio::sync::mpsc::UnboundedSender<Event>,
+    kind: tokio::signal::unix::SignalKind,
+    signum: i32,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let Ok(mut stream) = tokio::signal::unix::signal(kind) else {
+            return;
+        };
+        if stream.recv().await.is_some() {
+            let _ = tx.send(Event::TerminateSignal(signum));
+        }
+    })
+}
+
+pub(super) type Term = Terminal<crate::app::inline_backend::InlineBackend<std::io::Stdout>>;
 
 use crate::app::inline_backend::InlineBackend;
 
@@ -507,7 +541,6 @@ pub(crate) fn bottom_anchored(slot: Rect, content: u16) -> Rect {
     }
 }
 
-
 pub(crate) fn live_region_height(input_needed: u16, term_rows: u16) -> u16 {
     const OVERHEAD: u16 = 3;
     let want = OVERHEAD.saturating_add(input_needed);
@@ -567,8 +600,7 @@ pub(crate) const STREAM_PREVIEW_STEP: u16 = 6;
 /// the activity feed's tick (so an actively moving band is never shrunk between
 /// updates) and below human perception of a settled screen (so the rows come
 /// back before the user reads the gap as a defect).
-pub(crate) const SLOT_SHRINK_HOLD: std::time::Duration =
-    std::time::Duration::from_millis(200);
+pub(crate) const SLOT_SHRINK_HOLD: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Largest preview slot allowed on a terminal of `term_rows` rows.
 ///
@@ -626,12 +658,7 @@ impl DampedSlot {
     ///
     /// `now` is a parameter rather than an `Instant::now()` call so the timing
     /// behaviour is testable against a synthetic clock.
-    pub(crate) fn resolve(
-        &mut self,
-        content_h: u16,
-        ceiling: u16,
-        now: std::time::Instant,
-    ) -> u16 {
+    pub(crate) fn resolve(&mut self, content_h: u16, ceiling: u16, now: std::time::Instant) -> u16 {
         let want = content_h.min(ceiling);
         if want >= self.reserved {
             // Growth, or already exact. Either way there is no pending shrink.
@@ -799,6 +826,36 @@ impl App {
         let animating = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let anim_handle = spawn_animation_timer(self.event_tx.clone(), animating.clone());
 
+        // Listen for SIGTERM/SIGHUP/SIGQUIT — a plain `kill`, the terminal
+        // window closing, or Ctrl+\. All three are interceptable (unlike
+        // SIGKILL/-9/OOM-kill, which reaches no user code at all and stays a
+        // documented, accepted limitation — see the module doc on
+        // `Event::TerminateSignal`). Left running for the app's whole
+        // lifetime; there is nothing to pause them around the way the
+        // terminal reader gets paused for a viewport rebuild.
+        //
+        // unix-only (`tokio::signal::unix` + `libc::SIG*` do not exist on
+        // Windows): nothing is spawned on Windows, so `Event::TerminateSignal`
+        // is simply never produced there and this whole path stays dormant.
+        #[cfg(unix)]
+        let sigterm_handle = spawn_signal_listener(
+            self.event_tx.clone(),
+            tokio::signal::unix::SignalKind::terminate(),
+            libc::SIGTERM,
+        );
+        #[cfg(unix)]
+        let sighup_handle = spawn_signal_listener(
+            self.event_tx.clone(),
+            tokio::signal::unix::SignalKind::hangup(),
+            libc::SIGHUP,
+        );
+        #[cfg(unix)]
+        let sigquit_handle = spawn_signal_listener(
+            self.event_tx.clone(),
+            tokio::signal::unix::SignalKind::quit(),
+            libc::SIGQUIT,
+        );
+
         // Seed screen-reader (plain-text) mode from persisted config, or auto-detect
         // from the environment (NO_COLOR / accessibility hints) on first run.
         self.activity
@@ -811,9 +868,6 @@ impl App {
         // Initial health check
         self.check_health();
 
-        // The terminal was built Inline; the app boots in Connecting (which wants
-        // the full viewport), so the first iteration flips to full before drawing.
-        let mut was_full = false;
         // Whether mouse capture is currently enabled. It is scoped ONLY to the
         // transcript overlay's lifetime: enabled when the reader opens, disabled
         // the instant it closes (Esc, q, Ctrl+O, scroll-off, backend swap, error —
@@ -823,11 +877,17 @@ impl App {
         // final release also runs on loop exit, and `restore_terminal` disables it
         // unconditionally on process teardown / panic — three independent nets.
         let mut mouse_captured = false;
-        // Current inline-viewport height. The composer grows the live region (up
-        // to ~5 text lines) and a terminal resize reshapes it, so this tracks the
-        // height the viewport is currently built at and is rebuilt when the wanted
-        // height changes. Seeded with the height main.rs constructed the viewport.
-        let mut cur_inline_h = inline_h;
+        // The inline chrome's on-screen geometry (top row, height, and whether
+        // the alternate screen currently owns the display) — the single owner
+        // of what used to be three hand-synchronized loop-locals
+        // (`last_inline_top`, `cur_inline_h`, `was_full`). The terminal was
+        // built Inline; the app boots in Connecting (which wants the full
+        // viewport), so the first iteration flips to full before drawing. See
+        // `app::inline_chrome` for the whole contract this replaces.
+        let mut chrome = crate::app::inline_chrome::InlineChrome::new(
+            terminal.get_frame().area().top(),
+            inline_h,
+        );
         // Shrink-debounce state for the inline viewport (see the rebuild block
         // below). The wanted height dips transiently almost every tick (activity
         // spinner, streaming quantization, transient notices). Rebuilding on each
@@ -873,20 +933,6 @@ impl App {
         // popup open/close is a discrete user action, not a streaming dip, so it
         // must rebuild cleanly and immediately (like a resize), never debounced.
         let mut prev_popup_h: u16 = 0;
-        // Top row (absolute terminal row) of the inline viewport the last time we
-        // were inline, captured the instant BEFORE switching to the full/alternate
-        // screen. `EnterAlternateScreen`/`LeaveAlternateScreen` (DECSET 1049) save
-        // and restore the cursor position on the PRIMARY screen across the trip,
-        // but ratatui's `Viewport::Inline` reconstruction anchors the new region on
-        // wherever the cursor happens to be when it queries it back — which is
-        // wherever the last inline draw left it (typically inside/below the
-        // composer's own text-cursor row), NOT the top of the old chrome. Without
-        // this, `switch_to_inline` builds the fresh region starting mid-way through
-        // the OLD composer + status rows, leaving the rows above (the rest of the
-        // old chrome) stranded on screen as a visible duplicate. Remembering the
-        // real top lets us explicitly clear from there before rebuilding, so
-        // exactly one copy of the chrome ever exists. See `switch_to_inline`.
-        let mut last_inline_top: Option<u16> = None;
         // Whether a turn was in flight on the PREVIOUS iteration. The falling edge
         // of this is the one true "turn complete" event — see `turn_just_ended`
         // below and `App::settle_turn_chrome`.
@@ -1061,7 +1107,7 @@ impl App {
             // was already minimal does not pay for a pointless DSR rebuild.
             let force_commit = terminal_resized
                 || popup_changed
-                || (turn_just_ended && desired_inline_h != cur_inline_h);
+                || (turn_just_ended && desired_inline_h != chrome.height());
             // /clear was run: the in-memory transcript is already wiped
             // (commands.rs), but in inline mode the finalized messages were
             // flushed into the terminal's REAL scrollback via `insert_before`,
@@ -1080,12 +1126,9 @@ impl App {
                 // `purge_scrollback` ends with the cursor homed at (0, 0), so
                 // the rebuilt region's top is known and no DSR — and therefore
                 // no reader teardown — is needed. See `rebuild_inline`.
-                purge_scrollback()?;
-                rebuild_inline(&mut terminal, desired_inline_h, Some(0))?;
-                cur_inline_h = desired_inline_h;
+                chrome.clear_and_rebuild(&mut terminal, desired_inline_h)?;
                 shrink_streak = 0;
-                last_inline_top = Some(terminal.get_frame().area().top());
-            } else if terminal_resized && !want_full && !was_full {
+            } else if terminal_resized && !want_full && !chrome.is_full() {
                 // Source-backed resize replay, adapted from OpenAI Codex's
                 // `app::resize_reflow` architecture (Apache-2.0). Terminal
                 // scrollback is not a retained widget tree, so an old absolute
@@ -1095,16 +1138,22 @@ impl App {
                 // reflows markdown tables instead of preserving old-width
                 // border rows.
                 //
-                // Gated on `!was_full` as well as `!want_full` so a resize that
-                // lands in the same iteration as a dialog CLOSING does not
-                // rebuild the viewport here and then have `switch_to_inline`
-                // rebuild it again on the next pass. The mode switch already
-                // reconstructs the region from scratch, which absorbs the
-                // resize.
+                // Gated on `!chrome.is_full()` as well as `!want_full` so a
+                // resize that lands in the same iteration as a dialog CLOSING
+                // does not rebuild the viewport here and then have
+                // `to_inline` rebuild it again on the next pass. The mode
+                // switch already reconstructs the region from scratch, which
+                // absorbs the resize.
                 resize_sync_guard = Some(ResizeSyncGuard::begin());
-                purge_scrollback()?;
-                rebuild_inline(&mut terminal, desired_inline_h, Some(0))?;
-                cur_inline_h = desired_inline_h;
+                // `clear_and_rebuild`, not `rebuild_at_top0`: this branch has NOT
+                // erased anything yet (unlike `/clear`, which purges in
+                // `commands.rs` before this iteration even starts) — the real
+                // terminal still shows the pre-resize screen. Skipping the purge
+                // here left the old banner + composer on screen while
+                // `replay_scrollback` painted a second copy below it, a
+                // deterministic doubled-chrome fossil on every real resize while
+                // inline (reproduced by `test/pty/test_resize.py::test_small_viewport`).
+                chrome.clear_and_rebuild(&mut terminal, desired_inline_h)?;
                 shrink_streak = 0;
                 replay_scrollback(
                     &mut terminal,
@@ -1115,18 +1164,16 @@ impl App {
                     size.rows.max(1),
                     desired_inline_h,
                 )?;
-                last_inline_top = Some(terminal.get_frame().area().top());
+                chrome.resync_top(&mut terminal);
                 // The source-backed rebuild fully consumed this resize. Do not
                 // enter the stale-anchor reconstruction below as well.
-            } else if want_full != was_full {
+            } else if want_full != chrome.is_full() {
                 if want_full {
-                    // Remember where the inline chrome currently starts (its real
-                    // top row) before we leave it for the alternate screen — see
-                    // `last_inline_top` above.
-                    last_inline_top = Some(terminal.get_frame().area().top());
                     // Full screen (Terminal::new) does NOT query the cursor, so no
-                    // reader contention — switch directly.
-                    switch_to_full(&mut terminal)?;
+                    // reader contention — switch directly. `to_full` remembers
+                    // where the inline chrome currently starts before leaving it
+                    // for the alternate screen.
+                    chrome.to_full(&mut terminal)?;
                 } else {
                     // Rebuilding the inline viewport issues a cursor-position query
                     // (DSR). The event reader shares stdin and would eat the
@@ -1135,12 +1182,9 @@ impl App {
                     // practice (the user just closed a dialog).
                     term_handle.abort();
                     let _ = term_handle.await;
-                    switch_to_inline(&mut terminal, desired_inline_h, last_inline_top, size)?;
+                    chrome.to_inline(&mut terminal, desired_inline_h, size)?;
                     term_handle = terminal::spawn_terminal_reader(self.event_tx.clone());
-                    cur_inline_h = desired_inline_h;
-                    last_inline_top = Some(terminal.get_frame().area().top());
                 }
-                was_full = want_full;
                 // A mode switch rebuilds the viewport fresh (switch_to_* clear +
                 // reconstruct), so any pending resize is already absorbed.
             } else if want_full {
@@ -1149,9 +1193,9 @@ impl App {
                 // draw, but a resize can leave stale diff state — clear so every
                 // cell repaints at the new size.
                 if terminal_resized {
-                    let _ = terminal.clear();
+                    chrome.resize_while_full(&mut terminal);
                 }
-            } else if force_commit || desired_inline_h != cur_inline_h {
+            } else if force_commit || desired_inline_h != chrome.height() {
                 // Staying inline, and either a real resize landed or the wanted
                 // height changed. Rebuilding the inline viewport issues a DSR
                 // cursor query that tmux can drop, so every rebuild risks leaving
@@ -1178,7 +1222,7 @@ impl App {
                 let commit = if force_commit {
                     shrink_streak = 0;
                     true
-                } else if desired_inline_h > cur_inline_h {
+                } else if desired_inline_h > chrome.height() {
                     shrink_streak = 0;
                     true
                 } else {
@@ -1189,239 +1233,29 @@ impl App {
                     shrink_streak = 0;
                     // **The reader is NOT torn down here, and that is the fix
                     // for the frozen composer.** It used to be: the rebuild
-                    // below took a DSR cursor query, the reply arrives on the
-                    // same stdin this reader owns, so the reader had to be
-                    // aborted and respawned around every rebuild. A growing
-                    // streaming preview commits its grow immediately, which is
-                    // one rebuild per row — measured at 26 in a single
-                    // 5-second turn — and every keystroke that landed in one of
-                    // those 26 windows was read by nobody. Mid-stream, 7 of 7
+                    // took a DSR cursor query, the reply arrives on the same
+                    // stdin this reader owns, so the reader had to be aborted
+                    // and respawned around every rebuild. A growing streaming
+                    // preview commits its grow immediately, which is one
+                    // rebuild per row — measured at 26 in a single 5-second
+                    // turn — and every keystroke that landed in one of those
+                    // 26 windows was read by nobody. Mid-stream, 7 of 7
                     // keystrokes never echoed within 5 s each; a paste never
-                    // appeared at all.
+                    // appeared at all. `InlineChrome::relocate` hands
+                    // `rebuild_inline` the new top directly instead of asking
+                    // the terminal to read it back, so there is no cursor
+                    // query, nothing on stdin to steal, and no reason to stop
+                    // reading input. Keystrokes queue in the channel across a
+                    // rebuild exactly as they do across any other frame.
                     //
-                    // `rebuild_inline` is now handed `new_top` (computed below,
-                    // and written to the terminal with an explicit `MoveTo`)
-                    // instead of asking the terminal to read it back, so there
-                    // is no cursor query, nothing on stdin to steal, and no
-                    // reason to stop reading input. Keystrokes queue in the
-                    // channel across a rebuild exactly as they do across any
-                    // other frame.
-
-                    // **Where the rebuilt region starts.** Two different
-                    // questions, and conflating them is the defect this release
-                    // is about.
-                    //
-                    // A real RESIZE reflowed the emulator's screen: the old top
-                    // is genuinely unknowable, so the only defensible anchor is
-                    // the bottom (`rows - h`). That is the v1.0.75 fix and it
-                    // stays.
-                    //
-                    // A pure HEIGHT change moved nothing. The transcript above
-                    // the region is exactly where it was, so the region's first
-                    // row must not move either — it may only be pushed UP, and
-                    // only by as much as a taller region needs to stay on the
-                    // screen. Homing this case to `rows - h` as well is what
-                    // teleported the live region between two contradictory
-                    // anchors:
-                    //
-                    //   * a turn STARTING grows the region, `rows - h` is above
-                    //     where it was, and the chrome is rebuilt on top of rows
-                    //     that hold committed conversation — the reply that came
-                    //     out truncated, and the response timestamped 11:27
-                    //     rendering below the prompt timestamped 11:28, because
-                    //     the next commit was emitted from an origin that had
-                    //     moved backwards over content;
-                    //   * a turn ENDING shrinks it, `rows - h` is below where it
-                    //     was, and the rows it vacates become a blank band that
-                    //     the next commit scrolls up into scrollback — the
-                    //     screenful of dead rows in the middle of the transcript.
-                    //
-                    // Neither happens if the top simply stays. `min` is the only
-                    // clamp: it never lets the region hang off the bottom, and on
-                    // a screen with room it is the identity.
-                    let old_top = last_inline_top
-                        .unwrap_or_else(|| size.rows.saturating_sub(cur_inline_h));
-                    // Which erase this resize will use decides where the region may
-                    // be rebuilt, so resolve it ONCE and let both follow from it.
-                    // Splitting the two is what produced the blank band: the clear
-                    // was anchored at the remembered top while the rebuild was
-                    // anchored at `rows - h`, and on a shrink `rows - h` is BELOW
-                    // the remembered top — so the rows between them were erased by
-                    // the clear and then never occupied by the rebuild. Nothing
-                    // repaints a row no one owns.
-                    let resize_clear = if terminal_resized {
-                        Some(resize_clear_strategy(&TermIdent::from_env()))
-                    } else {
-                        None
-                    };
-                    let new_top = match resize_clear {
-                        // Full-screen wipe: the emulator reflowed, the screen is
-                        // erased and the cursor homed, so there is no surviving row
-                        // to honour and bottom-pinning is the only sound anchor.
-                        Some(ResizeClear::FullScreen) => {
-                            resize_clear_top_from_bottom(size.rows, desired_inline_h)
-                        }
-                        // Multiplexer resize (tmux/screen do not reflow, which is the
-                        // whole premise of the surgical erase below) and every pure
-                        // height change: the remembered top is still valid, so keep
-                        // it. `min` only stops the region hanging off the bottom.
-                        //
-                        // A shrink then vacates rows at the BOTTOM, under the
-                        // composer, instead of tearing a hole above it — and those
-                        // rows are reclaimed by the next `insert_before`, which
-                        // re-anchors the region after the content it commits.
-                        _ => old_top.min(size.rows.saturating_sub(desired_inline_h)),
-                    };
-
-                    if terminal_resized {
-                        // ACTUAL terminal resize. The emulator reflowed the whole
-                        // screen, so the old chrome floated to an unknown row — and on
-                        // terminals that DROP the DSR cursor query mid-resize, no
-                        // surgical anchor can find it (the "N% context used" staircase)
-                        // and deferring to ratatui's autoresize surfaces the failed
-                        // query as the "cursor position could not be read" CRASH. The
-                        // only reflow-proof, DSR-free option is to wipe the whole
-                        // screen and rebuild. Cost: the on-screen transcript is cleared
-                        // on resize (still in scrollback history + the transcript
-                        // viewer). This ONLY runs on a real resize.
-                        //
-                        // The erase is ED0-from-home (`ESC[H` + `ESC[J`), NOT ED2
-                        // (`ESC[2J`). Visually the two are identical — both leave a
-                        // blank screen with the cursor at (0, 0) — but ED2 is NOT a
-                        // pure erase on the VTE family (GNOME Terminal, Tilix,
-                        // Terminator, and every other libvte embedder): VTE
-                        // implements it by SCROLLING the current screen into the
-                        // scrollback buffer, which is why `clear(1)` there leaves the
-                        // old screen readable above. Emitting it once per resize step
-                        // therefore deposited a full snapshot of the live region —
-                        // composer, status bar, and whatever markdown was mid-render
-                        // — into unreflowable scrollback on EVERY step of a window
-                        // drag. A drag through 15 columns left 15 stacked copies, each
-                        // one column narrower than the last: the "cascade of
-                        // horizontal rules" a bordered markdown table produced, and
-                        // the same mechanism behind the older "composer duplicates
-                        // down the screen on resize" reports.
-                        //
-                        // ED0 (erase from cursor to end of screen) is specified as an
-                        // in-place erase and is implemented as one by VTE, xterm,
-                        // kitty and Alacritty alike, so it wipes the screen without
-                        // touching scroll history. Every other inline clear in this
-                        // file already uses it; this was the one hole.
-                        //
-                        // EXCEPT inside a multiplexer, where the premise above
-                        // is false. The whole justification for the
-                        // full-screen wipe is "the emulator reflowed, so the
-                        // old chrome's row is unknowable" — but tmux and
-                        // screen do NOT reflow on a width change. The remembered
-                        // `last_inline_top` therefore stays valid, and the
-                        // surgical clear used for height changes is both
-                        // sufficient and non-destructive.
-                        //
-                        // This matters because the full-screen path was the
-                        // stranding: under tmux the live region scrolls into
-                        // pane history as it redraws at each new width, and no
-                        // erase reaches history — a 12-step drag left 13 copies
-                        // (`test/pty/tmux_resize.py`). Clearing from the known
-                        // top instead means the old chrome is overwritten in
-                        // place and never becomes history in the first place,
-                        // which is how Claude Code survives the identical drag
-                        // with one prompt box (measured, same harness).
-                        //
-                        // The rejected alternative was ED3 (purge pane
-                        // history). It worked, but destroyed the user's
-                        // scrollback on every resize to clean up a mess this
-                        // branch did not need to make.
-                        let surgical_top = match resize_clear {
-                            Some(ResizeClear::Surgical) => last_inline_top,
-                            _ => None,
-                        };
-                        if let Some(top) = surgical_top {
-                            let max_row = size.rows.saturating_sub(1);
-                            let top = surgical_clear_top(top, new_top);
-                            let _ = execute!(
-                                std::io::stdout(),
-                                crossterm::cursor::MoveTo(0, top.min(max_row)),
-                                crossterm::terminal::Clear(
-                                    crossterm::terminal::ClearType::FromCursorDown
-                                ),
-                            );
-                        } else {
-                            let _ = clear_screen_for_resize(&mut std::io::stdout());
-                        }
-                    } else {
-                        // Pure HEIGHT change (the composer grew, the spinner came
-                        // up, a turn ended) — NOT a resize. Nothing on screen moved
-                        // by itself, so nothing above the region may move now.
-                        //
-                        // The one case that needs the screen to move is a region
-                        // that has grown past the bottom: `new_top` is then `old_top
-                        // - scroll`, and those `scroll` rows have to be MADE, not
-                        // taken. Scrolling the screen up by exactly that much flows
-                        // the oldest visible rows into scrollback — the same motion
-                        // a commit performs, which is why it reads as the transcript
-                        // moving rather than the chrome jumping — and leaves the
-                        // rows the region is about to occupy already vacated by the
-                        // old chrome. Growing with room below, and every shrink,
-                        // scroll by zero.
-                        //
-                        // `MoveTo(bottom)` + newlines is the scroll ratatui's own
-                        // `insert_before` performs (`Terminal::scroll_up` →
-                        // `Backend::append_lines`), so history receives the rows
-                        // through the one path every emulator agrees on. `ESC[S`
-                        // scrolls the screen WITHOUT depositing anything into
-                        // history on the VTE family — those rows would be lost.
-                        let mut out = std::io::stdout();
-                        let scroll = old_top.saturating_sub(new_top);
-                        if scroll > 0 {
-                            let _ = execute!(
-                                out,
-                                crossterm::cursor::MoveTo(0, size.rows.saturating_sub(1))
-                            );
-                            for _ in 0..scroll {
-                                let _ = out.write_all(b"\n");
-                            }
-                            let _ = out.flush();
-                        }
-                        // The old chrome now begins at `new_top` (it scrolled up
-                        // with everything else). Erasing from there down takes
-                        // exactly the old chrome and the rows below it, and never
-                        // reaches a transcript row.
-                        let max_row = size.rows.saturating_sub(1);
-                        let _ = execute!(
-                            out,
-                            crossterm::cursor::MoveTo(0, new_top.min(max_row)),
-                            crossterm::terminal::Clear(
-                                crossterm::terminal::ClearType::FromCursorDown
-                            ),
-                        );
-                    }
-
-                    // Put the cursor on `new_top`: `Viewport::Inline` anchors
-                    // the region wherever it finds it. `clear_screen_for_resize`
-                    // ends at row 0, and the surgical clears end on their own
-                    // start row, so without this the region was rebuilt at the
-                    // TOP of the screen after a resize (measured: chrome at rows
-                    // 25-28 before one width change, rows 1-4 after). The
-                    // arithmetic lives in `resize_clear_top_from_bottom` for the
-                    // resize case, and in the `min` above for the height case —
-                    // a pure helper stating an invariant nothing calls is a
-                    // comment with a test suite, which is how this one rotted.
-                    let _ = execute!(
-                        std::io::stdout(),
-                        crossterm::cursor::MoveTo(0, new_top.min(size.rows.saturating_sub(1)))
-                    );
-
-                    // Rebuild fresh to bypass ratatui's in-place inline-resize
-                    // (which can misplace the viewport on a shrink). `new_top`
-                    // is where the `MoveTo` above just put the cursor, so the
-                    // rebuild anchors there without a DSR round trip.
-                    rebuild_inline(
-                        &mut terminal,
-                        desired_inline_h,
-                        Some(new_top.min(size.rows.saturating_sub(1))),
-                    )?;
-                    cur_inline_h = desired_inline_h;
-                    last_inline_top = Some(terminal.get_frame().area().top());
+                    // The erase-then-rebuild mechanics, and the choice between
+                    // a bottom-anchored resize wipe vs. an in-place height-only
+                    // relocation, live in `InlineChrome::relocate` — see its
+                    // doc for the full argument (this used to be ~250 lines
+                    // inline here, one of six branches independently choosing
+                    // its own clear strategy, which is exactly the shape that
+                    // let a future branch forget a step).
+                    chrome.relocate(&mut terminal, size, desired_inline_h, terminal_resized)?;
                 }
             } else {
                 // Staying inline, wanted height already matches what's built, no
@@ -1450,10 +1284,8 @@ impl App {
 
             // 1b. Emit the OSA welcome banner (bordered box + ASCII logo) into the
             //     scrollback exactly once, before any messages, so it sits at the top.
-            if !was_full {
-                if let Some((tool_count, provider, model)) =
-                    self.pending_welcome_banner.take()
-                {
+            if !chrome.is_full() {
+                if let Some((tool_count, provider, model)) = self.pending_welcome_banner.take() {
                     // This frame's width (the inline frame area can lag a resize
                     // and under-report it, which is why the banner must use the
                     // frame's sampled size rather than `get_frame().area()`).
@@ -1510,7 +1342,7 @@ impl App {
                 }
             }
 
-            if !was_full && self.chat.has_pending_scrollback() {
+            if !chrome.is_full() && self.chat.has_pending_scrollback() {
                 // Both from this frame's ONE size. `get_frame().area().width` was
                 // a third, independent size source: it reports the width the
                 // viewport was last BUILT at, so mid-drag it lags the ioctl and
@@ -1558,8 +1390,7 @@ impl App {
                     // the single choke point every message passes through, so it
                     // retains the full conversation regardless of which handler
                     // produced it.
-                    if let Some(entry) =
-                        crate::dialogs::transcript_viewer::entry_from_message(&msg)
+                    if let Some(entry) = crate::dialogs::transcript_viewer::entry_from_message(&msg)
                     {
                         // Same choke point, so the exit dump and the re-layout
                         // store cannot drift apart.
@@ -1600,16 +1431,15 @@ impl App {
 
             // `insert_before` (the welcome banner + every finalized-message flush
             // above) moves the inline viewport's REAL top DOWN by the inserted
-            // height (ratatui `set_viewport_area`). `last_inline_top` is otherwise
-            // refreshed only at rebuild points, so without this it goes stale the
-            // moment a message flushes to scrollback — and the next surgical
-            // height-change clear then anchors `FromCursorDown` at that stale,
-            // higher row and WIPES the just-flushed transcript rows. Re-read the
-            // real top here so the tracked value always matches where the region
-            // actually is. Cheap: `get_frame().area()` is a cached Rect.
-            if !was_full {
-                last_inline_top = Some(terminal.get_frame().area().top());
-            }
+            // height (ratatui `set_viewport_area`). The chrome's tracked top is
+            // otherwise refreshed only at relocate points, so without this it
+            // goes stale the moment a message flushes to scrollback — and the
+            // next surgical height-change clear would then anchor
+            // `FromCursorDown` at that stale, higher row and WIPE the
+            // just-flushed transcript rows. `resync_top` re-reads the real top
+            // so the tracked value always matches where the region actually
+            // is. Cheap: `get_frame().area()` is a cached Rect.
+            chrome.resync_top(&mut terminal);
 
             // 2b. Hard repaint (Ctrl+L / return from a Ctrl+Z suspend): drop
             // the terminal's diff state so the next draw repaints every cell,
@@ -1682,7 +1512,8 @@ impl App {
             // the backend emits one StreamingToken per token; draining the backlog
             // collapses a burst into a single redraw (the main lever for smooth,
             // fast streaming). FIFO order is preserved.
-            while !should_quit {
+            let batch_started = std::time::Instant::now();
+            while !should_quit && batch_started.elapsed() < Duration::from_millis(4) {
                 match self.event_rx.try_recv() {
                     Ok(event) => {
                         batch_cadence_only &= is_cadence_event(&event);
@@ -1740,12 +1571,18 @@ impl App {
         tick_handle.abort();
         anim_handle.abort();
         term_handle.abort();
+        #[cfg(unix)]
+        sigterm_handle.abort();
+        #[cfg(unix)]
+        sighup_handle.abort();
+        #[cfg(unix)]
+        sigquit_handle.abort();
 
         // If a dialog still owned the full/alternate screen when the loop broke
         // (quitting through the `/quit` confirm does exactly this), come back to
         // the primary screen FIRST. Everything below — and the exit hint `main`
         // prints — has to act on the surface the shell will inherit.
-        if was_full && crate::app::alt_screen::is_active() {
+        if chrome.is_full() && crate::app::alt_screen::is_active() {
             let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
             crate::app::alt_screen::mark_left();
         }
@@ -1758,17 +1595,35 @@ impl App {
         // scrollback above it.
         // Teardown runs after the last frame, so this is a fresh sample of its
         // own rather than a frame's threaded size.
+        //
+        // `term_rows.saturating_sub(cur_inline_h)` clamps to row 0 whenever the
+        // chrome region is as tall as, or taller than, the terminal (a small
+        // pane, or a tall splash/toast stack right before exit) — exactly the
+        // row-0 case `erase_rows_in_place` exists for. Using the old bare
+        // `MoveTo(0, top) + Clear(FromCursorDown)` here left this graceful-exit
+        // path vulnerable to the same tmux 3.6a quirk fixed at the other three
+        // call sites: it would silently deposit the chrome into the pane's real
+        // scrollback on the way out, one fossil per such exit, in a shell pane
+        // that otherwise runs on for days across many osagent invocations.
         let term_rows = crate::app::frame_size::probe().rows;
-        if let Some(top) = clamp_inline_top(Some(term_rows.saturating_sub(cur_inline_h)), term_rows)
+        if let Some(top) =
+            clamp_inline_top(Some(term_rows.saturating_sub(chrome.height())), term_rows)
         {
-            let _ = execute!(
-                std::io::stdout(),
-                crossterm::cursor::MoveTo(0, top),
-                crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown)
-            );
+            let _ = erase_rows_in_place(&mut std::io::stdout(), top, term_rows);
         }
         if let Some(cancel) = self.sse_cancel.take() {
             cancel.cancel();
+        }
+
+        // SIGTERM/SIGHUP/SIGQUIT: the chrome is already erased above (the same
+        // path every other exit takes), so all that is left is telling `main`
+        // which signal to re-raise once it has also restored the terminal.
+        // Checked before `fatal_exit`: a signal arriving mid-launch-failure is
+        // still, first and foremost, a signal — the process's exit status
+        // should say so.
+        if let Some(sig) = self.pending_signal.take() {
+            info!("App exiting: caught signal {}", sig);
+            return Ok(crate::app::resume::ExitOutcome::TerminatedBySignal(sig));
         }
 
         // A launch-time resume that could not be resolved leaves through the
@@ -1780,7 +1635,9 @@ impl App {
         }
 
         info!("App exiting cleanly");
-        Ok(crate::app::resume::ExitOutcome::normal(self.exit_resume_hint()))
+        Ok(crate::app::resume::ExitOutcome::normal(
+            self.exit_resume_hint(),
+        ))
     }
 
     /// The `Resume this session with: …` block to print after teardown, or
@@ -1801,6 +1658,16 @@ impl App {
     /// input while open, toggles from the plain chat surface, and records keypress
     /// activity for the completion-notification idle heuristic.
     fn dispatch_event(&mut self, event: Event) -> bool {
+        // SIGTERM/SIGHUP/SIGQUIT: quit through the SAME cleanup path as every
+        // other exit (the chrome erase a few dozen lines below, in `run`'s own
+        // teardown) rather than doing anything terminal-touching here — by
+        // this point `tokio::signal::unix`'s self-pipe has already gotten us
+        // back into ordinary async Rust, so there is no async-signal-safety
+        // constraint on THIS code, only on the machinery that woke it up.
+        if let Event::TerminateSignal(sig) = event {
+            self.pending_signal = Some(sig);
+            return true;
+        }
         // U-T11 — fold terminal focus transitions (DECSET 1004 FocusGained/Lost,
         // enabled in main.rs) into the process-global focus flag so the
         // turn-complete notifier can gate on real "user is away" state. A no-op
@@ -1839,10 +1706,28 @@ impl App {
                 }
                 // Ctrl+O opens the reader from the normal chat surface only.
                 if is_ctrl_o(key) && self.transcript_can_open() {
-                    self.transcript =
-                        Some(crate::dialogs::transcript_viewer::TranscriptViewer::open(
-                            &self.transcript_log,
-                        ));
+                    // Snapshot unfinished text too: long code/table blocks may
+                    // not have a safe scrollback boundary yet. Reading must not
+                    // interrupt generation or force premature finalization.
+                    let mut entries = self.transcript_log.clone();
+                    for msg in self.chat.pending_scrollback() {
+                        if let Some(entry) =
+                            crate::dialogs::transcript_viewer::entry_from_message(msg)
+                        {
+                            entries.push(entry);
+                        }
+                    }
+                    let tail = self.assistant_stream.tail();
+                    if !tail.is_empty() {
+                        entries.push(crate::dialogs::transcript_viewer::TranscriptEntry {
+                            role: crate::dialogs::transcript_viewer::TranscriptRole::Agent,
+                            text: tail.to_owned(),
+                        });
+                    }
+                    self.transcript = Some(
+                        crate::dialogs::transcript_viewer::TranscriptViewer::open(&entries),
+                    );
+                    self.transcript_override = Some(entries);
                     return false;
                 }
             }
@@ -1864,7 +1749,7 @@ impl App {
     /// selector, dialogs) or there is nothing to show, so existing bindings and
     /// the update-layer Ctrl+O handling are left intact.
     pub(crate) fn transcript_can_open(&self) -> bool {
-        !self.transcript_log.is_empty()
+        (!self.transcript_log.is_empty() || !self.assistant_stream.tail().is_empty())
             && !self.agents.is_active()
             && self.file_picker.is_none()
             && self.reasoning_selector.is_none()
@@ -1949,8 +1834,10 @@ impl App {
                 };
             tv.draw(frame, area, entries);
             if self.toasts.has_toasts() {
-                self.toasts
-                    .draw(frame, toast_rect(area, self.toasts.live_count()).intersection(area));
+                self.toasts.draw(
+                    frame,
+                    toast_rect(area, self.toasts.live_count()).intersection(area),
+                );
             }
             return;
         }
@@ -1959,11 +1846,7 @@ impl App {
             frame.render_widget(ratatui::widgets::Clear, area);
             match self.state {
                 AppState::Connecting => {
-                    crate::view::connecting::draw_connecting(
-                        frame,
-                        area,
-                        self.connecting_draft(),
-                    );
+                    crate::view::connecting::draw_connecting(frame, area, self.connecting_draft());
                 }
                 AppState::Onboarding => {
                     if let Some(ref wizard) = self.onboarding {
@@ -2015,143 +1898,150 @@ impl App {
                         }
                         None => {
                             match self.state {
-                            AppState::Quit => self.quit_dialog.draw(frame, area),
-                            AppState::Palette => self.palette.draw(frame, area),
-                            AppState::ModelPicker => {
-                                if let Some(ref m) = self.model_picker {
-                                    m.draw(frame, area);
+                                AppState::Quit => self.quit_dialog.draw(frame, area),
+                                AppState::Palette => self.palette.draw(frame, area),
+                                AppState::ModelPicker => {
+                                    if let Some(ref m) = self.model_picker {
+                                        m.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Sessions => {
-                                if let Some(ref b) = self.session_browser {
-                                    b.draw(frame, area);
+                                AppState::Sessions => {
+                                    if let Some(ref b) = self.session_browser {
+                                        b.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Rewind => {
-                                if let Some(ref d) = self.rewind_dialog {
-                                    d.draw(frame, area);
+                                AppState::Rewind => {
+                                    if let Some(ref d) = self.rewind_dialog {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            // AppState::Permissions has no draw arm here: the
-                            // permission ask renders inline (see draw_inline), and
-                            // Permissions is not an is_overlay() state, so this
-                            // full-viewport branch was unreachable dead code and was
-                            // removed. It falls through to the `_ => {}` no-op.
-                            // AppState::PlanReview has no draw arm here: like the
-                            // permission ask, the plan-review panel renders INLINE
-                            // (see draw_inline), and PlanReview is no longer an
-                            // is_overlay() state, so this full-viewport branch was
-                            // unreachable. It falls through to the `_ => {}` no-op.
-                            // AppState::Survey has no draw arm either: the
-                            // ask_user picker renders INLINE in its own reserved
-                            // band (see `survey_slot` / `draw_inline`) and Survey
-                            // is no longer an is_overlay() state, so this
-                            // full-viewport branch is unreachable. It falls
-                            // through to the `_ => {}` no-op.
-                            AppState::Status => {
-                                // Stateless: build a live snapshot each frame so the
-                                // dashboard numbers are never stale.
-                                let view = crate::dialogs::status_dashboard::StatusView {
-                                    model: self.header.model_name().to_string(),
-                                    provider: self.header.provider().to_string(),
-                                    tools: self.header.tool_count(),
-                                    context_util: self.status.context_utilization(),
-                                    context_max: self.status.context_max_label(),
-                                    mode: self.status.permission_mode(),
-                                    session: self.session_id.clone(),
-                                    version: crate::config::osa_version_display().to_string(),
-                                };
-                                crate::dialogs::status_dashboard::draw(frame, area, &view);
-                            }
-                            AppState::ThemePicker => {
-                                if let Some(ref d) = self.theme_picker {
-                                    d.draw(frame, area);
+                                // AppState::Permissions has no draw arm here: the
+                                // permission ask renders inline (see draw_inline), and
+                                // Permissions is not an is_overlay() state, so this
+                                // full-viewport branch was unreachable dead code and was
+                                // removed. It falls through to the `_ => {}` no-op.
+                                // AppState::PlanReview has no draw arm here: like the
+                                // permission ask, the plan-review panel renders INLINE
+                                // (see draw_inline), and PlanReview is no longer an
+                                // is_overlay() state, so this full-viewport branch was
+                                // unreachable. It falls through to the `_ => {}` no-op.
+                                // AppState::Survey has no draw arm either: the
+                                // ask_user picker renders INLINE in its own reserved
+                                // band (see `survey_slot` / `draw_inline`) and Survey
+                                // is no longer an is_overlay() state, so this
+                                // full-viewport branch is unreachable. It falls
+                                // through to the `_ => {}` no-op.
+                                AppState::Status => {
+                                    // Stateless: build a live snapshot each frame so the
+                                    // dashboard numbers are never stale.
+                                    let view = crate::dialogs::status_dashboard::StatusView {
+                                        model: self.header.model_name().to_string(),
+                                        provider: self.header.provider().to_string(),
+                                        tools: self.header.tool_count(),
+                                        context_util: self.status.context_utilization(),
+                                        context_max: self.status.context_max_label(),
+                                        mode: self.status.permission_mode(),
+                                        session: self.session_id.clone(),
+                                        version: crate::config::osa_version_display().to_string(),
+                                    };
+                                    crate::dialogs::status_dashboard::draw(frame, area, &view);
                                 }
-                            }
-                            AppState::Keybindings => {
-                                if let Some(ref d) = self.keybindings_viewer {
-                                    d.draw(frame, area);
+                                AppState::ThemePicker => {
+                                    if let Some(ref d) = self.theme_picker {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Tools => {
-                                if let Some(ref d) = self.tools_browser {
-                                    d.draw(frame, area);
+                                AppState::Keybindings => {
+                                    if let Some(ref d) = self.keybindings_viewer {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::ContextBreakdown => {
-                                if let Some(ref s) = self.context_stats {
-                                    crate::dialogs::context_breakdown::draw(frame, area, s);
+                                AppState::Tools => {
+                                    if let Some(ref d) = self.tools_browser {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Trust => {
-                                if let Some(ref d) = self.trust_dialog {
-                                    d.draw(frame, area);
+                                AppState::ContextBreakdown => {
+                                    if let Some(ref s) = self.context_stats {
+                                        crate::dialogs::context_breakdown::draw(frame, area, s);
+                                    }
                                 }
-                            }
-                            AppState::PermissionsManager => {
-                                if let Some(ref d) = self.permissions_manager {
-                                    d.draw(frame, area);
+                                AppState::Trust => {
+                                    if let Some(ref d) = self.trust_dialog {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Hooks => {
-                                if let Some(ref d) = self.hooks_viewer {
-                                    d.draw(frame, area);
+                                AppState::PermissionsManager => {
+                                    if let Some(ref d) = self.permissions_manager {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Mcp => {
-                                if let Some(ref d) = self.mcp_servers {
-                                    d.draw(frame, area);
+                                AppState::Hooks => {
+                                    if let Some(ref d) = self.hooks_viewer {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Cost => {
-                                if let Some(ref d) = self.cost_dashboard {
-                                    d.draw(frame, area);
+                                AppState::Mcp => {
+                                    if let Some(ref d) = self.mcp_servers {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Skills => {
-                                if let Some(ref d) = self.skills_browser {
-                                    d.draw(frame, area);
+                                AppState::Cost => {
+                                    if let Some(ref d) = self.cost_dashboard {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Channels => {
-                                if let Some(ref d) = self.channels_panel {
-                                    d.draw(frame, area);
+                                AppState::Skills => {
+                                    if let Some(ref d) = self.skills_browser {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Memory => {
-                                if let Some(ref d) = self.memory_browser {
-                                    d.draw(frame, area);
+                                AppState::Channels => {
+                                    if let Some(ref d) = self.channels_panel {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Persona => {
-                                if let Some(ref d) = self.persona_picker {
-                                    d.draw(frame, area);
+                                AppState::Memory => {
+                                    if let Some(ref d) = self.memory_browser {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Sandbox => {
-                                if let Some(ref d) = self.sandbox_picker {
-                                    d.draw(frame, area);
+                                AppState::Persona => {
+                                    if let Some(ref d) = self.persona_picker {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Metrics => {
-                                if let Some(ref d) = self.metrics_dashboard {
-                                    d.draw(frame, area);
+                                AppState::Sandbox => {
+                                    if let Some(ref d) = self.sandbox_picker {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            AppState::Tasks => {
-                                if let Some(ref d) = self.tasks_panel {
-                                    d.draw(frame, area);
+                                AppState::Metrics => {
+                                    if let Some(ref d) = self.metrics_dashboard {
+                                        d.draw(frame, area);
+                                    }
                                 }
-                            }
-                            _ => {}
+                                AppState::Tasks => {
+                                    if let Some(ref d) = self.tasks_panel {
+                                        d.draw(frame, area);
+                                    }
+                                }
+                                AppState::GoalCompletion => {
+                                    if let Some(ref p) = self.completion_panel {
+                                        p.draw(frame, area);
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
                 }
             }
             if self.toasts.has_toasts() {
-                self.toasts
-                    .draw(frame, toast_rect(area, self.toasts.live_count()).intersection(area));
+                self.toasts.draw(
+                    frame,
+                    toast_rect(area, self.toasts.live_count()).intersection(area),
+                );
             }
         } else {
             self.draw_inline(frame, area);
@@ -2328,7 +2218,9 @@ impl App {
         // converging on reserved == drawn once the reply settles.
         let mut slot = self.stream_preview_slot.get();
         let preview_rows = stream_preview_rows(
-            content_h,
+            // Continuations draw no OSA header. Reserving that invisible row
+            // leaves a blank gap between the committed paragraph and live list.
+            content_h.saturating_sub(u16::from(self.agent_header_sent)),
             &mut slot,
             stream_preview_ceiling(term_rows),
             self.frame_now.get(),
@@ -2478,7 +2370,6 @@ impl App {
         .capped()
     }
 
-
     /// Draw the compact inline live region: streaming preview, thinking/activity,
     /// status, and input. Finalized conversation lives in native scrollback.
     fn draw_inline(&self, frame: &mut Frame, area: Rect) {
@@ -2524,7 +2415,8 @@ impl App {
             // reserved by desired_inline_height's plan_review branch.
             review.draw(frame, a_stream);
         } else {
-            self.chat.draw_live(frame, a_stream, !self.agent_header_sent);
+            self.chat
+                .draw_live(frame, a_stream, !self.agent_header_sent);
         }
         // In screen-reader mode the boxed thinking display is skipped in favor of
         // the activity's plain-text status line (screen readers choke on the box).
@@ -2568,11 +2460,13 @@ impl App {
             // between the spinner and the composer. Handing it exactly the content
             // rows, anchored to the bottom, keeps the spinner tight above the
             // composer and leaves any slack above it as plain padding.
-            self.activity.draw(frame, bottom_anchored(a_think, self.activity.height()));
+            self.activity
+                .draw(frame, bottom_anchored(a_think, self.activity.height()));
         }
         // Multi-agent activity + background-terminals summary (no-ops when empty).
         // Same treatment: the slot is a stable cap, the roster paints only its rows.
-        self.agents.draw(frame, bottom_anchored(a_agents, self.agents.height()));
+        self.agents
+            .draw(frame, bottom_anchored(a_agents, self.agents.height()));
         self.draw_context_hint(frame, a_hint);
         self.input.draw(frame, a_input);
         // `/` popup or `@` dropdown, in the band reserved by `popup_slot` — never
@@ -2601,7 +2495,8 @@ impl App {
         // an overlay over `a_stream`. The band is full-width; `toast_window`
         // keeps the historical right-hand 40-column placement.
         if a_toast.height > 0 {
-            self.toasts.draw(frame, toast_window(a_toast).intersection(bounds));
+            self.toasts
+                .draw(frame, toast_window(a_toast).intersection(bounds));
         }
     }
 
@@ -2654,9 +2549,7 @@ impl App {
                     "Context low ({}% remaining) \u{00b7} Run /compact to compact & continue",
                     left
                 ),
-                None => {
-                    "Context low \u{00b7} Run /compact to compact & continue".to_string()
-                }
+                None => "Context low \u{00b7} Run /compact to compact & continue".to_string(),
             };
             let para = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(
                 ratatui::text::Span::styled(
@@ -2688,13 +2581,132 @@ impl App {
     }
 }
 
+/// Debug/test bookkeeping for the "exactly one copy of the chrome (composer +
+/// hint row + status bar) ever exists" invariant (see `last_inline_top`
+/// above). `switch_to_full`, `switch_to_inline`, and `rebuild_inline` are the
+/// only three places that install a fresh chrome region, and each records
+/// here — a `thread_local!` counter bump, not a rendered-buffer scrape — so a
+/// test can ask "did exactly one region get (re)built, and where does it sit
+/// now" without regexing a `Terminal`'s cell grid.
+///
+/// This module was originally landing-row-only: it proved the NEW region
+/// always starts where its caller expects, but said nothing about whether
+/// the OLD region it replaced was actually reclaimed first. That half of the
+/// invariant is where the real bug lived — measured live (v1.0.189, a
+/// long-running tmux pane): the VISIBLE screen always shows exactly one
+/// chrome block (`tmux capture-pane -p`), but `-S -2000` (history + visible)
+/// shows two to four. The live render was never wrong; old chrome rows were
+/// being scrolled into the pane's PERMANENT history — never cleared, never
+/// reclaimed — instead of overwritten in place, and each occurrence is a
+/// fossil nothing after this point can ever remove. A generation delta of
+/// exactly one (the original half of this module) reads as perfectly healthy
+/// while that happens: the new region was still built exactly once, in the
+/// right place; the old one just was not reclaimed before it moved. `top`
+/// and `height` are now tracked, not just `top`, so callers can also ask
+/// "did the erase that preceded this rebuild reach far enough up the screen
+/// to cover where the PREVIOUS region started" — see `reclaimed` below.
+///
+/// Thread-local, not global: `cargo test` runs test bodies on a pool of OS
+/// threads and never two bodies concurrently on the same thread, so a test
+/// snapshotting a before/after delta around one call is isolated from every
+/// other test's rebuilds. It is not meant to be read across threads, and the
+/// production event loop only ever runs on one.
+mod chrome_region {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Bumped by one on every chrome (re)build observed on this thread.
+        static GENERATION: Cell<u32> = const { Cell::new(0) };
+        /// Absolute top row of the chrome region as of the last (re)build
+        /// observed on this thread.
+        static LAST_TOP: Cell<u16> = const { Cell::new(0) };
+        /// Row count of the chrome region as of the last (re)build observed
+        /// on this thread.
+        static LAST_HEIGHT: Cell<u16> = const { Cell::new(0) };
+    }
+
+    /// Record that a chrome region was just (re)built at `top..top+height`.
+    pub(super) fn record(top: u16, height: u16) {
+        GENERATION.with(|g| g.set(g.get() + 1));
+        LAST_TOP.with(|t| t.set(top));
+        LAST_HEIGHT.with(|h| h.set(height));
+    }
+
+    /// How many chrome (re)builds this thread has observed so far. Wrap a
+    /// single `switch_to_full` / `switch_to_inline` / `rebuild_inline` call
+    /// with a before/after snapshot of this and assert the delta is exactly
+    /// one: zero means the call silently no-op'd and left a stale region on
+    /// screen (the region that should have been reclaimed survives); two or
+    /// more means it built the chrome more than once in what should have
+    /// been one atomic swap (the "two chat things" duplicate). Also doubles
+    /// as "is there a previous region at all" — `0` means this thread has
+    /// never recorded one, so there is nothing for a rebuild to reclaim.
+    ///
+    /// Deliberately NOT `#[cfg(test)]`: `switch_to_inline` and
+    /// `rebuild_inline` read this from a production `debug_assert!` (see
+    /// `reclaimed` below), which has to compile in every build even though
+    /// `debug_assert!` itself compiles away to nothing in release.
+    pub(crate) fn generation() -> u32 {
+        GENERATION.with(|g| g.get())
+    }
+
+    /// Top row of the most recently (re)built chrome region on this thread —
+    /// i.e., read BEFORE calling `record` again, this is the region the next
+    /// rebuild is about to replace.
+    pub(crate) fn last_top() -> u16 {
+        LAST_TOP.with(|t| t.get())
+    }
+
+    /// Row count of the most recently (re)built chrome region on this thread.
+    /// Unlike `generation`/`last_top`, production code never reads this (the
+    /// `reclaimed` check below only needs a top row) — `#[cfg(test)]` so it
+    /// stays test-only rather than a dead accessor kept warm in release.
+    #[cfg(test)]
+    pub(crate) fn last_height() -> u16 {
+        LAST_HEIGHT.with(|h| h.get())
+    }
+
+    /// Whether a rebuild that erases (or lands) from `erase_floor` down to
+    /// the bottom of the screen fully reclaims a PREVIOUS chrome region that
+    /// started at `prev_top`.
+    ///
+    /// True whenever there was no previous region at all (`had_previous` is
+    /// false — nothing to reclaim), or the erase floor is at or above where
+    /// the old region began (`prev_top >= erase_floor`): the erase covers
+    /// every row the old chrome could have occupied, all the way to the
+    /// bottom, so none of it survives outside the erased-and-rebuilt range.
+    ///
+    /// False means the old region started ABOVE the erase floor — some of
+    /// its rows sit outside what this rebuild touches. On a live terminal
+    /// those rows do not just linger on screen; if anything scrolls before
+    /// they are ever reclaimed, they scroll into PERMANENT history — the
+    /// fossil this whole module exists to catch. A pure function (no
+    /// `Terminal`, no I/O) so the containment arithmetic is directly
+    /// testable independent of ratatui/crossterm plumbing.
+    pub(super) fn reclaimed(had_previous: bool, prev_top: u16, erase_floor: u16) -> bool {
+        !had_previous || prev_top >= erase_floor
+    }
+}
+
 /// Enter the alternate screen and rebuild the terminal at full height. Used for
 /// dialogs, onboarding, connecting, and the file picker.
-fn switch_to_full(terminal: &mut Term) -> Result<()> {
+pub(super) fn switch_to_full(terminal: &mut Term) -> Result<()> {
     execute!(std::io::stdout(), EnterAlternateScreen)?;
     crate::app::alt_screen::mark_entered();
     *terminal = Terminal::new(InlineBackend::new(std::io::stdout()))?;
     terminal.clear()?; // fresh diff state after rebuild
+
+    // The alternate screen is always a blank buffer at row 0 — there is no
+    // "previous region" to reclaim here, `EnterAlternateScreen` already gave
+    // us one. If this ever fires, `Terminal::new` stopped anchoring at 0 and
+    // every erase/rebuild elsewhere in this file that assumes a full-screen
+    // chrome starts at row 0 is now wrong too.
+    debug_assert_eq!(
+        terminal.get_frame().area().top(),
+        0,
+        "full-screen chrome must start at row 0"
+    );
+    chrome_region::record(0, terminal.get_frame().area().height);
     Ok(())
 }
 
@@ -2787,6 +2799,67 @@ pub(crate) fn surgical_clear_top(last_inline_top: u16, rebuild_top: u16) -> u16 
     last_inline_top.min(rebuild_top)
 }
 
+/// Erase every row from `top` through the bottom of the screen, IN PLACE,
+/// without depositing the erased content into the terminal's real scrollback
+/// history — the property every surgical clear in this file relies on and
+/// which `Clear(ClearType::FromCursorDown)` (ED0) does NOT have on tmux 3.6a
+/// whenever `top` is 0.
+///
+/// ED0 is documented, and correctly implemented by VTE, xterm, kitty and
+/// Alacritty, as an in-place erase that never touches scroll history — which
+/// is why every other erase in this file (including this one, for any `top`
+/// other than 0) can just issue it directly. tmux 3.6a's OWN terminal
+/// emulation of ED0 does not honor that when the erase targets the entire
+/// visible screen, i.e. when the cursor row at the time of the erase is row
+/// 0: it silently deposits the screen's prior contents into the pane's real,
+/// permanent history buffer instead of erasing in place, functionally
+/// identical to a natural scroll. An erase from any OTHER row is unaffected —
+/// this is specific to erasing the whole screen from its top edge.
+///
+/// Confirmed with a minimal, OSA-free synthetic reproduction against a real
+/// tmux 3.6a server: a 100x10 pane prints 8 lines, then receives ONLY
+/// `printf '\033[1;1H\033[J'` (MoveTo(0,0) + ED0) with no redraw at all — the
+/// visible screen (`capture-pane -p`) is correctly blank, but the full
+/// scrollback (`capture-pane -p -S -50`) still contains all 8 lines. Erasing
+/// the same screen from row 5 instead (a genuinely partial erase) leaves no
+/// such fossil, isolating the quirk to the top-of-screen case.
+///
+/// This is exactly the geometry every "chrome anchored at the top" erase
+/// hits — a fresh boot before the first commit pushes it down, and,
+/// decisively, the very next height-only rebuild after a `/clear` (which
+/// always leaves the live region pinned at row 0, so the following turn's
+/// toast-driven resize erases from there).
+///
+/// `Clear(ClearType::CurrentLine)` (EL, `ESC[2K`) does not carry the quirk at
+/// any row, including row 0 — confirmed with the same synthetic harness:
+/// looping it per-row from the erase's start row to the bottom of the screen
+/// leaves both the visible screen and the full scrollback clean. That is
+/// what this function does in place of a single whole-screen ED0, at the
+/// call sites where the start row can be 0 (`clear_screen_for_resize` is not
+/// one of them — tmux and screen are always routed to the surgical strategy
+/// instead, so it is never reached on a terminal where this quirk is known
+/// to exist, and its exact emitted bytes are pinned by
+/// `resize_clear_erases_in_place_and_never_scrolls_into_history`).
+///
+/// Clamps `top` to the last row first so a start row at or past the bottom
+/// still erases that one row, matching the clamping every caller used to do
+/// itself before a single `MoveTo` + `Clear(FromCursorDown)`.
+pub(crate) fn erase_rows_in_place(
+    out: &mut impl std::io::Write,
+    top: u16,
+    rows_total: u16,
+) -> Result<()> {
+    let top = top.min(rows_total.saturating_sub(1));
+    for row in top..rows_total {
+        execute!(
+            out,
+            crossterm::cursor::MoveTo(0, row),
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
+        )?;
+    }
+    Ok(())
+}
+
 /// Blank rows [`replay_scrollback`] emits AHEAD of a replayed transcript so the
 /// live region still lands on the screen's last `inline_h` rows.
 ///
@@ -2825,7 +2898,7 @@ pub(crate) fn bottom_align_lead(rows: u16, inline_h: u16, content_h: u16) -> u16
 /// downward before rebuilding erases exactly the old chrome (never the real
 /// transcript scrollback above `prev_inline_top`, which this never touches)
 /// so the freshly built viewport lands in the same place the old one started.
-fn switch_to_inline(
+pub(super) fn switch_to_inline(
     terminal: &mut Term,
     inline_h: u16,
     prev_inline_top: Option<u16>,
@@ -2843,11 +2916,12 @@ fn switch_to_inline(
     let term_rows = size.rows;
     let placed = clamp_inline_top(prev_inline_top, term_rows);
     if let Some(top) = placed {
-        let _ = execute!(
-            std::io::stdout(),
-            crossterm::cursor::MoveTo(0, top),
-            crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown),
-        );
+        // Per-row EL (`erase_rows_in_place`), not a single whole-screen ED0:
+        // `top` can be 0 here (a splash/dialog that opened while the inline
+        // chrome sat at the absolute top of the screen), which on tmux 3.6a
+        // is the case a whole-screen ED0 deposits into real, permanent pane
+        // history instead of erasing.
+        let _ = erase_rows_in_place(&mut std::io::stdout(), top, term_rows);
     }
 
     // When the old top was remembered, the `MoveTo` above just PUT the cursor
@@ -2855,8 +2929,25 @@ fn switch_to_inline(
     // `Viewport::Inline` would take reads back a number we wrote. Hand ratatui
     // that number instead (see [`rebuild_inline`] for the full argument). Only
     // the no-remembered-top case — the cursor is genuinely wherever the dialog
-    // left it — still has to ask, and it keeps the priming/retry ladder that
-    // stopped a dropped reply from crashing the session on a dialog close.
+    // left it — still has to ask, and it falls through to the retry ladder
+    // below.
+    //
+    // A separate priming loop used to sit here (`for _ in 0..40 { if
+    // crossterm::cursor::position().is_ok() { break } sleep(25ms) }`), added
+    // back when this function always queried. It was dead weight even before
+    // this rewrite — its answer was discarded, not fed to the retry below —
+    // and on a terminal that keeps dropping the DSR reply (the exact resize
+    // storm this whole function exists to survive) it was actively harmful:
+    // `crossterm::cursor::position()` already blocks up to ~2s per call
+    // internally, so 40 iterations could stall this thread for up to ~80s
+    // BEFORE the retry ladder's own up to ~6 attempts (another ~12s) even
+    // started — the event loop reads as hung, not degraded, and a user who
+    // gives up and kills the terminal mid-stall is the "crash" that leaves the
+    // shell garbled. Ratatui's own construction just below performs the
+    // identical query, so the loop was retrying a call whose result it threw
+    // away, then paying for the real query a second time regardless. Deleting
+    // it changes no behavior on a healthy terminal (which answers in ms) and
+    // caps the unhealthy case at the retry ladder's own bound.
     if let Some(top) = placed {
         if let Ok(t) = Terminal::with_options(
             InlineBackend::primed_at(std::io::stdout(), top),
@@ -2865,14 +2956,41 @@ fn switch_to_inline(
             },
         ) {
             *terminal = t;
+            // The region was primed at `top` — the SAME row the erase above
+            // just cleared `FromCursorDown` from. Landing anywhere else would
+            // mean the erase and the rebuild disagree about where the old
+            // chrome was, leaving some of it stranded above (or the new
+            // region overlapping rows the erase never touched).
+            debug_assert_eq!(
+                terminal.get_frame().area().top(),
+                top,
+                "primed inline rebuild must land exactly on the just-erased row"
+            );
+            // The RECLAIM half of the invariant, not just the landing half:
+            // the erase just above wiped rows `top..term_rows`, so the region
+            // this call is about to replace must have started at or below
+            // `top` too — read BEFORE `record` overwrites it — or some of its
+            // rows sat above the erase and were never reclaimed. That is
+            // exactly how the live-tmux fossils were produced (measured on
+            // v1.0.189: the visible screen always shows one chrome block,
+            // but pane HISTORY held two to four) — this call reported a
+            // clean generation delta of one every time, because the NEW
+            // region was still built exactly once, in the right place; the
+            // stranded rows were the OLD region's, left behind above the
+            // floor this erase reached.
+            debug_assert!(
+                chrome_region::reclaimed(
+                    chrome_region::generation() > 0,
+                    chrome_region::last_top(),
+                    top,
+                ),
+                "chrome erased from row {top} but the previous region started \
+                 higher, at row {} — it was not fully reclaimed and may now \
+                 be stranded on screen or scrolled into permanent history",
+                chrome_region::last_top()
+            );
+            chrome_region::record(top, inline_h);
             return Ok(());
-        }
-    } else {
-        for _ in 0..40 {
-            if crossterm::cursor::position().is_ok() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(25));
         }
     }
 
@@ -2886,6 +3004,14 @@ fn switch_to_inline(
         ) {
             Ok(t) => {
                 *terminal = t;
+                // Reaching the query ladder at all means either there was no
+                // remembered top (`placed.is_none()`) or the primed attempt
+                // above failed outright (its `Ok(t)` would have already
+                // returned). Either way the priming branch cannot also have
+                // recorded a region this call, so this is still the one
+                // rebuild the invariant expects — just landed via a real DSR
+                // round trip instead of a primed answer.
+                chrome_region::record(terminal.get_frame().area().top(), inline_h);
                 return Ok(());
             }
             Err(e) => {
@@ -2899,9 +3025,18 @@ fn switch_to_inline(
     // dialog close), degrade to a full-screen terminal — `Terminal::new` never
     // queries the cursor, so it can't fail. The viewport reconciliation will
     // recover the inline region on a later iteration if the terminal recovers.
-    info!("inline rebuild failed ({:?}); degrading to full-screen", last_err);
+    info!(
+        "inline rebuild failed ({:?}); degrading to full-screen",
+        last_err
+    );
     *terminal = Terminal::new(InlineBackend::new(std::io::stdout()))?;
     let _ = terminal.clear();
+    debug_assert_eq!(
+        terminal.get_frame().area().top(),
+        0,
+        "full-screen degrade path must land at row 0"
+    );
+    chrome_region::record(0, terminal.get_frame().area().height);
     Ok(())
 }
 
@@ -2934,13 +3069,19 @@ fn switch_to_inline(
 /// exactly the stall a terminal that drops DSR (tmux, SSH) used to take, 26
 /// times a turn.
 ///
-/// With `known_top = None` the behaviour is the old one verbatim: prime, query,
-/// retry, degrade. Nothing on the inline path passes `None` today; it exists so
-/// a future caller without a placed cursor is still correct rather than lying.
+/// With `known_top = None` the behaviour falls through to the query/retry/
+/// degrade ladder below (no priming loop first — see the note in
+/// `switch_to_inline`, whose fallback used to duplicate this same dead-weight
+/// wait). Nothing on the inline path passes `None` today; it exists so a
+/// future caller without a placed cursor is still correct rather than lying.
 ///
 /// The caller should still `terminal.clear()` / erase beforehand so no stale
 /// rows of the old-sized region remain.
-fn rebuild_inline(terminal: &mut Term, inline_h: u16, known_top: Option<u16>) -> Result<()> {
+pub(super) fn rebuild_inline(
+    terminal: &mut Term,
+    inline_h: u16,
+    known_top: Option<u16>,
+) -> Result<()> {
     if let Some(top) = known_top {
         // No cursor query happens at all, so there is nothing to drop and
         // nothing to retry: the only way this fails is a genuine write error on
@@ -2952,14 +3093,34 @@ fn rebuild_inline(terminal: &mut Term, inline_h: u16, known_top: Option<u16>) ->
             },
         ) {
             *terminal = t;
+            // `known_top` is the row the CALLER already erased/scrolled to
+            // (see the doc comment above); the rebuilt region must land there
+            // exactly, or the erase and the rebuild disagree about where the
+            // old chrome was and some of it survives on screen.
+            debug_assert_eq!(
+                terminal.get_frame().area().top(),
+                top,
+                "known-top inline rebuild must land exactly on the caller-erased row"
+            );
+            // NOT running `chrome_region::reclaimed` here on purpose, unlike
+            // the equivalent branch in `switch_to_inline`. There, `top` is
+            // both the erase floor AND the landing row in one local scope, so
+            // checking the previous region against it is sound. Here,
+            // `known_top` is only ever the LANDING row `rebuild_inline`
+            // receives; the actual erase floor its callers use is `new_top`
+            // for a plain height change but `min(old_top, new_top)` for a
+            // surgical resize clear (see `surgical_clear_top`) — smaller
+            // whenever the region is moving DOWN the screen — and this
+            // function has no way to tell which one ran. Asserting against
+            // `known_top` as if it were the floor would false-positive on
+            // exactly that resize shape (old region above the new one, fully
+            // covered by the wider surgical erase, but not by `known_top`
+            // alone). `chrome_region::last_top()`/`last_height()` are still
+            // recorded below either way — a caller that DOES know its real
+            // erase floor (the resize/scroll path dup-chrome-190 owns) can
+            // call `chrome_region::reclaimed` itself with that floor.
+            chrome_region::record(top, inline_h);
             return Ok(());
-        }
-    } else {
-        for _ in 0..40 {
-            if crossterm::cursor::position().is_ok() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(25));
         }
     }
     let mut last_err = None;
@@ -2972,6 +3133,10 @@ fn rebuild_inline(terminal: &mut Term, inline_h: u16, known_top: Option<u16>) ->
         ) {
             Ok(t) => {
                 *terminal = t;
+                // As in `switch_to_inline`'s query ladder: only reachable when
+                // `known_top` was absent or its primed attempt failed, so
+                // this is still the one region-build the invariant expects.
+                chrome_region::record(terminal.get_frame().area().top(), inline_h);
                 return Ok(());
             }
             Err(e) => {
@@ -2983,9 +3148,18 @@ fn rebuild_inline(terminal: &mut Term, inline_h: u16, known_top: Option<u16>) ->
     // As in `switch_to_inline`: never surface the DSR timeout to the user. If the
     // cursor query keeps failing, fall back to a full-screen terminal (which does
     // not query the cursor) so the live-region resize can't crash the session.
-    info!("inline height rebuild failed ({:?}); degrading to full-screen", last_err);
+    info!(
+        "inline height rebuild failed ({:?}); degrading to full-screen",
+        last_err
+    );
     *terminal = Terminal::new(InlineBackend::new(std::io::stdout()))?;
     let _ = terminal.clear();
+    debug_assert_eq!(
+        terminal.get_frame().area().top(),
+        0,
+        "full-screen degrade path must land at row 0"
+    );
+    chrome_region::record(0, terminal.get_frame().area().height);
     Ok(())
 }
 
@@ -3163,7 +3337,7 @@ fn replay_scrollback(
 /// Homing the cursor to (0, 0) means the caller's following `Viewport::Inline`
 /// rebuild anchors fresh at the very top instead of wherever the old composer
 /// happened to leave the cursor.
-fn purge_scrollback() -> Result<()> {
+pub(super) fn purge_scrollback() -> Result<()> {
     purge_scrollback_into(&mut std::io::stdout())
 }
 
@@ -3208,7 +3382,10 @@ pub(crate) fn clear_screen_for_resize(out: &mut impl std::io::Write) -> Result<(
 pub(crate) enum ResizeClear {
     /// Clear from the remembered live-region top downward, leaving the
     /// transcript above it untouched. The old chrome is overwritten in place
-    /// and never becomes scroll history.
+    /// and never becomes scroll history — via `erase_rows_in_place`'s per-row
+    /// EL, not a whole-screen ED0, precisely because that top is frequently
+    /// row 0, which is the one case tmux 3.6a's own ED0 does not erase in
+    /// place (see `erase_rows_in_place` for the confirmed mechanism).
     Surgical,
     /// Wipe the whole screen (ED0 from home) and rebuild from nothing.
     FullScreen,
@@ -3311,9 +3488,7 @@ pub(crate) fn resize_clear_strategy(id: &TermIdent) -> ResizeClear {
     // screen is erased.
     match id.r#override.as_deref().map(str::trim) {
         Some("surgical") => return ResizeClear::Surgical,
-        Some("full") | Some("full-screen") | Some("fullscreen") => {
-            return ResizeClear::FullScreen
-        }
+        Some("full") | Some("full-screen") | Some("fullscreen") => return ResizeClear::FullScreen,
         _ => {}
     }
 
@@ -3386,8 +3561,8 @@ mod render_tests {
     use ratatui::backend::Backend;
     use ratatui::backend::TestBackend;
     use ratatui::layout::{Constraint, Direction, Layout as RLayout, Rect};
-    use ratatui::Frame;
     use ratatui::widgets::{Block, Borders, Paragraph};
+    use ratatui::Frame;
     use ratatui::Terminal;
 
     // `Activity::draw` and `InputComponent::draw` are `Component` trait methods.
@@ -3398,14 +3573,7 @@ mod render_tests {
     use crate::components::Component;
 
     /// The terminal sizes every case is exercised at, from absurdly tiny to large.
-    const SIZES: &[(u16, u16)] = &[
-        (10, 3),
-        (20, 5),
-        (40, 10),
-        (80, 24),
-        (120, 40),
-        (200, 60),
-    ];
+    const SIZES: &[(u16, u16)] = &[(10, 3), (20, 5), (40, 10), (80, 24), (120, 40), (200, 60)];
 
     /// Run `f` inside a `TestBackend` draw at every size. Any panic in `f`
     /// (including a ratatui out-of-buffer index) fails the test.
@@ -3682,7 +3850,9 @@ mod render_tests {
     fn render_inline(top: u16, w: u16, view_h: u16, input: &InputComponent, status: &StatusBar) {
         let total_h = top.saturating_add(view_h).saturating_add(4).max(1);
         let mut backend = TestBackend::new(w, total_h);
-        backend.set_cursor_position(Position { x: 0, y: top }).unwrap();
+        backend
+            .set_cursor_position(Position { x: 0, y: top })
+            .unwrap();
         let mut term = Terminal::with_options(
             backend,
             TerminalOptions {
@@ -3729,7 +3899,14 @@ mod render_tests {
         // — including a hard shrink and a grow — with the slash popup open. The
         // viewport is parked at a non-zero offset each time (the geometry that
         // reproduced the original crash).
-        let sizes = [(92u16, 30u16), (50, 6), (120, 40), (40, 5), (200, 60), (10, 3)];
+        let sizes = [
+            (92u16, 30u16),
+            (50, 6),
+            (120, 40),
+            (40, 5),
+            (200, 60),
+            (10, 3),
+        ];
         for &(w, rows) in &sizes {
             let input = input_with_slash_popup(w);
             let mut status = StatusBar::new();
@@ -3768,8 +3945,14 @@ mod render_tests {
             wide.chat_height,
         );
         let back = Layout::compute(120, 40, false, 0, 0);
-        assert_eq!(back.chat_width, wide.chat_width, "width must converge on round-trip");
-        assert_eq!(back.chat_height, wide.chat_height, "height must converge on round-trip");
+        assert_eq!(
+            back.chat_width, wide.chat_width,
+            "width must converge on round-trip"
+        );
+        assert_eq!(
+            back.chat_height, wide.chat_height,
+            "height must converge on round-trip"
+        );
     }
 
     #[test]
@@ -3813,7 +3996,9 @@ mod render_tests {
             let view_h = super::live_region_height(input.needed_height(), 40);
             let total_h = view_h.saturating_add(4).max(1);
             let mut backend = TestBackend::new(w, total_h);
-            backend.set_cursor_position(Position { x: 0, y: 0 }).unwrap();
+            backend
+                .set_cursor_position(Position { x: 0, y: 0 })
+                .unwrap();
             let mut term = Terminal::with_options(
                 backend,
                 TerminalOptions {
@@ -3846,15 +4031,19 @@ mod render_tests {
 
         // The popup wants rows now that it is open (all sample commands match "").
         let popup_h = input.completions_popup_height();
-        assert!(popup_h >= 3, "open popup should want >= 3 rows, got {popup_h}");
+        assert!(
+            popup_h >= 3,
+            "open popup should want >= 3 rows, got {popup_h}"
+        );
 
         // Viewport height the event loop would build: live region + popup rows.
-        let view_h = super::live_region_height(input.needed_height(), 40)
-            .saturating_add(popup_h);
+        let view_h = super::live_region_height(input.needed_height(), 40).saturating_add(popup_h);
         let total_h = view_h + 4;
 
         let mut backend = TestBackend::new(w, total_h);
-        backend.set_cursor_position(Position { x: 0, y: 0 }).unwrap();
+        backend
+            .set_cursor_position(Position { x: 0, y: 0 })
+            .unwrap();
         let mut term = Terminal::with_options(
             backend,
             TerminalOptions {
@@ -3980,6 +4169,80 @@ mod render_tests {
         }
     }
 
+    /// The regression `replay_scrollback`'s bottom-alignment exists to prevent,
+    /// stated directly rather than only implied by the padding arithmetic above.
+    ///
+    /// A source-backed resize rebuild always reconstructs the inline viewport at
+    /// row 0, then replays the retained transcript with `insert_before`, which
+    /// leaves the live region on whatever row the replay ends at. A LONG
+    /// transcript overflows the screen, so that row already coincides with
+    /// `rows - inline_h` — the bottom. A SHORT one does not: with no padding, a
+    /// three-line transcript on a 30-row, 4-row-chrome screen would leave the
+    /// composer at row 3, twenty-three rows above where it belongs, with dead
+    /// space under it — visibly regressed against a real resize, which has
+    /// re-anchored the region at the bottom since v1.0.75. That is "the chrome
+    /// rebuilt at the TOP" shape.
+    ///
+    /// `bottom_align_lead` is the fix: pad ahead of a short transcript so the
+    /// live region always lands on the bottom `inline_h` rows regardless of
+    /// how little content preceded it. This test asserts the shape directly —
+    /// the resulting top row equals `rows - inline_h` (the bottom-anchored
+    /// invariant `resize_clear_top_from_bottom` also encodes) and, for a short
+    /// transcript, is NOT row 0 — rather than only checking (as
+    /// `a_padded_replay_fills_the_screen_exactly` does) that the three
+    /// quantities sum to `rows`.
+    #[test]
+    fn assert_chrome_bottom_anchored() {
+        // The exact repro shape from the regression: a short transcript that
+        // would otherwise leave the chrome stranded near the top.
+        let rows = 30u16;
+        let inline_h = 4u16;
+        let content_h = 3u16;
+        let pad = bottom_align_lead(rows, inline_h, content_h);
+        let live_region_top = pad + content_h;
+
+        assert_eq!(
+            live_region_top,
+            rows - inline_h,
+            "a short replayed transcript must still leave the live region \
+             bottom-anchored, not stranded above dead rows"
+        );
+        assert_ne!(
+            live_region_top, 0,
+            "the live region must not be rebuilt at the TOP of the screen — \
+             the defect this test is named for"
+        );
+
+        // Sweep a range of screen/chrome/content combinations: the bottom
+        // anchor must hold whenever there is room for it (content shorter than
+        // the screen minus the chrome), and must never accidentally land on
+        // row 0 unless the chrome itself consumes the whole screen.
+        for rows in [10u16, 24, 30, 50, 80] {
+            for inline_h in [1u16, 4, 7] {
+                if inline_h >= rows {
+                    continue;
+                }
+                for content_h in 0..rows.saturating_sub(inline_h) {
+                    let pad = bottom_align_lead(rows, inline_h, content_h);
+                    let top = pad + content_h;
+                    assert_eq!(
+                        top,
+                        rows - inline_h,
+                        "rows={rows} inline_h={inline_h} content_h={content_h}: \
+                         live region must anchor to the bottom"
+                    );
+                    if rows > inline_h {
+                        assert_ne!(
+                            top, 0,
+                            "rows={rows} inline_h={inline_h} content_h={content_h}: \
+                             live region rebuilt at the top"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn resize_clear_top_from_bottom_lands_on_region_first_row() {
         // The inline live region is pinned to the bottom `inline_h` rows. On a
@@ -4064,7 +4327,10 @@ mod render_tests {
 
         // Which is not merely "a different row": it is the inversion of the
         // bottom-anchored invariant, so the two disagree by nearly a screen.
-        assert_ne!(ratatui_inline_top(0, 30, 4), resize_clear_top_from_bottom(30, 4));
+        assert_ne!(
+            ratatui_inline_top(0, 30, 4),
+            resize_clear_top_from_bottom(30, 4)
+        );
 
         // Measured against the real binary at 30 rows before the fix
         // (`test/pty/anchor_probe.py`): chrome at rows 25-28 when booted and
@@ -4138,7 +4404,9 @@ mod render_tests {
             .unwrap();
         let mut term = Terminal::with_options(
             backend,
-            TerminalOptions { viewport: Viewport::Inline(old_h) },
+            TerminalOptions {
+                viewport: Viewport::Inline(old_h),
+            },
         )
         .unwrap();
         let input = InputComponent::new();
@@ -4158,7 +4426,10 @@ mod render_tests {
         // and now out of bounds — the exact reason the old `terminal.clear()`
         // could not erase the on-screen chrome.
         let stale_top = term.get_frame().area().top();
-        assert_eq!(stale_top, old_top, "cached inline top must still be the pre-resize row");
+        assert_eq!(
+            stale_top, old_top,
+            "cached inline top must still be the pre-resize row"
+        );
         assert!(
             stale_top >= new_rows,
             "root cause: the stale viewport top ({stale_top}) is out of bounds for the shrunk terminal ({new_rows} rows), so a clear anchored to it misses the old chrome",
@@ -4174,7 +4445,11 @@ mod render_tests {
             fix_top < new_rows,
             "fix: the size-anchored clear top ({fix_top}) is within the resized terminal ({new_rows} rows)",
         );
-        assert_eq!(fix_top, new_rows - old_h, "fix: clear starts on the region's first row");
+        assert_eq!(
+            fix_top,
+            new_rows - old_h,
+            "fix: clear starts on the region's first row"
+        );
     }
 
     /// True if any cell in `row` holds non-blank rendered content.
@@ -4209,10 +4484,14 @@ mod render_tests {
         let total_h = 30u16;
 
         let mut backend = TestBackend::new(w, total_h);
-        backend.set_cursor_position(Position { x: 0, y: old_top }).unwrap();
+        backend
+            .set_cursor_position(Position { x: 0, y: old_top })
+            .unwrap();
         let mut term = Terminal::with_options(
             backend,
-            TerminalOptions { viewport: Viewport::Inline(old_h) },
+            TerminalOptions {
+                viewport: Viewport::Inline(old_h),
+            },
         )
         .unwrap();
         assert_eq!(term.get_frame().area().top(), old_top);
@@ -4230,13 +4509,21 @@ mod render_tests {
         let stale_cursor_row = old_top + old_h - 1;
         let mut carried = term.backend().clone();
         carried
-            .set_cursor_position(Position { x: 0, y: stale_cursor_row })
+            .set_cursor_position(Position {
+                x: 0,
+                y: stale_cursor_row,
+            })
             .unwrap();
 
         // The buggy path: rebuild WITHOUT clearing first.
         let new_h = 8u16;
-        let mut buggy = Terminal::with_options(carried, TerminalOptions { viewport: Viewport::Inline(new_h) })
-            .unwrap();
+        let mut buggy = Terminal::with_options(
+            carried,
+            TerminalOptions {
+                viewport: Viewport::Inline(new_h),
+            },
+        )
+        .unwrap();
         let new_top = buggy.get_frame().area().top();
 
         assert!(
@@ -4261,10 +4548,14 @@ mod render_tests {
         let total_h = 30u16;
 
         let mut backend = TestBackend::new(w, total_h);
-        backend.set_cursor_position(Position { x: 0, y: old_top }).unwrap();
+        backend
+            .set_cursor_position(Position { x: 0, y: old_top })
+            .unwrap();
         let mut term = Terminal::with_options(
             backend,
-            TerminalOptions { viewport: Viewport::Inline(old_h) },
+            TerminalOptions {
+                viewport: Viewport::Inline(old_h),
+            },
         )
         .unwrap();
         let input = InputComponent::new();
@@ -4281,16 +4572,25 @@ mod render_tests {
         let mut fixed = term.backend().clone();
         let term_rows = fixed.size().unwrap().height;
         let top = clamp_inline_top(remembered_top, term_rows).expect("top must be in bounds");
-        fixed.set_cursor_position(Position { x: 0, y: top }).unwrap();
-        fixed.clear_region(ratatui::backend::ClearType::AfterCursor).unwrap();
+        fixed
+            .set_cursor_position(Position { x: 0, y: top })
+            .unwrap();
+        fixed
+            .clear_region(ratatui::backend::ClearType::AfterCursor)
+            .unwrap();
         assert!(
             !row_has_content(&fixed, content_row),
             "clearing from the remembered top must wipe the old chrome"
         );
 
         let new_h = 8u16;
-        let mut fixed_term = Terminal::with_options(fixed, TerminalOptions { viewport: Viewport::Inline(new_h) })
-            .unwrap();
+        let mut fixed_term = Terminal::with_options(
+            fixed,
+            TerminalOptions {
+                viewport: Viewport::Inline(new_h),
+            },
+        )
+        .unwrap();
         assert_eq!(
             fixed_term.get_frame().area().top(),
             old_top,
@@ -4319,22 +4619,27 @@ mod render_tests {
             use ratatui::widgets::Widget;
             let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, old_top - 1, w, 1));
             Paragraph::new("earlier transcript line").render(buf.area, &mut buf);
-            backend.draw(buf.content().iter().enumerate().map(|(i, c)| {
-                let x = (i as u16) % w;
-                let y = old_top - 1;
-                (x, y, c)
-            }))
-            .unwrap();
+            backend
+                .draw(buf.content().iter().enumerate().map(|(i, c)| {
+                    let x = (i as u16) % w;
+                    let y = old_top - 1;
+                    (x, y, c)
+                }))
+                .unwrap();
         }
         assert!(
             row_has_content(&backend, old_top - 1),
             "sanity: fake transcript row must have content before the clear"
         );
 
-        backend.set_cursor_position(Position { x: 0, y: old_top }).unwrap();
+        backend
+            .set_cursor_position(Position { x: 0, y: old_top })
+            .unwrap();
         let mut term = Terminal::with_options(
             backend,
-            TerminalOptions { viewport: Viewport::Inline(old_h) },
+            TerminalOptions {
+                viewport: Viewport::Inline(old_h),
+            },
         )
         .unwrap();
         let input = InputComponent::new();
@@ -4346,8 +4651,12 @@ mod render_tests {
 
         let mut fixed = term.backend().clone();
         let top = clamp_inline_top(Some(old_top), fixed.size().unwrap().height).unwrap();
-        fixed.set_cursor_position(Position { x: 0, y: top }).unwrap();
-        fixed.clear_region(ratatui::backend::ClearType::AfterCursor).unwrap();
+        fixed
+            .set_cursor_position(Position { x: 0, y: top })
+            .unwrap();
+        fixed
+            .clear_region(ratatui::backend::ClearType::AfterCursor)
+            .unwrap();
 
         assert!(
             row_has_content(&fixed, old_top - 1),
@@ -4424,10 +4733,14 @@ mod render_tests {
         let total_h = 30u16;
 
         let mut backend = TestBackend::new(w, total_h);
-        backend.set_cursor_position(Position { x: 0, y: old_top }).unwrap();
+        backend
+            .set_cursor_position(Position { x: 0, y: old_top })
+            .unwrap();
         let mut term = Terminal::with_options(
             backend,
-            TerminalOptions { viewport: Viewport::Inline(old_h) },
+            TerminalOptions {
+                viewport: Viewport::Inline(old_h),
+            },
         )
         .unwrap();
         let input = InputComponent::new();
@@ -4450,8 +4763,13 @@ mod render_tests {
             );
         }
 
-        let mut rebuilt = Terminal::with_options(purged, TerminalOptions { viewport: Viewport::Inline(old_h) })
-            .unwrap();
+        let mut rebuilt = Terminal::with_options(
+            purged,
+            TerminalOptions {
+                viewport: Viewport::Inline(old_h),
+            },
+        )
+        .unwrap();
         assert_eq!(
             rebuilt.get_frame().area().top(),
             0,
@@ -4476,7 +4794,10 @@ mod render_tests {
             grown >= base + 4,
             "composer should grow with newlines: base={base} grown={grown}"
         );
-        assert!(grown >= 7, "5-line composer should need >= 7 rows, got {grown}");
+        assert!(
+            grown >= 7,
+            "5-line composer should need >= 7 rows, got {grown}"
+        );
     }
 
     #[test]
@@ -4535,12 +4856,19 @@ mod render_tests {
         // The slot is exactly the preview window stacked on the chrome, and it
         // sits above the idle base (so a preview row band is actually reserved).
         assert_eq!(h0, overhead + input_needed + STREAM_PREVIEW_ROWS);
-        assert!(h0 > base, "streaming reserves the preview slot above idle base");
+        assert!(
+            h0 > base,
+            "streaming reserves the preview slot above idle base"
+        );
 
         // A grown preview is reserved rows-for-rows — the growth must reach the
         // viewport, or `draw_inline` would carve the extra rows out of somewhere
         // else (the composer), which is the band-accounting bug in reverse.
-        for extra in [0u16, super::STREAM_PREVIEW_STEP, super::STREAM_PREVIEW_STEP * 2] {
+        for extra in [
+            0u16,
+            super::STREAM_PREVIEW_STEP,
+            super::STREAM_PREVIEW_STEP * 2,
+        ] {
             let grown = streaming_inline_height(
                 base,
                 overhead,
@@ -4551,7 +4879,11 @@ mod render_tests {
                 STREAM_PREVIEW_ROWS + extra,
                 hi,
             );
-            assert_eq!(grown, h0 + extra, "a {extra}-row taller preview must reserve {extra} more rows");
+            assert_eq!(
+                grown,
+                h0 + extra,
+                "a {extra}-row taller preview must reserve {extra} more rows"
+            );
         }
     }
 
@@ -4603,14 +4935,18 @@ mod render_tests {
                         "explorer",
                         "test-model",
                         format!("investigating subject number {i}"),
-                        Some("background".to_string()), None,);
+                        Some("background".to_string()),
+                        None,
+                    );
                     agents.agent_progress(
                         &format!("agent-{i}"),
                         "reading files",
                         i as u32,
                         100,
                         "",
-                        vec!["file_read: a.rs".into(), "file_grep: foo".into()], None,);
+                        vec!["file_read: a.rs".into(), "file_grep: foo".into()],
+                        None,
+                    );
                 }
                 agents.set_bg_summary(bg);
                 for_each_size(|frame, area| {
@@ -4635,14 +4971,18 @@ mod render_tests {
                     "explorer",
                     "test-model",
                     format!("investigating a fairly long subject line number {i}"),
-                    Some("batch-1".to_string()), None,);
+                    Some("batch-1".to_string()),
+                    None,
+                );
                 agents.agent_progress(
                     &format!("agent-{i}"),
                     "reading files",
                     i as u32,
                     100,
                     "",
-                    Vec::new(), None,);
+                    Vec::new(),
+                    None,
+                );
             }
             let bg_rows = vec![
                 crate::components::agents::BgTerminalRow {
@@ -4667,6 +5007,159 @@ mod render_tests {
     }
 }
 
+// ---------------------------------------------------------------------------
+// "Exactly one copy of the chrome ever exists — for the WHOLE life of the
+// session, not just the current frame" — the invariant `last_inline_top`
+// documents in prose above, enforced here rather than only asserted about.
+//
+// `chrome_region` is a thread-local counter + geometry pair bumped by
+// `switch_to_full`, `switch_to_inline`, and `rebuild_inline` — the only three
+// functions that install a fresh chrome region — every time one of them
+// completes. A test wraps a single call in a before/after snapshot and
+// asserts the generation delta is exactly one: that is "how many live chrome
+// regions got built", answered by a counter instead of scraping a rendered
+// `Buffer` for duplicate composer text.
+//
+// That counter alone proved insufficient: it was measured live (v1.0.189, a
+// long-running tmux pane) that the VISIBLE screen always shows exactly one
+// chrome block while pane HISTORY (`tmux capture-pane -S -2000`) held two to
+// four. Every rebuild still landed in the right place, one at a time — the
+// half this module originally checked — but the OLD region was not always
+// reclaimed before it scrolled into permanent history, and a clean
+// generation delta of one says nothing about that. `reclaimed` is the fix:
+// a pure predicate over "where did the old region start" vs. "how far up did
+// this rebuild's erase reach", directly testable without a `Terminal`.
+//
+// This cannot exercise `switch_to_full`/`switch_to_inline` end-to-end here —
+// both write real cursor-control sequences to `std::io::Stdout`, which a unit
+// test has no business doing — but the counter, the geometry, and the
+// `reclaimed` predicate are directly testable: a test standing in for a call
+// site (bump-then-check, exactly like the real callers do) proves the
+// bookkeeping is sound in isolation, and `debug_assert!`s inside the three
+// real functions (see their bodies) prove each one starts its rebuilt region
+// on the row the caller expected, and (where the erase floor is knowable
+// without ambiguity) that the previous region was fully reclaimed.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod chrome_region_tests {
+    use super::chrome_region;
+
+    #[test]
+    fn one_record_call_bumps_the_generation_by_exactly_one() {
+        let before = chrome_region::generation();
+        chrome_region::record(7, 4);
+        assert_eq!(
+            chrome_region::generation(),
+            before + 1,
+            "a single chrome (re)build must bump the generation by exactly one \
+             — a delta of zero means a call site silently no-op'd and left the \
+             old region on screen; a delta of two or more means it built the \
+             chrome more than once in what should have been one atomic swap"
+        );
+        assert_eq!(chrome_region::last_top(), 7);
+        assert_eq!(chrome_region::last_height(), 4);
+    }
+
+    #[test]
+    fn last_top_and_height_reflect_the_most_recent_record_only() {
+        chrome_region::record(3, 2);
+        chrome_region::record(9, 5);
+        assert_eq!(
+            chrome_region::last_top(),
+            9,
+            "last_top must report the LATEST build, not accumulate history — a \
+             test asserting exactly-one-chrome cares about where it is now"
+        );
+        assert_eq!(chrome_region::last_height(), 5);
+    }
+
+    #[test]
+    fn generation_is_monotonic_across_repeated_rebuilds() {
+        // Models a session that goes full-screen and back inline several
+        // times (dialogs, onboarding, the file picker): each round trip must
+        // account for exactly one region build per switch, never zero (a
+        // stranded old region) and never more than one (a duplicate).
+        let start = chrome_region::generation();
+        for top in [0u16, 5, 0, 12, 0] {
+            let before = chrome_region::generation();
+            chrome_region::record(top, 4);
+            assert_eq!(chrome_region::generation(), before + 1);
+            assert_eq!(chrome_region::last_top(), top);
+        }
+        assert_eq!(chrome_region::generation(), start + 5);
+    }
+
+    // -- `reclaimed`: the reclaim-half predicate --------------------------
+
+    #[test]
+    fn nothing_to_reclaim_is_always_fine() {
+        // `had_previous = false` means this thread has never recorded a
+        // region — there is nothing for the erase to have missed, regardless
+        // of where `prev_top`/`erase_floor` happen to be.
+        assert!(chrome_region::reclaimed(false, 0, 0));
+        assert!(chrome_region::reclaimed(false, 50, 0));
+        assert!(chrome_region::reclaimed(false, 0, 50));
+    }
+
+    #[test]
+    fn an_erase_that_reaches_the_old_top_reclaims_it() {
+        // The erase floor is AT the old region's start row: every row the old
+        // chrome could have occupied is inside `[floor, bottom)`.
+        assert!(chrome_region::reclaimed(true, 20, 20));
+        // The erase floor is ABOVE the old region's start row: still covered,
+        // with room to spare.
+        assert!(chrome_region::reclaimed(true, 20, 10));
+    }
+
+    #[test]
+    fn an_erase_that_stops_short_of_the_old_top_does_not_reclaim_it() {
+        // The exact fossil shape: the old region started at row 5, but this
+        // rebuild only erased from row 10 down. Rows 5..10 of the old chrome
+        // are outside the erased-and-rebuilt range — stranded, and a fossil
+        // in permanent history the moment anything scrolls.
+        assert!(!chrome_region::reclaimed(true, 5, 10));
+    }
+
+    #[test]
+    fn surgical_resize_floor_is_always_reclaimed_by_construction() {
+        // Regression-shaped: `surgical_clear_top` (used by the real resize
+        // path) always erases from `min(old_top, new_top)`, which by
+        // definition can never be greater than `old_top` — so a caller that
+        // feeds `reclaimed` the SAME `min(...)` it actually erased from can
+        // never observe a stranding here, whichever way the region moved.
+        for old_top in [0u16, 5, 12, 40] {
+            for new_top in [0u16, 3, 20, 60] {
+                let floor = super::surgical_clear_top(old_top, new_top);
+                assert!(
+                    chrome_region::reclaimed(true, old_top, floor),
+                    "old_top={old_top} new_top={new_top} floor={floor}: the \
+                     surgical erase floor must always reclaim the old region"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn using_the_landing_row_alone_as_the_floor_would_false_positive() {
+        // The exact trap `rebuild_inline`'s known-top branch avoids: when the
+        // region moves DOWN the screen (old_top < new_top), the real erase
+        // floor is `min(old_top, new_top)` == `old_top`, which reclaims it —
+        // but naively asserting against the landing row alone (`new_top`)
+        // would wrongly call this a stranding. This test pins down WHY that
+        // check was deliberately left out of `rebuild_inline`, rather than
+        // asserting the (safe) absence of a check by omission.
+        let old_top = 5u16;
+        let new_top = 20u16;
+        let real_floor = super::surgical_clear_top(old_top, new_top);
+        assert!(chrome_region::reclaimed(true, old_top, real_floor));
+        assert!(
+            !chrome_region::reclaimed(true, old_top, new_top),
+            "asserting against the landing row alone must disagree with the \
+             real (surgical) floor here — that mismatch is the false positive"
+        );
+    }
+}
+
 #[cfg(test)]
 mod cadence_tests {
     use super::is_stream_delta;
@@ -4688,9 +5181,9 @@ mod cadence_tests {
     #[test]
     fn only_assistant_deltas_are_deferrable() {
         assert!(is_stream_delta(&token()));
-        assert!(is_stream_delta(&Event::Backend(BackendEvent::ThinkingDelta {
-            text: "…".into()
-        })));
+        assert!(is_stream_delta(&Event::Backend(
+            BackendEvent::ThinkingDelta { text: "…".into() }
+        )));
 
         // A tick drives the spinner; deferring it would stutter the animation.
         assert!(!is_stream_delta(&Event::Tick));
@@ -4706,12 +5199,14 @@ mod cadence_tests {
             crossterm::event::Event::Resize(80, 24)
         )));
         // The terminal event that ENDS the stream draws immediately too.
-        assert!(!is_stream_delta(&Event::Backend(BackendEvent::AgentResponse {
-            response: "done".into(),
-            response_type: "text".into(),
-            signal: None,
-            message_id: Some("m1".into()),
-        })));
+        assert!(!is_stream_delta(&Event::Backend(
+            BackendEvent::AgentResponse {
+                response: "done".into(),
+                response_type: "text".into(),
+                signal: None,
+                message_id: Some("m1".into()),
+            }
+        )));
     }
 
     // ── The waiting repaint rate ────────────────────────────────────────

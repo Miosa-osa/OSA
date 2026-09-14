@@ -1,8 +1,44 @@
 defmodule OptimalSystemAgent.Agent.Tasks.TrackerTest do
-  use ExUnit.Case, async: true
+  # `Tasks.Tracker.ensure_session/2` falls through to
+  # `Tasks.Persistence.load_tasks/1` for any session id it hasn't seen yet in
+  # the CURRENT process's in-memory state, and that read (like the matching
+  # `save_tasks/2` write in every test below) goes to the REAL
+  # `~/.osa/sessions/{id}/tasks.json` — `Persistence.tasks_path/1` has no
+  # process-scoped override, only `System.get_env("OSA_HOME")`. A `session_id`
+  # is a fresh `System.unique_integer/1` every call, so within one run this
+  # never collides — but `mix test` runs interrupted mid-suite (a killed run,
+  # a crash) skip every `on_exit`, and each one leaves a REAL, permanent
+  # `test_tracker_<N>/tasks.json` behind. `unique_integer/1` restarts from a
+  # low value on every fresh BEAM boot, so a later run's freshly-generated id
+  # has a real chance of landing on ONE of the (thousands, in practice) stale
+  # directories left by earlier interrupted runs, and this test then reads
+  # THAT run's leftover tasks back as if they were its own — observed as
+  # "empty list returns empty ids" getting "Task A"/"Task B"/"Task C" from the
+  # sibling "adds multiple tasks at once" test's abandoned directory.
+  #
+  # Fix: give every test its own throwaway `OSA_HOME`, exactly like
+  # `cli_setup_test.exs` / `onboarding_setup_wizard_hotfix_test.exs` do for the
+  # same reason — so this suite can never again write into (or accidentally
+  # resurrect a stale read from) the operator's real `~/.osa`. `async: false`
+  # because `OSA_HOME` is a process-wide OS env var.
+  use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Agent.Tasks
   alias OptimalSystemAgent.Agent.Tasks.Tracker
+
+  setup do
+    tmp = Path.join(System.tmp_dir!(), "osa_tracker_t#{System.unique_integer([:positive])}")
+    File.mkdir_p!(tmp)
+    prev_home = System.get_env("OSA_HOME")
+    System.put_env("OSA_HOME", tmp)
+
+    on_exit(fn ->
+      if prev_home, do: System.put_env("OSA_HOME", prev_home), else: System.delete_env("OSA_HOME")
+      File.rm_rf(tmp)
+    end)
+
+    :ok
+  end
 
   # ── Helpers ──────────────────────────────────────────────────────
 
@@ -17,17 +53,10 @@ defmodule OptimalSystemAgent.Agent.Tasks.TrackerTest do
     {pid, name}
   end
 
-  defp session_id do
-    id = "test_tracker_#{System.unique_integer([:positive, :monotonic])}"
-
-    on_exit(fn ->
-      base = System.get_env("OSA_HOME") || Path.expand("~/.osa")
-      dir = Path.join([base, "sessions", id])
-      File.rm_rf(dir)
-    end)
-
-    id
-  end
+  # Each test's OSA_HOME is its own throwaway temp dir (see `setup` above,
+  # torn down whole in its `on_exit`), so there is nothing left for this
+  # helper to clean up per id.
+  defp session_id, do: "test_tracker_#{System.unique_integer([:positive, :monotonic])}"
 
   # ── add_task ────────────────────────────────────────────────────
 

@@ -103,9 +103,12 @@ defmodule OptimalSystemAgent.Agent.Safety.PathPolicyTest do
     end
 
     test "the real system directories are still blocked" do
-      assert PathPolicy.blocked_write?("/var/log/syslog")
-      assert PathPolicy.blocked_write?("/usr/bin/env")
-      assert PathPolicy.blocked_write?("/etc/passwd")
+      # macOS note: canonicalised paths resolve /var -> /private/var, so the
+      # rules carry both forms; the CANONICAL form is what check_write/2
+      # evaluates, and the raw form stays blocked for direct callers.
+      assert PathPolicy.blocked_write?("/private/var/log/syslog")
+      assert PathPolicy.blocked_write?("/private/usr/bin/env")
+      assert PathPolicy.blocked_write?("/private/etc/passwd")
       assert PathPolicy.blocked_write?("/boot/vmlinuz")
     end
 

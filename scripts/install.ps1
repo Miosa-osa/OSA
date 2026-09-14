@@ -163,6 +163,7 @@ if ($haveSidecar) {
   }
   Write-Ok 'Checksum verified'
 } else {
+  if ($env:OSA_INSTALL_REQUIRE_CHECKSUM -eq '1') { Write-Fail 'Required release checksum is unavailable.' 3 }
   Write-Warn 'No .sha256 sidecar for this release - skipping verification.'
 }
 
@@ -184,6 +185,7 @@ if ($haveTuiSidecar) {
   }
   Write-Ok 'Checksum verified (TUI)'
 } else {
+  if ($env:OSA_INSTALL_REQUIRE_CHECKSUM -eq '1') { Write-Fail 'Required TUI checksum is unavailable.' 3 }
   Write-Warn 'No .sha256 sidecar for the TUI binary - skipping verification.'
 }
 
@@ -1219,7 +1221,7 @@ if ($userPath) {
   }
 }
 $pathHint = $false
-if (-not $onPath) {
+if (-not $onPath -and $env:OSA_INSTALL_SKIP_PATH -ne '1') {
   if ([string]::IsNullOrEmpty($userPath)) {
     $newPath = $BinDir
   } else {

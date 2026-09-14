@@ -357,10 +357,24 @@ mod prune_tests {
     fn mention_image_paths_keeps_only_image_files() {
         use crate::components::input::mentions::{Attachment as M, LineRange};
         let atts = vec![
-            M::File { path: "docs/diagram.PNG".into(), range: None },
-            M::File { path: "src/main.rs".into(), range: Some(LineRange { start: 1, end: None }) },
-            M::File { path: "shot.jpeg".into(), range: None },
-            M::Agent { name: "reviewer".into() },
+            M::File {
+                path: "docs/diagram.PNG".into(),
+                range: None,
+            },
+            M::File {
+                path: "src/main.rs".into(),
+                range: Some(LineRange {
+                    start: 1,
+                    end: None,
+                }),
+            },
+            M::File {
+                path: "shot.jpeg".into(),
+                range: None,
+            },
+            M::Agent {
+                name: "reviewer".into(),
+            },
         ];
         // Only the two image files survive; the .rs mention and the @agent are
         // excluded (they stay inline prompt text, not on the vision wire).
@@ -374,13 +388,27 @@ mod prune_tests {
     fn mention_context_refs_carries_non_image_file_and_agent() {
         use crate::components::input::mentions::{Attachment as M, LineRange};
         let atts = vec![
-            M::File { path: "docs/diagram.PNG".into(), range: None },
+            M::File {
+                path: "docs/diagram.PNG".into(),
+                range: None,
+            },
             M::File {
                 path: "src/main.rs".into(),
-                range: Some(LineRange { start: 10, end: Some(20) }),
+                range: Some(LineRange {
+                    start: 10,
+                    end: Some(20),
+                }),
             },
-            M::File { path: "README.md".into(), range: Some(LineRange { start: 5, end: None }) },
-            M::Agent { name: "debugger".into() },
+            M::File {
+                path: "README.md".into(),
+                range: Some(LineRange {
+                    start: 5,
+                    end: None,
+                }),
+            },
+            M::Agent {
+                name: "debugger".into(),
+            },
         ];
         let refs = mention_context_refs(&atts);
         // The image mention is excluded (it rides `images` instead).
@@ -419,9 +447,15 @@ mod prune_tests {
             "/tmp/x.png"
         );
         // Quoted plain path still works (no file:// scheme).
-        assert_eq!(decode_dropped_path("'/tmp/my file.png'"), "/tmp/my file.png");
+        assert_eq!(
+            decode_dropped_path("'/tmp/my file.png'"),
+            "/tmp/my file.png"
+        );
         // Shell-escaped plain path still works.
-        assert_eq!(decode_dropped_path("/tmp/my\\ file.png"), "/tmp/my file.png");
+        assert_eq!(
+            decode_dropped_path("/tmp/my\\ file.png"),
+            "/tmp/my file.png"
+        );
     }
 
     #[test]
@@ -433,7 +467,10 @@ mod prune_tests {
         let uri = format!("file://{}", path.to_string_lossy());
         let got = parse_attachment_paths(&uri);
         assert_eq!(got, vec![path.to_string_lossy().to_string()]);
-        assert!(is_image_path(&got[0]), "dropped .png is recognised as an image");
+        assert!(
+            is_image_path(&got[0]),
+            "dropped .png is recognised as an image"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

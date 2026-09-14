@@ -7,13 +7,29 @@ defmodule OptimalSystemAgent.Monitor.WatchTask do
   (non-blocking — the agent's ReAct turn is NOT held while it runs) and, on each
   detected change (or when an optional `condition` becomes true), it:
 
-    * emits `{:system_event, event: :monitor_fired, ...}` on the `Events.Bus`
+    * emits `{:system_event, event: :monitor_event, ...}` on the `Events.Bus`
       (bridged to the session's `osa:session:<id>` PubSub topic by
-      `Events.TuiForwarder`, whose allowlist already includes `monitor_fired`),
-      and
+      `Events.TuiForwarder`, whose allowlist already includes it), and
     * injects a synthetic user message into the parent `Agent.Loop` via
       `Loop.inject_agent_result/2` so the model sees the change at its next step
       boundary — the same re-entry mechanism background shell commands use.
+
+  ## Lifecycle frames (agents-tree parity)
+
+  Every emitted Bus event ALSO carries the minimal, fixed shape the TUI's
+  agents tree renders a monitor as a node from — mirroring the same
+  `id`/`label`/`state`/`parent_agent_id` convention `BackgroundNotifier` and
+  `Fleet` already use for subagent nodes on this exact transport, so the tree
+  can nest a monitor under whichever agent started it (or under the root, when
+  `parent_agent_id` is `nil`):
+
+    * `monitor_started` — the watch was registered (`state: "running"`).
+    * `monitor_event`   — a change (or edge-triggered condition) fired
+      (`state: "running"` — the watch may still be alive; a `:once` watch's
+      terminal transition is reported by the `monitor_done` that immediately
+      follows, not folded into this frame).
+    * `monitor_done`    — the watch is retiring, whatever the reason
+      (`state: "done" | "timeout" | "stopped"`).
 
   Modes:
     * `:once`   — fire once, then retire (backward-compatible default).
@@ -109,7 +125,7 @@ defmodule OptimalSystemAgent.Monitor.WatchTask do
       max_fires: max_fires
     }
 
-    emit(state, :monitor_started, %{mode: mode, poll_interval_ms: poll_ms})
+    emit(state, :monitor_started, %{mode: mode, poll_interval_ms: poll_ms}, "running")
     schedule_poll(state)
     {:ok, state}
   end
@@ -132,7 +148,7 @@ defmodule OptimalSystemAgent.Monitor.WatchTask do
         handle_fire(state, current, now, expired?)
 
       expired? ->
-        emit(state, :monitor_timeout, %{elapsed_ms: now - state.started_at})
+        emit(state, :monitor_done, %{elapsed_ms: now - state.started_at}, "timeout")
         {:stop, :normal, %{state | status: :timeout}}
 
       true ->
@@ -147,6 +163,7 @@ defmodule OptimalSystemAgent.Monitor.WatchTask do
   def handle_call(:snapshot, _from, state), do: {:reply, to_map(state), state}
 
   def handle_call(:stop, _from, state) do
+    emit(state, :monitor_done, %{}, "stopped")
     {:stop, :normal, to_map(%{state | status: :stopped}), %{state | status: :stopped}}
   end
 
@@ -156,12 +173,17 @@ defmodule OptimalSystemAgent.Monitor.WatchTask do
     elapsed_ms = now - state.started_at
     fires = state.fires + 1
 
-    emit(state, :monitor_fired, %{
-      fire: fires,
-      before: inspect(state.baseline),
-      after: inspect(current),
-      elapsed_ms: elapsed_ms
-    })
+    emit(
+      state,
+      :monitor_event,
+      %{
+        fire: fires,
+        before: inspect(state.baseline),
+        after: inspect(current),
+        elapsed_ms: elapsed_ms
+      },
+      "running"
+    )
 
     inject(state, current, elapsed_ms, fires)
 
@@ -171,6 +193,7 @@ defmodule OptimalSystemAgent.Monitor.WatchTask do
     # and there is no window left to keep watching, so retire instead of
     # re-scheduling a zero-delay poll that could only time out.
     if state.mode == :once or fires >= state.max_fires or expired? do
+      emit(state, :monitor_done, %{elapsed_ms: elapsed_ms}, "done")
       {:stop, :normal, %{state | status: :done}}
     else
       schedule_poll(state)
@@ -192,9 +215,14 @@ defmodule OptimalSystemAgent.Monitor.WatchTask do
 
   # ── Event emit + loop injection ──────────────────────────────────────
 
-  defp emit(%{session_id: sid}, _event, _extra) when not is_binary(sid), do: :ok
+  defp emit(%{session_id: sid}, _event, _extra, _tree_state) when not is_binary(sid), do: :ok
 
-  defp emit(state, event, extra) do
+  # `tree_state` is the fixed lifecycle vocabulary the agents-tree node reads
+  # ("running" | "done" | "timeout" | "stopped") — passed explicitly at every
+  # call site rather than derived from `state.status`, because `state.status`
+  # itself is only updated in the RETURN value of the caller (see
+  # `handle_fire/4`), not in the `state` this function closes over.
+  defp emit(state, event, extra, tree_state) do
     Bus.emit(
       :system_event,
       Map.merge(
@@ -203,7 +231,19 @@ defmodule OptimalSystemAgent.Monitor.WatchTask do
           session_id: state.session_id,
           watch_id: state.id,
           kind: state.kind,
-          target: state.target
+          target: state.target,
+          # Minimal lifecycle-frame contract the TUI agents tree renders a
+          # monitor node from (`monitor_started` / `monitor_event` /
+          # `monitor_done`) — same `id`/`label`/`state`/`parent_agent_id` shape
+          # `BackgroundNotifier`/`Fleet` already use for subagent nodes, over
+          # the identical Bus → `TuiForwarder` → `osa:session:<id>` transport
+          # (see moduledoc). Kept alongside the richer `watch_id`/`kind`/
+          # `target`/`extra` fields above rather than replacing them, so
+          # nothing that reads those loses them.
+          id: state.id,
+          label: "#{state.kind}:#{state.target}",
+          state: tree_state,
+          parent_agent_id: parent_agent_id(state.session_id)
         },
         extra
       )
@@ -215,6 +255,17 @@ defmodule OptimalSystemAgent.Monitor.WatchTask do
   catch
     _, _ -> :ok
   end
+
+  # A monitor started BY a subagent nests under that subagent's node in the
+  # tree; one started by the main/root session has no parent node to nest
+  # under. `"agent:"` is the established subagent-id prefix used the same way
+  # elsewhere (e.g. `Agent.Hooks.Handlers`, `agent_management_routes.ex`) —
+  # reused here rather than re-deriving session identity a new way.
+  defp parent_agent_id(session_id) when is_binary(session_id) do
+    if String.starts_with?(session_id, "agent:"), do: session_id, else: nil
+  end
+
+  defp parent_agent_id(_), do: nil
 
   defp inject(%{session_id: sid}, _current, _elapsed_ms, _fires) when not is_binary(sid), do: :ok
 

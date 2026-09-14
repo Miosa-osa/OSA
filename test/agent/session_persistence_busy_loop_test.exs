@@ -111,8 +111,11 @@ defmodule OptimalSystemAgent.Agent.SessionPersistenceBusyLoopTest do
       assert length(restored) == 2
       assert Enum.any?(restored, &(&1[:content] == "work that must survive"))
 
-      # Spend is persisted at the same turn boundary (audit gap C2).
-      assert SessionPersistence.load_spend(id).cost_usd == 2.5
+      # Spend is persisted at the same turn boundary (audit gap C2). The
+      # transcript write and the spend sidecar are separate files written in
+      # the same handler; under load the transcript can land a moment before
+      # the sidecar flush, so wait for the sidecar rather than racing it.
+      assert eventually(fn -> SessionPersistence.load_spend(id).cost_usd == 2.5 end)
 
       GenServer.stop(pid)
     end

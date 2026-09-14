@@ -17,7 +17,11 @@ defmodule OptimalSystemAgent.OnboardingAuthModesTest do
   promised could not happen.
   """
 
-  use ExUnit.Case, async: true
+  # "when sign-in is not available in this build" below touches both
+  # `:copilot_client_id` (Application env) and `OSA_COPILOT_CLIENT_ID` (a
+  # process-wide OS env var) — unsafe under `async: true` if any other
+  # concurrently-running test reads either while this one has them cleared.
+  use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Onboarding
 
@@ -31,7 +35,7 @@ defmodule OptimalSystemAgent.OnboardingAuthModesTest do
   # routing that makes it usable — never before it (the BYOK suite enforces
   # exactly that: "a provider you can select but never use is worse than one
   # that is absent"). Everything NOT listed here must be untouched.
-  @new_provider_ids ["openai_codex", "claude_cli", "copilot_cli", "bedrock"]
+  @new_provider_ids ["openai_codex", "claude_cli", "copilot_cli", "bedrock", "surplus"]
 
   # Pre-existing providers that have since GAINED a second auth mode in place,
   # rather than being split into a second entry. The test for which pattern

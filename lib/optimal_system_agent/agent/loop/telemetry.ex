@@ -25,7 +25,8 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
     model_window = provider_context_window(state)
 
     # ONE denominator. `used_percent/2` and `warning_state/2` both clamp the
-    # window internally (`operative_window/1`, min(window, 200k)), but the raw
+    # window internally (`operative_window/1`, which is `min(window,
+    # model_ceiling)` — a per-model share, not a flat 200k), but the raw
     # window was ALSO emitted as `max_tokens` — which the TUI both displays and
     # uses as its own ratio fallback (`estimated_tokens / max_tokens`). On a
     # 500K model that is a 2.8x disagreement inside a single status line.
@@ -53,11 +54,11 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
         do: state.last_input_tokens,
         else: OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
 
-    # Percent is measured against the EFFECTIVE window (window - output reserve),
-    # Claude Code parity, so "N% used" lines up with the auto-compact threshold.
+    # Display occupancy against the SAME denominator emitted as max_tokens.
+    # Reserve-based warning/compaction thresholds remain independent below.
     utilization =
       if max_tok > 0,
-        do: CompactionThresholds.used_percent(estimated, max_tok),
+        do: min(100.0, Float.round(estimated / max_tok * 100, 1)),
         else: 0.0
 
     warning =
@@ -103,6 +104,26 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
         "above_warning=#{warning.above_warning} above_compact=#{warning.above_compact}"
     )
 
+    # Mirror this session's LIVE context utilization into the per-agent control
+    # store. A subagent's session_id IS its agent_id (Orchestrator), so the
+    # progress forwarder can read it back and surface a real "N% ctx" on the
+    # agent-dashboard row instead of a cumulative, cache-inclusive token count
+    # that reads like runaway spend. Best-effort — a telemetry write must never
+    # break the turn.
+    _ =
+      try do
+        OptimalSystemAgent.Agent.ExecutionControl.progress(
+          state.session_id,
+          # Integer percent 0..100. The TUI decodes this as Option<u32>; a float
+          # would fail that decode and drop the whole progress frame, so round.
+          %{context_percent: round(utilization * 1.0)}
+        )
+      rescue
+        _ -> :ok
+      catch
+        _, _ -> :ok
+      end
+
     Bus.emit(:system_event, %{
       event: :context_pressure,
       session_id: state.session_id,
@@ -137,6 +158,15 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
          model_context_window: model_window,
          context_window_clamped: max_tok < model_window,
          utilization: utilization,
+         # Item 10 — the session/main row's honest headline: context% of window +
+         # real $ cost, so the ROOT row stops presenting a raw, cache-inflated
+         # cumulative token count as if it were spend. `context_percent` mirrors
+         # `utilization` but is ROUNDED to an integer — the TUI decodes this field
+         # as u32 and would drop the whole frame on a float (same contract as the
+         # per-agent mirror in ExecutionControl). `cost_usd` is this session's real
+         # (per-model cache-discounted) spend, read straight off the loop state.
+         context_percent: round(utilization),
+         cost_usd: Map.get(state, :session_cost_usd, 0.0),
          percent_left: warning.percent_left,
          context_low: warning.above_warning,
          above_compact: warning.above_compact,

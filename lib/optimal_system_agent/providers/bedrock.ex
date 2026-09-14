@@ -155,6 +155,15 @@ defmodule OptimalSystemAgent.Providers.Bedrock do
   def build_request_body(messages, model, opts \\ []) do
     {system, conversation} = split_system(messages)
 
+    # No service tier on this body, deliberately. The shape it used to send,
+    # `"serviceTier" => %{"type" => tier}` at the Converse top level, is not a
+    # field this module ever verified against the live API, and the tier it
+    # carried ("priority") is OpenAI's vocabulary rather than anything AWS
+    # documents. Converse's documented latency knob is `performanceConfig`, a
+    # different field with a different shape. Guessing costs a rejected request
+    # plus the tier-less retry behind it on every `/fast` turn, which is worse
+    # than not having the feature, so this stays out until a live call
+    # confirms the field name and its accepted values.
     %{"messages" => format_messages(conversation)}
     |> put_unless_empty("system", Enum.map(system, &%{"text" => &1}))
     |> put_inference_config(opts)

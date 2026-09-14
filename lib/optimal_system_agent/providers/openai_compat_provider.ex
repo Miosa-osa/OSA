@@ -6,7 +6,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   configs and dispatches to OpenAICompat.chat/5 with the correct URL, API key, and model.
 
   Covers: openai, groq, deepseek, together, fireworks, perplexity, mistral,
-  openrouter, qwen, moonshot, zhipu, volcengine, baichuan.
+  openrouter, surplus, qwen, moonshot, zhipu, volcengine, baichuan.
   """
 
   alias OptimalSystemAgent.Providers.ConfiguredModel
@@ -106,6 +106,11 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
         {"HTTP-Referer", "https://github.com/Miosa-osa/OSA"},
         {"X-Title", "OSA"}
       ]
+    },
+    surplus: %{
+      default_url: "https://api.surplusintelligence.ai/v1",
+      default_model: OptimalSystemAgent.Providers.SurplusModels.default_model(),
+      available_models: {OptimalSystemAgent.Providers.SurplusModels, :ids}
     },
     qwen: %{
       default_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -222,6 +227,12 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
 
   @doc "Return provider atoms handled by this module."
   def providers, do: Map.keys(@provider_configs)
+
+  @doc false
+  def transport(:openai, "gpt-6-astra"),
+    do: OptimalSystemAgent.Providers.OpenAIResponses
+
+  def transport(_provider, _model), do: OpenAICompat
 
   @doc "Return the default model for a given provider."
   # Honour the SAME configured key `chat/3` honours.
@@ -377,7 +388,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
 
       result =
         retry_once_on_rejected_account_token(provider, api_key, fn key ->
-          OpenAICompat.chat(url, key, model, messages, opts)
+          transport(provider, model).chat(url, key, model, messages, opts)
         end)
 
       case result do
@@ -421,7 +432,7 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
 
       result =
         retry_once_on_rejected_account_token(provider, api_key, fn key ->
-          OpenAICompat.chat_stream(url, key, model, messages, callback, opts)
+          transport(provider, model).chat_stream(url, key, model, messages, callback, opts)
         end)
 
       case result do

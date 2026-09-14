@@ -359,10 +359,10 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   @impl OptimalSystemAgent.Agent.ContextEngine
   def estimate_tokens(messages) when is_list(messages) do
     Enum.reduce(messages, 0, fn msg, acc ->
-      content_tokens = estimate_content_tokens(Map.get(msg, :content))
+      content_tokens = estimate_content_tokens(Map.get(msg, :content) || Map.get(msg, "content"))
 
       tool_call_tokens =
-        case Map.get(msg, :tool_calls) do
+        case Map.get(msg, :tool_calls) || Map.get(msg, "tool_calls") do
           nil ->
             0
 
@@ -370,10 +370,20 @@ defmodule OptimalSystemAgent.Agent.Compactor do
             0
 
           calls when is_list(calls) ->
-            Enum.reduce(calls, 0, fn tc, tc_acc ->
-              name_tokens = estimate_tokens(safe_to_string(Map.get(tc, :name, "")))
-              arg_tokens = estimate_tokens(safe_to_string(Map.get(tc, :arguments, "")))
-              tc_acc + name_tokens + arg_tokens + 4
+            Enum.reduce(calls, 0, fn
+              tc, tc_acc when is_map(tc) ->
+                name_tokens =
+                  estimate_tokens(safe_to_string(Map.get(tc, :name) || Map.get(tc, "name", "")))
+
+                arg_tokens =
+                  estimate_tokens(
+                    safe_to_string(Map.get(tc, :arguments) || Map.get(tc, "arguments", ""))
+                  )
+
+                tc_acc + name_tokens + arg_tokens + 4
+
+              _, tc_acc ->
+                tc_acc
             end)
 
           _ ->
@@ -413,6 +423,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   def estimate_content_tokens(blocks) when is_list(blocks),
     do: Enum.reduce(blocks, 0, fn block, acc -> acc + estimate_block_tokens(block) end)
 
+  def estimate_content_tokens(block) when is_map(block), do: estimate_block_tokens(block)
   def estimate_content_tokens(other), do: estimate_tokens(safe_to_string(other))
 
   # One content block. Images are charged flat; text blocks are measured on
@@ -2324,14 +2335,29 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # JSON-encoded straight into the prompt by `safe_to_string/1`.
   # ---------------------------------------------------------------------------
 
-  @tool_output_max_chars 2_000
+  # Cap on a single tool result WHEN it is folded into a summarization prompt
+  # (P6). This is deliberately much tighter than the loop-transcript cap
+  # (`:max_tool_output_bytes`, item 9): by the time history is summarized, each
+  # tool result was already bounded on the way into the transcript, and the
+  # summary only needs a gist — so we shrink it further here. Runtime-configurable
+  # (gap #1) via `:summary_tool_output_max_chars` / OSA_SUMMARY_TOOL_OUTPUT_MAX_CHARS;
+  # default unchanged (2_000). Kept ≤ the loop cap so the two never fight: this
+  # only ever shrinks an already-capped result further, never re-expands it.
+  @default_tool_output_max_chars 2_000
+
+  defp tool_output_max_chars do
+    case Application.get_env(:optimal_system_agent, :summary_tool_output_max_chars) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @default_tool_output_max_chars
+    end
+  end
 
   @doc """
   Formats a message list into the plain-text block fed to summarization LLM
   calls, with media stripped to `[Attached <type>]` placeholders and tool
-  output capped at `@tool_output_max_chars` (P6). Public (rather than `defp`)
-  so it is directly unit-testable — mirrors `micro_compact/1`'s exposure of
-  an internal pipeline step for the same reason.
+  output capped at the summarization tool-output limit (P6). Public (rather
+  than `defp`) so it is directly unit-testable — mirrors `micro_compact/1`'s
+  exposure of an internal pipeline step for the same reason.
   """
   @spec format_for_summary([map()]) :: String.t()
   @impl OptimalSystemAgent.Agent.ContextEngine
@@ -2417,15 +2443,17 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   defp block_text(block),
     do: safe_to_string(Map.get(block, "text", Map.get(block, :text, "")))
 
-  # Caps a (already media-stripped) tool-result string at
-  # `@tool_output_max_chars`, matching opencode's `toolOutputMaxChars`. Only
-  # applied to `role: "tool"` content — assistant/user prose is left to the
-  # existing zone/importance compression to size down.
+  # Caps a (already media-stripped) tool-result string at the configured
+  # summarization tool-output limit. Only applied to `role: "tool"` content —
+  # assistant/user prose is left to the existing zone/importance compression to
+  # size down.
   @doc false
   defp cap_tool_output(content) when is_binary(content) do
-    if String.length(content) > @tool_output_max_chars do
-      truncated = String.slice(content, 0, @tool_output_max_chars)
-      omitted = String.length(content) - @tool_output_max_chars
+    cap = tool_output_max_chars()
+
+    if String.length(content) > cap do
+      truncated = String.slice(content, 0, cap)
+      omitted = String.length(content) - cap
       "#{truncated}\n[... #{omitted} more characters truncated for summarization]"
     else
       content

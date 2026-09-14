@@ -200,17 +200,24 @@ defmodule OptimalSystemAgent.Providers.ModerationTest do
 
   describe "check_messages/2" do
     test "returns empty result when no API key configured" do
-      # Clear any configured key
+      # Clear any configured key. Register the restore BEFORE mutating so it runs
+      # even if an assertion below fails — an inline restore at the end of the
+      # body leaks the deleted global into later tests on the failure path, and
+      # this module is async: true so the leak races concurrent readers. (#208)
       previous = Application.get_env(:optimal_system_agent, :openai_api_key)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:optimal_system_agent, :openai_api_key, previous),
+          else: Application.delete_env(:optimal_system_agent, :openai_api_key)
+      end)
+
       Application.delete_env(:optimal_system_agent, :openai_api_key)
 
       result = Moderation.check_messages([%{role: "user", content: "pentest example.com"}])
 
       assert result.should_uncensor == false
       assert result.moderation_text == ""
-
-      # Restore
-      if previous, do: Application.put_env(:optimal_system_agent, :openai_api_key, previous)
     end
 
     test "returns empty result for no user messages" do

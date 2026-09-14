@@ -75,7 +75,8 @@ impl HooksViewer {
     /// rendered order matches real execution order (lower priority runs first).
     pub fn new(mut events: Vec<EventHooks>) -> Self {
         for e in &mut events {
-            e.hooks.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.name.cmp(&b.name)));
+            e.hooks
+                .sort_by(|a, b| a.priority.cmp(&b.priority).then(a.name.cmp(&b.name)));
         }
         Self {
             events,
@@ -111,7 +112,10 @@ impl HooksViewer {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> HooksViewerAction {
         // Chorded shortcuts belong to the app, not this overlay.
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return HooksViewerAction::None;
         }
         let last = self.rows().len().saturating_sub(1);
@@ -163,7 +167,10 @@ impl HooksViewer {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(c.primary))
             .title(Line::from(vec![
-                Span::styled(" OSA ", Style::default().fg(c.primary).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " OSA ",
+                    Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("\u{00b7} hooks ", Style::default().fg(c.muted)),
             ]))
             .style(Style::default().bg(c.dialog_bg));
@@ -197,8 +204,11 @@ impl HooksViewer {
             );
         } else {
             let rows = self.rows();
-            let scroll =
-                crate::dialogs::clamp_scroll_to_cursor(self.scroll, self.cursor, (list_h as usize).max(1));
+            let scroll = crate::dialogs::clamp_scroll_to_cursor(
+                self.scroll,
+                self.cursor,
+                (list_h as usize).max(1),
+            );
 
             for rel in 0..(list_h as usize) {
                 let abs = rel + scroll;
@@ -206,8 +216,25 @@ impl HooksViewer {
                 let ry = inner.y + rel as u16;
                 let selected = abs == self.cursor;
                 match row {
-                    Row::Header(ei) => self.draw_header(frame, c, &theme, *ei, selected, maxw, Rect::new(inner.x, ry, iw, 1)),
-                    Row::Hook(ei, hi) => self.draw_hook(frame, c, &theme, *ei, *hi, selected, maxw, Rect::new(inner.x, ry, iw, 1)),
+                    Row::Header(ei) => self.draw_header(
+                        frame,
+                        c,
+                        &theme,
+                        *ei,
+                        selected,
+                        maxw,
+                        Rect::new(inner.x, ry, iw, 1),
+                    ),
+                    Row::Hook(ei, hi) => self.draw_hook(
+                        frame,
+                        c,
+                        &theme,
+                        *ei,
+                        *hi,
+                        selected,
+                        maxw,
+                        Rect::new(inner.x, ry, iw, 1),
+                    ),
                 }
             }
         }
@@ -223,9 +250,17 @@ impl HooksViewer {
                     format!("{total} hooks"),
                     Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!(" across {n_ev} events  "), Style::default().fg(c.dim)),
+                Span::styled(
+                    format!(" across {n_ev} events  "),
+                    Style::default().fg(c.dim),
+                ),
                 Span::styled("lower priority runs first  ", Style::default().fg(c.muted)),
-                Span::styled("esc", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "esc",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" close", Style::default().fg(c.dim)),
             ])),
             Rect::new(inner.x, footer_y, iw, 1),
@@ -233,7 +268,16 @@ impl HooksViewer {
     }
 
     /// Event header: bold name on the left, dim metric summary right-aligned.
-    fn draw_header(&self, frame: &mut Frame, c: &crate::style::ThemeColors, theme: &crate::style::Theme, ei: usize, selected: bool, maxw: usize, rect: Rect) {
+    fn draw_header(
+        &self,
+        frame: &mut Frame,
+        c: &crate::style::ThemeColors,
+        theme: &crate::style::Theme,
+        ei: usize,
+        selected: bool,
+        maxw: usize,
+        rect: Rect,
+    ) {
         let e = &self.events[ei];
         let metric = if e.calls > 0 {
             format!("{} calls \u{00b7} avg {} \u{00b5}s", e.calls, e.avg_us)
@@ -250,7 +294,11 @@ impl HooksViewer {
                 format!("{name}   {metric}")
             };
             let s = crate::util::pad_cols(&raw, maxw);
-            put(frame, Paragraph::new(Line::from(Span::styled(s, theme.button_active()))), rect);
+            put(
+                frame,
+                Paragraph::new(Line::from(Span::styled(s, theme.button_active()))),
+                rect,
+            );
             return;
         }
 
@@ -269,12 +317,26 @@ impl HooksViewer {
     }
 
     /// Hook row: indented `priority  name`, sorted so it reads in run order.
-    fn draw_hook(&self, frame: &mut Frame, c: &crate::style::ThemeColors, theme: &crate::style::Theme, ei: usize, hi: usize, selected: bool, maxw: usize, rect: Rect) {
+    fn draw_hook(
+        &self,
+        frame: &mut Frame,
+        c: &crate::style::ThemeColors,
+        theme: &crate::style::Theme,
+        ei: usize,
+        hi: usize,
+        selected: bool,
+        maxw: usize,
+        rect: Rect,
+    ) {
         let hook = &self.events[ei].hooks[hi];
         if selected {
             let raw = format!("  {:>4}  {}", hook.priority, hook.name);
             let s = crate::util::pad_cols(&raw, maxw);
-            put(frame, Paragraph::new(Line::from(Span::styled(s, theme.button_active()))), rect);
+            put(
+                frame,
+                Paragraph::new(Line::from(Span::styled(s, theme.button_active()))),
+                rect,
+            );
             return;
         }
         let prio = format!("  {:>4}  ", hook.priority);
@@ -314,15 +376,24 @@ mod hooks_viewer_tests {
             EventHooks {
                 event: "pre_tool_use".into(),
                 hooks: vec![
-                    HookEntry { name: "guardrail_check".into(), priority: 50 },
-                    HookEntry { name: "audit_log".into(), priority: 10 },
+                    HookEntry {
+                        name: "guardrail_check".into(),
+                        priority: 50,
+                    },
+                    HookEntry {
+                        name: "audit_log".into(),
+                        priority: 10,
+                    },
                 ],
                 calls: 128,
                 avg_us: 42,
             },
             EventHooks {
                 event: "post_tool_use".into(),
-                hooks: vec![HookEntry { name: "\u{4e2d}\u{6587}\u{30d5}\u{30c3}\u{30af}".into(), priority: 5 }],
+                hooks: vec![HookEntry {
+                    name: "\u{4e2d}\u{6587}\u{30d5}\u{30c3}\u{30af}".into(),
+                    priority: 5,
+                }],
                 calls: 0, // no metrics reported
                 avg_us: 0,
             },
@@ -355,7 +426,10 @@ mod hooks_viewer_tests {
         v.handle_key(key(KeyCode::Home));
         assert_eq!(v.cursor, 0);
         assert_eq!(v.handle_key(key(KeyCode::Esc)), HooksViewerAction::Close);
-        assert_eq!(v.handle_key(key(KeyCode::Char('q'))), HooksViewerAction::Close);
+        assert_eq!(
+            v.handle_key(key(KeyCode::Char('q'))),
+            HooksViewerAction::Close
+        );
     }
 
     #[test]

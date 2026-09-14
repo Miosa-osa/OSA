@@ -134,6 +134,20 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalTrackerDurabilityTest do
       assert after_boundary.phase == before.phase
     end
 
+    test "a completion claim survives the cache dying, still scoped to its turn", %{
+      session_id: sid
+    } do
+      GoalTracker.start(sid, "ship the exporter")
+      {:ok, claimed} = GoalTracker.claim_complete(sid)
+      assert claimed.completion_claim_turn == claimed.turn_count
+
+      drop_cache()
+
+      reloaded = GoalTracker.snapshot(sid)
+      assert reloaded.completion_claim_turn == claimed.completion_claim_turn
+      assert GoalTracker.completion_claimed_this_turn?(sid)
+    end
+
     test "goal_loop?/1 still answers true after the cache dies", %{session_id: sid} do
       GoalTracker.start(sid, "still anchored")
       assert GoalTracker.goal_loop?(sid)

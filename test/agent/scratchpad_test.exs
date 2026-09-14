@@ -9,9 +9,65 @@ defmodule OptimalSystemAgent.Agent.ScratchpadTest do
     - Anthropic uses native thinking (no injection)
     - Thinking events are emitted via Bus
   """
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
+  alias OptimalSystemAgent.Agent.Effort
   alias OptimalSystemAgent.Agent.Scratchpad
+
+  # `inject?/1` consults `Ollama.reasoning_decision/2`, which honours the
+  # `:ollama_think` app env — and runtime.exs bakes `false` for an unset
+  # OLLAMA_THINK. Under that baked value a cloud tag answers {false, :config}
+  # and the scaffold decision flips, so pin the env to UNSET (the serving-mode
+  # default the decision table describes) for the duration. `async: false`
+  # because this mutates global application env.
+  setup do
+    # Start each test from a clean global scratchpad/provider config. Both keys
+    # are process-global Application env; a sibling test (or another file)
+    # leaving :scratchpad_enabled set flipped the `refute inject?(:anthropic)`
+    # cases to true in the full suite while they passed in isolation. Save,
+    # clear, and restore both so the module is hermetic. (#208)
+    prev_think = Application.get_env(:optimal_system_agent, :ollama_think)
+    prev_scratch = Application.get_env(:optimal_system_agent, :scratchpad_enabled)
+    Application.delete_env(:optimal_system_agent, :ollama_think)
+    Application.delete_env(:optimal_system_agent, :scratchpad_enabled)
+
+    # The `:anthropic` cases below go through `native_thinking?/1`, which ALSO
+    # reads `:thinking_enabled`, the global effort ladder (`Effort.fast_mode?/0`)
+    # and `:anthropic_model` — three more process-global inputs this file never
+    # pinned. None of the tests here exercise fast mode, disabled thinking, or a
+    # non-default Anthropic model (that is `scratchpad_native_thinking_test.exs`'s
+    # job), so there is nothing for pinning them to distort: every assertion in
+    # this file is written against "thinking is on, effort is not fast, the
+    # model is whatever `AnthropicModels.default_model/0` names" — make that the
+    # state the test actually runs in, instead of assuming the rest of the suite
+    # left it there. `Effort.set/1` is the one owning module already uses to
+    # mutate the ladder, so restoring through it (not a raw ETS/app-env poke)
+    # keeps both halves — the `:osa_settings` session row and the app-env
+    # mirror — in sync on the way back out, exactly like
+    # `scratchpad_native_thinking_test.exs` does for the same ladder.
+    prev_thinking_enabled = Application.get_env(:optimal_system_agent, :thinking_enabled)
+    prev_anthropic_model = Application.get_env(:optimal_system_agent, :anthropic_model)
+    prev_effort = Effort.current()
+
+    Application.put_env(:optimal_system_agent, :thinking_enabled, true)
+    Application.delete_env(:optimal_system_agent, :anthropic_model)
+    Effort.set(:medium)
+
+    on_exit(fn ->
+      restore = fn
+        key, nil -> Application.delete_env(:optimal_system_agent, key)
+        key, v -> Application.put_env(:optimal_system_agent, key, v)
+      end
+
+      restore.(:ollama_think, prev_think)
+      restore.(:scratchpad_enabled, prev_scratch)
+      restore.(:thinking_enabled, prev_thinking_enabled)
+      restore.(:anthropic_model, prev_anthropic_model)
+      Effort.set(prev_effort)
+    end)
+
+    :ok
+  end
 
   # ---------------------------------------------------------------------------
   # inject?/1 — provider-based injection decision

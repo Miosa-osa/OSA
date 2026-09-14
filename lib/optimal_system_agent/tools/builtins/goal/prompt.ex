@@ -107,7 +107,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.Goal.Prompt do
       """
 
 
-      Use this tool only to mark the goal achieved or genuinely blocked.
+      Use this tool to claim completion, record a genuine block, or await a human decision.
+      Before continuing, distinguish work the agent can perform from evidence only a
+      person can supply. Use awaiting_user with question, criterion, work_summary and
+      artifact when the next useful action belongs to the user. Do not invent approval
+      requirements. Asking for approval does not satisfy the criterion. Additional
+      polishing or tool activity alone does not advance a missing human decision.
+      Waiting keeps the goal unfinished and frozen, stops automatic continuation, and
+      preserves spent budget. Only explicit user controls can resolve the decision.
       Set status to `complete` only when the objective has actually been achieved and no required work remains.
       Set status to `blocked` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and you cannot make meaningful progress without user input or an external-state change.
       If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least three consecutive resumed goal turns, set status to `blocked` again.

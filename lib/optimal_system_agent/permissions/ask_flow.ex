@@ -303,7 +303,7 @@ defmodule OptimalSystemAgent.Permissions.AskFlow do
   defp kind_of(name) do
     cond do
       name in OptimalSystemAgent.Agent.Safety.DangerousCommands.shell_tools() -> "bash"
-      name in ["file_edit", "multi_file_edit"] -> "file_edit"
+      name in ["file_edit", "multi_file_edit", "structural_edit"] -> "file_edit"
       name in ["file_write", "file_create"] -> "file_write"
       name in ["file_delete", "file_move"] -> "file_delete"
       name in ["web_fetch", "web_search", "download"] -> "fetch"

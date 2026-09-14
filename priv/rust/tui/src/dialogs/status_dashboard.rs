@@ -41,12 +41,25 @@ pub struct StatusView {
 }
 
 /// `(label, "why it means", color)` for the active permission mode.
-fn mode_spec(mode: PermissionMode, c: &crate::style::ThemeColors) -> (&'static str, &'static str, Color) {
+fn mode_spec(
+    mode: PermissionMode,
+    c: &crate::style::ThemeColors,
+) -> (&'static str, &'static str, Color) {
     match mode {
         PermissionMode::Default => ("ask", "prompts on every gated action", c.success),
-        PermissionMode::Auto => ("auto", "guardian approves safe, pauses on risk", c.secondary),
-        PermissionMode::AcceptEdits => ("auto-edit", "edits auto-approved, shell still prompts", c.warning),
-        PermissionMode::BypassPermissions => ("overdrive", "full auto — every prompt bypassed", c.error),
+        PermissionMode::Auto => (
+            "auto",
+            "guardian approves safe, pauses on risk",
+            c.secondary,
+        ),
+        PermissionMode::AcceptEdits => (
+            "auto-edit",
+            "edits auto-approved, shell still prompts",
+            c.warning,
+        ),
+        PermissionMode::BypassPermissions => {
+            ("overdrive", "full auto — every prompt bypassed", c.error)
+        }
         PermissionMode::Plan => ("plan", "read-only, no mutating execution", c.secondary),
     }
 }
@@ -96,7 +109,10 @@ pub fn draw(frame: &mut Frame, area: Rect, view: &StatusView) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(c.primary))
         .title(Line::from(vec![
-            Span::styled(" OSA ", Style::default().fg(c.primary).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " OSA ",
+                Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("\u{00b7} status ", Style::default().fg(c.muted)),
         ]))
         .style(Style::default().bg(c.dialog_bg));
@@ -115,34 +131,64 @@ pub fn draw(frame: &mut Frame, area: Rect, view: &StatusView) {
     let mut cy = inner.y;
 
     // Small helper closures for the two row shapes.
-    let label = |s: &str| Span::styled(
-        format!("{s:<9}"),
-        Style::default().fg(c.muted).add_modifier(Modifier::BOLD),
-    );
+    let label = |s: &str| {
+        Span::styled(
+            format!("{s:<9}"),
+            Style::default().fg(c.muted).add_modifier(Modifier::BOLD),
+        )
+    };
 
     // ── MODEL ──────────────────────────────────────────────────────────
-    put(frame, Paragraph::new(Line::from(Span::styled(
-        "MODEL", Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
-    ))), Rect::new(inner.x, cy, iw, 1));
+    put(
+        frame,
+        Paragraph::new(Line::from(Span::styled(
+            "MODEL",
+            Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
+        ))),
+        Rect::new(inner.x, cy, iw, 1),
+    );
     cy += 1;
-    put(frame, Paragraph::new(Line::from(vec![
-        Span::styled(format!("  {}", view.model), Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("   via {}", view.provider), Style::default().fg(c.dim)),
-    ])), Rect::new(inner.x, cy, iw, 1));
+    put(
+        frame,
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("  {}", view.model),
+                Style::default()
+                    .fg(c.secondary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("   via {}", view.provider),
+                Style::default().fg(c.dim),
+            ),
+        ])),
+        Rect::new(inner.x, cy, iw, 1),
+    );
     cy += 2;
 
     // ── CONTEXT (color-graded gauge) ───────────────────────────────────
-    put(frame, Paragraph::new(Line::from(Span::styled(
-        "CONTEXT", Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
-    ))), Rect::new(inner.x, cy, iw, 1));
+    put(
+        frame,
+        Paragraph::new(Line::from(Span::styled(
+            "CONTEXT",
+            Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
+        ))),
+        Rect::new(inner.x, cy, iw, 1),
+    );
     cy += 1;
     let util = view.context_util.clamp(0.0, 1.0);
     let filled = (util * GAUGE_W as f64).round() as usize;
     let filled = filled.min(GAUGE_W);
     let bar_fg = gauge_color(util, c);
     let mut spans = vec![Span::raw("  ")];
-    spans.push(Span::styled("\u{2588}".repeat(filled), Style::default().fg(bar_fg)));
-    spans.push(Span::styled("\u{2591}".repeat(GAUGE_W - filled), Style::default().fg(c.dim)));
+    spans.push(Span::styled(
+        "\u{2588}".repeat(filled),
+        Style::default().fg(bar_fg),
+    ));
+    spans.push(Span::styled(
+        "\u{2591}".repeat(GAUGE_W - filled),
+        Style::default().fg(c.dim),
+    ));
     spans.push(Span::styled(
         format!("  {:>3.0}%", util * 100.0),
         Style::default().fg(bar_fg).add_modifier(Modifier::BOLD),
@@ -151,44 +197,83 @@ pub fn draw(frame: &mut Frame, area: Rect, view: &StatusView) {
         format!("  of {}", view.context_max),
         Style::default().fg(c.dim),
     ));
-    put(frame, Paragraph::new(Line::from(spans)), Rect::new(inner.x, cy, iw, 1));
+    put(
+        frame,
+        Paragraph::new(Line::from(spans)),
+        Rect::new(inner.x, cy, iw, 1),
+    );
     cy += 2;
 
     // ── TOOLS / MODE / SESSION / VERSION (aligned key-value rows) ──────
-    put(frame, Paragraph::new(Line::from(vec![
-        label("TOOLS"),
-        Span::styled(format!("{}", view.tools), Style::default().fg(c.success).add_modifier(Modifier::BOLD)),
-        Span::styled(" available", Style::default().fg(c.dim)),
-    ])), Rect::new(inner.x, cy, iw, 1));
+    put(
+        frame,
+        Paragraph::new(Line::from(vec![
+            label("TOOLS"),
+            Span::styled(
+                format!("{}", view.tools),
+                Style::default().fg(c.success).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" available", Style::default().fg(c.dim)),
+        ])),
+        Rect::new(inner.x, cy, iw, 1),
+    );
     cy += 1;
 
     let (m_label, m_why, m_color) = mode_spec(view.mode, c);
-    put(frame, Paragraph::new(Line::from(vec![
-        label("MODE"),
-        Span::styled("\u{25CF} ", Style::default().fg(m_color)),
-        Span::styled(m_label, Style::default().fg(m_color).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("  {m_why}"), Style::default().fg(c.dim)),
-    ])), Rect::new(inner.x, cy, iw, 1));
+    put(
+        frame,
+        Paragraph::new(Line::from(vec![
+            label("MODE"),
+            Span::styled("\u{25CF} ", Style::default().fg(m_color)),
+            Span::styled(
+                m_label,
+                Style::default().fg(m_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {m_why}"), Style::default().fg(c.dim)),
+        ])),
+        Rect::new(inner.x, cy, iw, 1),
+    );
     cy += 1;
 
-    put(frame, Paragraph::new(Line::from(vec![
-        label("SESSION"),
-        Span::styled(shorten(&view.session, iw.saturating_sub(11) as usize), Style::default().fg(c.muted)),
-    ])), Rect::new(inner.x, cy, iw, 1));
+    put(
+        frame,
+        Paragraph::new(Line::from(vec![
+            label("SESSION"),
+            Span::styled(
+                shorten(&view.session, iw.saturating_sub(11) as usize),
+                Style::default().fg(c.muted),
+            ),
+        ])),
+        Rect::new(inner.x, cy, iw, 1),
+    );
     cy += 1;
 
-    put(frame, Paragraph::new(Line::from(vec![
-        label("VERSION"),
-        Span::styled(format!("OSA {}", view.version), Style::default().fg(c.muted)),
-    ])), Rect::new(inner.x, cy, iw, 1));
+    put(
+        frame,
+        Paragraph::new(Line::from(vec![
+            label("VERSION"),
+            Span::styled(
+                format!("OSA {}", view.version),
+                Style::default().fg(c.muted),
+            ),
+        ])),
+        Rect::new(inner.x, cy, iw, 1),
+    );
     cy += 2;
 
     // ── footer hint ────────────────────────────────────────────────────
     if cy < inner.y + inner.height {
-        put(frame, Paragraph::new(Line::from(vec![
-            Span::styled("  esc", Style::default().fg(c.muted).add_modifier(Modifier::BOLD)),
-            Span::styled(" close", Style::default().fg(c.dim)),
-        ])), Rect::new(inner.x, cy, iw, 1));
+        put(
+            frame,
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "  esc",
+                    Style::default().fg(c.muted).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" close", Style::default().fg(c.dim)),
+            ])),
+            Rect::new(inner.x, cy, iw, 1),
+        );
     }
 }
 

@@ -193,6 +193,104 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestratorTest do
       assert event_index(events, :started, "safe2") < event_index(events, :finished, "safe1")
       assert event_index(events, :finished, "safe1") < event_index(events, :started, "unsafe")
     end
+
+    # ── Result ordering under differential completion latency (regression) ──
+    #
+    # When the model requests N tools in one turn, the ones that are safe to
+    # run in parallel are dispatched concurrently — nothing enforces that they
+    # FINISH in the order they were REQUESTED. `dispatch/3` must still hand
+    # `ReactLoop` results keyed to their own `tool_call_id` and sequenced in
+    # the model's original request order, or a slow tool's result gets stamped
+    # onto a faster tool's `tool_call_id` and the model reads tool A's output
+    # as tool B's.
+    test "a later-requested call finishing FIRST does not reorder or mis-key results", %{
+      state: base_state,
+      supervisor: supervisor
+    } do
+      ref = make_ref()
+
+      state =
+        Map.merge(base_state, %{
+          test_pid: self(),
+          event_ref: ref,
+          # "1" is requested FIRST but is the slowest — "2" and "3" (requested
+          # later) both finish well before it.
+          delays: %{"1" => 200, "2" => 0, "3" => 0}
+        })
+
+      tcs = [
+        %{id: "1", name: SafeTool.name()},
+        %{id: "2", name: SafeTool.name()},
+        %{id: "3", name: SafeTool.name()}
+      ]
+
+      results =
+        ToolOrchestrator.dispatch(tcs, state, executor: EventExecutor, supervisor: supervisor)
+
+      # Prove completion order really was reversed relative to request order —
+      # otherwise this test would pass even under a naive positional zip.
+      events = collect_tool_events(ref, 6)
+      assert event_index(events, :finished, "2") < event_index(events, :finished, "1")
+      assert event_index(events, :finished, "3") < event_index(events, :finished, "1")
+
+      # The results array handed back to the model is still in the ORIGINAL
+      # request order...
+      assert Enum.map(results, fn {tc, _r} -> tc.id end) == ["1", "2", "3"]
+
+      # ...and every result is matched to its OWN tool_call_id and body, never
+      # the id of whichever call happened to land in that slot by arrival time.
+      Enum.each(results, fn {tc, {tool_msg, result_str}} ->
+        assert tool_msg.tool_call_id == tc.id
+        assert tool_msg.content == "event:#{tc.id}"
+        assert result_str == "event:#{tc.id}"
+      end)
+    end
+
+    test "mixed parallel read-only calls + a serial barrier preserve request " <>
+           "order and id-matching under differential delay",
+         %{state: base_state, supervisor: supervisor} do
+      ref = make_ref()
+
+      state =
+        Map.merge(base_state, %{
+          test_pid: self(),
+          event_ref: ref,
+          # Within the trailing parallel batch (p2, p3), p3 is requested
+          # SECOND but finishes FIRST.
+          delays: %{"p1" => 0, "s1" => 0, "p2" => 200, "p3" => 0}
+        })
+
+      tcs = [
+        %{id: "p1", name: SafeTool.name()},
+        %{id: "s1", name: UnsafeTool.name()},
+        %{id: "p2", name: SafeTool.name()},
+        %{id: "p3", name: SafeTool.name()}
+      ]
+
+      results =
+        ToolOrchestrator.dispatch(tcs, state, executor: EventExecutor, supervisor: supervisor)
+
+      events = collect_tool_events(ref, 8)
+
+      # p3 really did finish before p2 despite being requested after it...
+      assert event_index(events, :finished, "p3") < event_index(events, :finished, "p2")
+
+      # ...and the serial call is a genuine barrier: it starts only once p1 is
+      # done, and both trailing parallel calls start only once IT is done.
+      assert event_index(events, :finished, "p1") < event_index(events, :started, "s1")
+      assert event_index(events, :finished, "s1") < event_index(events, :started, "p2")
+      assert event_index(events, :finished, "s1") < event_index(events, :started, "p3")
+
+      # Despite that, the returned results stay in ORIGINAL request order,
+      # each matched to its own tool_call_id.
+      assert Enum.map(results, fn {tc, _r} -> tc.id end) == ["p1", "s1", "p2", "p3"]
+
+      Enum.each(results, fn {tc, {tool_msg, result_str}} ->
+        assert tool_msg.tool_call_id == tc.id
+        assert tool_msg.content == "event:#{tc.id}"
+        assert result_str == "event:#{tc.id}"
+      end)
+    end
   end
 
   defp collect_tool_events(ref, count) do

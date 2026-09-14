@@ -45,7 +45,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrep.BackendTest do
   end
 
   defp tmp_dir(tag) do
-    dir = Path.join(System.tmp_dir!(), "osa_grep_backend_#{tag}_#{:rand.uniform(1_000_000)}")
+    dir =
+      System.tmp_dir!()
+      |> OptimalSystemAgent.Agent.Safety.PathCanon.canonicalize()
+      |> Path.join("osa_grep_backend_#{tag}_#{:rand.uniform(1_000_000)}")
+
     File.mkdir_p!(dir)
     on_exit(fn -> File.rm_rf(dir) end)
     dir

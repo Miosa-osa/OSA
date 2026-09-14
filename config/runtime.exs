@@ -171,6 +171,7 @@ provider_map = %{
   "openai" => :openai,
   "groq" => :groq,
   "openrouter" => :openrouter,
+  "surplus" => :surplus,
   "together" => :together,
   "fireworks" => :fireworks,
   "deepseek" => :deepseek,
@@ -225,6 +226,7 @@ default_provider =
     System.get_env("OPENAI_API_KEY") -> :openai
     System.get_env("GROQ_API_KEY") -> :groq
     System.get_env("OPENROUTER_API_KEY") -> :openrouter
+    System.get_env("SURPLUS_API_KEY") -> :surplus
     true -> :ollama
   end
 
@@ -234,6 +236,7 @@ config :optimal_system_agent,
   openai_api_key: System.get_env("OPENAI_API_KEY"),
   groq_api_key: System.get_env("GROQ_API_KEY"),
   openrouter_api_key: System.get_env("OPENROUTER_API_KEY"),
+  surplus_api_key: System.get_env("SURPLUS_API_KEY"),
   google_api_key: System.get_env("GOOGLE_API_KEY"),
   deepseek_api_key: System.get_env("DEEPSEEK_API_KEY"),
   mistral_api_key: System.get_env("MISTRAL_API_KEY"),
@@ -325,8 +328,14 @@ config :optimal_system_agent,
   wecom_bot_key: System.get_env("WECOM_BOT_KEY"),
   wecom_webhook_token: System.get_env("WECOM_WEBHOOK_TOKEN"),
 
-  # Computer Use — set OSA_COMPUTER_USE=true to enable desktop control tool
-  computer_use_enabled: System.get_env("OSA_COMPUTER_USE") == "true",
+  # Computer Use is part of the standard agent harness on supported desktops.
+  # Keep an explicit opt-out for managed/headless deployments; absence means
+  # enabled so every provider sees the same machine-action capability.
+  computer_use_enabled:
+    (case System.get_env("OSA_COMPUTER_USE") do
+       value when value in ["false", "0", "no", "off"] -> false
+       _ -> true
+     end),
   computer_use_platform:
     (case System.get_env("OSA_COMPUTER_USE_PLATFORM") do
        nil -> nil
@@ -400,9 +409,15 @@ config :optimal_system_agent,
     (case System.get_env("OLLAMA_THINK") do
        "true" -> true
        "false" -> false
-       # Baked default OFF: an unrecognised local reasoning model otherwise
-       # thinks on every turn (2s+ to say hi). Explicit OLLAMA_THINK=true re-arms.
-       _ -> false
+       # Default nil (NOT false): let Ollama.reasoning_decision/2 decide by
+       # serving mode + effort, exactly as the comment above promises. A baked
+       # `false` short-circuits that whole decision (it matches the `:config`
+       # branch before serving-mode/effort are ever consulted), silently
+       # disabling cloud reasoning AND per-turn effort steering. Local reasoning
+       # models are still protected from unbounded thinking by the dedicated
+       # `:local_stall_guard` branch, so nil does not re-arm the "thinks on every
+       # turn" problem. Explicit OLLAMA_THINK=true/false still overrides both ways.
+       _ -> nil
      end),
   # OLLAMA_TOOLS: force tool schemas to be sent ("true") or withheld ("false")
   # for ALL Ollama models, overriding `Ollama.tools_decision/2` in both
@@ -467,6 +482,9 @@ config :optimal_system_agent,
 
          :openrouter ->
            System.get_env("OPENROUTER_MODEL")
+
+         :surplus ->
+           System.get_env("SURPLUS_MODEL") || "claude-fable-5.1"
 
          :deepseek ->
            System.get_env("DEEPSEEK_MODEL")
@@ -598,6 +616,7 @@ config :optimal_system_agent,
            {:openai, System.get_env("OPENAI_API_KEY")},
            {:groq, System.get_env("GROQ_API_KEY")},
            {:openrouter, System.get_env("OPENROUTER_API_KEY")},
+           {:surplus, System.get_env("SURPLUS_API_KEY")},
            {:deepseek, System.get_env("DEEPSEEK_API_KEY")},
            {:together, System.get_env("TOGETHER_API_KEY")},
            {:fireworks, System.get_env("FIREWORKS_API_KEY")},
@@ -748,6 +767,12 @@ if is_binary(openrouter_base_url) and openrouter_base_url != "" do
   config :optimal_system_agent, openrouter_url: openrouter_base_url
 end
 
+surplus_base_url = System.get_env("SURPLUS_BASE_URL")
+
+if is_binary(surplus_base_url) and surplus_base_url != "" do
+  config :optimal_system_agent, surplus_url: surplus_base_url
+end
+
 # ── Compaction window ceiling ────────────────────────────────────────────
 # `CompactionThresholds` derives every threshold from a ceiling that scales
 # WITH the model (a share of its real window, floored at 200k), because a flat
@@ -780,4 +805,121 @@ case System.get_env("OSA_CONTEXT_CEILING_SHARE") do
       _ ->
         :ok
     end
+end
+
+# ── Subagent tuning knobs (Claude-Code-like defaults; all optional) ──────────
+# Dial subagent budgets per-session without a code change. Unset = built-in
+# defaults (turn caps 120/60/25, concurrency 24, no default USD cap).
+if v = System.get_env("OSA_MAX_FLEET_AGENTS") do
+  case Integer.parse(v) do
+    {n, _} when n > 0 -> config :optimal_system_agent, max_fleet_agents: n
+    _ -> :ok
+  end
+end
+
+# Flat single-number global default USD cap for EVERY subagent tier. Acts as a
+# global override of the per-tier defaults in `Tier.max_budget_usd/1`.
+if v = System.get_env("OSA_SUBAGENT_MAX_BUDGET_USD") do
+  case Float.parse(v) do
+    {f, _} when f > 0.0 -> config :optimal_system_agent, subagent_default_budget_usd: f
+    _ -> :ok
+  end
+end
+
+# Per-tier default USD cap overrides (more specific than the flat knob above).
+# Unset tiers keep their built-in default (elite $8 / specialist $4 / utility $1.50).
+subagent_budget_overrides =
+  [
+    elite: "OSA_SUBAGENT_MAX_BUDGET_USD_ELITE",
+    specialist: "OSA_SUBAGENT_MAX_BUDGET_USD_SPECIALIST",
+    utility: "OSA_SUBAGENT_MAX_BUDGET_USD_UTILITY"
+  ]
+  |> Enum.reduce(%{}, fn {tier, var}, acc ->
+    case System.get_env(var) do
+      nil ->
+        acc
+
+      s ->
+        case Float.parse(s) do
+          {f, _} when f > 0.0 -> Map.put(acc, tier, f)
+          _ -> acc
+        end
+    end
+  end)
+
+if map_size(subagent_budget_overrides) > 0 do
+  config :optimal_system_agent, subagent_max_budget_usd: subagent_budget_overrides
+end
+
+# Per-turn tool-call ceiling for subagents (complements the USD budget: bounds
+# tool round-trips WITHIN a single turn). Default 50; only affects subagents.
+if v = System.get_env("OSA_SUBAGENT_MAX_TOOL_CALLS_PER_TURN") do
+  case Integer.parse(v) do
+    {n, _} when n > 0 -> config :optimal_system_agent, subagent_max_tool_calls_per_turn: n
+    _ -> :ok
+  end
+end
+
+# Upper bound on a single synchronous `task_wait` join — a bounded "converge
+# window" (default 5 min) so one call never freezes the parent turn for an
+# agent's whole lifetime. Re-arm burn (a model that re-waits on the same
+# still-running agent) is closed separately by TaskWait.RewaitGuard.
+if v = System.get_env("OSA_TASK_WAIT_MAX_MS") do
+  case Integer.parse(v) do
+    {n, _} when n > 0 -> config :optimal_system_agent, task_wait_max_ms: n
+    _ -> :ok
+  end
+end
+
+# Per-tool-result output cap (bytes) before a result enters the loop transcript.
+# The single biggest lever on subagent context runaway: a fat pytest / file_read
+# / bash dump injected whole is re-sent on EVERY later turn. Over the cap, the
+# result keeps head+tail with the middle spilled to a temp file and referenced.
+# Governs both the last cut (ToolExecutor) and the earlier offload
+# (ToolResultStorage). Shipped default is the deliberate 16_384 (config.exs);
+# raise it here per deployment. chars ≈ bytes for the mostly-ASCII output this
+# bounds.
+if v = System.get_env("OSA_TOOL_OUTPUT_MAX_CHARS") do
+  case Integer.parse(v) do
+    {n, _} when n > 0 -> config :optimal_system_agent, max_tool_output_bytes: n
+    _ -> :ok
+  end
+end
+
+# Formerly-hardcoded output caps, now env-overridable (gap #1). Defaults live in
+# config.exs (values unchanged); these only override when set.
+for {var, key} <- [
+      {"OSA_BASH_OUTPUT_MAX_BYTES", :bash_output_max_bytes},
+      {"OSA_TERMINAL_OUTPUT_MAX_CHARS", :terminal_output_max_chars},
+      {"OSA_SUMMARY_TOOL_OUTPUT_MAX_CHARS", :summary_tool_output_max_chars}
+    ] do
+  if v = System.get_env(var) do
+    case Integer.parse(v) do
+      {n, _} when n > 0 -> config :optimal_system_agent, [{key, n}]
+      _ -> :ok
+    end
+  end
+end
+
+subagent_iter_overrides =
+  [
+    elite: "OSA_SUBAGENT_MAX_ITERS_ELITE",
+    specialist: "OSA_SUBAGENT_MAX_ITERS_SPECIALIST",
+    utility: "OSA_SUBAGENT_MAX_ITERS_UTILITY"
+  ]
+  |> Enum.reduce(%{}, fn {tier, var}, acc ->
+    case System.get_env(var) do
+      nil ->
+        acc
+
+      s ->
+        case Integer.parse(s) do
+          {n, _} when n > 0 -> Map.put(acc, tier, n)
+          _ -> acc
+        end
+    end
+  end)
+
+if map_size(subagent_iter_overrides) > 0 do
+  config :optimal_system_agent, subagent_max_iterations: subagent_iter_overrides
 end

@@ -74,10 +74,8 @@ impl Keystroke {
                     // Terminals disagree whether Ctrl+Shift+L reports 'l'+SHIFT
                     // or 'L': treat an uppercase char as an implicit SHIFT and
                     // require parity, so ctrl+l can never fire on ctrl+shift+l.
-                    let ev_shift =
-                        ev_mods.contains(KeyModifiers::SHIFT) || b.is_ascii_uppercase();
-                    let want_shift =
-                        want.contains(KeyModifiers::SHIFT) || a.is_ascii_uppercase();
+                    let ev_shift = ev_mods.contains(KeyModifiers::SHIFT) || b.is_ascii_uppercase();
+                    let want_shift = want.contains(KeyModifiers::SHIFT) || a.is_ascii_uppercase();
                     ev_shift == want_shift
                 } else {
                     // Punctuation: shift is baked into the character itself and
@@ -118,8 +116,7 @@ pub fn parse_keystroke(s: &str) -> Option<Keystroke> {
             "left" | "\u{2190}" => code = Some(KeyCode::Left),
             "right" | "\u{2192}" => code = Some(KeyCode::Right),
             other => {
-                if let Some(n) = other.strip_prefix('f').and_then(|n| n.parse::<u8>().ok())
-                {
+                if let Some(n) = other.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()) {
                     if (1..=12).contains(&n) {
                         code = Some(KeyCode::F(n));
                         continue;
@@ -321,12 +318,8 @@ fn non_rebindable_reason(chord: &[Keystroke]) -> Option<&'static str> {
             (KeyCode::Char('m'), m) if m == KeyModifiers::CONTROL => {
                 Some("ctrl+m is identical to Enter in terminals")
             }
-            (KeyCode::Esc, _) => {
-                Some("esc is reserved (cancel / double-press chords)")
-            }
-            (KeyCode::Enter, m) if m == KeyModifiers::NONE => {
-                Some("enter is reserved (submit)")
-            }
+            (KeyCode::Esc, _) => Some("esc is reserved (cancel / double-press chords)"),
+            (KeyCode::Enter, m) if m == KeyModifiers::NONE => Some("enter is reserved (submit)"),
             _ => None,
         };
         if bad.is_some() {
@@ -414,9 +407,8 @@ impl Keybindings {
             }
         };
         let Some(blocks) = val.as_array() else {
-            self.warnings.push(
-                "keybindings.json must be an array of {context, bindings} blocks".into(),
-            );
+            self.warnings
+                .push("keybindings.json must be an array of {context, bindings} blocks".into());
             return;
         };
         for block in blocks {
@@ -445,9 +437,8 @@ impl Keybindings {
                 }
                 let action_str = action_val.as_str().unwrap_or("");
                 let Some(action) = Action::parse(action_str) else {
-                    self.warnings.push(format!(
-                        "'{chord_str}': unknown action '{action_str}'"
-                    ));
+                    self.warnings
+                        .push(format!("'{chord_str}': unknown action '{action_str}'"));
                     continue;
                 };
                 self.set_binding(ctx, chord, action);

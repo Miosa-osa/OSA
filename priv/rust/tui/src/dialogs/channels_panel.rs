@@ -85,7 +85,10 @@ impl ChannelsPanel {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> ChannelsPanelAction {
         // Ignore chorded shortcuts — they belong to the app, not this overlay.
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return ChannelsPanelAction::None;
         }
         let last = self.channels.len().saturating_sub(1);
@@ -258,10 +261,7 @@ impl ChannelsPanel {
                     let remaining = maxw.saturating_sub(used);
                     if remaining > 5 && !tail.is_empty() {
                         let t = truncate_chars(&tail, remaining - 3);
-                        spans.push(Span::styled(
-                            format!("   {t}"),
-                            Style::default().fg(c.dim),
-                        ));
+                        spans.push(Span::styled(format!("   {t}"), Style::default().fg(c.dim)));
                     }
                     put(
                         frame,
@@ -279,12 +279,16 @@ impl ChannelsPanel {
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     "\u{2191}\u{2193}",
-                    Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" nav   ", Style::default().fg(c.dim)),
                 Span::styled(
                     "esc",
-                    Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" close", Style::default().fg(c.dim)),
             ])),
@@ -329,12 +333,42 @@ mod channels_panel_tests {
 
     fn sample() -> Vec<ChannelEntry> {
         vec![
-            ChannelEntry { name: "telegram".into(), connected: true, status: "running".into(), kind: "bot".into() },
-            ChannelEntry { name: "slack".into(), connected: false, status: "not configured".into(), kind: "app".into() },
-            ChannelEntry { name: "discord".into(), connected: true, status: "running".into(), kind: "bot".into() },
-            ChannelEntry { name: "signal".into(), connected: false, status: "error: socket".into(), kind: "cli".into() },
-            ChannelEntry { name: "whatsapp".into(), connected: false, status: "".into(), kind: "".into() },
-            ChannelEntry { name: "\u{4e2d}\u{6587}\u{6e20}\u{9053}".into(), connected: true, status: "\u{20ac}".repeat(80), kind: "xmpp".into() },
+            ChannelEntry {
+                name: "telegram".into(),
+                connected: true,
+                status: "running".into(),
+                kind: "bot".into(),
+            },
+            ChannelEntry {
+                name: "slack".into(),
+                connected: false,
+                status: "not configured".into(),
+                kind: "app".into(),
+            },
+            ChannelEntry {
+                name: "discord".into(),
+                connected: true,
+                status: "running".into(),
+                kind: "bot".into(),
+            },
+            ChannelEntry {
+                name: "signal".into(),
+                connected: false,
+                status: "error: socket".into(),
+                kind: "cli".into(),
+            },
+            ChannelEntry {
+                name: "whatsapp".into(),
+                connected: false,
+                status: "".into(),
+                kind: "".into(),
+            },
+            ChannelEntry {
+                name: "\u{4e2d}\u{6587}\u{6e20}\u{9053}".into(),
+                connected: true,
+                status: "\u{20ac}".repeat(80),
+                kind: "xmpp".into(),
+            },
         ]
     }
 
@@ -365,9 +399,15 @@ mod channels_panel_tests {
     #[test]
     fn esc_and_q_close() {
         let mut p = ChannelsPanel::new(sample());
-        assert_eq!(p.handle_key(key(KeyCode::Char('j'))), ChannelsPanelAction::None);
+        assert_eq!(
+            p.handle_key(key(KeyCode::Char('j'))),
+            ChannelsPanelAction::None
+        );
         assert_eq!(p.handle_key(key(KeyCode::Esc)), ChannelsPanelAction::Close);
-        assert_eq!(p.handle_key(key(KeyCode::Char('q'))), ChannelsPanelAction::Close);
+        assert_eq!(
+            p.handle_key(key(KeyCode::Char('q'))),
+            ChannelsPanelAction::Close
+        );
     }
 
     #[test]
@@ -393,11 +433,17 @@ mod channels_panel_tests {
         assert!(is_error("connection FAILED"));
         assert!(!is_error("running"));
         let both = channel_tail(&ChannelEntry {
-            name: "x".into(), connected: true, status: "up".into(), kind: "bot".into(),
+            name: "x".into(),
+            connected: true,
+            status: "up".into(),
+            kind: "bot".into(),
         });
         assert!(both.contains("bot") && both.contains("up"));
         let empty = channel_tail(&ChannelEntry {
-            name: "x".into(), connected: false, status: "".into(), kind: "".into(),
+            name: "x".into(),
+            connected: false,
+            status: "".into(),
+            kind: "".into(),
         });
         assert_eq!(empty, "");
     }

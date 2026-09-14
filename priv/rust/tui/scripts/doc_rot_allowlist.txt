@@ -1,0 +1,9 @@
+# Allowlist for test/tools/doc_rot_lint.py.
+#
+# One identifier per line. `#` starts a comment; blank lines are ignored.
+#
+# Add an entry here only when a doc comment in priv/rust/tui/src legitimately
+# names an assert_*/test_* symbol the lint cannot resolve on its own — e.g. a
+# reference behind a cfg this script does not evaluate, or generated code.
+# Prefer fixing the comment or writing the missing test over adding an entry;
+# this file exists for the cases where neither is correct.

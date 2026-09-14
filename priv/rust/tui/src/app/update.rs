@@ -212,6 +212,12 @@ impl App {
                 self.check_health();
                 false
             }
+            // `dispatch_event` intercepts and quits on this before `update` is
+            // ever called (it needs to set `pending_signal`, which this fn has
+            // no access to) — unreachable in practice, kept only so the match
+            // stays exhaustive if `Event` ever gains another signal-shaped
+            // variant that DOES want ordinary update-layer handling.
+            Event::TerminateSignal(_) => false,
         }
     }
 
@@ -398,6 +404,17 @@ impl App {
                 }
                 false
             }
+            AppState::GoalCompletion => {
+                use crate::components::completion_panel::CompletionPanelAction;
+                if matches!(
+                    self.completion_panel.as_mut().map(|p| p.handle_key(key)),
+                    Some(CompletionPanelAction::Close)
+                ) {
+                    self.completion_panel = None;
+                    self.exit_overlay();
+                }
+                false
+            }
             AppState::Persona => {
                 use crate::dialogs::persona_picker::PersonaPickerAction;
                 match self.persona_picker.as_mut().map(|d| d.handle_key(key)) {
@@ -465,6 +482,7 @@ impl App {
             AppState::Tasks => self.tasks_panel.is_none(),
             AppState::Persona => self.persona_picker.is_none(),
             AppState::Sandbox => self.sandbox_picker.is_none(),
+            AppState::GoalCompletion => self.completion_panel.is_none(),
             _ => false,
         }
     }
@@ -741,6 +759,16 @@ impl App {
                 // Enter on main detaches (view_selected_dashboard_item routes
                 // index 0 → detach_to_main); on a worker it opens its transcript.
                 self.view_selected_dashboard_item();
+            }
+            (KeyCode::Char('o'), KeyModifiers::NONE) | (KeyCode::Char(' '), KeyModifiers::NONE) => {
+                // Per-node expand/collapse of the highlighted roster row (C1a).
+                // Ctrl+O still folds the WHOLE panel; this folds just this node's
+                // children (trail + nested monitors). Sync the component's cursor
+                // to the app's authoritative selection first so it targets the
+                // highlighted row.
+                self.agents
+                    .set_roster_selected(Some(self.agents_dashboard_selected));
+                self.agents.toggle_selected_node_collapse();
             }
             (KeyCode::Char('x'), KeyModifiers::NONE) | (KeyCode::Char('c'), KeyModifiers::NONE) => {
                 self.stop_selected_dashboard_item();
@@ -1567,6 +1595,14 @@ impl App {
         self.agents.tick();
         self.task_checklist.tick();
 
+        // `/jailbreak` — poll the backend's state file (bounded: one read per
+        // second, see components/jailbreak.rs) and feed both surfaces that
+        // render the badge. Cheap enough to run every tick; the poller's own
+        // interval gate does the real bounding.
+        let liberated = crate::components::jailbreak::is_liberated();
+        self.status.set_liberated(liberated);
+        self.activity.set_liberated(liberated);
+
         // NOTE: no plan snapshot is pushed here. The checklist is a LIVE panel
         // with its own band in the inline region (see `checklist_slot`), so
         // scrollback needs exactly ONE frozen copy per turn — pushed by
@@ -1612,7 +1648,15 @@ impl App {
             if let Some(start) = self.processing_start {
                 let ms = start.elapsed().as_millis() as u64;
                 self.sidebar.set_elapsed_ms(ms);
+                // Keep the live spinner's visible elapsed on the same wall clock
+                // as the sidebar and the end-of-turn recap, instead of the
+                // agent-time clock that orchestrate/backgrounded stretches zero.
+                self.activity.set_display_elapsed_secs(Some(ms / 1000));
             }
+        } else {
+            // Idle: drop the override so the next turn starts clean and the
+            // agent-time fallback governs until processing_start is set again.
+            self.activity.set_display_elapsed_secs(None);
         }
 
         if self.state.is_processing() {

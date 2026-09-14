@@ -16,7 +16,7 @@ defmodule OptimalSystemAgent.Agent.FastPath do
 
   @intent_tools %{
     code:
-      ~w(file_read file_write file_edit multi_file_edit shell_execute git grep diff task_write),
+      ~w(file_read file_write file_edit multi_file_edit structural_edit shell_execute git grep diff task_write),
     search: ~w(file_read grep glob codebase_explore semantic_search web_search tool_search),
     git: ~w(git diff shell_execute file_read),
     schedule: ~w(cron remote_trigger subscribe_pr task_write),
@@ -297,7 +297,9 @@ defmodule OptimalSystemAgent.Agent.FastPath do
     |> Enum.find(fn msg -> to_string(msg[:role] || msg["role"]) == "user" end)
     |> case do
       nil -> ""
-      msg -> to_string(msg[:content] || msg["content"] || "")
+      # Content is a block LIST when an image is attached; `to_string/1` on a
+      # list raises. Take the prose (file hints key off the text, not the image).
+      msg -> OptimalSystemAgent.Utils.Text.content_text(msg[:content] || msg["content"])
     end
   end
 

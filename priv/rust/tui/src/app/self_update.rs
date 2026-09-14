@@ -131,9 +131,7 @@ async fn run_self_update(tx: tokio::sync::mpsc::UnboundedSender<Event>) {
         // the in-place path also fails do we report an error.
         RunOutcome::NeedsFallback | RunOutcome::Failed(_) => {
             let _ = tx.send(Event::Backend(BackendEvent::SelfUpdate(
-                SelfUpdateEvent::Progress(
-                    "Updating in place...".into(),
-                ),
+                SelfUpdateEvent::Progress("Updating in place...".into()),
             )));
             run_osa_update(&tx, false).await
         }
@@ -242,7 +240,8 @@ async fn run_osa_update(
 
     match status {
         Ok(s) if s.success() => RunOutcome::Failed(
-            "the updater exited without reporting a result. Run `osa update` from a terminal.".into(),
+            "the updater exited without reporting a result. Run `osa update` from a terminal."
+                .into(),
         ),
         _ => {
             let msg = stderr_out
@@ -327,9 +326,7 @@ pub(crate) fn parse_update_result(line: &str) -> Option<ParsedUpdate> {
 
     // "Updated ..." (but not "Updating"/"Update failed"). Require a version so a
     // stray "updated" word in prose isn't treated as the outcome.
-    if (lower.starts_with("updated") || lower.contains(" updated "))
-        && !lower.contains("fail")
-    {
+    if (lower.starts_with("updated") || lower.contains(" updated ")) && !lower.contains("fail") {
         if let Some(v) = last_version(trimmed) {
             return Some(ParsedUpdate {
                 message: format!("Updated to {}. Relaunch OSA to apply.", v),
@@ -426,7 +423,10 @@ mod tests {
         assert!(p.message.contains("40 commit(s) behind"));
         assert!(p.message.contains("origin/main"));
         // And it must NOT be rendered as the reassuring outcome.
-        assert!(!p.message.to_ascii_lowercase().contains("already up to date"));
+        assert!(!p
+            .message
+            .to_ascii_lowercase()
+            .contains("already up to date"));
     }
 
     /// A line that says both things only counts as the branch case — the
@@ -466,8 +466,14 @@ mod tests {
 
     #[test]
     fn phase_labels_are_extracted() {
-        assert_eq!(phase_label("[3/5] Building (~60s)").as_deref(), Some("Building (~60s)"));
-        assert_eq!(phase_label("[2/5] Staging abc123").as_deref(), Some("Staging abc123"));
+        assert_eq!(
+            phase_label("[3/5] Building (~60s)").as_deref(),
+            Some("Building (~60s)")
+        );
+        assert_eq!(
+            phase_label("[2/5] Staging abc123").as_deref(),
+            Some("Staging abc123")
+        );
         assert_eq!(
             phase_label("Checking for updates...").as_deref(),
             Some("Checking for updates...")

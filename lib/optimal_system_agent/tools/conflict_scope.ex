@@ -184,6 +184,16 @@ defmodule OptimalSystemAgent.Tools.ConflictScope do
     name = canonical_name(name)
 
     cond do
+      # `structural_edit` gets its OWN clause rather than a `@list_writers`
+      # entry: its targets can live under `edits` (list of maps) AND/OR
+      # `pattern.paths` (list of raw strings) in the SAME call, and
+      # `scoped_list_writer/3` only ever reads one declared list key. Reusing
+      # `Handler.all_target_paths/1` — the tool's own canonical extraction —
+      # means both shapes are always seen together here, instead of a
+      # `pattern`-only call's targets being silently invisible to conflict
+      # detection (the exact "wrong disjoint costs a file" failure this
+      # module exists to prevent).
+      name == "structural_edit" -> scoped_structural_edit(input)
       spec = Map.get(@writers, name) -> scoped_writer(spec, input, name)
       spec = Map.get(@list_writers, name) -> scoped_list_writer(spec, input, name)
       spec = Map.get(@readers, name) -> scoped_reader(spec, input, per_call_safe?)
@@ -247,6 +257,15 @@ defmodule OptimalSystemAgent.Tools.ConflictScope do
       nil -> %__MODULE__{mode: :barrier}
       raw -> scope_from_paths([raw], root, :write)
     end
+  end
+
+  defp scoped_structural_edit(input) do
+    case OptimalSystemAgent.Tools.Builtins.StructuralEdit.Handler.all_target_paths(input) do
+      [] -> %__MODULE__{mode: :barrier}
+      raws -> scope_from_paths(raws, :cwd, :write)
+    end
+  rescue
+    _ -> %__MODULE__{mode: :barrier}
   end
 
   defp scoped_list_writer({list_key, keys, root}, input, _name) do

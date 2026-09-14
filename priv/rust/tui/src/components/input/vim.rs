@@ -31,7 +31,10 @@ impl Default for VimState {
     fn default() -> Self {
         // Start in Insert so enabling vim mid-draft doesn't strand the user in a
         // mode they didn't ask for; Esc drops to Normal.
-        Self { mode: VimMode::Insert, pending: None }
+        Self {
+            mode: VimMode::Insert,
+            pending: None,
+        }
     }
 }
 

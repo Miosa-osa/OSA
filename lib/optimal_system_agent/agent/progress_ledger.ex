@@ -218,7 +218,16 @@ defmodule OptimalSystemAgent.Agent.ProgressLedger do
   @spec summarize(String.t()) :: result()
   def summarize(session_id) when is_binary(session_id) do
     with {:ok, contents} <- read(session_id) do
-      {:ok, build_summary(contents)}
+      summary = build_summary(contents)
+      status = OptimalSystemAgent.Agent.Loop.GoalTracker.status(session_id)
+
+      if status in [:paused, :awaiting_user, :cleared, :abandoned, :completed] do
+        {:ok,
+         "Goal status: #{status}. Historical record below; do not restart pursuit from this recap.\n\n" <>
+           summary}
+      else
+        {:ok, summary}
+      end
     end
   end
 

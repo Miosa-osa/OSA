@@ -299,7 +299,10 @@ mod tests {
 
     #[test]
     fn profile_takes_a_value() {
-        assert_eq!(parse(&["--profile", "work"]).profile.as_deref(), Some("work"));
+        assert_eq!(
+            parse(&["--profile", "work"]).profile.as_deref(),
+            Some("work")
+        );
         assert_eq!(
             Cli::parse_from(["--profile"]).unwrap_err(),
             CliError::MissingValue("--profile")
@@ -334,7 +337,10 @@ mod tests {
 
     #[test]
     fn resume_with_and_without_an_id() {
-        assert_eq!(parse(&["--resume", "sess-1"]).resume, Some(Some("sess-1".into())));
+        assert_eq!(
+            parse(&["--resume", "sess-1"]).resume,
+            Some(Some("sess-1".into()))
+        );
         assert_eq!(parse(&["--resume"]).resume, Some(None));
         // A following flag must not be eaten as the session id.
         let cli = parse(&["--resume", "--dev"]);
@@ -345,7 +351,9 @@ mod tests {
     #[test]
     fn permission_mode_is_lowercased() {
         assert_eq!(
-            parse(&["--permission-mode", "Plan"]).permission_mode.as_deref(),
+            parse(&["--permission-mode", "Plan"])
+                .permission_mode
+                .as_deref(),
             Some("plan")
         );
         assert_eq!(
@@ -395,7 +403,10 @@ mod tests {
 
     #[test]
     fn short_model_alias_parses() {
-        assert_eq!(parse(&["-m", "gpt-oss:20b"]).model.as_deref(), Some("gpt-oss:20b"));
+        assert_eq!(
+            parse(&["-m", "gpt-oss:20b"]).model.as_deref(),
+            Some("gpt-oss:20b")
+        );
     }
 
     #[test]

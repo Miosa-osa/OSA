@@ -60,7 +60,10 @@ impl Candidate {
     }
 
     pub fn agent(name: impl Into<String>) -> Self {
-        Self { insert: name.into(), kind: MentionKind::Agent }
+        Self {
+            insert: name.into(),
+            kind: MentionKind::Agent,
+        }
     }
 }
 
@@ -76,7 +79,10 @@ pub struct LineRange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Attachment {
     /// `@path` or `@path#L10-20`.
-    File { path: String, range: Option<LineRange> },
+    File {
+        path: String,
+        range: Option<LineRange>,
+    },
     /// `@agent-name` where the token matched a known agent.
     Agent { name: String },
 }
@@ -172,9 +178,14 @@ pub fn parse_mentions(text: &str, agents: &[String]) -> Vec<Attachment> {
             if !body.is_empty() && !body.starts_with('@') {
                 let (path, range) = split_line_range(body);
                 if agents.iter().any(|a| a.eq_ignore_ascii_case(path)) {
-                    out.push(Attachment::Agent { name: path.to_string() });
+                    out.push(Attachment::Agent {
+                        name: path.to_string(),
+                    });
                 } else {
-                    out.push(Attachment::File { path: path.to_string(), range });
+                    out.push(Attachment::File {
+                        path: path.to_string(),
+                        range,
+                    });
                 }
             }
             prev = bytes.get(j - 1).copied();
@@ -253,14 +264,26 @@ mod tests {
     fn split_range_start_only() {
         let (p, r) = split_line_range("src/main.rs#L5");
         assert_eq!(p, "src/main.rs");
-        assert_eq!(r, Some(LineRange { start: 5, end: None }));
+        assert_eq!(
+            r,
+            Some(LineRange {
+                start: 5,
+                end: None
+            })
+        );
     }
 
     #[test]
     fn split_range_start_end() {
         let (p, r) = split_line_range("a/b.rs#L10-20");
         assert_eq!(p, "a/b.rs");
-        assert_eq!(r, Some(LineRange { start: 10, end: Some(20) }));
+        assert_eq!(
+            r,
+            Some(LineRange {
+                start: 10,
+                end: Some(20)
+            })
+        );
     }
 
     #[test]
@@ -277,7 +300,13 @@ mod tests {
         // A '#L' inside the path (rare) must not eat the trailing real range.
         let (p, r) = split_line_range("weird#Lname.rs#L3-4");
         assert_eq!(p, "weird#Lname.rs");
-        assert_eq!(r, Some(LineRange { start: 3, end: Some(4) }));
+        assert_eq!(
+            r,
+            Some(LineRange {
+                start: 3,
+                end: Some(4)
+            })
+        );
     }
 
     #[test]
@@ -289,9 +318,14 @@ mod tests {
             vec![
                 Attachment::File {
                     path: "src/main.rs".into(),
-                    range: Some(LineRange { start: 1, end: Some(9) }),
+                    range: Some(LineRange {
+                        start: 1,
+                        end: Some(9)
+                    }),
                 },
-                Attachment::Agent { name: "debugger".into() },
+                Attachment::Agent {
+                    name: "debugger".into()
+                },
             ]
         );
     }
@@ -302,7 +336,10 @@ mod tests {
         let got = parse_mentions("mail user@host.com and @ and @@x and (@f.rs)", &[]);
         assert_eq!(
             got,
-            vec![Attachment::File { path: "f.rs".into(), range: None }]
+            vec![Attachment::File {
+                path: "f.rs".into(),
+                range: None
+            }]
         );
     }
 
@@ -310,7 +347,12 @@ mod tests {
     fn parse_agent_is_case_insensitive() {
         let agents = vec!["Debugger".to_string()];
         let got = parse_mentions("@debugger", &agents);
-        assert_eq!(got, vec![Attachment::Agent { name: "debugger".into() }]);
+        assert_eq!(
+            got,
+            vec![Attachment::Agent {
+                name: "debugger".into()
+            }]
+        );
     }
 
     #[test]
@@ -358,7 +400,11 @@ mod tests {
         f.record("y");
         f.record("y");
         let items = vec!["x".to_string(), "y".to_string(), "z".to_string()];
-        let ranked: Vec<&str> = f.rank(&items, |s| s.as_str()).iter().map(|s| s.as_str()).collect();
+        let ranked: Vec<&str> = f
+            .rank(&items, |s| s.as_str())
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         assert_eq!(ranked, vec!["y", "x", "z"]);
     }
 }

@@ -1,13 +1,13 @@
 // Phase 2+: survey_id field — wired when survey Q&A is persisted
 #![allow(dead_code)]
 
-use std::cell::Cell;
-use std::time::SystemTime;
-use ratatui::prelude::*;
-use ratatui::buffer::Buffer;
-use ratatui::widgets::{Block, Borders, BorderType, Paragraph, Widget, Wrap};
 use crate::client::types::Signal;
 use crate::style;
+use ratatui::buffer::Buffer;
+use ratatui::prelude::*;
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget, Wrap};
+use std::cell::Cell;
+use std::time::SystemTime;
 
 /// Message types
 #[derive(Debug, Clone)]
@@ -390,10 +390,14 @@ impl Message {
         }
 
         // For agent messages, use the markdown renderer for accurate line count.
-        if matches!(self.msg_type, MessageType::Agent | MessageType::AgentContinuation) {
+        if matches!(
+            self.msg_type,
+            MessageType::Agent | MessageType::AgentContinuation
+        ) {
             // Raw-mode: one row per source line (tab-expanded, no markdown).
             if self.renders_raw() {
-                let rendered_lines = raw_source_text(&self.content, &style::theme()).lines.len() as u16;
+                let rendered_lines =
+                    raw_source_text(&self.content, &style::theme()).lines.len() as u16;
                 let h = if matches!(self.msg_type, MessageType::AgentContinuation) {
                     rendered_lines.max(1)
                 } else {
@@ -435,8 +439,7 @@ impl Message {
         // is not a cosmetic gap: this number sizes the `insert_before` rect, and
         // rows past it are clipped out of scrollback permanently.
         let plain_width = width.saturating_sub(1).max(1);
-        let mut height: u16 =
-            super::wrap_count::wrapped_row_count(&self.content, plain_width);
+        let mut height: u16 = super::wrap_count::wrapped_row_count(&self.content, plain_width);
 
         // Label line for user/agent messages (continuation has no label)
         match self.msg_type {
@@ -473,27 +476,27 @@ impl Message {
             MessageType::AgentContinuation => {
                 self.draw_agent_continuation(buf, area, &theme, scroll_top)
             }
-            MessageType::SystemInfo => {
-                self.draw_system(buf, area, &theme, theme.colors.msg_border_system, scroll_top)
-            }
-            MessageType::SystemWarning => {
-                self.draw_system(buf, area, &theme, theme.colors.msg_border_warning, scroll_top)
-            }
+            MessageType::SystemInfo => self.draw_system(
+                buf,
+                area,
+                &theme,
+                theme.colors.msg_border_system,
+                scroll_top,
+            ),
+            MessageType::SystemWarning => self.draw_system(
+                buf,
+                area,
+                &theme,
+                theme.colors.msg_border_warning,
+                scroll_top,
+            ),
             MessageType::SystemError => {
                 self.draw_system(buf, area, &theme, theme.colors.msg_border_error, scroll_top)
             }
-            MessageType::ToolCall => {
-                self.draw_tool_call(buf, area, &theme)
-            }
-            MessageType::Help => {
-                self.draw_help(buf, area, &theme)
-            }
-            MessageType::SurveyQA => {
-                self.draw_survey_qa(buf, area, &theme)
-            }
-            MessageType::Plan => {
-                self.draw_plan(buf, area, scroll_top)
-            }
+            MessageType::ToolCall => self.draw_tool_call(buf, area, &theme),
+            MessageType::Help => self.draw_help(buf, area, &theme),
+            MessageType::SurveyQA => self.draw_survey_qa(buf, area, &theme),
+            MessageType::Plan => self.draw_plan(buf, area, scroll_top),
         }
     }
 
@@ -525,7 +528,10 @@ impl Message {
                 Span::styled("❯  ", theme.prompt_char()),
                 Span::styled("You", theme.user_label()),
             ];
-            let ts_text = self.timestamp.and_then(format_timestamp).unwrap_or_default();
+            let ts_text = self
+                .timestamp
+                .and_then(format_timestamp)
+                .unwrap_or_default();
             let label = build_header_line(left_spans, ts_text, area.width, theme);
             Paragraph::new(label).render(label_area, buf);
             y = area.y + 1;
@@ -572,7 +578,10 @@ impl Message {
                 }
             }
 
-            let ts_text = self.timestamp.and_then(format_timestamp).unwrap_or_default();
+            let ts_text = self
+                .timestamp
+                .and_then(format_timestamp)
+                .unwrap_or_default();
             let label = build_header_line(label_spans, ts_text, area.width, theme);
             Paragraph::new(label).render(label_area, buf);
             y = area.y + 1;
@@ -598,12 +607,12 @@ impl Message {
                 }
             };
             let body_scroll = scroll_top.saturating_sub(1); // header was line 0
-            // NOT via `Paragraph`: a markdown body can carry OSC 8 hyperlink
-            // escapes (`render/markdown.rs` linkifies `[text](url)`, bare URLs
-            // and attachment chips). With no `.wrap()`, `Paragraph` truncates
-            // through `LineTruncator`, which counts every ESC byte as one
-            // display column — about 45 phantom columns for a short https link
-            // — and cuts the row's visible tail. See `render/cells.rs`.
+                                                            // NOT via `Paragraph`: a markdown body can carry OSC 8 hyperlink
+                                                            // escapes (`render/markdown.rs` linkifies `[text](url)`, bare URLs
+                                                            // and attachment chips). With no `.wrap()`, `Paragraph` truncates
+                                                            // through `LineTruncator`, which counts every ESC byte as one
+                                                            // display column — about 45 phantom columns for a short https link
+                                                            // — and cuts the row's visible tail. See `render/cells.rs`.
             let inner = block.inner(content_area);
             block.render(content_area, buf);
             crate::render::cells::render_lines(&styled_text.lines, inner, buf, body_scroll);
@@ -611,7 +620,13 @@ impl Message {
     }
 
     /// Draw a continuation chunk — same left-border style as Agent but no "◈ OSA" header.
-    fn draw_agent_continuation(&self, buf: &mut Buffer, area: Rect, theme: &style::Theme, scroll_top: u16) {
+    fn draw_agent_continuation(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        theme: &style::Theme,
+        scroll_top: u16,
+    ) {
         if area.height == 0 {
             return;
         }
@@ -672,12 +687,7 @@ impl Message {
         paragraph.render(area, buf);
     }
 
-    fn draw_tool_call(
-        &self,
-        buf: &mut Buffer,
-        area: Rect,
-        theme: &style::Theme,
-    ) {
+    fn draw_tool_call(&self, buf: &mut Buffer, area: Rect, theme: &style::Theme) {
         // Turn separator: draw a width-reflowing dim rule instead of baked lines.
         if self.is_turn_separator() {
             self.draw_turn_separator(buf, area, theme);
@@ -704,12 +714,9 @@ impl Message {
             .border_type(BorderType::Plain)
             .border_style(Style::default().fg(theme.colors.border));
 
-        let paragraph = Paragraph::new(Span::styled(
-            self.content.as_str(),
-            theme.faint(),
-        ))
-        .block(block)
-        .wrap(Wrap { trim: false });
+        let paragraph = Paragraph::new(Span::styled(self.content.as_str(), theme.faint()))
+            .block(block)
+            .wrap(Wrap { trim: false });
         paragraph.render(area, buf);
     }
 
@@ -755,10 +762,7 @@ impl Message {
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         for (q, a) in &sd.pairs {
-            lines.push(Line::from(Span::styled(
-                format!("  Q: {}", q),
-                muted_style,
-            )));
+            lines.push(Line::from(Span::styled(format!("  Q: {}", q), muted_style)));
             lines.push(Line::from(Span::styled(
                 format!("  A: {}", a),
                 answer_style,
@@ -894,7 +898,10 @@ fn format_timestamp(ts: SystemTime) -> Option<String> {
         Some(format!("{}:{:02} {}", hour12, minute, ampm))
     } else {
         let (month_name, day_of_month) = epoch_days_to_month_day(day as u64);
-        Some(format!("{} {}, {}:{:02} {}", month_name, day_of_month, hour12, minute, ampm))
+        Some(format!(
+            "{} {}, {}:{:02} {}",
+            month_name, day_of_month, hour12, minute, ampm
+        ))
     }
 }
 
@@ -992,10 +999,16 @@ fn build_help_lines(theme: &style::Theme) -> Vec<Line<'static>> {
         ("  /model <name>", "Switch model"),
         ("  /sessions", "Browse sessions"),
         ("  /session new", "New session"),
-        ("  /steer <text>", "Redirect the agent mid-turn (queues if idle)"),
+        (
+            "  /steer <text>",
+            "Redirect the agent mid-turn (queues if idle)",
+        ),
         ("  /bg", "List background turns (Ctrl+B backgrounds one)"),
         ("  /fg", "Bring a backgrounded turn back to the foreground"),
-        ("  /agents", "Background-agent dashboard (running + finished)"),
+        (
+            "  /agents",
+            "Background-agent dashboard (running + finished)",
+        ),
         ("  /rewind", "Restore code/conversation from a checkpoint"),
         ("  /revert N", "Restore files N mutating-tool steps ago"),
         ("  /theme <name>", "Switch theme"),
@@ -1159,7 +1172,10 @@ mod raw_mode_tests {
         // Markdown markup is preserved literally (not rendered) and tabs expand.
         // "- **a**" is 7 cols → next 4-stop is col 8 → exactly one filler space.
         let t = raw_source_text("# Title\n- **a**\tb", &theme);
-        assert_eq!(flat(&t), vec!["# Title".to_string(), "- **a** b".to_string()]);
+        assert_eq!(
+            flat(&t),
+            vec!["# Title".to_string(), "- **a** b".to_string()]
+        );
     }
 
     #[test]
@@ -1198,7 +1214,10 @@ mod timestamp_tz_tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     fn local_now() -> i64 {
-        let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         secs + local_utc_offset_secs()
     }
 
@@ -1265,7 +1284,10 @@ mod timestamp_tz_tests {
     #[test]
     fn local_offset_is_plausible() {
         let off = local_utc_offset_secs();
-        assert!((-14 * 3600..=14 * 3600).contains(&off), "implausible offset {off}");
+        assert!(
+            (-14 * 3600..=14 * 3600).contains(&off),
+            "implausible offset {off}"
+        );
         assert_eq!(off % 60, 0, "offset must be a whole number of minutes");
     }
 }
@@ -1323,7 +1345,11 @@ mod commit_parse_tests {
             "a 30-item list must wrap differently at 40 columns than at 120; \
              if this ever ties, pick a body where it does not"
         );
-        assert_eq!(msg.height(120), wide, "second call must agree with the memo");
+        assert_eq!(
+            msg.height(120),
+            wide,
+            "second call must agree with the memo"
+        );
     }
 
     /// Invalidation still reaches it — otherwise the memo would outlive an edit.

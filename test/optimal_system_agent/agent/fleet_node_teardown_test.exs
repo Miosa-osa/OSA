@@ -9,10 +9,18 @@ defmodule OptimalSystemAgent.Agent.FleetNodeTeardownTest do
   Two teardown paths are asserted here as bounds — spawn N nodes, assert the
   live-loop count comes back down:
 
-    * `stop_node/1` — the terminal path `finish/3` takes on success, failure,
-      driver crash and idle timeout;
+    * `stop_node/1` — the CASCADING path: this node AND its own descendants are
+      being torn down (used by `stop_children/1`'s own recursion and
+      `RunStore.handle_ownership_loss/1`'s abort);
     * `stop_children/1` — the parent-shutdown path, cascaded from
       `Runtime.SessionManager.stop_session/1`.
+
+  `finish/3` — the per-delegation terminal path taken on success, failure,
+  driver crash and idle timeout — calls `retire_node/1` instead, precisely
+  because it must NOT cascade: see
+  `OptimalSystemAgent.Agent.NestedBackgroundPersistenceTest` for why a node
+  finishing its own work must not cancel a still-running background subagent
+  it dispatched.
   """
   use ExUnit.Case, async: false
 
@@ -154,6 +162,39 @@ defmodule OptimalSystemAgent.Agent.FleetNodeTeardownTest do
     test "stop_children never raises on a bad argument" do
       assert Fleet.stop_children(nil) == 0
       assert Fleet.stop_children(:not_a_binary) == 0
+    end
+
+    test "a child that already reached its own terminal state is left alone", %{parent: parent} do
+      # Simulates a node whose OWN `finish/3` (success, failure, driver crash,
+      # idle timeout) landed before `stop_children` gets to it — the same
+      # sequence `finish/3` itself performs: `RunStore.complete/2` then
+      # `retire_node/1` (no cascade). Reproduces the "ended, then a spurious
+      # second terminal write" shape from the incident this guards against —
+      # `stop_children` must not re-complete (or re-log a contradictory STOP
+      # line for) a run that is no longer `:running`.
+      #
+      # This does not pin the narrower mid-iteration TOCTOU race (a sibling
+      # completing WHILE `stop_children` is still processing an earlier one) —
+      # that requires genuine concurrency and would make the test's outcome
+      # depend on scheduler timing. The `Enum.filter(&still_running?/1)` guard
+      # this exercises is the same guard that closes both cases; this test
+      # pins the deterministic half of it.
+      done = spawn_node(parent, "td-already-done-#{System.unique_integer([:positive])}")
+      RunStore.complete(done, %{status: :completed, summary: "finished its own work"})
+      Fleet.retire_node(done)
+      refute alive?(done)
+
+      running = spawn_node(parent, "td-still-running-#{System.unique_integer([:positive])}")
+      assert alive?(running)
+
+      assert Fleet.stop_children(parent) == 1,
+             "only the still-running sibling should be counted as stopped"
+
+      assert %{status: :completed, result: %{summary: "finished its own work"}} =
+               RunStore.get(done),
+             "an already-terminal run's real outcome must survive a parent-shutdown sweep"
+
+      refute alive?(running)
     end
   end
 end

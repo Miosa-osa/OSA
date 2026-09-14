@@ -156,10 +156,26 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileGrepTest do
     end
 
     test "a match only in a dependency directory is found and labelled", %{dir: dir} do
+      # The "found and labelled" contract is the FALLBACK walk's: it prunes
+      # dependency dirs in the ordinary pass and widens to them (with the
+      # note) when the ordinary pass finds nothing. With ripgrep ON the PATH
+      # the rg engine serves the search and — no .gitignore in this fixture —
+      # correctly reports the node_modules match in its ordinary pass, with
+      # no note. Pinning which engine serves the search would make the test
+      # machine-dependent, so assert the machine-independent contract: the
+      # match IS found, and the note appears exactly when the fallback's
+      # prune-then-widen path served it.
       assert {:ok, out} = FileGrep.execute(%{"pattern" => "only_in_deps", "path" => dir})
 
       assert out =~ "node_modules/leftpad/b.py"
-      assert out =~ "dependency or build directories"
+
+      if String.contains?(out, "Backend: the pure-Elixir fallback") do
+        assert out =~ "dependency or build directories"
+      else
+        # ripgrep served it: no note is correct — rg answered from its
+        # ordinary pass, nothing was widened.
+        :ok
+      end
     end
 
     test "an ordinary match skips dependency directories and carries no note", %{dir: dir} do

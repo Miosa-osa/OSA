@@ -141,9 +141,15 @@ pub fn notify(title: &str, message: &str) -> bool {
     let (program, args) = match n {
         Notifier::TerminalNotifier(path) => {
             let sender = std::env::var("OSA_NOTIFY_SENDER").ok();
-            (path, terminal_notifier_args(title, message, sender.as_deref()))
+            (
+                path,
+                terminal_notifier_args(title, message, sender.as_deref()),
+            )
         }
-        Notifier::Osascript(path) => (path, vec!["-e".to_string(), osascript_script(title, message)]),
+        Notifier::Osascript(path) => (
+            path,
+            vec!["-e".to_string(), osascript_script(title, message)],
+        ),
         Notifier::NotifySend(path) => (path, notify_send_args(title, message)),
     };
 
@@ -178,10 +184,15 @@ mod tests {
         let args = terminal_notifier_args("t", "m", Some("com.github.wez.wezterm"));
         // `-sender` alone is not enough: recent macOS ignores the identity
         // masquerade, and without `-activate` the toast becomes unclickable.
-        assert!(args.contains(&"-activate".to_string()), "no click target: {args:?}");
+        assert!(
+            args.contains(&"-activate".to_string()),
+            "no click target: {args:?}"
+        );
         assert!(args.contains(&"-sender".to_string()));
         assert_eq!(
-            args.iter().filter(|a| *a == "com.github.wez.wezterm").count(),
+            args.iter()
+                .filter(|a| *a == "com.github.wez.wezterm")
+                .count(),
             2,
             "both flags need the bundle id: {args:?}"
         );

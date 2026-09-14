@@ -165,6 +165,12 @@ pub enum BackendEvent {
         /// NOT zero: a client must keep whatever anchor it already had rather
         /// than reset to "just started".
         elapsed_ms: Option<u64>,
+        /// This agent's per-subagent spend ceiling in USD (2e —
+        /// `max_budget_usd` on the orchestrator: a caller override or the
+        /// spawning tier's default). Fixed for the life of the run, so this
+        /// is reported once here rather than repeated on every progress
+        /// frame. `None` from an older backend that does not yet send it.
+        budget_cap_usd: Option<f64>,
     },
     OrchestratorAgentProgress {
         agent_name: String,
@@ -183,6 +189,13 @@ pub enum BackendEvent {
         failure_count: u32,
         delivery_status: String,
         available_controls: Vec<String>,
+        /// Live context-window utilization (percent) for this agent's session,
+        /// or None from an older backend.
+        context_percent: Option<u32>,
+        /// Cumulative REAL (per-model, cache-discounted) cost in USD for this
+        /// agent so far (backend item-10, on the progress frame). `None` from an
+        /// older backend. Drives the live per-worker `$cost` in the roster meter.
+        cost_usd: Option<f64>,
     },
     AgentControlResult {
         agent_id: String,
@@ -197,6 +210,10 @@ pub enum BackendEvent {
         /// Compact one-line preview of the worker's final result (<=~140 chars),
         /// surfaced under the finished row. `None` from older backends.
         summary: Option<String>,
+        /// A capped run that came back RESUMABLE (RunStore `:completed` with
+        /// `partial`/`resumable`). When true the row is surfaced as its own
+        /// "Partial · resumable" state rather than a clean "Done".
+        resumable: bool,
     },
     OrchestratorAgentFailed {
         agent_name: String,
@@ -205,6 +222,26 @@ pub enum BackendEvent {
         tokens_used: u32,
         /// Compact one-line error preview (<=~140 chars). `None` from older backends.
         summary: Option<String>,
+    },
+    // === Monitors / watch-tasks (C1b) ===
+    // Wire contract: {id (a.k.a. watch_id), label "<kind>:<target>", state, and
+    // parent_agent_id (subagent session id, else none → attach to main root)}.
+    MonitorStarted {
+        id: String,
+        label: String,
+        parent_agent_id: Option<String>,
+    },
+    MonitorEvent {
+        id: String,
+        /// A short line describing the edge that fired (or its detail).
+        detail: String,
+    },
+    MonitorDone {
+        id: String,
+        /// Wire `state`: "done" | "timeout" | "stopped".
+        state: String,
+        /// Optional verdict/detail carried on retirement.
+        detail: Option<String>,
     },
     OrchestratorWaveStarted {
         wave_number: u32,
@@ -477,6 +514,40 @@ pub enum BackendEvent {
         pause_reason: Option<String>,
         turn_count: u32,
         verify_run_count: u32,
+    },
+    /// Item #3 — one-time full-screen completion report, fired exactly once
+    /// when a goal transitions into a TERMINAL status: `completed` (panel
+    /// verdict), `blocked` (repeated `claim_blocked`), or `abandoned` (model
+    /// called `abandon`). NOT fired for `paused` (resumable, not terminal).
+    ///
+    /// Producer: `GoalTracker.completion_overview/1` /
+    /// `maybe_emit_completion_overview/1`
+    /// (`lib/optimal_system_agent/agent/loop/goal_tracker.ex`), forwarded as
+    /// `goal_completion_overview` on the session's PubSub topic — the same
+    /// mechanism as `goal_verifier_round`/`goal_tracker_transition`.
+    GoalCompletionOverview {
+        goal_id: Option<String>,
+        goal: Option<String>,
+        /// `"completed"` | `"blocked"` | `"abandoned"` — see
+        /// `components::completion_panel::CompletionOutcome::from_status`.
+        status: String,
+        /// Why a Blocked run stopped, when the backend reported one.
+        pause_reason: Option<String>,
+        /// Goal-verifier-panel findings. Populated when the skeptic panel
+        /// ran (typically the `completed` path, even when it approved with
+        /// residual notes); commonly EMPTY for `blocked`/`abandoned`, which
+        /// stop via `claim_blocked`/`abandon` rather than a panel verdict.
+        gaps: Vec<String>,
+        /// Distinct file paths touched this session (from the backend's
+        /// VerificationEvidence ledger) — NOT prose.
+        work_summary: Vec<String>,
+        /// The frozen acceptance-criteria text, if the goal had one set and
+        /// it differs from the goal text itself.
+        acceptance_criteria: Option<String>,
+        turn_count: u32,
+        verify_run_count: u32,
+        /// Most recent goal-tracker history line, for extra context.
+        latest: Option<String>,
     },
     SwarmIntelligenceConverged {
         swarm_id: String,

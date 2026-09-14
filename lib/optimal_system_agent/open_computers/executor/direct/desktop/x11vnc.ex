@@ -26,6 +26,8 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.X11vnc do
 
   require Logger
 
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Readiness
+
   @port_pattern ~r/PORT=(\d+)/
   @startup_timeout_ms 5_000
 
@@ -43,12 +45,12 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.X11vnc do
 
   Returns `{:ok, t()}` or `{:error, reason}`.
   """
-  @spec spawn(String.t()) :: {:ok, t()} | {:error, term()}
-  def spawn(display \\ ":0") do
+  @spec spawn(String.t() | nil) :: {:ok, t()} | {:error, term()}
+  def spawn(display \\ nil, opts \\ %{}) do
     with :ok <- check_x11vnc_present(),
-         :ok <- check_display(display),
+         {:ok, display} <- Readiness.display(display),
          {:ok, auth} <- make_auth(),
-         {:ok, port} <- open_port(display, auth),
+         {:ok, port} <- open_port(display, auth, opts),
          {:ok, os_pid} <- fetch_os_pid(port),
          {:ok, vnc_port} <- await_port_announcement(port) do
       {:ok,
@@ -139,21 +141,6 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.X11vnc do
     end
   end
 
-  defp check_display(display) do
-    case System.get_env("DISPLAY") do
-      nil ->
-        # Also accept an explicit non-empty display arg (rare but valid)
-        if display != "" do
-          :ok
-        else
-          {:error, {:missing_display, "DISPLAY environment variable is not set"}}
-        end
-
-      _ ->
-        :ok
-    end
-  end
-
   @doc """
   Build the x11vnc argv for `display`, authenticating with `secret`.
 
@@ -172,8 +159,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.X11vnc do
     * `-localhost` + `-rfbport 0` — loopback only, kernel-assigned port.
   """
   @spec build_args(String.t(), map() | nil) :: [String.t()]
-  def build_args(display, auth) do
+  def build_args(display, auth, opts \\ %{}) do
     base = ["-display", display, "-localhost", "-rfbport", "0", "-quiet"]
+    base = if Map.get(opts, :allow_input) === true, do: base, else: base ++ ["-viewonly"]
 
     case auth do
       %{file: file} when is_binary(file) -> base ++ ["-passwdfile", "rm:" <> file]
@@ -181,10 +169,10 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.X11vnc do
     end
   end
 
-  defp open_port(display, auth) do
+  defp open_port(display, auth, opts) do
     x11vnc = System.find_executable("x11vnc")
 
-    args = build_args(display, auth)
+    args = build_args(display, auth, opts)
 
     port =
       Port.open(
@@ -266,9 +254,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.X11vnc do
     if binary != nil and not File.exists?(binary) do
       {:error, :unsupported_platform}
     else
-      display = Map.get(opts, :display, ":0")
+      display = Map.get(opts, :display)
 
-      case spawn(display) do
+      case spawn(display, opts) do
         # The RFB port is ephemeral (`-rfbport 0`), so it MUST travel with the
         # handle. Returning only the os_pid is what left the controller
         # connecting to a hardcoded 5900 that this server never binds — i.e.

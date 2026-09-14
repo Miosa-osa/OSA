@@ -86,6 +86,7 @@ defmodule OptimalSystemAgent.CLI.Doctor do
       check_model(),
       check_provider(),
       check_miosa_cli(),
+      check_computer_use(),
       check_event_router(),
       check_working_directory(),
       check_postgresql(),
@@ -243,6 +244,29 @@ defmodule OptimalSystemAgent.CLI.Doctor do
   defp check_runtime do
     otp_release = :erlang.system_info(:otp_release) |> to_string()
     {:pass, "Runtime", "OTP #{otp_release}"}
+  end
+
+  defp check_computer_use do
+    case :os.type() do
+      {:unix, :darwin} ->
+        alias OptimalSystemAgent.Tools.Builtins.ComputerUse.Adapters.MacOS
+
+        case MacOS.accessibility_status() do
+          {:ok, %{trusted: true}} ->
+            {:pass, "Computer use", "native semantic accessibility ready"}
+
+          {:ok, %{trusted: false}} ->
+            {:optional, "Computer use", "enable Accessibility permission in System Settings"}
+
+          {:error, reason} ->
+            {:optional, "Computer use", reason}
+        end
+
+      _ ->
+        {:optional, "Computer use", "platform adapter checked when desktop control is used"}
+    end
+  rescue
+    error -> {:optional, "Computer use", Exception.message(error)}
   end
 
   # Is `file_grep` running on ripgrep, or on the fallback?

@@ -473,14 +473,24 @@ mod tests {
     /// apart.
     fn clumpy(n: usize) -> Vec<(String, Duration)> {
         (0..n)
-            .map(|i| ("x".repeat(28), Duration::from_millis(if i == 0 { 0 } else { 130 })))
+            .map(|i| {
+                (
+                    "x".repeat(28),
+                    Duration::from_millis(if i == 0 { 0 } else { 130 }),
+                )
+            })
             .collect()
     }
 
     /// Arrival shaped like a local model: 4-5 chars, 8 ms apart.
     fn smooth(n: usize) -> Vec<(String, Duration)> {
         (0..n)
-            .map(|i| ("abcd".to_string(), Duration::from_millis(if i == 0 { 0 } else { 8 })))
+            .map(|i| {
+                (
+                    "abcd".to_string(),
+                    Duration::from_millis(if i == 0 { 0 } else { 8 }),
+                )
+            })
             .collect()
     }
 
@@ -594,7 +604,11 @@ mod tests {
         let mut now = Instant::now();
         for i in 0..WARMUP_DELTAS {
             now += Duration::from_millis(130);
-            assert_eq!(p.push("hello", now), "hello", "delta {i} was held during warm-up");
+            assert_eq!(
+                p.push("hello", now),
+                "hello",
+                "delta {i} was held during warm-up"
+            );
         }
     }
 
@@ -651,7 +665,11 @@ mod tests {
         // Anything still held at the budget is released by the age rule.
         let t_end = burst_at + LAG_BUDGET;
         got += p.tick(t_end).chars().count();
-        assert!(!p.is_pending(), "{} chars still held a budget later", 4000 - got);
+        assert!(
+            !p.is_pending(),
+            "{} chars still held a budget later",
+            4000 - got
+        );
     }
 
     #[test]
@@ -803,11 +821,17 @@ mod real_trace {
             let (Some(t), Some(n)) = (it.next(), it.next()) else {
                 continue;
             };
-            let (t, n) = (t.parse::<u64>().unwrap_or(0), n.parse::<usize>().unwrap_or(0));
+            let (t, n) = (
+                t.parse::<u64>().unwrap_or(0),
+                n.parse::<usize>().unwrap_or(0),
+            );
             if n == 0 {
                 continue;
             }
-            out.push(("x".repeat(n), Duration::from_micros(t.saturating_sub(prev_us))));
+            out.push((
+                "x".repeat(n),
+                Duration::from_micros(t.saturating_sub(prev_us)),
+            ));
             prev_us = t;
         }
         out
@@ -878,8 +902,7 @@ mod real_trace {
         let (eng_on, on) = stats(PaceMode::Auto);
 
         println!("\n  chars revealed per paint, real trace (16ms frames)\n");
-        let rows: [(&str, bool, &Vec<usize>); 2] =
-            [("off", eng_off, &off), ("auto", eng_on, &on)];
+        let rows: [(&str, bool, &Vec<usize>); 2] = [("off", eng_off, &off), ("auto", eng_on, &on)];
         for (name, eng, v) in rows {
             println!(
                 "  {name:5} engaged={eng:5}  paints={:5}  p50={:4}  p90={:4}  p99={:4}  max={:4}",

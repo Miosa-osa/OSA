@@ -19,8 +19,25 @@ defmodule OptimalSystemAgent.CLI.SetupTest do
 
   @env_path Path.join(Path.join(System.user_home!(), ".osa"), ".env")
 
+  # `write_config/2,3` doesn't just write the `.env` file — `apply_live/4`
+  # (its last step) applies the same selection to the CURRENT PROCESS via
+  # `Application.put_env` and `System.put_env` so the change takes effect
+  # without a restart. That is just as global and just as much this test's
+  # responsibility to undo as the `.env` file: this module calls
+  # `write_config` for :ollama, :ollama_cloud, :anthropic and :openai with
+  # real models (including "glm-5.2:cloud"), and a leaked `:ollama_model` /
+  # `:default_model` pinned every OTHER test's "no model configured" case to
+  # a real, cataloged model for the rest of the suite.
+  @touched_app ~w(default_provider default_model ollama_model ollama_api_key anthropic_api_key openai_api_key)a
+  @touched_env ~w(OSA_DEFAULT_PROVIDER OSA_MODEL OLLAMA_URL OLLAMA_MODEL OLLAMA_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY)
+
   setup do
     original = if File.exists?(@env_path), do: File.read!(@env_path), else: nil
+
+    prev_app =
+      Map.new(@touched_app, fn k -> {k, Application.get_env(:optimal_system_agent, k)} end)
+
+    prev_env = Map.new(@touched_env, &{&1, System.get_env(&1)})
 
     # Start each test from a clean slate so write_config/* assertions don't
     # accumulate onto the developer's real ~/.osa/.env (leaks provider keys and
@@ -32,6 +49,16 @@ defmodule OptimalSystemAgent.CLI.SetupTest do
         nil -> File.rm(@env_path)
         content -> File.write!(@env_path, content)
       end
+
+      Enum.each(prev_app, fn
+        {k, nil} -> Application.delete_env(:optimal_system_agent, k)
+        {k, v} -> Application.put_env(:optimal_system_agent, k, v)
+      end)
+
+      Enum.each(prev_env, fn
+        {k, nil} -> System.delete_env(k)
+        {k, v} -> System.put_env(k, v)
+      end)
     end)
 
     :ok

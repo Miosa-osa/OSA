@@ -359,7 +359,7 @@ run_health_check() {
   local pid rc=1 i
   (
     cd "$stage"
-    OSA_PORT="$port" MIX_ENV="$OSA_UPDATE_MIX_ENV" timeout 40 mix osa.serve \
+    OSA_PORT="$port" OSA_HTTP_PORT="$port" MIX_ENV="$OSA_UPDATE_MIX_ENV" timeout 40 mix osa.serve \
       >"$stage/.osa-update-probe.log" 2>&1 &
     echo $! > "$stage/.osa-update-probe.pid"
   )

@@ -79,6 +79,18 @@ defmodule OptimalSystemAgent.FSCheckpoint.Hook do
     |> Enum.flat_map(&expand_if_exists/1)
   end
 
+  # `structural_edit` may declare targets under `edits` (list of maps, same
+  # shape as `multi_file_edit`) AND/OR `pattern.paths` (list of raw path
+  # strings) in the SAME call — both are gathered via the tool's own
+  # `Handler.all_target_paths/1` so a `pattern`-only call is snapshotted too,
+  # not just an `edits`-shaped one.
+  def extract_paths("structural_edit", args) do
+    OptimalSystemAgent.Tools.Builtins.StructuralEdit.Handler.all_target_paths(args)
+    |> Enum.flat_map(&expand_if_exists/1)
+  rescue
+    _ -> []
+  end
+
   # Destructive shell commands.
   #
   # This used to compute the destructive-pattern check and then return `[]` from

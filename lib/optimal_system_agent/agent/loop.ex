@@ -168,6 +168,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # Budget and turn limits — nil = no limit
     max_budget_usd: nil,
     max_turns: nil,
+    # Per-RUN react-loop iteration cap for THIS session (nil = the global
+    # ~unbounded default). Set for a delegated subagent from its agent def /
+    # delegate call so a bounded worker (e.g. `researcher` at 30) cannot crawl
+    # 187 pages in a single turn. ReactLoop reads it; hitting it runs the forced
+    # wrap-up handoff, not a silent halt.
+    max_iterations: nil,
     # Delegation nesting depth — 0 for a top-level session, incremented for
     # each subagent generation. Read by ToolFilter to strip spawning tools at
     # the max depth (fork-bomb / runaway-cost guard).
@@ -388,6 +394,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
       model: state.model,
       effective_context_window: state.effective_context_window,
       tokens_used: used_context_tokens(state),
+      context_pct: context_pct(state),
       tools_called: state.last_meta[:tools_used] || [],
       spend: OptimalSystemAgent.Agent.Loop.Accounting.snapshot(state),
       prompt_preview: preview(message)
@@ -537,13 +544,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
   # meaning. Stripped before the all-stop test so "stop doing shit please"
   # reduces to ["stop"] and halts, while a real target word survives and keeps
   # the message a steer. "wait" is filler (a bare "wait" must not kill a turn).
-  @stop_filler MapSet.new(
-                 ~w(please just now ok okay pls plz dude man bro yo no nah nope
+  @stop_filler MapSet.new(~w(please just now ok okay pls plz dude man bro yo no nah nope
                     nvm wait the a an of it its that this these those your you u
                     i we lol like fucking fuckin fuck shit damn hell bullshit
                     crap ass doing working going already right here so really
-                    actually all everything anything)
-               )
+                    actually all everything anything))
 
   @doc false
   @spec stop_intent?(String.t()) :: boolean()
@@ -892,12 +897,25 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # and the live SessionRegistry, in case a sub-agent hasn't hit
     # `RunStore.start_run/1` yet (registration race) or was launched by a
     # path that doesn't go through RunStore at all.
+    #
+    # Both folds additionally skip anything RunStore ALREADY knows is
+    # `background: true` — this is a MATCH ON ID PREFIX, not a RunStore walk,
+    # so it does not inherit `descendant_session_ids/1`'s exclusion for free.
+    # Without this check, a `run_background/2`-dispatched agent (registered in
+    # RunStore synchronously at dispatch, per its own moduledoc — so it is
+    # essentially never in the "not yet registered" gap this fallback exists
+    # for) would still get flagged here purely because its id happens to
+    # start with `agent:<session_id>:` and it is live in `SessionRegistry`,
+    # silently reintroducing the exact cascade `descendant_session_ids/1` was
+    # just changed to exclude it from. A genuinely unregistered/unknown id
+    # (`RunStore.get/1` returns `nil`) still gets flagged — this fallback's
+    # actual job, over-cancelling an unknown process, is unchanged.
     prefix = "agent:#{session_id}:"
 
     try do
       :ets.foldl(
         fn {key, _val}, acc ->
-          if is_binary(key) and String.starts_with?(key, prefix) do
+          if is_binary(key) and String.starts_with?(key, prefix) and not background_run?(key) do
             :ets.insert(@cancel_table, {key, true})
             Logger.info("[loop] Cancel propagated to sub-agent #{key}")
           end
@@ -914,7 +932,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
     try do
       Registry.select(OptimalSystemAgent.SessionRegistry, [{{:"$1", :_, :_}, [], [:"$1"]}])
       |> Enum.each(fn key ->
-        if is_binary(key) and String.starts_with?(key, prefix) do
+        if is_binary(key) and String.starts_with?(key, prefix) and not background_run?(key) do
           :ets.insert(@cancel_table, {key, true})
           Logger.info("[loop] Cancel propagated to registered sub-agent #{key}")
         end
@@ -1007,6 +1025,16 @@ defmodule OptimalSystemAgent.Agent.Loop do
     ArgumentError -> :ok
   end
 
+  # True when RunStore knows `id` as a `background: true` dispatch. Best-effort
+  # and fail-CLOSED toward `false` (cancellable) — an id RunStore has never
+  # heard of, or a lookup failure, must never be read as "safe to leave
+  # running"; see `cancel/1`'s prefix-fold/registry-scan callers.
+  defp background_run?(id) do
+    match?(%{background: true}, OptimalSystemAgent.Agent.RunStore.get(id))
+  rescue
+    _ -> false
+  end
+
   # True when `id` is a spawned subagent (RunStore row with a parent), not a
   # top-level interactive session. Best-effort — any failure treats `id` as
   # NOT a subagent so we never accidentally hard-kill an unknown/root session.
@@ -1041,10 +1069,21 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   @doc false
   # BFS over RunStore's parent_session_id chain from `root_session_id`.
-  # Returns every reachable descendant `agent_id`, deepest included
-  # (transitive: grandchildren, great-grandchildren, ...). A `seen` set
-  # guards against a cyclic/malformed parent chain looping forever — each
-  # id is only ever expanded once.
+  # Returns every reachable descendant `agent_id` this cascade may reach —
+  # deepest included (transitive: grandchildren, great-grandchildren, ...). A
+  # `seen` set guards against a cyclic/malformed parent chain looping forever
+  # — each id is only ever expanded once.
+  #
+  # A run marked `background: true` (dispatched via `Orchestrator.run_background/2`
+  # — `delegate(background: true)` and anything reusing that entry point) is
+  # EXCLUDED, along with its entire subtree: it is explicitly designed to
+  # outlive the turn that spawned it, so an interrupt/cancel of that turn must
+  # not reach it, and a background agent that itself dispatches more work must
+  # not have that work ripped out from under it while it keeps running. This
+  # is what makes `cancel/1` (interrupt) and `SessionManager.stop_session/1`
+  # (real teardown, via `Fleet.stop_children/1` — a SEPARATE walk that does
+  # NOT filter on `background`) diverge: interrupting a turn must not kill
+  # detached work, but a genuine session teardown must not leak it either.
   @spec descendant_session_ids(String.t()) :: [String.t()]
   def descendant_session_ids(root_session_id) do
     runs = OptimalSystemAgent.Agent.RunStore.list(limit: 100_000)
@@ -1061,18 +1100,45 @@ defmodule OptimalSystemAgent.Agent.Loop do
         end
       end)
 
-    bfs_descendants(children_by_parent, [root_session_id], MapSet.new([root_session_id]), [])
+    # Absent/unknown reads as `false` (cancellable) — fail toward the
+    # interrupt still reaching a row this field predates, never toward a run
+    # silently surviving one it was never meant to.
+    background_ids =
+      runs
+      |> Enum.filter(&(Map.get(&1, :background) == true))
+      |> Enum.map(& &1.agent_id)
+      |> MapSet.new()
+
+    bfs_descendants(
+      children_by_parent,
+      background_ids,
+      [root_session_id],
+      MapSet.new([root_session_id]),
+      []
+    )
   rescue
     _ -> []
   end
 
-  defp bfs_descendants(_children_by_parent, [], _seen, acc), do: acc
+  defp bfs_descendants(_children_by_parent, _background_ids, [], _seen, acc), do: acc
 
-  defp bfs_descendants(children_by_parent, [current | rest], seen, acc) do
+  defp bfs_descendants(children_by_parent, background_ids, [current | rest], seen, acc) do
     children = Map.get(children_by_parent, current, [])
     new_children = Enum.reject(children, &MapSet.member?(seen, &1))
+    # Seen covers EVERY newly-discovered child, background or not, so one is
+    # never re-evaluated via a second path into it — but only the attached
+    # ones are flagged for cancellation or walked any further; a background
+    # child's own descendants are left entirely unexplored.
     new_seen = Enum.reduce(new_children, seen, &MapSet.put(&2, &1))
-    bfs_descendants(children_by_parent, rest ++ new_children, new_seen, acc ++ new_children)
+    attached = Enum.reject(new_children, &MapSet.member?(background_ids, &1))
+
+    bfs_descendants(
+      children_by_parent,
+      background_ids,
+      rest ++ attached,
+      new_seen,
+      acc ++ attached
+    )
   end
 
   @doc """
@@ -1484,6 +1550,16 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # Best-effort and never allowed to disrupt the turn.
     _ = maybe_rewind_checkpoint(state, message)
 
+    # A delegated subagent can carry a per-run iteration cap (its agent def's
+    # `max_iterations`, threaded here by the orchestrator). Pin it onto the state
+    # so ReactLoop enforces it for this turn; absent, the session keeps its
+    # ~unbounded default.
+    state =
+      case Keyword.get(opts, :max_iterations) do
+        n when is_integer(n) and n > 0 -> %{state | max_iterations: n}
+        _ -> state
+      end
+
     # From here to the `after` below, this process serves no messages: the whole
     # turn runs on its own stack. Publish what a reader needs BEFORE going deaf,
     # so `get_state/1` has something true to fall back on for however long the
@@ -1550,6 +1626,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
       provider: state.provider,
       model: state.model,
       effective_context_window: state.effective_context_window,
+      # Context-window occupancy as a fraction (item 10): the honest "how full is
+      # this agent's window" figure for the headline, so the TUI can show cost +
+      # context% instead of a cache-inflated cumulative token count. `tokens_used`
+      # above stays as the raw occupancy for existing readers/telemetry.
+      context_pct: context_pct(state),
       spend: OptimalSystemAgent.Agent.Loop.Accounting.snapshot(state)
     }
 
@@ -2707,10 +2788,84 @@ defmodule OptimalSystemAgent.Agent.Loop do
   # the provider-reported input tokens (real usage) and fall back to the
   # char/word estimate when the provider returns none (glm/Ollama), matching the
   # status-bar context-pressure telemetry rather than always estimating.
+  #
+  # BEFORE the first real provider response of a process — a fresh session, or
+  # one resumed from a checkpoint (`last_input_tokens` is not restored, see
+  # `init/1`) — the message-only estimate is missing the fixed overhead every
+  # request pays regardless of turn count: the system-prompt static base for
+  # the variant this session resolves to, and, for a provider whose transport
+  # carries tool schemas natively, the JSON schema array for the live tool set.
+  # MEASURED: the `:native_tools` static base alone is 20,638 tokens with ZERO
+  # MCP servers registered; native schemas plus a dozen MCP servers add tens of
+  # thousands more. Omitting that overhead is why the meter used to read near
+  # 0% on a fresh session and then LEAP the instant the first `usage` came
+  # back — the leap was real, fixed cost the pre-response estimate had simply
+  # never counted, not a miscount on either side of it.
   defp used_context_tokens(state) do
     case Map.get(state, :last_input_tokens, 0) do
       n when is_integer(n) and n > 0 -> n
-      _ -> Telemetry.estimate_tokens(state)
+      _ -> pre_response_context_estimate(state)
+    end
+  end
+
+  # A pure lower bound on what the NEXT request will cost: conversation so far
+  # plus the fixed per-request overhead (`static_overhead_tokens/1`), clamped
+  # to the effective window so a small local model can never report over 100%
+  # before a single token has actually been sent.
+  defp pre_response_context_estimate(state) do
+    estimate = Telemetry.estimate_tokens(state) + static_overhead_tokens(state)
+
+    case Map.get(state, :effective_context_window) do
+      window when is_integer(window) and window > 0 -> min(estimate, window)
+      _ -> estimate
+    end
+  end
+
+  # Fixed overhead `state.messages` never carries: the system-prompt static
+  # base for the variant `Agent.Context.build/1` will actually pick for this
+  # provider/model (`Soul.static_token_count/1`, a real measurement, not a
+  # guess), plus — only when the transport carries tool schemas natively
+  # rather than as inlined prose (`Providers.Registry.native_tool_schemas?/1`)
+  # — the live native tool array's JSON schema cost (`Tools.Audit.array_cost/1`,
+  # the same figure `mix osa.tool_audit` reports). Provider/model resolution
+  # mirrors `Agent.Context.build/1` exactly (same default fallback) so this
+  # estimate and the request it is estimating can never disagree about which
+  # variant applies. Best-effort: a telemetry estimate must never crash the
+  # loop it is describing.
+  defp static_overhead_tokens(state) do
+    provider =
+      Map.get(state, :provider) ||
+        Application.get_env(:optimal_system_agent, :default_provider, :ollama)
+
+    model = Map.get(state, :model)
+
+    lite? = OptimalSystemAgent.Agent.Context.small_window?(model, provider)
+    variant = OptimalSystemAgent.Agent.Context.static_base_variant(provider, lite?)
+    static = OptimalSystemAgent.Soul.static_token_count(variant)
+
+    tool_schema =
+      if OptimalSystemAgent.Providers.Registry.native_tool_schemas?(provider) do
+        OptimalSystemAgent.Tools.Audit.array_cost(Tools.list_active()).tokens
+      else
+        0
+      end
+
+    static + tool_schema
+  rescue
+    _ -> 0
+  end
+
+  # Fraction of the model's context window currently occupied (0.0..1.0+),
+  # rounded to 4 dp. The headline-honest "how full is this agent" figure for the
+  # TUI (item 10). nil when the window size is unknown, so a consumer can render
+  # "—" rather than a bogus 0%.
+  defp context_pct(state) do
+    window = Map.get(state, :effective_context_window)
+
+    if is_integer(window) and window > 0 do
+      Float.round(used_context_tokens(state) / window, 4)
+    else
+      nil
     end
   end
 
@@ -2782,7 +2937,15 @@ defmodule OptimalSystemAgent.Agent.Loop do
         true
 
       true ->
-        content = to_string(Map.get(m, :content) || Map.get(m, "content") || "")
+        # `content` is a LIST of typed blocks whenever an image is attached, and
+        # `to_string/1` on a list raised `ArgumentError` — attaching an image
+        # crashed the turn here. `content_text/1` extracts the prose (a scaffold
+        # marker is always plain text, never an image block).
+        content =
+          OptimalSystemAgent.Utils.Text.content_text(
+            Map.get(m, :content) || Map.get(m, "content")
+          )
+
         trimmed = String.trim(content)
 
         trimmed in ReactLoop.interrupt_markers() or

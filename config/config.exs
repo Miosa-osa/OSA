@@ -34,6 +34,10 @@ config :optimal_system_agent,
   # config's default; verified present in the live GET /api/v1/models catalog.
   openrouter_model: "anthropic/claude-opus-5",
 
+  # Surplus Intelligence settings (set SURPLUS_API_KEY env var)
+  surplus_url: "https://api.surplusintelligence.ai/v1",
+  surplus_model: "claude-fable-5.1",
+
   # Drop, from the cached system prompt, the tool documentation that the
   # request's own native tool definitions already carry byte-for-byte.
   # Applies ONLY to providers that declare `native_tool_schemas?/0` (the
@@ -202,6 +206,18 @@ config :optimal_system_agent,
   # `verbose` still bypasses this entirely, and :max_tool_output_lines bounds
   # the other axis.
   max_tool_output_bytes: 16_384,
+
+  # Output caps that were formerly hardcoded module constants (gap #1), now
+  # runtime-configurable with their original values as defaults. Kept coherent
+  # with `:max_tool_output_bytes` above (the loop-transcript per-result cap):
+  #   * :bash_output_max_bytes        — shell_execute's own capture bound (100 KB)
+  #   * :terminal_output_max_chars    — terminal output save-to-file threshold (8 KB)
+  #   * :summary_tool_output_max_chars — per-tool cap inside a summarization prompt,
+  #     deliberately the tightest since it only needs a gist of an already-capped
+  #     result; must stay <= max_tool_output_bytes so the two never fight.
+  bash_output_max_bytes: 102_400,
+  terminal_output_max_chars: 8_000,
+  summary_tool_output_max_chars: 2_000,
 
   # Context compaction thresholds (3-tier)
   compaction_warn: 0.80,
@@ -407,7 +423,12 @@ config :optimal_system_agent, ecto_repos: [OptimalSystemAgent.Store.Repo]
 # Disable with `post_edit_verify: [enabled: false]`.
 config :optimal_system_agent,
   diagnostics_provider: {OptimalSystemAgent.Verify.PostEdit, :run},
-  post_edit_verify: [enabled: true, timeout_ms: 8_000]
+  post_edit_verify: [enabled: true, timeout_ms: 8_000],
+  # Diagnostics (syntax/parse errors) stay on; the in-place REFORMAT of edited
+  # files is OFF by default because it churns the bytes under the agent between
+  # its own edits. Opt in via `post_edit_format_enabled: true` in settings.json
+  # or this app env. See Verify.PostEdit.format_enabled?/0.
+  post_edit_format: false
 
 # Auto-mode safety Guardian. In :auto permission tier, the classifier blocks
 # dangerous tool calls and the Guardian pauses unattended execution after

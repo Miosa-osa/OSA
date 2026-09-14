@@ -46,11 +46,15 @@ const SCROLLBACK: usize = 200;
 pub enum PtyStatus {
     Running,
     /// The child is gone. `code` is its exit status; `0` is the only success.
-    Exited { code: u32 },
+    Exited {
+        code: u32,
+    },
     /// The child could never be started — a missing binary, a refused fork.
     /// Distinct from `Exited { code: 127 }` because nothing ran, so there is no
     /// child output to explain it and the message here is all the user gets.
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
 }
 
 impl PtyStatus {
@@ -313,7 +317,10 @@ impl PtyPane {
                     Some(c) if c.is_wide_continuation() => continue,
                     Some(c) => {
                         let s = c.contents();
-                        (if s.is_empty() { " ".to_string() } else { s }, cell_style(c))
+                        (
+                            if s.is_empty() { " ".to_string() } else { s },
+                            cell_style(c),
+                        )
                     }
                     None => (" ".to_string(), Style::default()),
                 };
@@ -464,8 +471,7 @@ mod tests {
             10,
             60,
         );
-        assert!(wait_for(&mut pane, |p| p
-            .screen_contains("hello-from-the-pty")));
+        assert!(wait_for(&mut pane, |p| p.screen_contains("hello-from-the-pty")));
     }
 
     #[test]
@@ -496,7 +502,13 @@ mod tests {
     #[test]
     fn the_child_sees_a_tty_which_is_the_entire_point() {
         // `test -t 0` is true only on a terminal. On a pipe this exits 1.
-        let mut pane = PtyPane::spawn(&sys_bin("test"), &["-t".to_string(), "0".to_string()], &[], 10, 40);
+        let mut pane = PtyPane::spawn(
+            &sys_bin("test"),
+            &["-t".to_string(), "0".to_string()],
+            &[],
+            10,
+            40,
+        );
         assert!(wait_for(&mut pane, |p| !p.status().is_running()));
         assert!(
             pane.status().succeeded(),
@@ -544,7 +556,10 @@ mod tests {
 
     #[test]
     fn a_key_with_no_terminal_encoding_is_declined_so_the_caller_can_handle_it() {
-        assert_eq!(encode_key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)), None);
+        assert_eq!(
+            encode_key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)),
+            None
+        );
     }
 
     #[test]

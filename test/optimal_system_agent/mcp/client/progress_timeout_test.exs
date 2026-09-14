@@ -31,6 +31,7 @@ defmodule OptimalSystemAgent.MCP.Client.ProgressTimeoutTest do
 
   alias OptimalSystemAgent.MCP.Client.ServerSession
   alias OptimalSystemAgent.MCP.Config.Server
+  alias OptimalSystemAgent.Test.MCPSessionCleanup
 
   # Deliberately long: the test never waits for it, it only reads it back off
   # the armed timer. A large value makes "the new timer carries the full
@@ -132,9 +133,13 @@ defmodule OptimalSystemAgent.MCP.Client.ProgressTimeoutTest do
 
     name = "prog_#{System.unique_integer([:positive])}"
     {:ok, pid} = ServerSession.start_link(%Server{name: name, transport: :stdio, command: "x"})
-    # The session traps exits and is linked to this (transient) test process,
-    # so it may already be terminating by cleanup time; kill tolerantly.
-    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+    # The session reports "slow"/"silent" to the singleton MCP.Client.Manager
+    # (report_tools/2), which keeps them in its own GenServer state independent
+    # of this pid — killing the session does not remove them. Without the
+    # reload below they leak into the GLOBAL `{Registry, :mcp_tools}`
+    # persistent_term for every later test (see MCPSessionCleanup's @moduledoc).
+    # This setup runs per test, so 3 tests would otherwise leak 6 entries.
+    on_exit(fn -> MCPSessionCleanup.kill_and_reload(pid) end)
     assert wait_until(fn -> ServerSession.status(name) == :ready end)
 
     {:ok, name: name, session: pid}

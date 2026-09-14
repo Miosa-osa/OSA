@@ -83,7 +83,9 @@ impl ToolsBrowser {
     fn matches(&self, t: &ToolEntry, needle: &str) -> bool {
         t.name.to_lowercase().contains(needle)
             || t.description.to_lowercase().contains(needle)
-            || Self::module_label(&t.module).to_lowercase().contains(needle)
+            || Self::module_label(&t.module)
+                .to_lowercase()
+                .contains(needle)
     }
 
     /// Tool indices in display order. Unfiltered: grouped by module in first-seen
@@ -157,7 +159,10 @@ impl ToolsBrowser {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> ToolsBrowserAction {
         // Ignore chorded shortcuts — they belong to the app, not the filter box.
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return ToolsBrowserAction::None;
         }
         let len = self.ordered().len();
@@ -235,7 +240,10 @@ impl ToolsBrowser {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(c.primary))
             .title(Line::from(vec![
-                Span::styled(" OSA ", Style::default().fg(c.primary).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " OSA ",
+                    Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("\u{00b7} tools ", Style::default().fg(c.muted)),
             ]))
             .style(Style::default().bg(c.dialog_bg));
@@ -387,13 +395,32 @@ impl ToolsBrowser {
         put(
             frame,
             Paragraph::new(Line::from(vec![
-                Span::styled("type", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
-                Span::styled(" filter  ", Style::default().fg(c.dim)),
-                Span::styled("\u{2191}\u{2193}", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
-                Span::styled(" nav  ", Style::default().fg(c.dim)),
-                Span::styled("esc", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
                 Span::styled(
-                    if self.filter.is_empty() { " close" } else { " clear" },
+                    "type",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" filter  ", Style::default().fg(c.dim)),
+                Span::styled(
+                    "\u{2191}\u{2193}",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" nav  ", Style::default().fg(c.dim)),
+                Span::styled(
+                    "esc",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    if self.filter.is_empty() {
+                        " close"
+                    } else {
+                        " clear"
+                    },
                     Style::default().fg(c.dim),
                 ),
             ])),
@@ -423,11 +450,31 @@ mod tools_browser_tests {
 
     fn sample() -> Vec<ToolEntry> {
         vec![
-            ToolEntry { name: "read_file".into(), description: "Read a file from disk".into(), module: None },
-            ToolEntry { name: "write_file".into(), description: "Write a file to disk".into(), module: None },
-            ToolEntry { name: "web_search".into(), description: "Search the web".into(), module: Some("web".into()) },
-            ToolEntry { name: "web_fetch".into(), description: "Fetch a URL".into(), module: Some("web".into()) },
-            ToolEntry { name: "\u{4e2d}\u{6587}\u{5de5}\u{5177}".into(), description: "\u{20ac}".repeat(80), module: Some("\u{4e2d}".into()) },
+            ToolEntry {
+                name: "read_file".into(),
+                description: "Read a file from disk".into(),
+                module: None,
+            },
+            ToolEntry {
+                name: "write_file".into(),
+                description: "Write a file to disk".into(),
+                module: None,
+            },
+            ToolEntry {
+                name: "web_search".into(),
+                description: "Search the web".into(),
+                module: Some("web".into()),
+            },
+            ToolEntry {
+                name: "web_fetch".into(),
+                description: "Fetch a URL".into(),
+                module: Some("web".into()),
+            },
+            ToolEntry {
+                name: "\u{4e2d}\u{6587}\u{5de5}\u{5177}".into(),
+                description: "\u{20ac}".repeat(80),
+                module: Some("\u{4e2d}".into()),
+            },
         ]
     }
 

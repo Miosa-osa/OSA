@@ -25,11 +25,13 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.MacOS do
   """
 
   require Logger
+  import Kernel, except: [spawn: 1]
 
   alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.HelperPath
 
   @helper_name "osa-screen-capture-darwin"
-  @port_pattern ~r/PORT=(\d+)/
+  @port_pattern ~r/(?:^|\n)PORT=(\d+)\r?\n/
+  @max_startup_output_bytes 16_384
   @startup_timeout_ms 8_000
 
   @type t :: %__MODULE__{
@@ -46,22 +48,42 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.MacOS do
   Returns `{:ok, t()}` or `{:error, reason}`.
   """
   @spec spawn() :: {:ok, t()} | {:error, term()}
-  def spawn do
-    with {:ok, helper_path} <- find_helper(),
-         {:ok, port} <- open_port(helper_path),
-         {:ok, os_pid} <- fetch_os_pid(port),
-         {:ok, vnc_port} <- await_port_announcement(port) do
-      {:ok, %__MODULE__{port: port, os_pid: os_pid, vnc_port: vnc_port}}
+  def spawn(opts \\ %{}) do
+    with {:ok, args} <- launch_args(opts),
+         {:ok, helper_path} <- find_helper(),
+         {:ok, port} <- open_port(helper_path, args) do
+      result =
+        with {:ok, os_pid} <- fetch_os_pid(port),
+             {:ok, vnc_port} <- await_port_announcement(port) do
+          {:ok, %__MODULE__{port: port, os_pid: os_pid, vnc_port: vnc_port}}
+        end
+
+      case result do
+        {:ok, _} ->
+          result
+
+        {:error, _} ->
+          stop(port)
+          result
+      end
     end
   end
 
   @doc "Terminates the helper OS process and closes the Port."
   @spec kill(t()) :: :ok
   def kill(%__MODULE__{port: port, os_pid: os_pid}) do
-    try do
+    # Only signal the PID while its owning Port is still alive, avoiding PID reuse.
+    if Port.info(port, :os_pid) == {:os_pid, os_pid} do
       System.cmd("kill", ["-TERM", to_string(os_pid)], stderr_to_stdout: true)
-    rescue
-      _ -> :ok
+
+      receive do
+        {^port, {:exit_status, _}} -> :ok
+      after
+        500 ->
+          if Port.info(port, :os_pid) == {:os_pid, os_pid} do
+            System.cmd("kill", ["-KILL", to_string(os_pid)], stderr_to_stdout: true)
+          end
+      end
     end
 
     catch_exit(fn -> Port.close(port) end)
@@ -76,8 +98,8 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.MacOS do
   helper reported, never a fixed one.
   """
   @spec start(map()) :: {:ok, map()} | {:error, term()}
-  def start(_opts \\ %{}) do
-    case spawn() do
+  def start(opts \\ %{}) do
+    case spawn(opts) do
       {:ok, %__MODULE__{port: port, os_pid: os_pid, vnc_port: vnc_port}} ->
         {:ok, %{port_ref: port, os_pid: os_pid, vnc_port: vnc_port}}
 
@@ -114,11 +136,23 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.MacOS do
     HelperPath.resolve(@helper_name, priv_path, user_path, "docs/macos-desktop.md")
   end
 
-  defp open_port(helper_path) do
+  @doc "Validated helper argv; callers supply only locally authorized input permission."
+  def launch_args(opts) do
+    display = Map.get(opts, :display, 0)
+
+    if is_integer(display) and display in 0..63 do
+      mode = if Map.get(opts, :allow_input) === true, do: "--allow-input", else: "--read-only"
+      {:ok, [mode, "--display", Integer.to_string(display)]}
+    else
+      {:error, :invalid_display}
+    end
+  end
+
+  defp open_port(helper_path, args) do
     port =
       Port.open(
         {:spawn_executable, helper_path},
-        [:binary, :exit_status, :stderr_to_stdout, args: []]
+        [:binary, :exit_status, :stderr_to_stdout, args: args]
       )
 
     {:ok, port}
@@ -146,19 +180,23 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.MacOS do
         {^port, {:data, chunk}} ->
           buffer = acc <> chunk
 
-          case Regex.run(@port_pattern, buffer, capture: :all_but_first) do
-            [num] ->
-              case Integer.parse(num) do
-                {vnc_port, ""} when vnc_port > 0 ->
-                  Logger.debug("[MacOS] helper announced RFB port #{vnc_port}")
-                  {:ok, vnc_port}
+          if byte_size(buffer) > @max_startup_output_bytes do
+            {:error, :startup_output_limit}
+          else
+            case Regex.run(@port_pattern, buffer, capture: :all_but_first) do
+              [num] ->
+                case Integer.parse(num) do
+                  {vnc_port, ""} when vnc_port > 0 and vnc_port <= 65_535 ->
+                    Logger.debug("[MacOS] helper announced RFB port #{vnc_port}")
+                    {:ok, vnc_port}
 
-                _ ->
-                  {:error, {:bad_port_value, num}}
-              end
+                  _ ->
+                    {:error, {:bad_port_value, num}}
+                end
 
-            nil ->
-              await_port_announcement(port, buffer, deadline)
+              nil ->
+                await_port_announcement(port, buffer, deadline)
+            end
           end
 
         {^port, {:exit_status, status}} ->

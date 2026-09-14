@@ -106,7 +106,10 @@ impl PersonaPicker {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> PersonaPickerAction {
         // Ignore chorded shortcuts — they belong to the app, not the filter box.
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return PersonaPickerAction::None;
         }
         let ordered = self.ordered();
@@ -189,7 +192,10 @@ impl PersonaPicker {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(c.primary))
             .title(Line::from(vec![
-                Span::styled(" OSA ", Style::default().fg(c.primary).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " OSA ",
+                    Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("\u{00b7} persona ", Style::default().fg(c.muted)),
             ]))
             .style(Style::default().bg(c.dialog_bg));
@@ -245,7 +251,10 @@ impl PersonaPicker {
         // ── separator ──────────────────────────────────────────────────────
         put(
             frame,
-            Paragraph::new(Span::styled("\u{2500}".repeat(maxw), Style::default().fg(c.dim))),
+            Paragraph::new(Span::styled(
+                "\u{2500}".repeat(maxw),
+                Style::default().fg(c.dim),
+            )),
             Rect::new(inner.x, cy, iw, 1),
         );
         cy += 1;
@@ -270,8 +279,11 @@ impl PersonaPicker {
                 Rect::new(inner.x, cy + list_h / 2, iw, 1),
             );
         } else {
-            let scroll =
-                crate::dialogs::clamp_scroll_to_cursor(self.scroll, self.cursor, (list_h as usize).max(1));
+            let scroll = crate::dialogs::clamp_scroll_to_cursor(
+                self.scroll,
+                self.cursor,
+                (list_h as usize).max(1),
+            );
 
             for rel in 0..(list_h as usize) {
                 let abs = rel + scroll;
@@ -304,13 +316,18 @@ impl PersonaPicker {
                         Span::styled(marker, marker_style),
                         Span::styled(
                             label,
-                            Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(c.secondary)
+                                .add_modifier(Modifier::BOLD),
                         ),
                     ];
                     let remaining = maxw.saturating_sub(used);
                     if remaining > 5 && !p.description.is_empty() {
                         let desc = truncate_chars(&p.description, remaining - 3);
-                        spans.push(Span::styled(format!("   {desc}"), Style::default().fg(c.dim)));
+                        spans.push(Span::styled(
+                            format!("   {desc}"),
+                            Style::default().fg(c.dim),
+                        ));
                     }
                     put(
                         frame,
@@ -326,15 +343,39 @@ impl PersonaPicker {
         put(
             frame,
             Paragraph::new(Line::from(vec![
-                Span::styled("type", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
-                Span::styled(" filter  ", Style::default().fg(c.dim)),
-                Span::styled("\u{2191}\u{2193}", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
-                Span::styled(" nav  ", Style::default().fg(c.dim)),
-                Span::styled("\u{21b5}", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
-                Span::styled(" apply  ", Style::default().fg(c.dim)),
-                Span::styled("esc", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
                 Span::styled(
-                    if self.filter.is_empty() { " close" } else { " clear" },
+                    "type",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" filter  ", Style::default().fg(c.dim)),
+                Span::styled(
+                    "\u{2191}\u{2193}",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" nav  ", Style::default().fg(c.dim)),
+                Span::styled(
+                    "\u{21b5}",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" apply  ", Style::default().fg(c.dim)),
+                Span::styled(
+                    "esc",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    if self.filter.is_empty() {
+                        " close"
+                    } else {
+                        " clear"
+                    },
                     Style::default().fg(c.dim),
                 ),
             ])),

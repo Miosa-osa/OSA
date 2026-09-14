@@ -230,7 +230,7 @@ defmodule OptimalSystemAgent.Providers.OllamaCloudCatalogTest do
       for {tag, rate} <- [
             {"kimi-k2.6:cloud", {0.95, 4.00}},
             {"kimi-k2.7-code:cloud", {0.95, 4.00}},
-            {"minimax-m3:cloud", {0.30, 1.20}},
+            {"minimax-m3:cloud", {0.60, 2.40}},
             {"deepseek-v4-pro:cloud", {0.435, 0.87}},
             {"deepseek-v4-flash:cloud", {0.14, 0.28}}
           ] do

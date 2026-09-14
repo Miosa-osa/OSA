@@ -71,6 +71,8 @@ pub fn fit_cols(s: &str, max_cols: usize) -> String {
 ///   visible text, and then the trailing `ESC \` eats the real output after it.
 /// * **DCS/SOS/PM/APC** — `ESC P|X|^|_` … terminated by `ST` (tmux passthrough).
 /// * **Two-byte** — `ESC <single byte>`, the catch-all (includes a bare `ESC \`).
+///
+/// The length returned is always a char boundary, so callers can slice with it.
 pub fn escape_len_at(s: &str, at: usize) -> Option<usize> {
     let b = s.as_bytes();
     if b.get(at) != Some(&0x1b) {
@@ -103,8 +105,14 @@ pub fn escape_len_at(s: &str, at: usize) -> Option<usize> {
             }
             Some(b.len() - at)
         }
-        // Anything else is a two-byte escape (`ESC \`, `ESC =`, charset selects…).
-        _ => Some(2),
+        // Anything else is a two-byte escape (`ESC \`, `ESC =`, charset selects…)
+        // — except when the byte after ESC is a UTF-8 lead byte, where "two
+        // bytes" lands INSIDE a char. Every caller slices at the length returned
+        // here, so `printf '\033✓'` or an ANSI sequence clipped mid-escape by a
+        // log used to abort the process on a char-boundary panic. Consume the
+        // following char whole: still the fail-closed direction (the char is
+        // attributed to the escape and dropped), and always a boundary.
+        _ => Some(1 + s[at + 1..].chars().next().map_or(1, char::len_utf8)),
     }
 }
 
@@ -250,8 +258,7 @@ pub const RECAP_ELAPSED_THRESHOLD_SECS: u64 = 10;
 /// defense-in-depth for legacy payloads that only carry the name list.
 pub fn is_internal_tool(name: &str) -> bool {
     let n = name.trim().to_ascii_lowercase();
-    n.starts_with("memory")
-        || matches!(n.as_str(), "session_search" | "session_recall" | "recall")
+    n.starts_with("memory") || matches!(n.as_str(), "session_search" | "session_recall" | "recall")
 }
 
 /// Count the substantive (user-visible) tools in a turn's tool list, excluding
@@ -568,10 +575,7 @@ mod tests {
     fn assert_whole_cluster_prefix(s: &str, out: &str, budget: usize) {
         use unicode_segmentation::UnicodeSegmentation;
 
-        assert!(
-            cols(out) <= budget,
-            "overflowed budget {budget}: {out:?}"
-        );
+        assert!(cols(out) <= budget, "overflowed budget {budget}: {out:?}");
 
         let body = out.strip_suffix('\u{2026}').unwrap_or(out);
 
@@ -659,7 +663,11 @@ mod tests {
         let home = Some("/Users/rhl");
         // 1. session cwd wins.
         assert_eq!(
-            display_path("/Users/rhl/projects/osa/src/lib.rs", Some("/Users/rhl/projects/osa"), home),
+            display_path(
+                "/Users/rhl/projects/osa/src/lib.rs",
+                Some("/Users/rhl/projects/osa"),
+                home
+            ),
             "src/lib.rs"
         );
         // 2. agent sandbox — the sub-agent case the roster actually shows.
@@ -668,7 +676,10 @@ mod tests {
             "codex/codex-rs/hooks"
         );
         // 3. plain home.
-        assert_eq!(display_path("/Users/rhl/notes.md", None, home), "~/notes.md");
+        assert_eq!(
+            display_path("/Users/rhl/notes.md", None, home),
+            "~/notes.md"
+        );
         // Nothing matches → untouched, never a lie.
         assert_eq!(display_path("/etc/hosts", None, home), "/etc/hosts");
         // Sibling directory is NOT under the root (boundary must be `/`).
@@ -676,7 +687,10 @@ mod tests {
         // The root itself has no tail to show; left alone.
         assert_eq!(display_path("/Users/rhl", None, home), "/Users/rhl");
         // Relative paths pass straight through.
-        assert_eq!(display_path("src/main.rs", Some("/Users/rhl"), home), "src/main.rs");
+        assert_eq!(
+            display_path("src/main.rs", Some("/Users/rhl"), home),
+            "src/main.rs"
+        );
     }
 
     #[test]
@@ -694,9 +708,15 @@ mod tests {
             "file_read: a/b/d"
         );
         // No shared directory component.
-        assert_eq!(elide_shared_prefix("dir_list: a/x", "dir_list: b/y"), "dir_list: b/y");
+        assert_eq!(
+            elide_shared_prefix("dir_list: a/x", "dir_list: b/y"),
+            "dir_list: b/y"
+        );
         // Shared head too short to be worth a marker ("a/" is 2 cols).
-        assert_eq!(elide_shared_prefix("dir_list: a/x", "dir_list: a/y"), "dir_list: a/y");
+        assert_eq!(
+            elide_shared_prefix("dir_list: a/x", "dir_list: a/y"),
+            "dir_list: a/y"
+        );
         // Not `verb: value` shaped at all.
         assert_eq!(elide_shared_prefix("thinking", "planning"), "planning");
         // Identical rows leave no tail.
@@ -875,5 +895,35 @@ mod tests {
     #[test]
     fn fit_arg_summary_leaves_short_values_untouched() {
         assert_eq!(fit_arg_summary("smoke-e2e", 60), "smoke-e2e");
+    }
+
+    /// **Every length this returns must be a char boundary.**
+    ///
+    /// The catch-all two-byte escape returned 2 regardless of what followed
+    /// ESC, so `printf '\033✓'` — or any ANSI sequence a log clipped mid-escape
+    /// — made every caller slice into the middle of a codepoint and abort the
+    /// session: `byte index 2 is not a char boundary; it is inside '✓'`. Raw
+    /// tool output reaches these scanners unsanitised, so the input is the
+    /// attacker's to choose.
+    #[test]
+    fn escape_len_never_splits_a_codepoint() {
+        for tail in ["\u{2713} done", "\u{20ac}", "\u{1f600}!", "\u{e9}", "=b"] {
+            let s = format!("a\u{1b}{tail}");
+            let len = escape_len_at(&s, 1).expect("ESC at byte 1");
+            assert!(
+                s.is_char_boundary(1 + len),
+                "escape_len_at cut inside a codepoint of {s:?}: len={len}"
+            );
+            // The callers' loop, which is what actually panicked.
+            let _ = &s[1 + len..];
+        }
+    }
+
+    /// `cols` walks the same lengths, so it inherited the panic. A width
+    /// measurement must never abort — it runs on every frame of every row.
+    #[test]
+    fn cols_survives_an_escape_before_a_multibyte_char() {
+        assert_eq!(cols("\u{1b}\u{2713} done"), 5); // ESC+✓ consumed, " done" measured
+        assert_eq!(cols("a\u{1b}\u{1f600}b"), 2);
     }
 }

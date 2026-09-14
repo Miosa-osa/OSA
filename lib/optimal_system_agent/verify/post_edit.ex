@@ -129,6 +129,26 @@ defmodule OptimalSystemAgent.Verify.PostEdit do
     |> Keyword.get(:enabled, true)
   end
 
+  @doc """
+  Whether to auto-REFORMAT files after an edit (rewrite in place), as opposed to
+  only reporting diagnostics.
+
+  Default OFF. Reformatting a file the agent just wrote is the single biggest
+  churn source in a coding turn: the bytes on disk change under the model, so it
+  re-reads, re-diffs, and re-edits against a moving target. Diagnostics (syntax
+  and parse errors) still run regardless of this flag - only the in-place
+  rewrite is gated. Opt back in with `post_edit_format_enabled: true` in
+  settings.json, or the `:post_edit_format` app env (kept on in the test env so
+  the formatter eval suite still exercises the write path).
+  """
+  @doc false
+  def format_enabled? do
+    case OptimalSystemAgent.Settings.get("post_edit_format_enabled") do
+      v when is_boolean(v) -> v
+      _ -> Application.get_env(:optimal_system_agent, :post_edit_format, false)
+    end
+  end
+
   defp timeout_ms do
     Application.get_env(:optimal_system_agent, :post_edit_verify, [])
     |> Keyword.get(:timeout_ms, @default_timeout_ms)
@@ -139,24 +159,34 @@ defmodule OptimalSystemAgent.Verify.PostEdit do
   # Elixir: format in-process (fast), then syntax-check in-process. A file that
   # fails to format (syntax error) is left untouched and its error is reported.
   defp check(:elixir, path, _exec) do
-    format_elixir(path)
+    if format_enabled?(), do: format_elixir(path)
     elixir_syntax(path)
   end
 
-  # Go: `gofmt -e -w` formats in place AND reports parse errors on non-zero exit
-  # (writing nothing when the source doesn't parse).
+  # Go: with formatting on, `gofmt -e -w` formats in place; with it off, `gofmt
+  # -e` (no -w) still reports parse errors on non-zero exit but writes nothing.
+  # A valid-but-unformatted file exits 0 either way, so it is never flagged.
   defp check(:go, path, exec) do
-    case exec.("gofmt", ["-e", "-w", path], dir(path)) do
+    args = if format_enabled?(), do: ["-e", "-w", path], else: ["-e", path]
+
+    case exec.("gofmt", args, dir(path)) do
       {out, code} when is_integer(code) and code != 0 -> to_string(out)
       _ -> ""
     end
   end
 
-  # Rust: rustfmt formats in place; parse errors go to stderr with a non-zero exit.
+  # Rust: with formatting on, rustfmt rewrites in place and reports parse errors.
+  # With it off we skip rustfmt entirely - `rustfmt --check` would flag every
+  # unformatted-but-valid file as a failure (pure noise), and real Rust parse
+  # errors surface on the cargo build/test the agent runs anyway.
   defp check(:rust, path, exec) do
-    case exec.("rustfmt", ["--edition", "2021", path], dir(path)) do
-      {out, code} when is_integer(code) and code != 0 -> to_string(out)
-      _ -> ""
+    if format_enabled?() do
+      case exec.("rustfmt", ["--edition", "2021", path], dir(path)) do
+        {out, code} when is_integer(code) and code != 0 -> to_string(out)
+        _ -> ""
+      end
+    else
+      ""
     end
   end
 
@@ -178,7 +208,7 @@ defmodule OptimalSystemAgent.Verify.PostEdit do
   # Python: ruff format (best-effort) + ruff check; fall back to py_compile when
   # ruff isn't installed.
   defp check(:python, path, exec) do
-    _ = exec.("ruff", ["format", path], dir(path))
+    if format_enabled?(), do: exec.("ruff", ["format", path], dir(path))
 
     case exec.("ruff", ["check", "--quiet", path], dir(path)) do
       {out, code} when is_integer(code) and code != 0 -> to_string(out)
@@ -191,8 +221,14 @@ defmodule OptimalSystemAgent.Verify.PostEdit do
 
   # ── shared external-tool helpers ───────────────────────────────────
 
+  # With formatting on, `prettier --write` reformats in place. With it off,
+  # `prettier <path>` (no flag) prints the formatted source to stdout and exits
+  # non-zero ONLY on a parse/syntax error - so we still get parse diagnostics
+  # without rewriting the file, and a valid-but-unformatted file is not flagged.
   defp prettier(path, exec) do
-    case exec.("prettier", ["--write", path], dir(path)) do
+    args = if format_enabled?(), do: ["--write", path], else: [path]
+
+    case exec.("prettier", args, dir(path)) do
       {out, code} when is_integer(code) and code != 0 -> to_string(out)
       _ -> ""
     end

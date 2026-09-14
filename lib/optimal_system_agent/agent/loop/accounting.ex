@@ -244,6 +244,7 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
     :openai,
     :openai_codex,
     :openrouter,
+    :surplus,
     :groq,
     :together,
     :fireworks,

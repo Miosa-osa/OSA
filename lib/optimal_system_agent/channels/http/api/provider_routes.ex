@@ -318,6 +318,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ProviderRoutes do
       "deepseek" -> "DeepSeek"
       "perplexity" -> "Perplexity"
       "openrouter" -> "OpenRouter"
+      "surplus" -> "Surplus Intelligence"
       "qwen" -> "Qwen"
       "moonshot" -> "Moonshot"
       "zhipu" -> "Zhipu"

@@ -532,7 +532,13 @@ defmodule OptimalSystemAgent.Providers.OllamaTest do
       result = Ollama.auto_detect_model()
       assert result == :ok
     after
+      # `auto_detect_model/0`'s "explicit" branch mirrors `:default_model` onto
+      # `:ollama_model` as a side effect (see its own moduledoc) — clean up
+      # both, not just the one this test set directly, or the next reader of
+      # `:ollama_model` (this file is `async: true`, so potentially a
+      # concurrently running one) inherits this test's value.
       Application.delete_env(:optimal_system_agent, :default_model)
+      Application.delete_env(:optimal_system_agent, :ollama_model)
     end
   end
 

@@ -113,19 +113,37 @@ defmodule OptimalSystemAgent.Providers.Google do
   end
 
   defp do_chat(base_url, api_key, model, messages, opts) do
+    body = build_request_body(messages, model, opts)
+
+    do_request(base_url, api_key, model, body, opts)
+  end
+
+  @doc false
+  def build_request_body(messages, model, opts \\ []) do
     formatted = format_messages(messages)
     {system_instruction, contents} = extract_system(formatted)
 
-    body =
-      %{contents: contents}
-      |> maybe_add_system_instruction(system_instruction)
-      |> maybe_add_generation_config(model, opts)
-      |> maybe_add_tools(opts)
-      # Gemini's 20 MB request ceiling — the budget knows the `contents`/`parts`
-      # envelope now, so this is a real gate rather than a no-op.
-      |> OptimalSystemAgent.Providers.ImageBudget.gate_unsupported(:google, model)
-      |> OptimalSystemAgent.Providers.ImageBudget.apply(provider: :google)
+    %{contents: contents}
+    |> maybe_add_system_instruction(system_instruction)
+    |> maybe_add_generation_config(model, opts)
+    |> maybe_add_tools(opts)
+    # No `serviceTier` here, deliberately. What used to be forwarded is
+    # whatever tier the loop resolved for the session, and for Gemini that is
+    # "priority", which is OpenAI's word: OSA has verified neither the field
+    # name nor any accepted value against this API. The request came back
+    # rejected rather than ignored, so a `/fast` turn on Gemini paid for a
+    # wasted round-trip plus the tier-less retry behind it, every turn, for
+    # acceleration the account never received. Re-add only with a field AND a
+    # value confirmed against the live API, the way
+    # `Anthropic.apply_service_tier/2` allowlists Anthropic's own vocabulary.
 
+    # Gemini's 20 MB request ceiling — the budget knows the `contents`/`parts`
+    # envelope now, so this is a real gate rather than a no-op.
+    |> OptimalSystemAgent.Providers.ImageBudget.gate_unsupported(:google, model)
+    |> OptimalSystemAgent.Providers.ImageBudget.apply(provider: :google)
+  end
+
+  defp do_request(base_url, api_key, model, body, _opts) do
     # The API key goes in the `x-goog-api-key` HEADER, not a `?key=` query
     # parameter. Every current Google example uses the header, and the query
     # form is no longer documented anywhere. It also leaked the key into

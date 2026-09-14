@@ -126,9 +126,23 @@ defmodule OptimalSystemAgent.Agent.TaskBrief do
   """
   @spec context_block(String.t()) :: String.t() | nil
   def context_block(session_id) when is_binary(session_id) do
-    case load(session_id) do
-      {:ok, brief} -> render(brief)
-      _ -> nil
+    status = OptimalSystemAgent.Agent.Loop.GoalTracker.status(session_id)
+
+    if status in [:cleared, :abandoned, :completed] do
+      nil
+    else
+      case load(session_id) do
+        {:ok, brief} ->
+          if status in [:awaiting_user, :paused] do
+            "Goal pursuit is #{status}; this is historical context, not an instruction to continue.\n" <>
+              render(brief)
+          else
+            render(brief)
+          end
+
+        _ ->
+          nil
+      end
     end
   rescue
     _ -> nil

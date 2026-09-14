@@ -106,7 +106,10 @@ impl SessionBrowser {
 
     fn move_up(&mut self) {
         if !self.filtered.is_empty() {
-            self.cursor = self.cursor.checked_sub(1).unwrap_or(self.filtered.len() - 1);
+            self.cursor = self
+                .cursor
+                .checked_sub(1)
+                .unwrap_or(self.filtered.len() - 1);
             self.adjust_scroll();
         }
     }
@@ -135,7 +138,10 @@ impl SessionBrowser {
     // ── Key handling ─────────────────────────────────────────────────────────
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<SessionAction> {
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return None;
         }
 
@@ -290,10 +296,9 @@ impl SessionBrowser {
 
         // Delete confirmation banner
         if self.mode == SessionMode::DeleteConfirm {
-            let banner = Paragraph::new(
-                "  Press y / Enter to confirm delete, any other key to cancel",
-            )
-            .style(Style::default().fg(theme.colors.error));
+            let banner =
+                Paragraph::new("  Press y / Enter to confirm delete, any other key to cancel")
+                    .style(Style::default().fg(theme.colors.error));
             frame.render_widget(banner, Rect::new(inner.x, cy, inner.width, 1));
             cy += 1;
         }
@@ -334,11 +339,7 @@ impl SessionBrowser {
             self.cursor,
             (list_h as usize).max(1),
         );
-        let visible_sessions = self
-            .filtered
-            .iter()
-            .skip(scroll)
-            .take(list_h as usize);
+        let visible_sessions = self.filtered.iter().skip(scroll).take(list_h as usize);
 
         for (rel_i, &idx) in visible_sessions.enumerate() {
             let abs_i = rel_i + scroll;
@@ -469,8 +470,16 @@ mod sessions_render_tests {
         };
         vec![
             mk("s1", "\u{20ac}".repeat(60), "2026-07-17T10:00:00Z"),
-            mk("s2", format!("caf\u{e9} \u{1f600} session"), "2026-07-16T09:00:00Z"),
-            mk("s3", "\u{4e2d}\u{6587}\u{6807}\u{9898}".to_string(), "2026-07-15"),
+            mk(
+                "s2",
+                format!("caf\u{e9} \u{1f600} session"),
+                "2026-07-16T09:00:00Z",
+            ),
+            mk(
+                "s3",
+                "\u{4e2d}\u{6587}\u{6807}\u{9898}".to_string(),
+                "2026-07-15",
+            ),
         ]
     }
 

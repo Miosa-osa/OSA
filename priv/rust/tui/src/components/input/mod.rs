@@ -14,7 +14,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event as CrosstermEvent, KeyCode, KeyEvent,
-    KeyboardEnhancementFlags, KeyModifiers, PopKeyboardEnhancementFlags,
+    KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
@@ -658,10 +658,8 @@ impl InputComponent {
                 &cand.insert,
                 (inner_w as usize).saturating_sub(head_cols).max(1),
             );
-            let display = crate::util::fit_cols(
-                &format!("{}{} {}", prefix, glyph, ep),
-                inner_w as usize,
-            );
+            let display =
+                crate::util::fit_cols(&format!("{}{} {}", prefix, glyph, ep), inner_w as usize);
             let row_area = Rect::new(area.x + 2, top + row as u16, inner_w, 1).intersection(bounds);
             if row_area.width == 0 || row_area.height == 0 {
                 continue;
@@ -847,7 +845,11 @@ impl InputComponent {
         self.cursor += ch.len_utf8();
         // Keep the run open only across contiguous non-space chars; whitespace
         // closes it so the next word begins a fresh undo step.
-        self.undo_insert_run = if ch.is_whitespace() { None } else { Some(self.cursor) };
+        self.undo_insert_run = if ch.is_whitespace() {
+            None
+        } else {
+            Some(self.cursor)
+        };
         self.tab_matches.clear();
 
         // Slash command completions popup
@@ -955,8 +957,7 @@ impl InputComponent {
                 .next()
                 .map_or(true, |c| c.is_whitespace());
             if let Some((s, e)) = chip_ranges(&self.content).into_iter().find(|&(s, e)| {
-                (self.cursor == e && next_is_boundary)
-                    || (self.cursor > s && self.cursor < e)
+                (self.cursor == e && next_is_boundary) || (self.cursor > s && self.cursor < e)
             }) {
                 self.snapshot();
                 self.content.drain(s..e);
@@ -1110,7 +1111,11 @@ impl InputComponent {
             .map(|p| p + 1)
             .unwrap_or(0);
         let prev_len = display_width(&self.content[prev_start..prev_end]);
-        let last_row_start = if prev_len == 0 { 0 } else { ((prev_len - 1) / w) * w };
+        let last_row_start = if prev_len == 0 {
+            0
+        } else {
+            ((prev_len - 1) / w) * w
+        };
         self.cursor = self.byte_at_column(prev_start, prev_end, last_row_start + vcol);
     }
 
@@ -1156,7 +1161,7 @@ impl InputComponent {
             self.snapshot();
             let selected = self.file_matches[self.file_match_index].insert.clone();
             self.file_frecency.record(&selected); // U-T6: reward this pick
-            // Replace from '@' to cursor with '@selected_path'
+                                                  // Replace from '@' to cursor with '@selected_path'
             let end = self.cursor;
             self.content.drain(self.file_search_start..end);
             let insertion = format!("@{}", selected);
@@ -1173,7 +1178,7 @@ impl InputComponent {
 
         if self.tab_matches.is_empty() {
             let prefix = &self.content[1..]; // skip the /
-            // Fuzzy subsequence match + rank (best-first) instead of prefix-only.
+                                             // Fuzzy subsequence match + rank (best-first) instead of prefix-only.
             self.tab_matches = crate::util::fuzzy::rank(&self.commands, prefix, |c| c.as_str())
                 .into_iter()
                 .map(|i| format!("/{}", self.commands[i]))
@@ -1274,7 +1279,12 @@ impl InputComponent {
                 // a clearly-better textual match.
                 let boost = (self.file_frecency.boost(rel) * 40.0) as i32;
                 let kind_bonus = if c.kind == MentionKind::Agent { 5 } else { 0 };
-                Some((best + boost + kind_bonus, rel.chars().count(), rel.clone(), c))
+                Some((
+                    best + boost + kind_bonus,
+                    rel.chars().count(),
+                    rel.clone(),
+                    c,
+                ))
             })
             .collect();
         scored.sort_by(|a, b| {
@@ -1796,9 +1806,9 @@ impl InputComponent {
     fn kill_to_line_end(&mut self, accumulate: bool) {
         let rest = &self.content[self.cursor..];
         let end = match rest.find('\n') {
-            Some(0) => self.cursor + 1,          // on a newline: remove it
-            Some(n) => self.cursor + n,          // to end of visual line
-            None => self.content.len(),          // last line: to end of buffer
+            Some(0) => self.cursor + 1, // on a newline: remove it
+            Some(n) => self.cursor + n, // to end of visual line
+            None => self.content.len(), // last line: to end of buffer
         };
         if end > self.cursor {
             let killed = self.content[self.cursor..end].to_string();
@@ -1843,7 +1853,11 @@ impl InputComponent {
         let editor = std::env::var("EDITOR")
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .or_else(|| std::env::var("VISUAL").ok().filter(|s| !s.trim().is_empty()))
+            .or_else(|| {
+                std::env::var("VISUAL")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
             .unwrap_or_else(|| default_editor.to_string());
 
         // Support `EDITOR="code --wait"` style values: first token is the program.
@@ -1856,11 +1870,8 @@ impl InputComponent {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let path = std::env::temp_dir().join(format!(
-            "osa-compose-{}-{}.md",
-            std::process::id(),
-            nanos
-        ));
+        let path =
+            std::env::temp_dir().join(format!("osa-compose-{}-{}.md", std::process::id(), nanos));
         // $TMPDIR is world-writable and this name is predictable, so create the
         // draft 0600 with O_EXCL: an attacker-planted symlink (or file) at the
         // path makes this fail loudly instead of becoming a write primitive.
@@ -1949,9 +1960,7 @@ impl InputComponent {
                 key.code == KeyCode::Esc
                     || matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
             }
-            vim::VimMode::Insert => {
-                key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE
-            }
+            vim::VimMode::Insert => key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE,
         }
     }
 
@@ -2068,11 +2077,11 @@ impl InputComponent {
     /// Apply a two-key operator (the first key was `op`, the second `c`).
     fn vim_apply_operator(&mut self, op: char, c: char) {
         match (op, c) {
-            ('g', 'g') => self.cursor = 0,          // gg → top of buffer
-            ('d', 'd') => self.vim_delete_line(),   // dd → delete line
+            ('g', 'g') => self.cursor = 0,                // gg → top of buffer
+            ('d', 'd') => self.vim_delete_line(),         // dd → delete line
             ('d', 'w') => self.vim_delete_word_forward(), // dw
-            ('c', 'c') => self.vim_change_line(),   // cc → change line
-            _ => {}                                  // unknown combo: ignore
+            ('c', 'c') => self.vim_change_line(),         // cc → change line
+            _ => {}                                       // unknown combo: ignore
         }
     }
 
@@ -2433,14 +2442,12 @@ impl Component for InputComponent {
                     // source of truth) rather than a second literal Enter match, so
                     // "what is a submit?" is answered in exactly one place. (Ctrl+Enter
                     // is accepted too for muscle-memory / terminals that map it.)
-                    _ if crate::app::key_normalize::is_submit(key) =>
-                    {
+                    _ if crate::app::key_normalize::is_submit(key) => {
                         // If file search dropdown is active and we have matches, select current match.
                         // `file_search_is_valid` gates the drain against a stale
                         // anchor (caret moved before '@' → start > end panic).
                         if self.file_search_is_valid() && !self.file_matches.is_empty() {
-                            let selected =
-                                self.file_matches[self.file_match_index].insert.clone();
+                            let selected = self.file_matches[self.file_match_index].insert.clone();
                             self.file_frecency.record(&selected); // U-T6
                             let end = self.cursor;
                             self.content.drain(self.file_search_start..end);
@@ -2467,7 +2474,9 @@ impl Component for InputComponent {
                         return ComponentAction::Consumed;
                     }
                     // Arrow keys — up/down navigate file matches when file search active
-                    (KeyCode::Up, KeyModifiers::NONE) if self.file_search_active && !self.file_matches.is_empty() => {
+                    (KeyCode::Up, KeyModifiers::NONE)
+                        if self.file_search_active && !self.file_matches.is_empty() =>
+                    {
                         if self.file_match_index > 0 {
                             self.file_match_index -= 1;
                         } else {
@@ -2475,8 +2484,11 @@ impl Component for InputComponent {
                         }
                         return ComponentAction::Consumed;
                     }
-                    (KeyCode::Down, KeyModifiers::NONE) if self.file_search_active && !self.file_matches.is_empty() => {
-                        self.file_match_index = (self.file_match_index + 1) % self.file_matches.len();
+                    (KeyCode::Down, KeyModifiers::NONE)
+                        if self.file_search_active && !self.file_matches.is_empty() =>
+                    {
+                        self.file_match_index =
+                            (self.file_match_index + 1) % self.file_matches.len();
                         return ComponentAction::Consumed;
                     }
                     // Multiline: Up/Down move the CURSOR between lines (preserving
@@ -2639,8 +2651,7 @@ impl Component for InputComponent {
                     // since '_' is shifted '-'); Ctrl+'-' is accepted for CC
                     // parity. `contains` tolerates stray protocol bits.
                     (KeyCode::Char('_') | KeyCode::Char('7') | KeyCode::Char('-'), m)
-                        if m.contains(KeyModifiers::CONTROL)
-                            && !m.contains(KeyModifiers::ALT) =>
+                        if m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
                     {
                         self.undo();
                         return ComponentAction::Consumed;
@@ -2702,7 +2713,9 @@ impl Component for InputComponent {
                                 ));
                             }
                         } else if self.restore_stash() {
-                            return ComponentAction::Emit(AppAction::Toast("Input restored".into()));
+                            return ComponentAction::Emit(AppAction::Toast(
+                                "Input restored".into(),
+                            ));
                         }
                         return ComponentAction::Consumed;
                     }
@@ -2832,8 +2845,7 @@ impl Component for InputComponent {
 
         // Top divider — full-width `─` rule (Claude-Code style).
         let sep_area = Rect::new(area.x, area.y, area.width, 1);
-        let separator =
-            Paragraph::new("\u{2500}".repeat(area.width as usize)).style(divider_style);
+        let separator = Paragraph::new("\u{2500}".repeat(area.width as usize)).style(divider_style);
         frame.render_widget(separator, sep_area);
 
         // Right-aligned mode badge on the top divider ("shell" / "memory").
@@ -2877,10 +2889,17 @@ impl Component for InputComponent {
             // newline that works on every terminal. Fixes the discoverability gap
             // where the only working newline key was invisible. Shown only on wide
             // enough composers so narrow terminals stay calm.
-            let nl = if self.kbd_enhanced { "shift+\u{23ce}" } else { "\\\u{23ce}" };
+            let nl = if self.kbd_enhanced {
+                "shift+\u{23ce}"
+            } else {
+                "\\\u{23ce}"
+            };
             let w = area.width as usize;
             let hint = if w >= 88 {
-                format!("  / commands \u{00b7} @ files \u{00b7} # memory \u{00b7} {} newline  ", nl)
+                format!(
+                    "  / commands \u{00b7} @ files \u{00b7} # memory \u{00b7} {} newline  ",
+                    nl
+                )
             } else if w >= 68 {
                 "  / commands \u{00b7} @ files \u{00b7} # memory  ".to_string()
             } else if w >= 50 {
@@ -2891,10 +2910,7 @@ impl Component for InputComponent {
             let hw = hint.chars().count() as u16;
             if hw > 0 && area.width > hw + 2 {
                 let hint_area = Rect::new(area.x + area.width - hw, bot_area.y, hw, 1);
-                frame.render_widget(
-                    Paragraph::new(Span::styled(hint, theme.hint())),
-                    hint_area,
-                );
+                frame.render_widget(Paragraph::new(Span::styled(hint, theme.hint())), hint_area);
             }
 
             // Vim mode indicator, left-aligned on the bottom divider. Only shown
@@ -2909,10 +2925,7 @@ impl Component for InputComponent {
                 };
                 if area.width > vw + 2 {
                     let v_area = Rect::new(area.x + 1, bot_area.y, vw, 1);
-                    frame.render_widget(
-                        Paragraph::new(Span::styled(vlabel, vstyle)),
-                        v_area,
-                    );
+                    frame.render_widget(Paragraph::new(Span::styled(vlabel, vstyle)), v_area);
                 }
             }
         }
@@ -3105,10 +3118,7 @@ impl Component for InputComponent {
                     hint_width,
                     1,
                 );
-                frame.render_widget(
-                    Paragraph::new(Span::styled(hint, theme.hint())),
-                    hint_area,
-                );
+                frame.render_widget(Paragraph::new(Span::styled(hint, theme.hint())), hint_area);
             }
         }
 
@@ -3124,16 +3134,8 @@ impl Component for InputComponent {
             let label = format!(" \u{29d6} {} queued ", self.queued_count);
             let w = label.chars().count() as u16;
             if input_area.width > w + 6 {
-                let q_area = Rect::new(
-                    input_area.x + input_area.width - w,
-                    input_area.y,
-                    w,
-                    1,
-                );
-                frame.render_widget(
-                    Paragraph::new(Span::styled(label, theme.hint())),
-                    q_area,
-                );
+                let q_area = Rect::new(input_area.x + input_area.width - w, input_area.y, w, 1);
+                frame.render_widget(Paragraph::new(Span::styled(label, theme.hint())), q_area);
             }
         }
 
@@ -3358,7 +3360,10 @@ fn is_chip_token(tok: &str) -> bool {
         if tail.is_empty() {
             return true;
         }
-        if let Some(mid) = tail.strip_prefix(" +").and_then(|t| t.strip_suffix(" lines")) {
+        if let Some(mid) = tail
+            .strip_prefix(" +")
+            .and_then(|t| t.strip_suffix(" lines"))
+        {
             return !mid.is_empty() && mid.bytes().all(|b| b.is_ascii_digit());
         }
         return false;
@@ -3799,7 +3804,10 @@ mod vim_and_memory_tests {
         let mut input = InputComponent::new();
         input.history = history::History::new(10);
         input.vim_enabled = true;
-        input.vim = vim::VimState { mode, pending: None };
+        input.vim = vim::VimState {
+            mode,
+            pending: None,
+        };
         input.content = content.to_string();
         input.cursor = 0;
         input.multiline = input.content.contains('\n');
@@ -3995,7 +4003,7 @@ mod ws9_composer_tests {
         input.insert_paste(&big);
         assert_eq!(input.value(), "[Pasted text #1]");
         assert_eq!(input.submit(), big); // model receives the full text
-        // History keeps the compact pill display, not the expanded body.
+                                         // History keeps the compact pill display, not the expanded body.
         assert_eq!(
             input.history.entries().last().map(|s| s.as_str()),
             Some("[Pasted text #1]")
@@ -4151,8 +4159,8 @@ mod ws9_composer_tests {
         assert_eq!(safe_str_range("hello", 1, 3), "el");
         assert_eq!(safe_str_range("hello", 2, 99), "llo"); // clamp upper
         assert_eq!(safe_str_range("hello", 99, 100), ""); // clamp both
-        // "é" occupies bytes [0,2); a mid-codepoint index snaps INWARD so a
-        // raw slice's "byte index is not a char boundary" panic can't happen.
+                                                          // "é" occupies bytes [0,2); a mid-codepoint index snaps INWARD so a
+                                                          // raw slice's "byte index is not a char boundary" panic can't happen.
         let s = "é";
         assert_eq!(safe_str_range(s, 0, 1), ""); // hi snaps down to 0
         assert_eq!(safe_str_range(s, 1, 2), ""); // lo snaps up to 2
@@ -4222,7 +4230,10 @@ mod ws9_composer_tests {
         let atts = input.take_attachments();
         assert_eq!(
             atts,
-            vec![Attachment::File { path: "Cargo.toml".into(), range: None }]
+            vec![Attachment::File {
+                path: "Cargo.toml".into(),
+                range: None
+            }]
         );
     }
 
@@ -4237,7 +4248,10 @@ mod ws9_composer_tests {
             atts,
             vec![Attachment::File {
                 path: "src/main.rs".into(),
-                range: Some(LineRange { start: 10, end: Some(20) }),
+                range: Some(LineRange {
+                    start: 10,
+                    end: Some(20)
+                }),
             }]
         );
     }
@@ -4303,7 +4317,7 @@ mod killring_undo_placeholder_tests {
         // Ctrl+Y restores the whole run.
         let mut input = at("abcdef", 0);
         input.handle_event(&kv(KeyCode::Char('k'), KeyModifiers::CONTROL)); // kill "abcdef"
-        // Nothing left to kill on this line; type + kill again to prove append.
+                                                                            // Nothing left to kill on this line; type + kill again to prove append.
         let mut input = at("ab\ncd", 0);
         input.handle_event(&kv(KeyCode::Char('k'), KeyModifiers::CONTROL)); // kill "ab"
         input.handle_event(&kv(KeyCode::Char('k'), KeyModifiers::CONTROL)); // kill the '\n' (accumulates)
@@ -4425,10 +4439,19 @@ mod killring_undo_placeholder_tests {
         let mut input = InputComponent::new();
         input.history = history::History::new(10);
         input.vim_enabled = true;
-        input.vim = vim::VimState { mode: vim::VimMode::Normal, pending: None };
-        assert!(render_text(&input).contains("NORMAL"), "NORMAL badge missing");
+        input.vim = vim::VimState {
+            mode: vim::VimMode::Normal,
+            pending: None,
+        };
+        assert!(
+            render_text(&input).contains("NORMAL"),
+            "NORMAL badge missing"
+        );
         input.vim.mode = vim::VimMode::Insert;
-        assert!(render_text(&input).contains("INSERT"), "INSERT badge missing");
+        assert!(
+            render_text(&input).contains("INSERT"),
+            "INSERT badge missing"
+        );
     }
 
     #[test]
@@ -4451,7 +4474,11 @@ mod killring_undo_placeholder_tests {
         assert_eq!(first, PLACEHOLDERS[0]); // classic greeting on first launch
         input.set_content("do a thing");
         let _ = input.submit(); // re-rolls the seed
-        assert_ne!(input.placeholder(), first, "placeholder should rotate on submit");
+        assert_ne!(
+            input.placeholder(),
+            first,
+            "placeholder should rotate on submit"
+        );
     }
 
     #[test]
@@ -4500,9 +4527,14 @@ mod composer_layers_tests {
             vec![
                 Attachment::File {
                     path: "src/main.rs".into(),
-                    range: Some(LineRange { start: 2, end: Some(8) }),
+                    range: Some(LineRange {
+                        start: 2,
+                        end: Some(8)
+                    }),
                 },
-                Attachment::Agent { name: "debugger".into() },
+                Attachment::Agent {
+                    name: "debugger".into()
+                },
             ]
         );
         // Draining leaves nothing for the next turn.
@@ -4575,10 +4607,7 @@ mod composer_layers_tests {
         input.history.push("zzghost completion target".into());
         input.content = "zzghost".into();
         input.cursor = input.content.len();
-        assert_eq!(
-            input.ghost_suffix().as_deref(),
-            Some(" completion target")
-        );
+        assert_eq!(input.ghost_suffix().as_deref(), Some(" completion target"));
         // Tab accepts the ghost (fish/CC autosuggest).
         input.handle_event(&key(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(input.value(), "zzghost completion target");
@@ -4678,10 +4707,7 @@ mod paste_burst_composer_tests {
     use std::time::Duration;
 
     fn ev(code: KeyCode) -> Event {
-        Event::Terminal(CrosstermEvent::Key(KeyEvent::new(
-            code,
-            KeyModifiers::NONE,
-        )))
+        Event::Terminal(CrosstermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)))
     }
 
     /// Feed `text` as raw key events at `step` apart, starting at `t`, exactly
@@ -4987,9 +5013,7 @@ mod queued_affordance {
         })
         .expect("draw");
         let buf = term.backend().buffer().clone();
-        (0..width)
-            .map(|x| buf[(x, 0)].symbol())
-            .collect::<String>()
+        (0..width).map(|x| buf[(x, 0)].symbol()).collect::<String>()
     }
 
     #[test]
@@ -5037,8 +5061,14 @@ mod queued_affordance {
         let mut plain = InputComponent::new();
         plain.set_queued_items(vec!["check the god files".into()]);
         let row_plain = render_row(&plain, 140);
-        assert!(!row_plain.contains("alt+enter"), "plain terminal must not name alt+enter: {row_plain:?}");
-        assert!(row_plain.contains("enter again"), "plain terminal must name the portable gesture: {row_plain:?}");
+        assert!(
+            !row_plain.contains("alt+enter"),
+            "plain terminal must not name alt+enter: {row_plain:?}"
+        );
+        assert!(
+            row_plain.contains("enter again"),
+            "plain terminal must name the portable gesture: {row_plain:?}"
+        );
 
         // Kitty-protocol terminal: alt+enter DOES reach OSA, so the full form
         // may name it (alongside the portable gesture).
@@ -5046,16 +5076,25 @@ mod queued_affordance {
         kitty.set_kbd_enhanced(true);
         kitty.set_queued_items(vec!["check the god files".into()]);
         let row_kitty = render_row(&kitty, 140);
-        assert!(row_kitty.contains("alt+enter"), "kitty terminal should offer alt+enter: {row_kitty:?}");
-        assert!(row_kitty.contains("enter again"), "portable gesture stays named too: {row_kitty:?}");
+        assert!(
+            row_kitty.contains("alt+enter"),
+            "kitty terminal should offer alt+enter: {row_kitty:?}"
+        );
+        assert!(
+            row_kitty.contains("enter again"),
+            "portable gesture stays named too: {row_kitty:?}"
+        );
     }
 
     fn render_row(input: &InputComponent, width: u16) -> String {
         let backend = ratatui::backend::TestBackend::new(width, 10);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
-        term.draw(|f| input.draw(f, ratatui::layout::Rect::new(0, 0, width, 10))).expect("draw");
+        term.draw(|f| input.draw(f, ratatui::layout::Rect::new(0, 0, width, 10)))
+            .expect("draw");
         let buf = term.backend().buffer().clone();
-        (0..width).map(|x| buf[(x, 0)].symbol().to_string()).collect::<String>()
+        (0..width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect::<String>()
     }
 
     #[test]

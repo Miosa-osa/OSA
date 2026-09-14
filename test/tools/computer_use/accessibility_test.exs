@@ -39,6 +39,27 @@ defmodule OptimalSystemAgent.Tools.Builtins.ComputerUse.AccessibilityTest do
       assert elem.x == 0
       assert elem.y == 0
     end
+
+    test "preserves native locator metadata behind semantic refs" do
+      raw = [
+        %{
+          "role" => "button",
+          "name" => "Close",
+          "pid" => 42,
+          "path" => [0, 2, 1],
+          "identifier" => "close-button",
+          "actions" => ["AXPress"]
+        }
+      ]
+
+      [parsed] = Accessibility.parse_tree(raw)
+      {_text, %{"e0" => ref}} = Accessibility.assign_refs([parsed])
+
+      assert ref.pid == 42
+      assert ref.path == [0, 2, 1]
+      assert ref.identifier == "close-button"
+      assert ref.actions == ["AXPress"]
+    end
   end
 
   # ---------------------------------------------------------------------------

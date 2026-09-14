@@ -52,25 +52,47 @@ defmodule OptimalSystemAgent.Tools.Builtins.ExitPlanMode.Handler do
   def execute(input, %UseContext{session_id: session_id} = ctx) do
     plan = Map.get(input, "plan")
 
-    if plan do
-      Logger.info("[exit_plan_mode] session=#{session_id} plan=#{String.slice(plan, 0, 200)}")
-      stash_pending_plan(session_id, plan, ctx)
-    end
+    stash_result =
+      if plan do
+        Logger.info(
+          "[exit_plan_mode] session=#{inspect(session_id)} plan=#{String.slice(plan, 0, 200)}"
+        )
 
-    case Loop.exit_plan_mode(session_id) do
-      {:ok, :exited} ->
-        confirmation = build_confirmation(plan)
-        {:ok, confirmation}
+        stash_pending_plan(session_id, plan, ctx)
+      else
+        :ok
+      end
 
-      {:ok, :was_not_active} ->
-        {:ok, "Plan mode was not active — no change made."}
-
-      {:error, :no_session} ->
-        confirmation = build_confirmation(plan)
-        {:ok, "#{confirmation} (offline — no live session to update)"}
-
+    case stash_result do
       {:error, reason} ->
-        {:error, "Failed to exit plan mode: #{inspect(reason)}"}
+        {:error,
+         "Plan could NOT be submitted for approval: #{reason}. " <>
+           "The approval dialog will not open. Check backend logs for details."}
+
+      :ok ->
+        case Loop.exit_plan_mode(session_id) do
+          {:ok, :exited} ->
+            {:ok, build_confirmation(plan)}
+
+          {:ok, :was_not_active} ->
+            {:ok, "Plan mode was not active — no change made."}
+
+          {:error, :no_session} when is_binary(plan) ->
+            # Plan WAS stashed above (stash_result was :ok), so the approval
+            # dialog will still open even though the Loop process isn't there
+            # to have its plan_mode_enabled flag reset. Say so honestly.
+            {:ok,
+             "#{build_confirmation(plan)}\n\n" <>
+               "(note: could not reset plan-mode flag on the running Loop — " <>
+               "session #{inspect(session_id)} not found. Approval dialog should still open.)"}
+
+          {:error, :no_session} ->
+            {:error,
+             "Cannot exit plan mode: no live Loop process for session #{inspect(session_id)}."}
+
+          {:error, reason} ->
+            {:error, "Failed to exit plan mode: #{inspect(reason)}"}
+        end
     end
   end
 
@@ -102,14 +124,31 @@ defmodule OptimalSystemAgent.Tools.Builtins.ExitPlanMode.Handler do
          plan: plan
        }}
     )
+
+    :ok
   rescue
-    e -> Logger.warning("[exit_plan_mode] failed to stash pending plan: #{Exception.message(e)}")
+    e ->
+      Logger.error("[exit_plan_mode] failed to stash pending plan: #{Exception.message(e)}")
+      {:error, Exception.message(e)}
   catch
     :exit, reason ->
-      Logger.warning("[exit_plan_mode] failed to stash pending plan: #{inspect(reason)}")
+      Logger.error("[exit_plan_mode] failed to stash pending plan: #{inspect(reason)}")
+      {:error, inspect(reason)}
   end
 
-  defp stash_pending_plan(_session_id, _plan, _ctx), do: :ok
+  # Silent no-op replaced with a loud, honest error. Previously this clause
+  # fired whenever session_id wasn't a binary (e.g. nil from a missing tool
+  # ctx injection) and the caller happily reported "Plan submitted for
+  # approval" — but the plan was silently dropped and the TUI's approval
+  # dialog never opened. Return an error so the user sees the real failure.
+  defp stash_pending_plan(session_id, _plan, _ctx) do
+    Logger.error(
+      "[exit_plan_mode] cannot stash plan — session_id missing or not a binary: " <>
+        "#{inspect(session_id)}. Approval dialog will NOT open."
+    )
+
+    {:error, "session_id missing from tool context (got #{inspect(session_id)})"}
+  end
 
   # Best-effort recovery of the turn's original user input from the tool-use
   # context's message list, mirroring `MessageHandler.original_user_input/1`.

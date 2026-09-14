@@ -1,14 +1,18 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use super::{
-    make_header, render_tool_box, truncate_lines, RenderOpts, ToolRenderer,
-};
+use super::{make_header, render_tool_box, truncate_lines, RenderOpts, ToolRenderer};
 
 pub struct DiagnosticsRenderer;
 
 impl ToolRenderer for DiagnosticsRenderer {
-    fn render(&self, _name: &str, _args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        _name: &str,
+        _args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
         // Parse entries from result JSON
@@ -139,7 +143,12 @@ fn parse_diagnostics(result: &str) -> Vec<DiagnosticEntry> {
                 .or_else(|| item.get("row"))
                 .and_then(|n| n.as_u64());
 
-            Some(DiagnosticEntry { severity, message, file, line })
+            Some(DiagnosticEntry {
+                severity,
+                message,
+                file,
+                line,
+            })
         })
         .collect()
 }
@@ -162,33 +171,25 @@ fn severity_icon(severity: &str, theme: &crate::style::Theme) -> (String, Style)
     match severity {
         "error" => (
             "✘".to_string(),
-            Style::default().fg(theme.colors.error).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.colors.error)
+                .add_modifier(Modifier::BOLD),
         ),
-        "warning" | "warn" => (
-            "⚠".to_string(),
-            Style::default().fg(theme.colors.warning),
-        ),
-        "hint" => (
-            "·".to_string(),
-            Style::default().fg(theme.colors.muted),
-        ),
-        _ => (
-            "ℹ".to_string(),
-            Style::default().fg(theme.colors.muted),
-        ),
+        "warning" | "warn" => ("⚠".to_string(), Style::default().fg(theme.colors.warning)),
+        "hint" => ("·".to_string(), Style::default().fg(theme.colors.muted)),
+        _ => ("ℹ".to_string(), Style::default().fg(theme.colors.muted)),
     }
 }
 
 /// Classify a plain-text diagnostic line by common prefixes.
-fn classify_plain_line<'a>(
-    line: &'a str,
-    theme: &crate::style::Theme,
-) -> (String, Style, &'a str) {
+fn classify_plain_line<'a>(line: &'a str, theme: &crate::style::Theme) -> (String, Style, &'a str) {
     let lower = line.to_lowercase();
     if lower.starts_with("error") || lower.contains(": error") {
         (
             "✘".to_string(),
-            Style::default().fg(theme.colors.error).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.colors.error)
+                .add_modifier(Modifier::BOLD),
             line,
         )
     } else if lower.starts_with("warning") || lower.contains(": warning") {

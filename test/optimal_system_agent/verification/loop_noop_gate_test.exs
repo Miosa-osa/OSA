@@ -9,10 +9,66 @@ defmodule OptimalSystemAgent.Verification.LoopNoopGateTest do
   Ported from Prime Agent's autonomous no-op detector (MIT), see
   `docs/research/prime-agent.md` §6.3.
   """
+  # `Verification.Loop` fingerprints via `WorkspaceFingerprint.capture(nil)`,
+  # which resolves the directory through `Workspace.Cwd.get/0` — there is no
+  # `:dir` (or `:working_dir`) option on `Loop.start_link/1` to point it
+  # anywhere else. Left pointed at the real checkout (an ordinary, actively
+  # edited dev tree), the "unchanged" fingerprint this test asserts on is a
+  # hash of `git status`/`git diff HEAD`/untracked-file bytes for the WHOLE
+  # repo — any other concurrently-running or still-finishing background work
+  # that touches a file anywhere in the tree between the two captures this
+  # test takes flips the hash and manufactures a second iteration, exactly the
+  # `snap.iteration == 1` assertion below. `goal_verifier_test.exs` hit the
+  # identical hazard and fixed it the same way: run against a throwaway,
+  # `git init`'d temp directory nothing else in the suite ever touches, via
+  # `Workspace.Cwd`'s GLOBAL `original_cwd` override (`async: false`, restored
+  # in `on_exit`, same mechanism `settings_bom_test.exs` uses for the same
+  # class of `File.cwd!`-adjacent global state).
   use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Verification.Loop
   alias OptimalSystemAgent.Verification.WorkspaceFingerprint
+  alias OptimalSystemAgent.Workspace.Cwd
+
+  setup do
+    tmp = Path.join(System.tmp_dir!(), "osa-noop-gate-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(tmp)
+    {_, 0} = System.cmd("git", ["init", "-q"], cd: tmp)
+    {_, 0} = System.cmd("git", ["config", "user.email", "osa-test@example.com"], cd: tmp)
+    {_, 0} = System.cmd("git", ["config", "user.name", "OSA Test"], cd: tmp)
+    File.write!(Path.join(tmp, "seed.txt"), "seed\n")
+    {_, 0} = System.cmd("git", ["add", "-A"], cd: tmp)
+    {_, 0} = System.cmd("git", ["commit", "-q", "-m", "seed"], cd: tmp)
+
+    prev_original = Cwd.original_cwd()
+    Cwd.set_original_cwd(tmp)
+
+    prev_provider_env = System.get_env("OSA_DEFAULT_PROVIDER")
+    prev_default_provider = Application.get_env(:optimal_system_agent, :default_provider)
+    prev_ollama_url = Application.get_env(:optimal_system_agent, :ollama_url)
+    System.delete_env("OSA_DEFAULT_PROVIDER")
+    Application.put_env(:optimal_system_agent, :default_provider, :ollama)
+    Application.put_env(:optimal_system_agent, :ollama_url, "http://127.0.0.1:1")
+
+    on_exit(fn ->
+      Cwd.set_original_cwd(prev_original)
+      File.rm_rf(tmp)
+
+      if prev_provider_env,
+        do: System.put_env("OSA_DEFAULT_PROVIDER", prev_provider_env),
+        else: System.delete_env("OSA_DEFAULT_PROVIDER")
+
+      if prev_default_provider,
+        do: Application.put_env(:optimal_system_agent, :default_provider, prev_default_provider),
+        else: Application.delete_env(:optimal_system_agent, :default_provider)
+
+      if prev_ollama_url,
+        do: Application.put_env(:optimal_system_agent, :ollama_url, prev_ollama_url),
+        else: Application.delete_env(:optimal_system_agent, :ollama_url)
+    end)
+
+    :ok
+  end
 
   defp await_terminal(loop_id, deadline_ms \\ 20_000) do
     deadline = System.monotonic_time(:millisecond) + deadline_ms

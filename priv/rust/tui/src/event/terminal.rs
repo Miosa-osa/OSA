@@ -281,11 +281,7 @@ mod tests {
     #[tokio::test]
     async fn an_esc_between_keys_arrives_once_and_in_order() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let script = vec![
-            Ok::<_, std::io::Error>(key('a')),
-            Ok(esc()),
-            Ok(key('b')),
-        ];
+        let script = vec![Ok::<_, std::io::Error>(key('a')), Ok(esc()), Ok(key('b'))];
 
         pump_terminal_events(futures::stream::iter(script), tx).await;
 
@@ -306,8 +302,7 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         drop(rx);
 
-        let script: Vec<Result<CrosstermEvent, std::io::Error>> =
-            vec![Ok(key('a')), Ok(key('b'))];
+        let script: Vec<Result<CrosstermEvent, std::io::Error>> = vec![Ok(key('a')), Ok(key('b'))];
 
         // Must return rather than hang.
         pump_terminal_events(futures::stream::iter(script), tx).await;

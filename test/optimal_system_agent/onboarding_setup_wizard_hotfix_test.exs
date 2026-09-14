@@ -14,10 +14,22 @@ defmodule OptimalSystemAgent.OnboardingSetupWizardHotfixTest do
 
   Uses a TEMP OSA_HOME for every `write_setup/1` call — never the operator's
   real `~/.osa`.
+
+  `write_setup/1` also applies its provider/model/URL/key selection to the
+  CURRENT PROCESS via `Application.put_env` and `System.put_env` (see its
+  moduledoc: "Sets env vars in-process — takes effect immediately"), so
+  those calls are just as global and just as much this test's responsibility
+  to undo as OSA_HOME — every `write_setup` call below runs with
+  `"provider" => "ollama_cloud"`, which pins `:default_provider`,
+  `:default_model` and `:ollama_model` to `:ollama` / `"glm-5.2:cloud"` for
+  every OTHER test in the suite once this module returns them.
   """
   use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Onboarding
+
+  @env_app_keys ~w(default_provider default_model ollama_model ollama_url ollama_api_key)a
+  @env_os_keys ~w(OLLAMA_URL OLLAMA_MODEL OLLAMA_API_KEY)
 
   setup do
     tmp =
@@ -30,9 +42,22 @@ defmodule OptimalSystemAgent.OnboardingSetupWizardHotfixTest do
     previous = System.get_env("OSA_HOME")
     System.put_env("OSA_HOME", tmp)
 
+    prev_app_env = Enum.map(@env_app_keys, &{&1, Application.get_env(:optimal_system_agent, &1)})
+    prev_os_env = Enum.map(@env_os_keys, &{&1, System.get_env(&1)})
+
     on_exit(fn ->
       if previous, do: System.put_env("OSA_HOME", previous), else: System.delete_env("OSA_HOME")
       File.rm_rf(tmp)
+
+      Enum.each(prev_app_env, fn
+        {k, nil} -> Application.delete_env(:optimal_system_agent, k)
+        {k, v} -> Application.put_env(:optimal_system_agent, k, v)
+      end)
+
+      Enum.each(prev_os_env, fn
+        {k, nil} -> System.delete_env(k)
+        {k, v} -> System.put_env(k, v)
+      end)
     end)
 
     %{osa_home: tmp}

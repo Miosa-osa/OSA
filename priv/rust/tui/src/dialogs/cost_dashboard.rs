@@ -79,7 +79,11 @@ pub struct CostDashboard {
 
 impl CostDashboard {
     pub fn new(view: CostView) -> Self {
-        Self { view, scroll: 0, viewport: Cell::new((DIALOG_H as usize).saturating_sub(3)) }
+        Self {
+            view,
+            scroll: 0,
+            viewport: Cell::new((DIALOG_H as usize).saturating_sub(3)),
+        }
     }
 
     /// Grade a spend fraction: comfortable → tight → over/near budget. Mirrors
@@ -97,7 +101,9 @@ impl CostDashboard {
     /// Effective monthly spend for the gauge — the explicit `monthly_spent_usd`
     /// if present, else the summary total.
     fn spent(&self) -> f64 {
-        self.view.monthly_spent_usd.unwrap_or(self.view.total_cost_usd)
+        self.view
+            .monthly_spent_usd
+            .unwrap_or(self.view.total_cost_usd)
     }
 
     /// Build the scrollable content lines (title and footer live outside this).
@@ -123,7 +129,9 @@ impl CostDashboard {
         out.push(hdr("SPEND"));
         out.push(Line::from(vec![Span::styled(
             truncate_chars(&format!("  {}", fmt_usd(v.total_cost_usd)), maxw),
-            Style::default().fg(c.secondary).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(c.secondary)
+                .add_modifier(Modifier::BOLD),
         )]));
         out.push(Line::from(Span::styled(
             truncate_chars(&format!("  since {}", fmt_since(&v.since)), maxw),
@@ -141,7 +149,10 @@ impl CostDashboard {
             out.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled("\u{2588}".repeat(filled), Style::default().fg(bar)),
-                Span::styled("\u{2591}".repeat(GAUGE_W - filled), Style::default().fg(c.dim)),
+                Span::styled(
+                    "\u{2591}".repeat(GAUGE_W - filled),
+                    Style::default().fg(c.dim),
+                ),
                 Span::styled(
                     format!("  {:>3.0}%", frac * 100.0),
                     Style::default().fg(bar).add_modifier(Modifier::BOLD),
@@ -186,12 +197,16 @@ impl CostDashboard {
 
     /// Largest valid scroll offset given the last measured viewport.
     fn max_scroll(&self) -> usize {
-        self.content_len().saturating_sub(self.viewport.get().max(1))
+        self.content_len()
+            .saturating_sub(self.viewport.get().max(1))
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> CostDashboardAction {
         // Chorded shortcuts belong to the app, not the dashboard.
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return CostDashboardAction::None;
         }
         let max = self.max_scroll();
@@ -225,7 +240,10 @@ impl CostDashboard {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(c.primary))
             .title(Line::from(vec![
-                Span::styled(" OSA ", Style::default().fg(c.primary).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " OSA ",
+                    Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("\u{00b7} cost ", Style::default().fg(c.muted)),
             ]))
             .style(Style::default().bg(c.dialog_bg));
@@ -252,7 +270,9 @@ impl CostDashboard {
         let scroll = self.scroll.min(max);
 
         for rel in 0..list_h {
-            let Some(line) = lines.get(rel + scroll) else { break };
+            let Some(line) = lines.get(rel + scroll) else {
+                break;
+            };
             put(
                 frame,
                 Paragraph::new(line.clone()),
@@ -263,14 +283,28 @@ impl CostDashboard {
         // ── footer hint ─────────────────────────────────────────────────────
         let hint_y = inner.y + inner.height.saturating_sub(1);
         let mut spans = vec![
-            Span::styled("esc", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "esc",
+                Style::default()
+                    .fg(c.secondary)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" close", Style::default().fg(c.dim)),
         ];
         if lines.len() > list_h {
-            spans.push(Span::styled("   \u{2191}\u{2193}", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(
+                "   \u{2191}\u{2193}",
+                Style::default()
+                    .fg(c.secondary)
+                    .add_modifier(Modifier::BOLD),
+            ));
             spans.push(Span::styled(" scroll", Style::default().fg(c.dim)));
         }
-        put(frame, Paragraph::new(Line::from(spans)), Rect::new(inner.x, hint_y, iw, 1));
+        put(
+            frame,
+            Paragraph::new(Line::from(spans)),
+            Rect::new(inner.x, hint_y, iw, 1),
+        );
     }
 }
 
@@ -374,9 +408,15 @@ mod cost_dashboard_tests {
     fn esc_and_q_close_scroll_keys_do_not() {
         let mut d = CostDashboard::new(budgeted());
         assert_eq!(d.handle_key(key(KeyCode::Down)), CostDashboardAction::None);
-        assert_eq!(d.handle_key(key(KeyCode::Char('j'))), CostDashboardAction::None);
+        assert_eq!(
+            d.handle_key(key(KeyCode::Char('j'))),
+            CostDashboardAction::None
+        );
         assert_eq!(d.handle_key(key(KeyCode::Esc)), CostDashboardAction::Close);
-        assert_eq!(d.handle_key(key(KeyCode::Char('q'))), CostDashboardAction::Close);
+        assert_eq!(
+            d.handle_key(key(KeyCode::Char('q'))),
+            CostDashboardAction::Close
+        );
     }
 
     #[test]
@@ -398,7 +438,9 @@ mod cost_dashboard_tests {
     #[test]
     fn budget_lines_appear_only_with_limits() {
         let c = crate::style::theme().colors;
-        let with = CostDashboard::new(budgeted()).build_lines(usize::MAX, &c).len();
+        let with = CostDashboard::new(budgeted())
+            .build_lines(usize::MAX, &c)
+            .len();
         let without = CostDashboard::new(bare()).build_lines(usize::MAX, &c).len();
         assert!(with > without, "budget gauge should add rows");
     }

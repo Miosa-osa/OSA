@@ -20,6 +20,16 @@ defmodule OptimalSystemAgent.Agent.ExecutionControl do
 
   @monotonic ~w(tokens_used tool_count retry_count failure_count)a
 
+  # Terminal states are LATCHED, mirroring `RunStore.complete/2`'s
+  # `settled_status/2`: the first one to land is the truth. Without this,
+  # a "stop"/"reassign" operator command (or a duplicate/late completion
+  # report) racing a run's own genuine completion could silently overwrite an
+  # already-final record — clobbering `status`, `completed_at`, and every
+  # other field `finish/3` sets — with no visible error and no way to tell the
+  # phantom write apart from the real one. `status` is stored as a STRING on
+  # disk (see `stringify_values/1`), so both representations are checked.
+  @terminal_statuses ~w(completed failed cancelled reassigned)
+
   @doc "Create or reset the control record for a newly dispatched run."
   @spec start(String.t(), map()) :: :ok | {:error, term()}
   def start(agent_id, attrs) when is_binary(agent_id) and is_map(attrs) do
@@ -53,16 +63,27 @@ defmodule OptimalSystemAgent.Agent.ExecutionControl do
     end)
   end
 
-  @doc "Set a terminal status and its final metrics."
+  @doc """
+  Set a terminal status and its final metrics.
+
+  A no-op — current record unchanged, nothing re-persisted — once the record
+  is ALREADY terminal. A run finishes exactly once; a second `finish/3` call
+  (an operator "stop"/"reassign" racing the run's own completion, a retried
+  report, a duplicate cancellation sweep) must not be able to re-terminate it.
+  """
   @spec finish(String.t(), atom() | String.t(), map()) :: :ok | {:error, term()}
   def finish(agent_id, status, attrs \\ %{}) when is_binary(agent_id) and is_map(attrs) do
     mutate(agent_id, fn current ->
-      current
-      |> merge_monotonic(attrs)
-      |> Map.put(:status, status)
-      |> Map.put(:current_tool, nil)
-      |> Map.put(:completed_at, now())
-      |> Map.put(:updated_at, now())
+      if terminal?(current) do
+        current
+      else
+        current
+        |> merge_monotonic(attrs)
+        |> Map.put(:status, status)
+        |> Map.put(:current_tool, nil)
+        |> Map.put(:completed_at, now())
+        |> Map.put(:updated_at, now())
+      end
     end)
   end
 
@@ -195,6 +216,19 @@ defmodule OptimalSystemAgent.Agent.ExecutionControl do
 
   defp number(value) when is_integer(value) and value >= 0, do: value
   defp number(_), do: 0
+
+  # `status` on a freshly-read record is whatever `decode/1` handed back
+  # (a string, from JSON) — but a record that has never been persisted yet
+  # (the `mutate/2` fallback for an unknown agent_id) carries no `status` key
+  # at all, and that absence must NOT read as terminal or a run that finishes
+  # before it ever started (or after its sidecar file was pruned) could never
+  # record its own outcome.
+  defp terminal?(%{status: status}) when is_binary(status), do: status in @terminal_statuses
+
+  defp terminal?(%{status: status}) when is_atom(status) and not is_nil(status),
+    do: Atom.to_string(status) in @terminal_statuses
+
+  defp terminal?(_), do: false
 
   defp decode(body) do
     case Jason.decode(body) do

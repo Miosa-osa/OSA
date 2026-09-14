@@ -263,6 +263,11 @@ impl App {
                         self.discard_overlay_return();
                         self.transition(AppState::Idle);
                         self.onboarding = None;
+                        // Escaping the wizard drops the user at an ordinary
+                        // prompt, but the branch that opened it never resolved
+                        // this folder's session — so without this the startup
+                        // gate enqueues everything they type and never sends it.
+                        self.resolve_session_after_onboarding();
                     }
                 }
             }

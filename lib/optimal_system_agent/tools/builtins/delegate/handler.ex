@@ -72,6 +72,13 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   # when delegation is not permitted, but a still-listed / hand-crafted call is
   # denied here too. `:proactive` allows, `:disabled` denies, `:explicit_only`
   # allows only when the user asked to delegate this turn.
+  # When `worktree_by_default` is set, delegated work runs isolated in a git
+  # worktree even when neither the call args nor the agent definition asked for
+  # it. Default off, so shipped behavior is unchanged until the user opts in.
+  defp default_isolation do
+    if OptimalSystemAgent.Settings.get("worktree_by_default", false), do: :worktree, else: nil
+  end
+
   defp check_delegation_policy(input, ctx) do
     policy = DelegationPolicy.resolve(%{delegation_policy: ctx_policy(ctx)})
     messages = ctx_messages(ctx)
@@ -181,7 +188,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
     tier = if raw_tier == :utility, do: Constants.min_subagent_tier(), else: raw_tier
 
     isolation =
-      case Map.get(args, "isolation") || (agent_def && agent_def[:isolation]) do
+      case Map.get(args, "isolation") || (agent_def && agent_def[:isolation]) ||
+             default_isolation() do
         "worktree" -> :worktree
         :worktree -> :worktree
         _ -> nil
@@ -238,6 +246,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       # `background?/2` — an agent definition may still opt back into
       # foreground, and an explicit `background:` arg always wins.
       background: default_background(agent_def),
+      # A role that must never block the parent (research fan-outs) — forces
+      # background in `background?/2` regardless of the caller's `background:` arg.
+      force_background: agent_def && agent_def[:force_background] == true,
       # Parent's depth — Orchestrator.run_subagent increments this for the child
       # so ToolFilter can strip spawning tools once the max nesting is reached.
       delegation_depth: parent_depth,
@@ -245,11 +256,15 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       # the single-task and fan-out paths; nil lets Orchestrator fall back to
       # `:subagent_join_timeout_ms` / `@default_subagent_timeout_ms`.
       timeout_ms: parse_timeout_ms(Map.get(args, "timeout_ms")),
-      # Per-subagent USD spend ceiling. nil = off (unchanged default). When set,
-      # the child Loop aborts its own run once it crosses the cap, so a wide
-      # fan-out cannot burn unbounded spend. Each child is capped independently.
+      # Per-subagent USD spend ceiling. The child Loop aborts its own run once it
+      # crosses the cap, so a wide fan-out cannot burn unbounded spend. Each child
+      # is capped independently. A model-supplied value wins; otherwise the child
+      # inherits its TIER default (elite $8 / specialist $4 / utility $1.50), so a
+      # generous turn cap can never turn into a token runaway. See
+      # `Tier.max_budget_usd/1`.
       max_budget_usd:
-        parse_budget_usd(Map.get(args, "max_budget_usd") || Map.get(args, "maxBudgetUsd")),
+        parse_budget_usd(Map.get(args, "max_budget_usd") || Map.get(args, "maxBudgetUsd")) ||
+          Tier.max_budget_usd(tier),
       # Speed/cost tier, normalized by DelegationRouter (nil → :standard). Biases
       # model tier + provider order toward cheaper/local for :loose long-horizon
       # work and toward the best model for :immediate.
@@ -294,9 +309,16 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   """
   @spec background?(map(), map()) :: boolean()
   def background?(args, config) do
-    case Map.fetch(args, "background") do
-      {:ok, value} -> value == true
-      :error -> Map.get(config, :background, true) == true
+    if Map.get(config, :force_background) == true do
+      # An agent def marked force_background (research fan-outs) must NEVER lock
+      # the parent's turn — background even if the model asked to foreground it,
+      # so the user can keep talking to the main agent and check in on the wave.
+      true
+    else
+      case Map.fetch(args, "background") do
+        {:ok, value} -> value == true
+        :error -> Map.get(config, :background, true) == true
+      end
     end
   end
 
@@ -827,7 +849,11 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
   defp resolve_parent_id(args, _ctx), do: Map.get(args, "__session_id__", "unknown")
 
   # Parse a per-subagent USD budget. Accepts a positive number or numeric
-  # string; anything else (including 0 / negative) is "no cap".
+  # string; anything else (including 0 / negative) is "no cap" (falls through to
+  # the tier default). The default itself now lives in `Tier.max_budget_usd/1` so
+  # every delegated child inherits a tier-appropriate cap and self-aborts once it
+  # crosses it (Loop.Limits.budget_exceeded?), bounding a runaway by dollars
+  # rather than only by the turn cap.
   defp parse_budget_usd(n) when is_number(n) and n > 0, do: n * 1.0
 
   defp parse_budget_usd(s) when is_binary(s) do

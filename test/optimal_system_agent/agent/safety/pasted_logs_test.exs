@@ -16,16 +16,24 @@ defmodule OptimalSystemAgent.Agent.Safety.PastedLogsTest do
   distinct roles, because the attack only works by putting words in another
   role's mouth.
   """
-  use ExUnit.Case, async: true
+  # `OSA_PROMPT_GUARD` is a process-wide OS env var; arming it for the
+  # duration of every test here (below) is unsafe under `async: true` since
+  # any OTHER concurrently-running test that reads it (expecting the opt-in
+  # default OFF, or arming it itself) can observe or clobber this file's value.
+  use ExUnit.Case, async: false
 
   # These tests verify the prompt-extraction guard MECHANISM, which is opt-in
   # (default OFF for operator-owned agents). Arm it for the duration.
   setup do
     prev = System.get_env("OSA_PROMPT_GUARD")
     System.put_env("OSA_PROMPT_GUARD", "1")
+
     on_exit(fn ->
-      if prev, do: System.put_env("OSA_PROMPT_GUARD", prev), else: System.delete_env("OSA_PROMPT_GUARD")
+      if prev,
+        do: System.put_env("OSA_PROMPT_GUARD", prev),
+        else: System.delete_env("OSA_PROMPT_GUARD")
     end)
+
     :ok
   end
 

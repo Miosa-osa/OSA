@@ -33,23 +33,23 @@ defmodule OptimalSystemAgent.Net.Port do
 
   @doc """
   Resolve the configured HTTP port the SAME way boot, doctor, and onboarding
-  must all see it: `OSA_HTTP_PORT` env wins, else the app-env `:http_port`,
-  else #{@default_port}.
+  must all see it: `OSA_HTTP_PORT` env wins, then the launcher's `OSA_PORT`
+  alias, then the app-env `:http_port`, else #{@default_port}.
 
   A non-integer `OSA_HTTP_PORT` (e.g. a typo) falls back to the app-env /
   default rather than raising — resilience over a cryptic crash.
   """
   @spec configured_http_port() :: non_neg_integer()
   def configured_http_port do
-    case System.get_env("OSA_HTTP_PORT") do
-      nil ->
-        Application.get_env(@app, :http_port, @default_port)
+    parse_env_port("OSA_HTTP_PORT") ||
+      parse_env_port("OSA_PORT") ||
+      Application.get_env(@app, :http_port, @default_port)
+  end
 
-      str ->
-        case Integer.parse(str) do
-          {port, _rest} when port >= 0 -> port
-          _ -> Application.get_env(@app, :http_port, @default_port)
-        end
+  defp parse_env_port(name) do
+    case Integer.parse(System.get_env(name) || "") do
+      {port, ""} when port >= 0 and port <= 65_535 -> port
+      _ -> nil
     end
   end
 

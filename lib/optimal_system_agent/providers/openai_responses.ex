@@ -176,8 +176,12 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
   def build_body(model, messages, opts, stream?) do
     {instructions, input} = split_instructions(messages)
 
-    %{model: model, input: input, stream: stream?}
+    # The ChatGPT Codex endpoint rejects persisted Responses requests. Codex
+    # clients must explicitly opt out of server-side storage; omitting this
+    # field currently produces an unhelpful empty HTTP 400 response.
+    %{model: model, input: input, stream: stream?, store: false}
     |> put_unless_nil(:instructions, instructions)
+    |> put_unless_nil(:service_tier, Keyword.get(opts, :service_tier))
     |> maybe_put_tools(opts)
     |> maybe_put_reasoning(model, opts)
     |> maybe_put_max_tokens(opts)
@@ -215,11 +219,13 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
 
     case role do
       "tool" ->
+        parts = input_parts(get(message, :content))
+
         [
           %{
             type: "function_call_output",
             call_id: get(message, :tool_call_id) || get(message, :id),
-            output: to_string(content || "")
+            output: if(Enum.any?(parts, &(&1.type == "input_image")), do: parts, else: content)
           }
         ]
 
@@ -244,9 +250,42 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
           %{
             type: "message",
             role: "user",
-            content: [%{type: "input_text", text: to_string(content || "")}]
+            content: input_parts(get(message, :content))
           }
         ]
+    end
+  end
+
+  defp input_parts(content) when is_binary(content), do: [%{type: "input_text", text: content}]
+
+  defp input_parts(content) when is_list(content) do
+    parts = Enum.flat_map(content, &input_part/1)
+    if parts == [], do: [%{type: "input_text", text: ""}], else: parts
+  end
+
+  defp input_parts(content), do: [%{type: "input_text", text: to_string(content || "")}]
+
+  defp input_part(text) when is_binary(text), do: [%{type: "input_text", text: text}]
+  defp input_part(%{type: "text", text: text}), do: [%{type: "input_text", text: text}]
+  defp input_part(%{"type" => "text", "text" => text}), do: [%{type: "input_text", text: text}]
+  defp input_part(%{type: "image", source: source}), do: image_input_part(source)
+  defp input_part(%{"type" => "image", "source" => source}), do: image_input_part(source)
+  defp input_part(_), do: []
+
+  defp image_input_part(source) do
+    media_type = get(source, :media_type) || "image/png"
+    data = get(source, :data)
+    url = get(source, :url)
+
+    cond do
+      is_binary(url) and url != "" ->
+        [%{type: "input_image", image_url: url}]
+
+      is_binary(data) and data != "" ->
+        [%{type: "input_image", image_url: "data:#{media_type};base64,#{data}"}]
+
+      true ->
+        []
     end
   end
 
@@ -327,12 +366,24 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
         current_effort()
 
     with true <- reasoning_model?(model),
-         level when is_binary(level) <- normalize_effort(effort) do
+         level when is_binary(level) <- normalize_model_effort(model, effort) do
       Map.put(body, :reasoning, %{effort: level})
     else
       _ -> body
     end
   end
+
+  # Ultra includes Codex-specific orchestration. On the API, use the
+  # documented maximum effort rather than silently reducing it to high.
+  defp normalize_model_effort("gpt-6-astra", effort) do
+    case effort |> to_string() |> String.trim() |> String.downcase() do
+      "xhigh" -> "xhigh"
+      value when value in ["max", "ultra"] -> "max"
+      other -> normalize_effort(other)
+    end
+  end
+
+  defp normalize_model_effort(_model, effort), do: normalize_effort(effort)
 
   defp reasoning_model?(model) do
     OptimalSystemAgent.Providers.OpenAIModels.reasoning?(String.downcase(to_string(model)))
@@ -387,8 +438,11 @@ defmodule OptimalSystemAgent.Providers.OpenAIResponses do
     ]
 
     case Keyword.get(opts, :account_id) do
-      id when is_binary(id) and id != "" -> [{"chatgpt-account-id", id} | base]
-      _ -> base
+      id when is_binary(id) and id != "" ->
+        [{"chatgpt-account-id", id}, {"openai-beta", "responses=v1"} | base]
+
+      _ ->
+        base
     end
   end
 

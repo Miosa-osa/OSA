@@ -1,5 +1,9 @@
 defmodule OptimalSystemAgent.Providers.ResilienceTest do
-  use ExUnit.Case, async: true
+  # "default attempts = 1 + 10 retries, overridable via OSA_API_MAX_RETRIES"
+  # below touches `OSA_API_MAX_RETRIES`, a process-wide OS env var every
+  # `Resilience.max_attempts/0` call reads — unsafe under `async: true` if any
+  # other concurrently-running test calls it while this one has it overridden.
+  use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.Providers.Resilience
 
@@ -256,11 +260,18 @@ defmodule OptimalSystemAgent.Providers.ResilienceTest do
 
   describe "CC parity — defaults and 529 fallback" do
     test "default attempts = 1 + 10 retries, overridable via OSA_API_MAX_RETRIES" do
+      prev = System.get_env("OSA_API_MAX_RETRIES")
+
+      on_exit(fn ->
+        if prev,
+          do: System.put_env("OSA_API_MAX_RETRIES", prev),
+          else: System.delete_env("OSA_API_MAX_RETRIES")
+      end)
+
       System.delete_env("OSA_API_MAX_RETRIES")
       assert Resilience.max_attempts() == 11
 
       System.put_env("OSA_API_MAX_RETRIES", "2")
-      on_exit(fn -> System.delete_env("OSA_API_MAX_RETRIES") end)
       assert Resilience.max_attempts() == 3
     end
 

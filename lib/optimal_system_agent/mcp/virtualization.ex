@@ -110,4 +110,73 @@ defmodule OptimalSystemAgent.MCP.Virtualization do
     defer? = virtualize?(map_size(aggregate))
     Map.new(aggregate, fn {key, info} -> {key, Map.put(info, :should_defer?, defer?)} end)
   end
+
+  @doc """
+  Snapshot of what MCP tools currently cost the prompt, for surfacing to an
+  operator (status bar, `/mcp` panel) who otherwise has no way to tell whether
+  their connected servers are cheap or expensive.
+
+  Reports the live aggregate tool/server count, whether virtualization is
+  currently active for that count, and an ESTIMATED token cost of whatever is
+  actually being shipped right now for MCP:
+
+    * virtualized  → the rendered `<mcp-servers>` catalog text (capped names,
+      see `Soul.ToolsSection.mcp_catalog_text/0`) — normally tiny (tens to a
+      few hundred tokens) regardless of how many tools exist.
+    * not virtualized → the JSON-encoded native schemas of every `mcp__`
+      tool in `Registry.list_active/0` — the exact array a native-tool
+      provider receives, so this can legitimately be large.
+
+  The token count is a heuristic (`Utils.Tokens.estimate/1`), not the
+  provider's real tokenizer — good enough for a status-bar order-of-magnitude,
+  not for billing. Never raises: any failure reads as an all-zero snapshot
+  rather than crashing whatever is trying to render it.
+  """
+  @spec cost_estimate() :: %{
+          tool_count: non_neg_integer(),
+          server_count: non_neg_integer(),
+          virtualized: boolean(),
+          estimated_tokens: non_neg_integer()
+        }
+  def cost_estimate do
+    tool_count = current_count()
+    virtualized? = virtualize?(tool_count)
+
+    %{
+      tool_count: tool_count,
+      server_count: server_count(),
+      virtualized: virtualized?,
+      estimated_tokens: estimated_tokens(virtualized?)
+    }
+  rescue
+    _ -> empty_cost_estimate()
+  catch
+    :exit, _ -> empty_cost_estimate()
+  end
+
+  defp empty_cost_estimate,
+    do: %{tool_count: 0, server_count: 0, virtualized: false, estimated_tokens: 0}
+
+  defp server_count do
+    OptimalSystemAgent.Tools.Registry.mcp_servers() |> length()
+  end
+
+  # Whichever half is actually live right now: the capped catalog text when
+  # virtualized, the native tool-array bytes when not. `apply_decision/1`
+  # stamps `should_defer?` uniformly across the WHOLE aggregate (never a mix),
+  # so exactly one of the two branches below has anything to measure and there
+  # is no risk of double-counting.
+  defp estimated_tokens(true) do
+    case OptimalSystemAgent.Soul.ToolsSection.mcp_catalog_text() do
+      text when is_binary(text) -> OptimalSystemAgent.Utils.Tokens.estimate(text)
+      _ -> 0
+    end
+  end
+
+  defp estimated_tokens(false) do
+    OptimalSystemAgent.Tools.Registry.list_active()
+    |> Enum.filter(fn tool -> OptimalSystemAgent.MCP.Client.ToolBridge.mcp_tool?(tool.name) end)
+    |> Enum.map_join("", fn tool -> Jason.encode!(tool) end)
+    |> OptimalSystemAgent.Utils.Tokens.estimate()
+  end
 end

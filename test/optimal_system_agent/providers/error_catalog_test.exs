@@ -161,4 +161,49 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalogTest do
       assert msg =~ "API Error"
     end
   end
+
+  describe "empty-response classification (flaky-provider retry)" do
+    test "the SSE empty-stream recovery strings classify as :empty_response" do
+      assert Catalog.classify("SSE recovery: stream completed without a result") ==
+               :empty_response
+
+      assert Catalog.classify(
+               "Anthropic SSE recovery: stream completed without a result. Original body: {...}"
+             ) == :empty_response
+    end
+
+    test "the synthesised empty-200 reason classifies as :empty_response" do
+      reason = "Empty response from provider (HTTP 200 with no content, tool calls, or reasoning)"
+      assert Catalog.classify(reason) == :empty_response
+    end
+
+    test ":empty_response carries an actionable, transient-framed user message" do
+      reason = "Empty response from provider (HTTP 200 with no content, tool calls, or reasoning)"
+      msg = Catalog.user_message(reason)
+      assert msg =~ "API Error"
+      assert msg =~ "empty response"
+      assert msg =~ "/model"
+    end
+  end
+
+  describe "partial-tool-call classification (cut-off arguments retry)" do
+    test "the synthesised incomplete-tool-call reason classifies as :partial_tool_call" do
+      reason = "Provider returned an incomplete tool call (arguments cut off mid-stream)"
+      assert Catalog.classify(reason) == :partial_tool_call
+    end
+
+    test "it survives the stream_error / http_error wrappers" do
+      reason = "Provider returned an incomplete tool call (arguments cut off mid-stream)"
+      assert Catalog.classify({:stream_error, reason}) == :partial_tool_call
+      assert Catalog.classify({:http_error, 200, reason}) == :partial_tool_call
+    end
+
+    test ":partial_tool_call carries an actionable, transient-framed user message" do
+      reason = "Provider returned an incomplete tool call (arguments cut off mid-stream)"
+      msg = Catalog.user_message(reason)
+      assert msg =~ "API Error"
+      assert msg =~ "incomplete tool call"
+      assert msg =~ "/model"
+    end
+  end
 end

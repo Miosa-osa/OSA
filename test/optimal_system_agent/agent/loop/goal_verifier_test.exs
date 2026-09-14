@@ -10,6 +10,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
 
   alias OptimalSystemAgent.Agent.Loop.GoalTracker
   alias OptimalSystemAgent.Agent.Loop.GoalVerifier
+  alias OptimalSystemAgent.Agent.RunStore
   alias OptimalSystemAgent.Agent.Loop.VerificationEvidence, as: Ledger
 
   # The lifetime verification-round cap is OFF by default: counting rounds
@@ -131,6 +132,175 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
 
       state = base_state(sid) |> Map.put(:goal_verifier_stall_count, 2)
       refute GoalVerifier.needs_verification?(state)
+    end
+  end
+
+  # ── Waiting on background agents must never look like a stall ───────────
+  #
+  # Reported: an orchestrator that correctly stops polling and just reports
+  # "still waiting on the background agent" (per OSA's own design — completion
+  # is injected automatically, the model is told NOT to poll) made zero tool
+  # calls of its own for round after round, which used to be indistinguishable
+  # from a genuine stall on tool-call-count grounds alone.
+  describe "awaiting_background_work?/1" do
+    test "false with no session_id" do
+      refute GoalVerifier.awaiting_background_work?(%{})
+    end
+
+    test "false when nothing was ever delegated", %{session_id: sid} do
+      refute GoalVerifier.awaiting_background_work?(base_state(sid))
+    end
+
+    test "true while a delegated background agent is still :running", %{session_id: sid} do
+      child = "agent:#{sid}:1"
+      RunStore.start_run(%{agent_id: child, parent_session_id: sid, role: "worker"})
+
+      assert GoalVerifier.awaiting_background_work?(base_state(sid))
+    end
+
+    test "false again once every delegated background agent has finished", %{session_id: sid} do
+      child = "agent:#{sid}:1"
+      RunStore.start_run(%{agent_id: child, parent_session_id: sid, role: "worker"})
+      assert GoalVerifier.awaiting_background_work?(base_state(sid))
+
+      RunStore.complete(child, %{status: :completed, summary: "done"})
+      refute GoalVerifier.awaiting_background_work?(base_state(sid))
+    end
+
+    test "an unrelated session's background agent does not leak in", %{session_id: sid} do
+      other_parent = "goal-verifier-test-other-#{System.unique_integer([:positive])}"
+
+      RunStore.start_run(%{
+        agent_id: "agent:#{other_parent}:1",
+        parent_session_id: other_parent,
+        role: "worker"
+      })
+
+      refute GoalVerifier.awaiting_background_work?(base_state(sid))
+    end
+  end
+
+  # ── The gate actually stops verification from running ────────────────────
+  describe "a running background agent skips the verification round entirely" do
+    test "identical-gap, tool-call-free rounds do NOT stall while background work is running",
+         %{session_id: sid} do
+      GoalTracker.start(sid, "run the security scan and report back")
+      child = "agent:#{sid}:1"
+      RunStore.start_run(%{agent_id: child, parent_session_id: sid, role: "worker"})
+
+      # Force every round past triage into the (expensive) panel, and have the
+      # panel refute with the SAME gap every time. Absent the background-work
+      # gate, this is exactly the shape that trips the stall detector: an
+      # unchanged fingerprint with a `total_tool_calls` that never moves.
+      Application.put_env(
+        :optimal_system_agent,
+        :goal_verifier_triage_runner,
+        fn _state -> {:ok, ~s({"status": "candidate_complete"})} end
+      )
+
+      stub_runner(fn _sid, configs ->
+        Enum.map(configs, fn _ -> json_result(true, reason: "still waiting on the scan") end)
+      end)
+
+      state =
+        base_state(sid)
+        |> Map.put(:goal_verifier_runs, 0)
+        |> Map.put(:total_tool_calls, 7)
+
+      for _ <- 1..4 do
+        GoalVerifier.maybe_wait_for_user(state, "Still waiting on the security scan.")
+      end
+
+      snap = GoalTracker.snapshot(sid)
+
+      assert snap.verify_run_count == 0,
+             "the panel must never even RUN while real background work is in flight"
+
+      assert snap.status == :active,
+             "a session legitimately waiting on running background work must never auto-pause"
+
+      RunStore.complete(child, %{status: :completed, summary: "done"})
+      Application.delete_env(:optimal_system_agent, :goal_verifier_triage_runner)
+      GoalTracker.reset(sid)
+    end
+  end
+
+  # #4 — the SAME background-work guard, but for the TOOL-CALLED reverify path
+  # (`maybe_gate/1`/`skip_reason/1`). Before this fix, `skip_reason/1` had no
+  # `awaiting_background_work?/1` check at all — only its sibling
+  # `wait_skip_reason/1` (used by the tool-call-free `maybe_wait_for_user/2`)
+  # did. A turn that makes an incidental tool call (e.g. checking on
+  # something) while genuinely waiting on a delegated background agent goes
+  # through `maybe_gate/1`, not `maybe_wait_for_user/2` — so it could still
+  # triage `:candidate_complete` on stale evidence, spawn a real panel round
+  # that (correctly) finds nothing new, and feed an unchanged gap fingerprint
+  # into the SAME cross-turn stall counter `GoalTracker` uses to auto-pause.
+  # Two such rounds in a row was the residual false "no_progress" pause.
+  describe "skip_reason/1 while a background agent is running" do
+    test "returns :awaiting_background_work, taking precedence over :no_work", %{
+      session_id: sid
+    } do
+      child = "agent:#{sid}:1"
+      RunStore.start_run(%{agent_id: child, parent_session_id: sid, role: "worker"})
+
+      # No write recorded either — :no_work would ALSO be a valid skip, but
+      # the background guard must win: an operator debugging why the panel
+      # never runs needs to see the REAL reason, not a coincidental one.
+      assert GoalVerifier.skip_reason(base_state(sid)) == :awaiting_background_work
+
+      RunStore.complete(child, %{status: :completed, summary: "done"})
+    end
+
+    test "does not skip for that reason once the background agent finishes", %{
+      session_id: sid
+    } do
+      mark_write(sid)
+      child = "agent:#{sid}:1"
+      RunStore.start_run(%{agent_id: child, parent_session_id: sid, role: "worker"})
+      assert GoalVerifier.skip_reason(base_state(sid)) == :awaiting_background_work
+
+      RunStore.complete(child, %{status: :completed, summary: "done"})
+      refute GoalVerifier.skip_reason(base_state(sid)) == :awaiting_background_work
+    end
+  end
+
+  describe "maybe_gate/1 with a running background agent (tool-called path)" do
+    test "identical-gap, tool-called rounds do NOT stall while background work is running", %{
+      session_id: sid
+    } do
+      GoalTracker.start(sid, "run the security scan and report back")
+      mark_write(sid)
+      child = "agent:#{sid}:1"
+      RunStore.start_run(%{agent_id: child, parent_session_id: sid, role: "worker"})
+
+      Application.put_env(
+        :optimal_system_agent,
+        :goal_verifier_triage_runner,
+        fn _state -> {:ok, ~s({"status": "candidate_complete"})} end
+      )
+
+      stub_runner(fn _sid, configs ->
+        Enum.map(configs, fn _ -> json_result(true, reason: "still waiting on the scan") end)
+      end)
+
+      state =
+        base_state(sid)
+        |> Map.put(:goal_verifier_runs, 0)
+        |> Map.put(:total_tool_calls, 7)
+
+      for _ <- 1..4, do: GoalVerifier.maybe_gate(state)
+
+      snap = GoalTracker.snapshot(sid)
+
+      assert snap.verify_run_count == 0,
+             "the panel must never even RUN while real background work is in flight"
+
+      assert snap.status == :active,
+             "a session legitimately waiting on running background work must never auto-pause"
+
+      RunStore.complete(child, %{status: :completed, summary: "done"})
+      Application.delete_env(:optimal_system_agent, :goal_verifier_triage_runner)
+      GoalTracker.reset(sid)
     end
   end
 
@@ -307,6 +477,135 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
 
       assert result.verdict == :incomplete
       assert result.total == 0
+    end
+  end
+
+  # ── C2 — red-test gate: a completion claim must not stand on a RED gate ──
+  describe "red-test gate (C2)" do
+    test "vetoes :complete when the latest recorded build/test run is RED", %{session_id: sid} do
+      mark_write(sid)
+
+      Ledger.record(sid, %{
+        tool: "shell_execute",
+        args: %{"command" => "mix test"},
+        success: false
+      })
+
+      stub_runner(fn _sid, _configs ->
+        [json_result(false), json_result(false), json_result(false)]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      assert result.verdict == :incomplete,
+             "every skeptic voted complete, but the gate itself is RED — must not pass"
+
+      assert Enum.any?(result.gaps, &(&1 =~ "red-test" and &1 =~ "mix test"))
+    end
+
+    test "does not veto once a LATER rerun of the same command is green", %{session_id: sid} do
+      mark_write(sid)
+
+      Ledger.record(sid, %{
+        tool: "shell_execute",
+        args: %{"command" => "mix test"},
+        success: false
+      })
+
+      Ledger.record(sid, %{tool: "shell_execute", args: %{"command" => "mix test"}, success: true})
+
+      stub_runner(fn _sid, _configs ->
+        [json_result(false), json_result(false), json_result(false)]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      assert result.verdict == :complete,
+             "the red run was superseded by a later green rerun of the SAME command — resolved, not a gap"
+    end
+
+    test "does not veto when no build/test command was ever run", %{session_id: sid} do
+      mark_write(sid)
+
+      stub_runner(fn _sid, _configs ->
+        [json_result(false), json_result(false), json_result(false)]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      assert result.verdict == :complete
+    end
+
+    test "a RED build (not just a red test) also vetoes completion", %{session_id: sid} do
+      mark_write(sid)
+
+      Ledger.record(sid, %{
+        tool: "shell_execute",
+        args: %{"command" => "mix compile"},
+        success: false
+      })
+
+      stub_runner(fn _sid, _configs ->
+        [json_result(false), json_result(false), json_result(false)]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      assert result.verdict == :incomplete
+      assert Enum.any?(result.gaps, &(&1 =~ "mix compile"))
+    end
+
+    test "the gate still catches a red test even when the panel's own vote would have passed",
+         %{session_id: sid} do
+      mark_write(sid)
+
+      Ledger.record(sid, %{
+        tool: "shell_execute",
+        args: %{"command" => "mix test"},
+        success: false
+      })
+
+      # Only 1/3 refuted -> majority NOT reached on the panel's own vote alone
+      # (needed = 2) -> WITHOUT the red-test gate this would be :complete.
+      stub_runner(fn _sid, _configs ->
+        [
+          json_result(true, reason: "the exporter is missing"),
+          json_result(false),
+          json_result(false)
+        ]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      assert result.verdict == :incomplete
+      assert Enum.any?(result.gaps, &(&1 =~ "red-test"))
+    end
+
+    test "an already-:incomplete verdict (real panel majority) keeps the PANEL's own gaps", %{
+      session_id: sid
+    } do
+      mark_write(sid)
+
+      Ledger.record(sid, %{
+        tool: "shell_execute",
+        args: %{"command" => "mix test"},
+        success: false
+      })
+
+      stub_runner(fn _sid, _configs ->
+        [
+          json_result(true, reason: "the exporter is missing"),
+          json_result(true, reason: "the exporter is missing"),
+          json_result(false)
+        ]
+      end)
+
+      {result, _state} = GoalVerifier.verify(base_state(sid))
+
+      assert result.verdict == :incomplete
+
+      assert Enum.any?(result.gaps, &(&1 =~ "exporter is missing")),
+             "the gate must not overwrite a real panel refute with its own reason"
     end
   end
 
@@ -497,6 +796,64 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       refute prompt =~ ~r/uncertain,?\s+REFUTE/i
       assert prompt =~ "Default to NOT-REFUTED when uncertain"
       assert prompt =~ "CONCRETE evidence"
+    end
+  end
+
+  # ── G4 — bounded panel scope: feed the ledger, don't let it re-crawl ─────
+  #
+  # Before this, a skeptic's only inputs were the goal, the diff, and the
+  # agent's own closing prose — nothing said which files were actually
+  # touched or which build/test commands already ran and passed, so a
+  # skeptic with no other lead reasonably re-explored the whole repository
+  # from scratch (measured: 29+ file reads, ~$2.61/round on one engagement).
+  describe "the skeptic prompt embeds a bounded evidence digest (G4)" do
+    test "the ledger's written paths and check results are embedded verbatim", %{
+      session_id: sid
+    } do
+      mark_write(sid, "/tmp/goal_verifier_fixture_digest.ex")
+
+      Ledger.record(sid, %{tool: "shell_execute", args: %{"command" => "mix test"}, success: true})
+
+      {[%{task: prompt} | _], _result} = capture_prompts(sid, [false, false, false])
+
+      assert prompt =~ "Evidence already gathered this session"
+      assert prompt =~ "/tmp/goal_verifier_fixture_digest.ex"
+      assert prompt =~ "mix test"
+      assert prompt =~ "PASSED"
+    end
+
+    test "a failed check is labelled FAILED, not silently omitted", %{session_id: sid} do
+      mark_write(sid)
+
+      Ledger.record(sid, %{
+        tool: "shell_execute",
+        args: %{"command" => "mix test"},
+        success: false
+      })
+
+      {[%{task: prompt} | _], _result} = capture_prompts(sid, [false, false, false])
+
+      assert prompt =~ "mix test"
+      assert prompt =~ "FAILED"
+    end
+
+    test "the prompt tells the skeptic to corroborate, not re-crawl the whole tree", %{
+      session_id: sid
+    } do
+      mark_write(sid)
+
+      {[%{task: prompt} | _], _result} = capture_prompts(sid, [false, false, false])
+
+      assert prompt =~ ~r/do not re-glob or re-read the wider repository/i
+    end
+
+    test "no evidence recorded still produces a well-formed (empty) digest, not a crash", %{
+      session_id: sid
+    } do
+      {[%{task: prompt} | _], _result} = capture_prompts(sid, [false, false, false])
+
+      assert prompt =~ "no successful writes recorded"
+      assert prompt =~ "no build/test/shell command recorded"
     end
   end
 
@@ -1259,6 +1616,132 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
       assert s2.goal_verifier_blocker_key == nil
     end
 
+    # ── DURABLE blocker streak (cross-turn — the missing sibling to
+    #    off-track/no-progress termination) ─────────────────────────────────
+    #
+    # Reported: an agent finished all agent-doable work and the only
+    # remaining acceptance criteria needed a human (merge two PRs, run a
+    # manual MFA test, rotate secrets, sign vendor BAAs). The SAME blocker
+    # kept getting cited across FIVE SEPARATE goal-continuation turns, and
+    # the goal never auto-paused — it just kept re-arming.
+    #
+    # Root cause: `TurnPipeline` resets `goal_verifier_blocker_key`/
+    # `goal_verifier_blocker_streak` to `nil`/`0` at the start of EVERY new
+    # top-level turn (correct for a genuine fresh user message — see that
+    # module's own comment — but the goal loop's OWN auto-continuation turns
+    # are NOT a fresh chance, they are the same goal talking to itself, and
+    # they arrive at the backend indistinguishable from real user input). So
+    # the EPHEMERAL streak `handle_blocked/2` kept on the turn `state` map
+    # could never count past 1 across separate turns, and
+    # `@blocker_streak_threshold` (3) could never trip.
+    #
+    # `GoalTracker.record_blocker/3` is the durable, cross-turn twin: each
+    # call below uses a FRESH `state` (no `goal_verifier_blocker_*` carried
+    # over) — exactly what a real new top-level turn looks like — yet the
+    # DURABLE streak still accumulates and pauses the goal on the 3rd round.
+    test "the same blocker across SEPARATE top-level turns durably pauses the goal, " <>
+           "even though the ephemeral in-turn latch never trips",
+         %{session_id: sid} do
+      state = complex_state(sid)
+
+      stub_triage(fn _ ->
+        triage_json("blocked",
+          blocker_key: "requires_human_signature",
+          reason: "vendor BAA needs a human signature"
+        )
+      end)
+
+      s1 = GoalVerifier.maybe_gate(state)
+      assert s1.goal_verifier_blocker_streak == 1
+      refute s1.goal_verifier_paused
+      refute GoalTracker.paused?(sid)
+      assert GoalTracker.snapshot(sid).blocker_streak == 1
+
+      # A FRESH `state` each round (not chained from `s1`/`s2`) simulates the
+      # per-turn reset — the ephemeral streak is streak-of-one EVERY time.
+      s2 = GoalVerifier.maybe_gate(state)
+      assert s2.goal_verifier_blocker_streak == 1
+      refute s2.goal_verifier_paused
+      refute GoalTracker.paused?(sid), "not yet — only 2 durable rounds so far"
+      assert GoalTracker.snapshot(sid).blocker_streak == 2
+
+      s3 = GoalVerifier.maybe_gate(state)
+      assert s3.goal_verifier_blocker_streak == 1
+      refute s3.goal_verifier_paused, "the ephemeral latch alone never reaches its own threshold"
+
+      # But the DURABLE goal is now genuinely paused — the fix.
+      assert GoalTracker.paused?(sid)
+      snap = GoalTracker.snapshot(sid)
+      assert snap.blocker_streak == 3
+      assert snap.pause_reason == :blocked_on_human
+      assert snap.last_gaps == ["vendor BAA needs a human signature"]
+      refute GoalTracker.continue?(sid)
+
+      # And it stays surfaced ONCE, not re-asked every subsequent boundary —
+      # `skip_reason/1` skips a `:paused` goal before triage even runs again,
+      # so `maybe_gate/1` is now a total no-op (no directive, no fresh triage
+      # call) rather than re-pausing an already-paused goal.
+      s4 = GoalVerifier.maybe_gate(state)
+      assert s4.messages == state.messages
+      assert GoalTracker.snapshot(sid).blocker_streak == 3
+      assert GoalTracker.paused?(sid)
+    end
+
+    test "a DIFFERENT blocker key resets the DURABLE streak too", %{session_id: sid} do
+      state = complex_state(sid)
+
+      stub_triage(fn _ -> triage_json("blocked", blocker_key: "missing_api_key") end)
+      GoalVerifier.maybe_gate(state)
+      GoalVerifier.maybe_gate(state)
+      assert GoalTracker.snapshot(sid).blocker_streak == 2
+
+      stub_triage(fn _ -> triage_json("blocked", blocker_key: "port_in_use") end)
+      GoalVerifier.maybe_gate(state)
+      snap = GoalTracker.snapshot(sid)
+      assert snap.blocker_streak == 1
+      assert snap.blocker_key == "port_in_use"
+      refute GoalTracker.paused?(sid)
+    end
+
+    test "a non-blocked triage clears the DURABLE blocker streak too", %{session_id: sid} do
+      state = complex_state(sid)
+
+      stub_triage(fn _ -> triage_json("blocked", blocker_key: "missing_api_key") end)
+      GoalVerifier.maybe_gate(state)
+      assert GoalTracker.snapshot(sid).blocker_streak == 1
+
+      stub_triage(fn _ -> triage_json("continue") end)
+      GoalVerifier.maybe_gate(state)
+      snap = GoalTracker.snapshot(sid)
+      assert snap.blocker_streak == 0
+      assert snap.blocker_key == nil
+    end
+
+    # ── Empty-panel circuit breaker (the missing "no verdict, don't re-arm") ─
+    #
+    # Reported: an independent review panel finished with NO verdict (every
+    # skeptic crashed/timed out), yet the goal still re-armed for another
+    # turn as if the panel had said "incomplete, keep going". A round where
+    # NOTHING was ever judged is not evidence the goal is unfinished — it is
+    # an infrastructure failure, and must not drive further auto-continuation.
+    test "every skeptic failing to return a verdict pauses the goal instead of re-arming it", %{
+      session_id: sid
+    } do
+      state = complex_state(sid)
+      stub_triage(fn _ -> triage_json("candidate_complete") end)
+      stub_runner(fn _sid, configs -> Enum.map(configs, fn _ -> {:error, :timeout} end) end)
+
+      out = GoalVerifier.maybe_gate(state)
+
+      assert out.messages == state.messages,
+             "an empty panel must not inject a keep-going nudge on top of the pause"
+
+      assert GoalTracker.paused?(sid)
+      snap = GoalTracker.snapshot(sid)
+      assert snap.pause_reason == :verification_unavailable
+      refute GoalTracker.continue?(sid)
+    end
+
     # ── Triage failure — FAIL-OPEN (defer), never fail-closed (panel) ───────
     #
     # A triage that cannot run means the provider that just drove the turn is
@@ -1322,6 +1805,53 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifierTest do
 
       GoalVerifier.maybe_gate(state)
       assert_received :panel_ran
+    end
+
+    # ── Auto-completion detection: an explicit claim forces the panel ───────
+    #
+    # Reported: does completion detection reliably CONCLUDE, or can it just
+    # keep auto-continuing? `update_goal(status: "complete")` is a crystal
+    # clear, structured signal — the model explicitly claiming the objective
+    # is met — but the old wiring STILL asked the cheap triage classifier to
+    # independently rediscover that from the same evidence before the panel
+    # would run at all. A transient triage misfire on the very turn the model
+    # claimed completion cost a full extra auto-continue cycle for nothing.
+    test "claim_complete/1 bypasses triage, runs the panel THIS round, and consumes the claim",
+         %{session_id: sid} do
+      state = complex_state(sid)
+
+      stub_triage(fn _ ->
+        flunk("triage must be bypassed when completion was explicitly claimed this turn")
+      end)
+
+      {:ok, _} = GoalTracker.claim_complete(sid)
+      assert GoalTracker.completion_claimed_this_turn?(sid)
+
+      out = GoalVerifier.maybe_gate(state)
+
+      assert_received :panel_ran
+      assert out.goal_verifier_runs == 1
+      assert GoalTracker.status(sid) == :completed
+
+      # Consumed by the round that just ran — a leftover flag would force
+      # every future round straight to the panel too, forever.
+      refute GoalTracker.completion_claimed_this_turn?(sid)
+    end
+
+    test "a stale claim from an earlier turn no longer forces the panel", %{session_id: sid} do
+      GoalTracker.start(sid, "ship the widget exporter")
+      {:ok, claimed} = GoalTracker.claim_complete(sid)
+      assert claimed.turn_count == 0
+      assert GoalTracker.completion_claimed_this_turn?(sid)
+
+      # A new top-level turn begins (mirrors `tick_turn/1`, called once at the
+      # very start of every fresh turn) without the claim ever having been
+      # verified — e.g. the session crashed mid-round, or `/goal pause`
+      # intervened before the tool-result boundary was reached.
+      GoalTracker.tick_turn(sid)
+
+      refute GoalTracker.completion_claimed_this_turn?(sid),
+             "a claim from an earlier turn must not force every future round to the panel"
     end
 
     # ── Cost shape ─────────────────────────────────────────────────────────

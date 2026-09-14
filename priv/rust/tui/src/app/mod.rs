@@ -1,15 +1,16 @@
 pub mod alt_screen;
-pub mod exit_dump;
 pub mod assistant_stream;
 pub mod attachment;
 pub mod commands;
 pub mod event_loop;
+pub mod exit_dump;
 pub mod focus;
 pub mod frame_size;
-pub mod inline_backend;
 mod handle_actions;
 mod handle_backend;
 mod handle_dialogs;
+pub mod inline_backend;
+mod inline_chrome;
 pub mod key_normalize;
 mod keymap_dispatch;
 pub mod keys;
@@ -159,6 +160,10 @@ pub struct App {
     pub mcp_servers: Option<crate::dialogs::mcp_servers::McpServers>,
     /// `/cost` — cost dashboard (AppState::Cost), from GET /api/v1/cost.
     pub cost_dashboard: Option<crate::dialogs::cost_dashboard::CostDashboard>,
+    /// Full-screen goal-COMPLETION report (item #3, AppState::GoalCompletion),
+    /// populated from a terminal `goal_tracker_transition` frame. Never
+    /// opened by a user command — see `BackendEvent::GoalTransition`.
+    pub completion_panel: Option<crate::components::completion_panel::CompletionPanel>,
     /// `/skill` `/skills` — skills browser (AppState::Skills), from GET /api/v1/skills.
     pub skills_browser: Option<crate::dialogs::skills_browser::SkillsBrowser>,
     /// `/channels` — channel connectivity panel (AppState::Channels).
@@ -194,6 +199,13 @@ pub struct App {
     /// switched to the bad id, got an empty transcript back, and looked like a
     /// perfectly normal fresh session.
     pub fatal_exit: Option<String>,
+    /// Raw signal number when the event loop is quitting because SIGTERM,
+    /// SIGHUP or SIGQUIT arrived (see `Event::TerminateSignal`), so `run`'s
+    /// cleanup can report `ExitOutcome::TerminatedBySignal` and `main` can
+    /// re-raise the same signal, with its default disposition, once the
+    /// terminal is restored — the process's exit status stays honest instead
+    /// of being laundered into a plain `exit(0)`.
+    pub pending_signal: Option<i32>,
     /// `--model <name>` / `--provider <name>`: a one-shot, SESSION-SCOPED model
     /// override applied the moment the launch session id is known.
     ///
@@ -438,6 +450,10 @@ pub struct App {
     /// What the in-flight `/goal` request was for, so its answer can be acted on
     /// rather than merely printed. `None` when no `/goal` request is outstanding.
     pub goal_intent: Option<crate::app::handle_actions::GoalIntent>,
+    /// The last "goal is no longer active" notice `continue_goal_from` actually
+    /// printed, so a materially identical stop notice for the SAME dormant
+    /// reason is collapsed instead of repeated. `None` on a fresh anchor.
+    pub last_goal_stop_notice: Option<String>,
     /// Instant the active goal became live, so the status-line goal indicator can
     /// count up "Working on: <goal> · 3m 40s" from activation (Codex
     /// `thread_goal_actions` + `status_indicator_widget` elapsed). Stamped the
@@ -454,6 +470,7 @@ pub struct App {
     pub welcome_injected: bool,
     // Set once we've resolved this folder's session on launch (resume-or-create).
     pub dir_session_resolved: bool,
+    pub session_creation_pending: bool,
     // Welcome banner (tool_count, provider, model) waiting to be pushed into the
     // terminal scrollback by the event loop via insert_before.
     pub pending_welcome_banner: Option<(usize, Option<String>, Option<String>)>,
@@ -655,8 +672,8 @@ impl App {
             .unwrap_or_default();
 
         // Initialize theme
-        let theme = crate::style::themes::by_name(&config.theme)
-            .unwrap_or_else(crate::style::themes::dark);
+        let theme =
+            crate::style::themes::by_name(&config.theme).unwrap_or_else(crate::style::themes::dark);
         crate::style::set_theme(theme);
 
         // Use actual terminal size instead of hardcoded 80x24
@@ -697,6 +714,9 @@ impl App {
         if !seeded_mode.is_default() {
             status.set_permission_mode(seeded_mode);
         }
+        // `/jailbreak` — seed the badge from the state file so it renders on
+        // the very first frame, not one tick later.
+        status.set_liberated(crate::components::jailbreak::is_liberated());
         // An overdrive seed implies the bypass flag + sidebar indicator, exactly
         // like --dangerously-skip-permissions.
         let overdrive_seeded = seeded_mode.is_overdrive();
@@ -767,6 +787,7 @@ impl App {
             hooks_viewer: None,
             mcp_servers: None,
             cost_dashboard: None,
+            completion_panel: None,
             skills_browser: None,
             channels_panel: None,
             memory_browser: None,
@@ -780,6 +801,7 @@ impl App {
             startup_resume: cli.resume.clone(),
             launch_mode: self::resume::LaunchMode::from_cli(&cli),
             fatal_exit: None,
+            pending_signal: None,
             // `--provider` alone (no `--model`) still needs a model to swap to;
             // the backend resolves the provider's default when model is "".
             startup_model: match (cli.model.clone(), cli.provider.clone()) {
@@ -854,10 +876,12 @@ impl App {
             goal_cycle: 0,
             goal_max_cycles,
             goal_intent: None,
+            last_goal_stop_notice: None,
             goal_activated_at: None,
             attachments: Vec::new(),
             welcome_injected: false,
             dir_session_resolved: false,
+            session_creation_pending: false,
             pending_welcome_banner: None,
             welcome_banner: None,
 
@@ -935,11 +959,11 @@ impl App {
     /// meter (status bar, mirrored to the sidebar so both surfaces agree). Cheap
     /// char/4 estimate; never mutates the committed context value.
     pub(crate) fn refresh_pending_input_tokens(&mut self) {
-        let pending =
-            crate::components::status_bar::estimate_tokens(self.input.value());
+        let pending = crate::components::status_bar::estimate_tokens(self.input.value());
         self.status.set_pending_input_tokens(pending);
         // Mirror the combined (committed + pending) ratio into the sidebar meter.
-        self.sidebar.set_context(self.status.display_context_ratio());
+        self.sidebar
+            .set_context(self.status.display_context_ratio());
     }
 
     /// Transition to a new state with validation
@@ -1149,6 +1173,29 @@ impl App {
         self.transition(target);
     }
 
+    /// Open the full-screen goal-completion report (item #3) for a NEWLY
+    /// terminal goal (completed/blocked/abandoned).
+    ///
+    /// Shared by both surfaces that can learn of a completion: the one-time
+    /// live `GoalCompletionOverview` event (`handle_backend.rs`) and the
+    /// `/goal` HTTP pull path — the reconnect-time quiet poll, or a
+    /// user-typed `/goal status` — which now carries the same fields on
+    /// `GoalStatus` (`handle_actions::apply_goal_status`). Takes the built
+    /// `CompletionReport` directly (rather than its many individual fields)
+    /// so the two callers can never disagree about the shape, and so this
+    /// one function stays under clippy's arg-count lint on its own.
+    pub(crate) fn open_completion_panel(
+        &mut self,
+        report: crate::components::completion_panel::CompletionReport,
+    ) {
+        self.completion_panel = Some(crate::components::completion_panel::CompletionPanel::new(
+            report,
+        ));
+        if self.state.can_transition_to(AppState::GoalCompletion) {
+            self.enter_overlay(AppState::GoalCompletion);
+        }
+    }
+
     /// Close the current overlay, returning to whatever opened it (default
     /// `Idle` if the stack is somehow empty). Deliberately bypasses
     /// `can_transition_to`: returning to the caller — even `Processing` — is
@@ -1231,6 +1278,14 @@ impl App {
         // clone; additive to the existing thinking timer/verb rotation.
         self.activity.set_current_effort(self.status.effort());
 
+        // 1/2d — feed the live "what a task_wait/join is blocked on" label
+        // from the agents roster every frame. `Activity` only consults this
+        // while ITS OWN `waiting_reason` is Tasks/TaskOutput, so this is inert
+        // outside a join; cheap otherwise (a roster scan for the freshest
+        // live child, no allocation on the common non-join frame's `None`).
+        self.activity
+            .set_join_wait_detail(self.agents.join_wait_label());
+
         // Goal + elapsed indicator: reconcile the status-line "Working on: <goal>
         // · <elapsed>" chip every frame from the live goal state (cheap; the
         // writer only re-renders on change).
@@ -1290,6 +1345,14 @@ impl App {
             };
             let tokens = self.status.output_tokens().min(u32::MAX as u64) as u32;
             self.agents.set_main_row(activity, elapsed, tokens);
+            // Truthful root-row gauge: the session's committed context-window
+            // occupancy (share of the model window), NOT the composer-inflated
+            // display ratio and NOT the raw token total. Only once the window is
+            // actually being tracked (ratio > 0), so an un-seeded session falls
+            // back to the token count rather than claiming "0% ctx".
+            let ctx = self.status.context_ratio();
+            let ctx_pct = (ctx > 0.0).then(|| (ctx * 100.0).round().clamp(0.0, 100.0) as u32);
+            self.agents.set_main_context(ctx_pct, None);
         } else {
             self.status.set_subagents(0, None);
         }
@@ -1535,10 +1598,7 @@ mod turn_active_tests {
 
     #[test]
     fn overlay_over_idle_is_not_active() {
-        assert!(!turn_active(
-            AppState::ContextBreakdown,
-            &[AppState::Idle]
-        ));
+        assert!(!turn_active(AppState::ContextBreakdown, &[AppState::Idle]));
     }
 
     #[test]
@@ -1591,8 +1651,14 @@ mod goal_indicator_tests {
         // non-zero, compact-formatted elapsed (Codex "Working on: <goal> · Nm Ss").
         let label = compose_goal_label("ship the release", 220);
         assert!(label.starts_with("Working on: ship the release"));
-        assert!(label.contains("3m 40s"), "non-zero elapsed must show, got: {label:?}");
-        assert!(!label.contains(" 0s "), "activated goal is not frozen at zero");
+        assert!(
+            label.contains("3m 40s"),
+            "non-zero elapsed must show, got: {label:?}"
+        );
+        assert!(
+            !label.contains(" 0s "),
+            "activated goal is not frozen at zero"
+        );
     }
 
     #[test]

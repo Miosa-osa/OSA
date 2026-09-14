@@ -9,7 +9,17 @@ defmodule OptimalSystemAgent.CLI.SetupAuthForkTest do
   modelled on — three capability lists that disagreed with each other.
   """
 
-  use ExUnit.Case, async: true
+  # The "health check for a subscription provider" describe below sets
+  # `OSA_HOME` via `System.put_env/2` — a process-wide OS env var every
+  # `SubscriptionStore` call re-reads on every access (its own moduledoc
+  # already flags "`OSA_HOME` that changes mid-operation must not be able to
+  # make the body..."). Left `async: true`, that redirect could be clobbered
+  # by any other concurrently-running test that also touches `OSA_HOME`,
+  # making `SubscriptionStore.put/2` write to (or `health_check` read from) a
+  # different directory than the one this test just set up — observed as
+  # "connected" flipping to "not_connected" because the write landed
+  # elsewhere.
+  use ExUnit.Case, async: false
 
   alias OptimalSystemAgent.CLI.Setup
   alias OptimalSystemAgent.Onboarding

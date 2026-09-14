@@ -1,8 +1,8 @@
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU8, Ordering};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use tracing::{info, warn, error};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
+use tracing::{error, info, warn};
 
 /// Captured audio buffer — accumulated PCM samples at 16kHz mono
 #[derive(Clone)]
@@ -36,8 +36,8 @@ impl AudioBuffer {
         };
         let mut cursor = std::io::Cursor::new(Vec::new());
         {
-            let mut writer = hound::WavWriter::new(&mut cursor, spec)
-                .context("Failed to create WAV writer")?;
+            let mut writer =
+                hound::WavWriter::new(&mut cursor, spec).context("Failed to create WAV writer")?;
             for &s in samples.iter() {
                 let pcm = (s * 32767.0).clamp(-32768.0, 32767.0) as i16;
                 writer.write_sample(pcm)?;
@@ -148,7 +148,10 @@ impl VoiceCapture {
             .context("Failed to build audio input stream")?;
 
         stream.play().context("Failed to start audio capture")?;
-        info!("Audio capture started (device {}Hz {}ch -> 16kHz mono)", device_sample_rate, device_channels);
+        info!(
+            "Audio capture started (device {}Hz {}ch -> 16kHz mono)",
+            device_sample_rate, device_channels
+        );
 
         Ok(Self {
             stream: Some(stream),

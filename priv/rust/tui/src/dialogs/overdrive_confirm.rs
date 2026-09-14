@@ -27,7 +27,10 @@ impl OverdriveConfirm {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<bool> {
         // Ignore ctrl/alt-modified keys (except plain Esc / letters handled below).
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return None;
         }
         match key.code {
@@ -91,7 +94,12 @@ impl OverdriveConfirm {
         .wrap(Wrap { trim: true });
         frame.render_widget(
             body,
-            Rect::new(inner.x, inner.y + 1, inner.width, inner.height.saturating_sub(3)),
+            Rect::new(
+                inner.x,
+                inner.y + 1,
+                inner.width,
+                inner.height.saturating_sub(3),
+            ),
         );
 
         // Button row at the bottom of the inner area.

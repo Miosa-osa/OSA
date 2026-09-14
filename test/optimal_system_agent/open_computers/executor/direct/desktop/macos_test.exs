@@ -59,7 +59,8 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.MacOSTest do
         IO.puts("Skipping macos_native test: binary not found at #{priv_path}")
         :ok
       else
-        assert {:ok, %MacOS{os_pid: os_pid, vnc_port: vnc_port}} = MacOS.spawn()
+        assert {:ok, %MacOS{os_pid: os_pid, vnc_port: vnc_port} = helper} = MacOS.spawn()
+        on_exit(fn -> MacOS.kill(helper) end)
 
         assert is_integer(os_pid) and os_pid > 0
         assert is_integer(vnc_port) and vnc_port > 0
@@ -72,7 +73,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.MacOSTest do
         assert version == "RFB 003.008\n"
 
         :gen_tcp.close(sock)
-        System.cmd("kill", ["-TERM", to_string(os_pid)], stderr_to_stdout: true)
+        MacOS.kill(helper)
       end
     end
   end

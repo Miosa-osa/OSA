@@ -12,6 +12,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.EnterPlanMode.Handler do
   and still returns a confirmation message.
   """
 
+  require Logger
+
   alias OptimalSystemAgent.Tools.UseContext
   alias OptimalSystemAgent.Agent.Loop
 
@@ -37,8 +39,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.EnterPlanMode.Handler do
         {:ok, "Plan mode is already active."}
 
       {:error, :no_session} ->
-        # No live Loop process — treat as a no-op (common in offline/test contexts).
-        {:ok, "Plan mode entered (offline — no live session to update)."}
+        Logger.error(
+          "[enter_plan_mode] no live Loop for session #{inspect(session_id)} — " <>
+            "plan_mode flag not toggled. Read-only enforcement will NOT be active."
+        )
+
+        {:error,
+         "Cannot enter plan mode: no live Loop process for session #{inspect(session_id)}. " <>
+           "Read-only enforcement will NOT be active this turn."}
 
       {:error, reason} ->
         {:error, "Failed to enter plan mode: #{inspect(reason)}"}

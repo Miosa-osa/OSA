@@ -93,6 +93,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileTransform.Ops do
           {:ok, String.t(), [report()]} | {:error, String.t()}
   def apply_all(content, ops, opts) when is_binary(content) and is_list(ops) do
     ops
+    |> Enum.map(&normalize_op/1)
     |> Enum.with_index(1)
     |> Enum.reduce_while({:ok, content, []}, fn {op, idx}, {:ok, acc, reports} ->
       case apply_one(acc, op, opts) do
@@ -114,6 +115,33 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileTransform.Ops do
   defp op_name(%{"op" => name}) when is_binary(name), do: name
   defp op_name(_), do: "unknown"
 
+  # Field-name tolerance. The replacement string is `to`, but models reach for
+  # `new`/`new_string`/`replacement` — the names other edit tools use — and burn
+  # a whole turn on the schema rejection. Fold the common aliases onto the
+  # canonical key only when the canonical key is absent, so an explicit `to`
+  # always wins and no existing call changes behaviour.
+  @aliases %{
+    "to" => ~w(new new_string newstring replacement),
+    "find" => ~w(old old_string oldstring from),
+    "pattern" => ~w(regex re),
+    "text" => ~w(content body)
+  }
+
+  defp normalize_op(%{"op" => _} = op) do
+    Enum.reduce(@aliases, op, fn {canonical, alts}, acc ->
+      if Map.has_key?(acc, canonical) do
+        acc
+      else
+        case Enum.find(alts, &Map.has_key?(acc, &1)) do
+          nil -> acc
+          key -> Map.put(acc, canonical, Map.get(acc, key))
+        end
+      end
+    end)
+  end
+
+  defp normalize_op(op), do: op
+
   # ── Static validation (no file needed) ────────────────────────────────
 
   @doc """
@@ -126,6 +154,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.FileTransform.Ops do
   @spec validate([term()]) :: :ok | {:error, String.t()}
   def validate(ops) when is_list(ops) and ops != [] do
     ops
+    |> Enum.map(&normalize_op/1)
     |> Enum.with_index(1)
     |> Enum.reduce_while(:ok, fn {op, idx}, :ok ->
       case validate_one(op) do

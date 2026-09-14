@@ -46,7 +46,8 @@ pub struct RenderOpts {
 // ─── Trait ────────────────────────────────────────────────────────────────────
 
 pub trait ToolRenderer {
-    fn render(&self, name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>>;
+    fn render(&self, name: &str, args: &str, result: &str, opts: &RenderOpts)
+        -> Vec<Line<'static>>;
 }
 
 // ─── Registry ─────────────────────────────────────────────────────────────────
@@ -84,7 +85,10 @@ pub const CONTROL_TAGS: [&str; 2] = ["system-reminder", "task-notification"];
 
 /// Strip every internal control block (see [`CONTROL_TAGS`]) from `text`.
 pub fn strip_control_markup(text: &str) -> String {
-    if !CONTROL_TAGS.iter().any(|t| text.contains(&format!("<{t}>"))) {
+    if !CONTROL_TAGS
+        .iter()
+        .any(|t| text.contains(&format!("<{t}>")))
+    {
         return text.to_string();
     }
     let mut out = text.to_string();
@@ -187,7 +191,10 @@ fn apply_commit_cap(lines: &mut Vec<Line<'static>>) {
     lines.truncate(cap - 1);
     let theme = crate::style::theme();
     lines.push(Line::from(Span::styled(
-        format!("\u{2026} {} more lines \u{2014} /transcript to view", hidden),
+        format!(
+            "\u{2026} {} more lines \u{2014} /transcript to view",
+            hidden
+        ),
         Style::default()
             .fg(theme.colors.dim)
             .bg(ratatui::style::Color::Reset),
@@ -221,7 +228,11 @@ fn force_failure_body(lines: &mut Vec<Line<'static>>, result: &str) {
         return;
     }
     // First non-empty line of the error is the part worth promoting.
-    let first = body.lines().find(|l| !l.trim().is_empty()).unwrap_or(body).trim();
+    let first = body
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(body)
+        .trim();
     let rendered: String = lines
         .iter()
         .flat_map(|l| l.spans.iter())
@@ -253,7 +264,10 @@ fn render_tool_dispatch(
     // model-facing only — never render it as tool output. Done once here so
     // every renderer below is covered.
     let stripped;
-    let result: &str = if CONTROL_TAGS.iter().any(|t| result.contains(&format!("<{t}>"))) {
+    let result: &str = if CONTROL_TAGS
+        .iter()
+        .any(|t| result.contains(&format!("<{t}>")))
+    {
         stripped = strip_control_markup(result);
         &stripped
     } else {
@@ -288,21 +302,22 @@ fn render_tool_dispatch(
         // File: Edit / MultiEdit / Download
         // `multi_file_edit` and `notebook_edit` are OSA's own names; both were
         // absent and rendered generically (no path, no diff).
-        "edit" | "edit_file" | "file_edit" | "str_replace_editor"
-        | "multiedit" | "multi_edit" | "multi_file_edit" | "notebook_edit"
-        | "download" | "str_replace_based_edit_tool" => {
-            file::FileEditRenderer.render(name, args, result, opts)
-        }
+        "edit"
+        | "edit_file"
+        | "file_edit"
+        | "str_replace_editor"
+        | "multiedit"
+        | "multi_edit"
+        | "multi_file_edit"
+        | "notebook_edit"
+        | "download"
+        | "str_replace_based_edit_tool" => file::FileEditRenderer.render(name, args, result, opts),
 
         // Search: Glob
-        "glob" | "file_glob" => {
-            search::GlobRenderer.render(name, args, result, opts)
-        }
+        "glob" | "file_glob" => search::GlobRenderer.render(name, args, result, opts),
 
         // Search: Grep
-        "grep" | "file_grep" => {
-            search::GrepRenderer.render(name, args, result, opts)
-        }
+        "grep" | "file_grep" => search::GrepRenderer.render(name, args, result, opts),
 
         // Search: LS
         "ls" | "list_directory" | "dir_list" | "list_dir" => {
@@ -324,9 +339,7 @@ fn render_tool_dispatch(
         "task" | "agent" | "sub_agent" | "orchestrate" => {
             agent::AgentRenderer.render(name, args, result, opts)
         }
-        "delegate" => {
-            agent::DelegateRenderer.render(name, args, result, opts)
-        }
+        "delegate" => agent::DelegateRenderer.render(name, args, result, opts),
 
         // Todos
         "todoread" | "todowrite" | "todos" | "task_write" => {
@@ -334,37 +347,109 @@ fn render_tool_dispatch(
         }
 
         // Cron / Schedule
-        "cron" | "schedule" => {
-            cron::CronRenderer.render(name, args, result, opts)
-        }
+        "cron" | "schedule" => cron::CronRenderer.render(name, args, result, opts),
 
         // Sleep
-        "sleep" | "wait" | "pause" => {
-            sleep::SleepRenderer.render(name, args, result, opts)
-        }
+        "sleep" | "wait" | "pause" => sleep::SleepRenderer.render(name, args, result, opts),
 
         // Monitor / Watch
-        "monitor" | "watch" => {
-            monitor::MonitorRenderer.render(name, args, result, opts)
-        }
+        "monitor" | "watch" => monitor::MonitorRenderer.render(name, args, result, opts),
 
         // Remote trigger
-        "remote_trigger" | "trigger" => {
-            cron::CronRenderer.render(name, args, result, opts)
-        }
+        "remote_trigger" | "trigger" => cron::CronRenderer.render(name, args, result, opts),
 
         // Diagnostics
-        "diagnostics" => {
-            diagnostics::DiagnosticsRenderer.render(name, args, result, opts)
-        }
+        "diagnostics" => diagnostics::DiagnosticsRenderer.render(name, args, result, opts),
 
         // References
-        "references" => {
-            references::ReferencesRenderer.render(name, args, result, opts)
-        }
+        "references" => references::ReferencesRenderer.render(name, args, result, opts),
 
         // Generic fallback
         _ => generic::GenericRenderer.render(name, args, result, opts),
+    }
+}
+
+// ─── Agent-roster action labels (2b) ──────────────────────────────────────────
+//
+// The multi-agent roster (`components::agents`) renders each worker's live
+// activity straight from the backend's `current_action` / `recent_actions`
+// strings, which are shaped `<tool_id>: <arg>` (or a bare `<tool_id>` once the
+// call ends — see `format_action/2` on the Elixir side). Rendered raw, a
+// healthy agent's row read "file_read: /Users/rhl/.osa/backend.log" or a bare
+// "shell_execute" — wire identifiers, not something a reader parses at a
+// glance. This is the SINGLE mapping from a raw tool id to a human label,
+// applied wherever an agent's activity/trail line renders (`row_activity`,
+// `trail_shorten`, `entry_summary_at`) so the roster never shows two
+// different tool-id spellings for the same fact.
+
+/// Map one action string — `"<tool_id>: <arg>"`, or a bare `<tool_id>` — to a
+/// human-readable label. `arg` (already display-formatted by the caller, e.g.
+/// path-shortened) survives untouched; only the verb is translated.
+///
+/// An unrecognized verb — a custom/MCP tool, or a plain sentence that merely
+/// happens to contain a colon ("no progress for 14m" has none, but a future
+/// phrase might) — is returned UNCHANGED: humanizing only ever adds clarity,
+/// it never risks mangling a string that was already a human sentence.
+pub fn humanize_tool_action(action: &str) -> String {
+    let action = action.trim();
+    if action.is_empty() {
+        return String::new();
+    }
+    let (verb, rest) = match action.split_once(':') {
+        Some((v, r)) => (v.trim(), r.trim()),
+        None => (action, ""),
+    };
+    let Some(label) = tool_action_label(verb) else {
+        return action.to_string();
+    };
+    if rest.is_empty() {
+        label.to_string()
+    } else if label == "$" {
+        format!("$ {rest}")
+    } else {
+        format!("{label} {rest}")
+    }
+}
+
+/// The human label for one builtin tool id's VERB, or `None` for anything not
+/// in this table (a custom/MCP tool, or ordinary prose). Deliberately mirrors
+/// the id sets `render_tool_dispatch` matches on, so the roster and the tool
+/// card dispatch never name the same tool two different ways.
+fn tool_action_label(verb: &str) -> Option<&'static str> {
+    match verb {
+        "shell_execute" | "bash" | "run_bash_command" | "shell" | "terminal" => Some("$"),
+        "file_read" | "read" | "read_file" => Some("Reading"),
+        "file_write" | "write" | "write_file" => Some("Writing"),
+        "file_edit"
+        | "edit"
+        | "edit_file"
+        | "str_replace_editor"
+        | "multiedit"
+        | "multi_edit"
+        | "multi_file_edit"
+        | "notebook_edit"
+        | "str_replace_based_edit_tool" => Some("Editing"),
+        "dir_list" | "ls" | "list_directory" | "list_dir" => Some("Listing"),
+        "grep" | "file_grep" => Some("Searching"),
+        "glob" | "file_glob" => Some("Finding"),
+        "web_search" | "websearch" | "search_web" | "search" => Some("Searching web"),
+        "web_fetch" | "webfetch" | "fetch" | "fetch_url" | "download" => Some("Fetching"),
+        "delegate" | "Delegate" | "Task" | "task" | "agent" | "sub_agent" => Some("Delegating"),
+        "orchestrate" | "spawn_agent" => Some("Orchestrating"),
+        "use_skill" => Some("Using skill"),
+        "task_write" | "TaskWrite" | "TaskCreate" | "task_read" | "TaskRead" | "TaskList" => {
+            Some("Planning")
+        }
+        "task_wait" | "TaskWait" => Some("Waiting on tasks"),
+        "ask_user" => Some("Asking"),
+        "diagnostics" | "doctor" => Some("Diagnosing"),
+        "memory" | "recall" | "session_search" => Some("Recalling"),
+        "cron" | "schedule" | "remote_trigger" | "trigger" => Some("Scheduling"),
+        "sleep" | "wait" | "pause" => Some("Waiting"),
+        "monitor" | "watch" => Some("Watching"),
+        "references" => Some("Referencing"),
+        _ if verb.starts_with("mcp__") => Some("Extending"),
+        _ => None,
     }
 }
 
@@ -403,9 +488,7 @@ pub(crate) fn status_icon(status: ToolStatus, spinner: Option<char>) -> (String,
         ),
         ToolStatus::Running => {
             // Claude Code blinks the dimmed circle while a tool is unresolved.
-            let icon = spinner
-                .map(|c| c.to_string())
-                .unwrap_or(bullet);
+            let icon = spinner.map(|c| c.to_string()).unwrap_or(bullet);
             (icon, Style::default().fg(theme.colors.muted))
         }
         ToolStatus::Success => (
@@ -425,10 +508,7 @@ pub(crate) fn status_icon(status: ToolStatus, spinner: Option<char>) -> (String,
                 .fg(theme.colors.error)
                 .add_modifier(Modifier::BOLD),
         ),
-        ToolStatus::Canceled => (
-            "⊘".to_string(),
-            Style::default().fg(theme.colors.muted),
-        ),
+        ToolStatus::Canceled => ("⊘".to_string(), Style::default().fg(theme.colors.muted)),
     }
 }
 
@@ -590,7 +670,13 @@ fn flatten_line(line: Line<'static>) -> Line<'static> {
             let flat = s
                 .content
                 .chars()
-                .map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c })
+                .map(|c| {
+                    if c == '\n' || c == '\r' || c == '\t' {
+                        ' '
+                    } else {
+                        c
+                    }
+                })
                 .collect::<String>();
             s.content = flat.into();
             s
@@ -855,7 +941,13 @@ mod system_reminder_tests {
             truncated: false,
         };
 
-        for tool in ["file_write", "file_edit", "file_read", "shell_execute", "some_unknown_tool"] {
+        for tool in [
+            "file_write",
+            "file_edit",
+            "file_read",
+            "shell_execute",
+            "some_unknown_tool",
+        ] {
             let lines = render_tool(tool, "{\"path\":\"notes.md\"}", &raw, &opts);
             let text: String = lines
                 .iter()
@@ -949,11 +1041,21 @@ mod task_notification_tests {
             truncated: false,
         };
 
-        for tool in ["shell_execute", "bash_output", "file_read", "some_unknown_tool"] {
+        for tool in [
+            "shell_execute",
+            "bash_output",
+            "file_read",
+            "some_unknown_tool",
+        ] {
             let lines = render_tool(tool, "{}", &raw, &opts);
             let text: String = lines
                 .iter()
-                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             assert!(
@@ -1011,8 +1113,12 @@ mod render_edge_tests {
             mb(60)
         );
         for exp in [false, true] {
-            let _ =
-                web::WebSearchRenderer.render("WebSearch", &search_args, &search_result, &opts(exp));
+            let _ = web::WebSearchRenderer.render(
+                "WebSearch",
+                &search_args,
+                &search_result,
+                &opts(exp),
+            );
         }
     }
 
@@ -1205,9 +1311,96 @@ mod cell_identity_tests {
     }
 }
 
+// ── 2b: raw backend tool ids humanized for the agent roster ────────────────
+#[cfg(test)]
+mod humanize_tool_action_tests {
+    use super::*;
+
+    #[test]
+    fn shell_gets_the_dollar_prompt_shape() {
+        assert_eq!(
+            humanize_tool_action("shell_execute: cargo build"),
+            "$ cargo build"
+        );
+        assert_eq!(humanize_tool_action("bash: ls -la"), "$ ls -la");
+    }
+
+    #[test]
+    fn file_verbs_get_plain_english_labels() {
+        assert_eq!(
+            humanize_tool_action("file_read: /Users/rhl/.osa/backend.log"),
+            "Reading /Users/rhl/.osa/backend.log"
+        );
+        assert_eq!(
+            humanize_tool_action("file_write: notes.md"),
+            "Writing notes.md"
+        );
+        assert_eq!(
+            humanize_tool_action("file_edit: src/main.rs"),
+            "Editing src/main.rs"
+        );
+        assert_eq!(humanize_tool_action("dir_list: /tmp"), "Listing /tmp");
+    }
+
+    #[test]
+    fn agent_and_task_verbs_are_mapped() {
+        assert_eq!(
+            humanize_tool_action("delegate: @researcher"),
+            "Delegating @researcher"
+        );
+        assert_eq!(
+            humanize_tool_action("orchestrate: fan-out"),
+            "Orchestrating fan-out"
+        );
+        assert_eq!(humanize_tool_action("task_wait"), "Waiting on tasks");
+    }
+
+    #[test]
+    fn a_bare_verb_with_no_argument_is_still_mapped() {
+        // The END half of a tool call arrives as a bare verb with the
+        // argument thrown away (`to_string(tool_name)`) — still humanize it.
+        assert_eq!(humanize_tool_action("shell_execute"), "$");
+        assert_eq!(humanize_tool_action("file_read"), "Reading");
+    }
+
+    #[test]
+    fn an_unrecognized_verb_is_left_completely_unchanged() {
+        // A custom/MCP tool, or a plain sentence — humanizing must never
+        // mangle what it does not recognize.
+        assert_eq!(
+            humanize_tool_action("no progress for 14m"),
+            "no progress for 14m"
+        );
+        assert_eq!(humanize_tool_action("cancelled"), "cancelled");
+        assert_eq!(
+            humanize_tool_action("some_custom_tool: arg"),
+            "some_custom_tool: arg"
+        );
+    }
+
+    #[test]
+    fn mcp_tools_are_labeled_generically() {
+        assert_eq!(
+            humanize_tool_action("mcp__github__list_issues: owner/repo"),
+            "Extending owner/repo"
+        );
+    }
+
+    #[test]
+    fn empty_and_whitespace_input_is_empty_output() {
+        assert_eq!(humanize_tool_action(""), "");
+        assert_eq!(humanize_tool_action("   "), "");
+    }
+}
+
 #[cfg(test)]
 mod tool_header_newline_guard {
-    use ratatui::{backend::TestBackend, text::{Line, Span}, widgets::Paragraph, Terminal};
+    use ratatui::{
+        backend::TestBackend,
+        text::{Line, Span},
+        widgets::Paragraph,
+        Terminal,
+    };
 
     /// Empirical: ratatui treats a `\n` INSIDE a Span as a zero-width grapheme,
     /// so a multi-line command collapses into one unreadable run rather than
@@ -1265,7 +1458,10 @@ mod tool_header_newline_guard {
             .iter()
             .map(|s| s.content.as_ref())
             .collect::<String>();
-        assert!(!joined.contains('\n') && !joined.contains('\r') && !joined.contains('\t'), "{joined:?}");
+        assert!(
+            !joined.contains('\n') && !joined.contains('\r') && !joined.contains('\t'),
+            "{joined:?}"
+        );
     }
 
     /// A single-line header is passed through byte-identically.
@@ -1372,7 +1568,11 @@ mod commit_cap_tests {
             .collect::<Vec<_>>()
             .join("\n");
         let lines = render_tool("bash", r#"{"command":"seq 5000"}"#, &result, &opts(true));
-        assert_eq!(lines.len(), 50, "the expanded body must not commit unbounded");
+        assert_eq!(
+            lines.len(),
+            50,
+            "the expanded body must not commit unbounded"
+        );
         let last: String = lines
             .last()
             .unwrap()

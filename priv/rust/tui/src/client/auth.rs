@@ -174,10 +174,8 @@ impl TempDir {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!(
-            "osa-test-{tag}-{}-{nanos}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("osa-test-{tag}-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         Self(dir)
     }
@@ -259,13 +257,21 @@ mod perm_tests {
 
         save_tokens(&profile, "fresh-token", "fresh-refresh").expect("save");
 
-        assert_eq!(mode_of(&token_path), 0o600, "pre-existing 0644 token not repaired");
+        assert_eq!(
+            mode_of(&token_path),
+            0o600,
+            "pre-existing 0644 token not repaired"
+        );
         assert_eq!(
             mode_of(&refresh_path),
             0o600,
             "pre-existing 0644 refresh token not repaired"
         );
-        assert_eq!(mode_of(&profile), 0o700, "pre-existing 0755 profile dir not repaired");
+        assert_eq!(
+            mode_of(&profile),
+            0o700,
+            "pre-existing 0755 profile dir not repaired"
+        );
         assert_eq!(
             load_tokens(&profile),
             Some(("fresh-token".to_string(), "fresh-refresh".to_string())),

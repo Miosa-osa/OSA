@@ -1,3 +1,4 @@
+# Real screen recording is opt-in with --include macos_native.
 # Exclude :integration tests (require live external services) and
 # :linux_only tests (depend on Linux X11 tooling: xdotool, maim, slop)
 # on non-Linux hosts.  Linux CI sets LINUX_X11_TESTS=1 to include them.
@@ -7,9 +8,9 @@ os_darwin? = match?({:unix, :darwin}, :os.type())
 os_windows? = match?({:win32, _}, :os.type())
 
 exclude_tags =
-  [:integration] ++
+  [:integration, :macos_native] ++
     if(linux_x11_tests?, do: [], else: [:linux_only]) ++
-    if(os_darwin?, do: [], else: [:macos, :macos_native]) ++
+    if(os_darwin?, do: [], else: [:macos]) ++
     if(os_windows?, do: [], else: [:windows_only])
 
 # Start each suite run from a clean sticky-permission-mode store. The file is
@@ -41,6 +42,20 @@ end
 case Application.get_env(:optimal_system_agent, :durable_log_dir) do
   dir when is_binary(dir) -> File.rm_rf(dir)
   _ -> :ok
+end
+
+# Start the Sandbox.CostTracker singleton once for the whole run. It is a named
+# GenServer that several async tests call (cost_per_ms/summary/start_session) but
+# nothing supervises (only Teams.CostTracker is in the app tree). Tests used to
+# start it per-`setup` with `start_link/0`, which LINKS it to the ephemeral test
+# process — so the moment that test finished the tracker died, and a concurrent
+# or subsequent test that called it hit `(EXIT) no process` (a seed-dependent
+# #208 flake that still passed in isolation). Linked to this long-lived runner
+# process instead, it stays alive for the entire suite, so `whereis` always finds
+# it and the per-test start_link never re-fires into the race.
+case OptimalSystemAgent.Sandbox.CostTracker.start_link() do
+  {:ok, _pid} -> :ok
+  {:error, {:already_started, _pid}} -> :ok
 end
 
 ExUnit.start(exclude: exclude_tags)

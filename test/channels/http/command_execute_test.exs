@@ -40,8 +40,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.CommandExecuteTest do
     :ok
   end
 
-  defp execute(command) do
-    conn(:post, "/execute", Jason.encode!(%{command: command}))
+  defp execute(command, session_id \\ nil) do
+    params =
+      %{command: command}
+      |> then(&if(session_id, do: Map.put(&1, :session_id, session_id), else: &1))
+
+    conn(:post, "/execute", Jason.encode!(params))
     |> put_req_header("content-type", "application/json")
     |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
     |> ToolRoutes.call(@opts)
@@ -78,15 +82,178 @@ defmodule OptimalSystemAgent.Channels.HTTP.CommandExecuteTest do
     assert is_binary(Jason.decode!(conn.resp_body)["output"])
   end
 
-  test "/fast returns the authoritative post-command effort for persistent UI" do
+  test "/fast enables OpenAI priority processing without changing effort" do
+    session_id = "fast-test-#{System.unique_integer([:positive])}"
+    other_session_id = "fast-other-#{System.unique_integer([:positive])}"
     previous = OptimalSystemAgent.Agent.Effort.current()
     :ok = OptimalSystemAgent.Agent.Effort.set(:medium)
 
-    on_exit(fn -> OptimalSystemAgent.Agent.Effort.set(previous) end)
+    on_exit(fn ->
+      OptimalSystemAgent.Agent.Effort.set(previous)
+      OptimalSystemAgent.Settings.clear_session(session_id)
+      OptimalSystemAgent.Settings.clear_session(other_session_id)
+    end)
 
-    body = execute("fast").resp_body |> Jason.decode!()
+    body = execute("fast", session_id).resp_body |> Jason.decode!()
 
-    assert body["effort"] == "fast"
-    assert OptimalSystemAgent.Agent.Effort.current() == :fast
+    assert body["effort"] == "medium"
+    assert OptimalSystemAgent.Agent.Effort.current() == :medium
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?(session_id)
+    refute OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?(other_session_id)
+
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
+             provider: :openai,
+             session_id: session_id
+           }) == "priority"
+
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
+             provider: :groq,
+             session_id: session_id
+           }) == "auto"
+
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
+             provider: :anthropic,
+             session_id: session_id
+           }) == "auto"
+
+    # A provider only gets a tier when OSA has a verified way to ask IT to go
+    # faster. `openai_codex` is the sharp case: it is an OpenAI endpoint, but
+    # the ChatGPT backend does not accept the `service_tier` field at all and
+    # `OpenAICodex.request_opts/2` strips it, so resolving one here would be a
+    # value invented for a request that will never carry it.
+    for provider <- [:openai_codex, :google, :bedrock, :xai, :openrouter, :ollama] do
+      assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
+               provider: provider,
+               session_id: session_id
+             }) == nil
+    end
+
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
+             provider: :openai,
+             session_id: other_session_id
+           }) == nil
+
+    execute("fast", session_id)
+    refute OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?(session_id)
+  end
+
+  test "/fast says so when the current provider cannot accelerate" do
+    session_id = "fast-honest-#{System.unique_integer([:positive])}"
+    previous = Application.get_env(:optimal_system_agent, :default_provider)
+    Application.put_env(:optimal_system_agent, :default_provider, :ollama)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:optimal_system_agent, :default_provider, previous),
+        else: Application.delete_env(:optimal_system_agent, :default_provider)
+
+      OptimalSystemAgent.Settings.clear_session(session_id)
+    end)
+
+    output = execute("fast", session_id).resp_body |> Jason.decode!() |> Map.get("output")
+
+    # The setting really is on, so the confirmation stands...
+    assert output =~ "enabled"
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.fast_service_tier?(session_id)
+
+    # ...but nothing about an ollama request changes, and the user is told that
+    # instead of being left to infer acceleration that never arrives.
+    assert output =~ "ollama has no acceleration tier"
+    assert output =~ "It takes effect on: anthropic, groq, openai"
+
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.service_tier_for(%{
+             provider: :ollama,
+             session_id: session_id
+           }) == nil
+  end
+
+  test "/fast names the tier it will ask for when the provider can accelerate" do
+    session_id = "fast-real-#{System.unique_integer([:positive])}"
+    previous = Application.get_env(:optimal_system_agent, :default_provider)
+    Application.put_env(:optimal_system_agent, :default_provider, :anthropic)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:optimal_system_agent, :default_provider, previous),
+        else: Application.delete_env(:optimal_system_agent, :default_provider)
+
+      OptimalSystemAgent.Settings.clear_session(session_id)
+    end)
+
+    output = execute("fast", session_id).resp_body |> Jason.decode!() |> Map.get("output")
+
+    assert output =~ "enabled"
+    assert output =~ ~s(Asking anthropic for its "auto" tier)
+    refute output =~ "no acceleration tier"
+  end
+
+  describe "#3 follow-up — /goal reconstructs the completion overview on a pull, not just the live event" do
+    alias OptimalSystemAgent.Agent.Loop.{GoalTracker, GoalVerifier}
+    alias OptimalSystemAgent.Agent.Loop.VerificationEvidence, as: Ledger
+
+    test "a completed goal's gaps/work_summary/acceptance_criteria ride along on /goal" do
+      session_id = "goal-http-overview-#{System.unique_integer([:positive])}"
+
+      on_exit(fn ->
+        GoalTracker.reset(session_id)
+        Ledger.reset(session_id)
+      end)
+
+      GoalTracker.start(session_id, "ship the widget exporter",
+        acceptance_criteria: "mix test passes and lib/exporter.ex exports dump/1"
+      )
+
+      Ledger.record(session_id, %{
+        tool: "file_write",
+        args: %{"path" => "lib/widget/exporter.ex"},
+        success: true
+      })
+
+      GoalTracker.advance(session_id, %GoalVerifier.Result{
+        verdict: :complete,
+        reason: "all criteria met"
+      })
+
+      body = execute("goal", session_id).resp_body |> Jason.decode!()
+
+      assert body["goal"]["status"] == "completed"
+      assert body["goal"]["gaps"] == []
+
+      assert Enum.any?(
+               body["goal"]["work_summary"],
+               &String.ends_with?(&1, "lib/widget/exporter.ex")
+             )
+
+      assert body["goal"]["acceptance_criteria"] ==
+               "mix test passes and lib/exporter.ex exports dump/1"
+
+      assert is_binary(body["goal"]["latest"])
+    end
+
+    test "a merely paused (non-terminal) goal does not carry the overview fields" do
+      session_id = "goal-http-paused-#{System.unique_integer([:positive])}"
+      on_exit(fn -> GoalTracker.reset(session_id) end)
+
+      GoalTracker.start(session_id, "ship the widget exporter")
+      GoalTracker.pause(session_id, :user)
+
+      body = execute("goal", session_id).resp_body |> Jason.decode!()
+
+      assert body["goal"]["status"] == "paused"
+      refute Map.has_key?(body["goal"], "gaps")
+      refute Map.has_key?(body["goal"], "work_summary")
+    end
+  end
+
+  test "fast-tier fallback only recognizes acceleration-specific errors" do
+    refute OptimalSystemAgent.Agent.Loop.LLMClient.tier_rejection?(
+             "HTTP 400: invalid tool schema"
+           )
+
+    refute OptimalSystemAgent.Agent.Loop.LLMClient.tier_rejection?("HTTP 403: account suspended")
+
+    assert OptimalSystemAgent.Agent.Loop.LLMClient.tier_rejection?(
+             "HTTP 400: service_tier priority is unavailable for this project"
+           )
   end
 end

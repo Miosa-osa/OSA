@@ -252,7 +252,12 @@ impl TaskChecklist {
     /// the rows are missing because the *screen* is too short, not because the
     /// panel chose to fold them, and offering a chord that cannot help is worse
     /// than offering nothing.
-    fn overflow_line(&self, hidden: usize, theme: &crate::style::Theme, max_width: usize) -> Line<'static> {
+    fn overflow_line(
+        &self,
+        hidden: usize,
+        theme: &crate::style::Theme,
+        max_width: usize,
+    ) -> Line<'static> {
         let text = if self.expanded() {
             format!("\u{2026} +{} more", hidden)
         } else {
@@ -311,7 +316,10 @@ impl TaskChecklist {
         // here that changes, and it is what a reader glances at for progress.
         Line::from(vec![
             Span::styled(title.to_string(), theme.recede()),
-            Span::styled(format!("  {}/{}", completed, self.items.len()), theme.faint()),
+            Span::styled(
+                format!("  {}/{}", completed, self.items.len()),
+                theme.faint(),
+            ),
         ])
     }
 
@@ -486,7 +494,12 @@ mod tests {
     fn flat(text: &Text<'_>) -> Vec<String> {
         text.lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect()
     }
 
@@ -504,13 +517,25 @@ mod tests {
         ];
         for status in cases {
             let c = checklist(vec![item("1", "a", status)]);
-            let h: String = c.header_line(&theme).spans.iter().map(|s| s.content.as_ref()).collect();
+            let h: String = c
+                .header_line(&theme)
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
             assert!(h.starts_with("Plan"), "got {h:?}");
-            assert!(!h.contains("Updated"), "header must not flip variants: {h:?}");
+            assert!(
+                !h.contains("Updated"),
+                "header must not flip variants: {h:?}"
+            );
         }
         // The plain-text form (transcript log) matches.
         let c = checklist(vec![item("1", "a", ChecklistStatus::InProgress)]);
-        assert!(c.snapshot_plain().starts_with("Plan\n"), "{:?}", c.snapshot_plain());
+        assert!(
+            c.snapshot_plain().starts_with("Plan\n"),
+            "{:?}",
+            c.snapshot_plain()
+        );
     }
 
     #[test]
@@ -521,7 +546,12 @@ mod tests {
             item("2", "b", ChecklistStatus::Completed),
             item("3", "c", ChecklistStatus::Pending),
         ]);
-        let header: String = c.header_line(&theme).spans.iter().map(|s| s.content.as_ref()).collect();
+        let header: String = c
+            .header_line(&theme)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
         assert!(header.contains("2/3"), "expected 2/3 count, got {header:?}");
     }
 
@@ -586,15 +616,32 @@ mod tests {
     #[test]
     fn subject_for_resolves_exact_and_unambiguous_prefix_ids() {
         let c = checklist(vec![
-            item("171c8358aa", "Fix invisible tasks", ChecklistStatus::Pending),
-            item("fd164248bb", "Fix discarded delegation", ChecklistStatus::Pending),
+            item(
+                "171c8358aa",
+                "Fix invisible tasks",
+                ChecklistStatus::Pending,
+            ),
+            item(
+                "fd164248bb",
+                "Fix discarded delegation",
+                ChecklistStatus::Pending,
+            ),
         ]);
         // Exact.
-        assert_eq!(c.subject_for("171c8358aa").as_deref(), Some("Fix invisible tasks"));
+        assert_eq!(
+            c.subject_for("171c8358aa").as_deref(),
+            Some("Fix invisible tasks")
+        );
         // Checklist holds the full id, the hint carries a prefix.
-        assert_eq!(c.subject_for("171c8358").as_deref(), Some("Fix invisible tasks"));
+        assert_eq!(
+            c.subject_for("171c8358").as_deref(),
+            Some("Fix invisible tasks")
+        );
         // …and the reverse.
-        assert_eq!(c.subject_for("171c8358aa-extra").as_deref(), Some("Fix invisible tasks"));
+        assert_eq!(
+            c.subject_for("171c8358aa-extra").as_deref(),
+            Some("Fix invisible tasks")
+        );
         // Unknown / empty resolve to nothing (caller keeps the raw id).
         assert_eq!(c.subject_for("deadbeef"), None);
         assert_eq!(c.subject_for("   "), None);
@@ -629,9 +676,15 @@ mod tests {
         let mut term = ratatui::Terminal::new(backend).unwrap();
         term.draw(|f| c.draw(f, area)).unwrap();
         let rendered = term.backend().buffer().clone();
-        let text: String = rendered.content().iter().map(|cell| cell.symbol()).collect();
+        let text: String = rendered
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
         assert!(!text.contains("Tasks"), "no title");
-        for border in ['\u{256d}', '\u{256e}', '\u{2570}', '\u{256f}', '\u{2502}', '\u{2500}'] {
+        for border in [
+            '\u{256d}', '\u{256e}', '\u{2570}', '\u{256f}', '\u{2502}', '\u{2500}',
+        ] {
             assert!(!text.contains(border), "no border glyph {border:?}");
         }
         // Header and content are present.
@@ -642,11 +695,23 @@ mod tests {
     #[test]
     fn draw_does_not_panic_at_tiny_or_edge_sizes() {
         let c = checklist(vec![
-            item("1", "a very long subject that will need truncation for sure", ChecklistStatus::Pending),
+            item(
+                "1",
+                "a very long subject that will need truncation for sure",
+                ChecklistStatus::Pending,
+            ),
             item("2", "second item", ChecklistStatus::InProgress),
             item("3", "third", ChecklistStatus::Completed),
         ]);
-        for (w, h) in [(0u16, 0u16), (1, 1), (2, 2), (8, 1), (8, 2), (10, 3), (200, 200)] {
+        for (w, h) in [
+            (0u16, 0u16),
+            (1, 1),
+            (2, 2),
+            (8, 1),
+            (8, 2),
+            (10, 3),
+            (200, 200),
+        ] {
             let backend = ratatui::backend::TestBackend::new(w.max(1), h.max(1));
             let mut term = ratatui::Terminal::new(backend).unwrap();
             let area = Rect::new(0, 0, w, h);
@@ -678,7 +743,10 @@ mod tests {
             item("1", "a", ChecklistStatus::Completed),
             item("2", "b", ChecklistStatus::Failed),
         ]);
-        assert!(!c.is_visible(), "nothing left to do — the panel must stand down");
+        assert!(
+            !c.is_visible(),
+            "nothing left to do — the panel must stand down"
+        );
     }
 
     /// The rule is stateless, so a new turn's fresh tasks re-show the panel with
@@ -730,7 +798,13 @@ mod tests {
     fn long_list(n: usize) -> TaskChecklist {
         checklist(
             (0..n)
-                .map(|i| item(&i.to_string(), &format!("task {i}"), ChecklistStatus::Pending))
+                .map(|i| {
+                    item(
+                        &i.to_string(),
+                        &format!("task {i}"),
+                        ChecklistStatus::Pending,
+                    )
+                })
                 .collect(),
         )
     }
@@ -756,7 +830,10 @@ mod tests {
         let c = long_list(30);
         let rows = drawn(&c, 60, MAX_HEIGHT);
         let marker = rows.last().unwrap();
-        assert!(marker.starts_with('\u{2026}'), "last row must be the marker: {rows:?}");
+        assert!(
+            marker.starts_with('\u{2026}'),
+            "last row must be the marker: {rows:?}"
+        );
         // 30 items, MAX_HEIGHT=12 → header + 10 items + marker → 20 hidden.
         assert!(marker.contains("+20 more"), "exact count: {marker:?}");
         assert!(marker.contains("ctrl+t to expand"), "{marker:?}");
@@ -791,7 +868,10 @@ mod tests {
         let rows = drawn(&c, 60, 6);
         let marker = rows.last().unwrap();
         assert!(marker.contains("+26 more"), "{marker:?}");
-        assert!(!marker.contains("ctrl+t"), "no dead-end hint when pinned: {marker:?}");
+        assert!(
+            !marker.contains("ctrl+t"),
+            "no dead-end hint when pinned: {marker:?}"
+        );
     }
 
     /// A list that fits gets no marker — the marker only appears when something

@@ -401,9 +401,29 @@ defmodule OptimalSystemAgent.Soul do
   # is an explicit statement about what the prompt should be, and quietly
   # serving a different bundled template instead would discard it.
   defp lean_template do
-    if lean_prompt?() and not PromptLoader.user_override?(:SYSTEM) do
+    if lean_system_prompt?() and not PromptLoader.user_override?(:SYSTEM) do
       PromptLoader.get(:SYSTEM_LEAN)
     end
+  end
+
+  @doc """
+  Serve the condensed `SYSTEM_LEAN.md` instead of the full `SYSTEM.md`?
+
+  Defaults to **false** — the FULL template is the default so the model gets the
+  complete instruction set every session. `SYSTEM_LEAN.md` is the special-case
+  fallback for constrained deployments (genuinely small context windows, local
+  models where the ~2x prompt cost hurts). Opt in with
+
+      config :optimal_system_agent, :lean_system_prompt, true
+
+  This is deliberately SEPARATE from `lean_prompt?/0`: that flag governs skipping
+  unfilled bundled rule templates (a prompt-cleanliness concern) and keeps its
+  own default, so choosing the full template never drags in empty rule files.
+  A user override at `~/.osa/prompts/SYSTEM.md` always wins over both.
+  """
+  @spec lean_system_prompt?() :: boolean()
+  def lean_system_prompt? do
+    Application.get_env(:optimal_system_agent, :lean_system_prompt, false) == true
   end
 
   @doc """

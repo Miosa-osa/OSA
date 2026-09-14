@@ -5,7 +5,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Monitor.Handler do
   Implements 4 watch kinds: file, process, url, command. Execution is
   NON-BLOCKING: `execute/2` registers a supervised background watcher via
   `Monitor.WatchManager` and returns immediately with a `watch_id`. The watcher
-  streams `monitor_fired` events (and injects a notification into the parent
+  streams `monitor_event` events (and injects a notification into the parent
   loop) on each occurrence — the agent's ReAct turn is never held. The polling
   sample/compare loop itself lives in `Monitor.WatchTask`.
   """
@@ -59,7 +59,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Monitor.Handler do
   def check_permissions(input, _ctx), do: {:allow, input}
 
   # Register a supervised background watcher and return immediately. The watcher
-  # streams monitor_fired events + injects notifications into the parent loop on
+  # streams monitor_event events + injects notifications into the parent loop on
   # each occurrence (see Monitor.WatchTask) instead of blocking this turn.
   @spec execute(map(), UseContext.t()) ::
           {:ok, String.t()} | {:error, String.t()}

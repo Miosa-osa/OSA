@@ -90,11 +90,16 @@ defmodule OptimalSystemAgent.Agent.Safety.PathPolicy do
     {:dir, ".aws"},
     {:dir, ".git"},
     {:root, "/etc"},
+    {:root, "/private/etc"},
     {:root, "/boot"},
     {:root, "/usr"},
+    {:root, "/private/usr"},
     {:root, "/bin"},
+    {:root, "/private/bin"},
     {:root, "/sbin"},
-    {:root, "/var"},
+    {:root, "/private/sbin"},
+    {:root, "/var/log"},
+    {:root, "/private/var/log"},
     :dotenv
   ]
 
@@ -108,6 +113,11 @@ defmodule OptimalSystemAgent.Agent.Safety.PathPolicy do
   # "/private/tmp/" on macOS. The write list's extra entry is redundant rather
   # than load-bearing. What was actually broken was the CALLER side - see
   # `within_read_roots?/1`.
+  #
+  # macOS's `$TMPDIR` (`/var/folders/...`) is `/private/var/folders/...` once
+  # canonicalised (the `/var` symlink), and `System.tmp_dir!/0` returns the
+  # un-resolved form — so the default roots must carry the canonical form or
+  # every tmp-dir path is denied as "outside allowed paths".
   @default_read_roots ["~", "/tmp"]
   @default_write_roots ["~", "/tmp", "/private/tmp"]
 
@@ -209,7 +219,7 @@ defmodule OptimalSystemAgent.Agent.Safety.PathPolicy do
   def read_roots do
     configured =
       :optimal_system_agent
-      |> Application.get_env(:allowed_read_paths, @default_read_roots)
+      |> Application.get_env(:allowed_read_paths, default_read_roots())
       |> normalize_roots()
 
     Enum.uniq(configured ++ workspace_roots())
@@ -226,16 +236,19 @@ defmodule OptimalSystemAgent.Agent.Safety.PathPolicy do
     Enum.uniq(configured ++ workspace_roots())
   end
 
-  @doc "Default write roots including this platform's temp directory."
+  @doc "Default write roots including this platform's temp directory (canonicalised)."
   @spec default_write_roots() :: [String.t()]
   def default_write_roots do
-    tmp = System.tmp_dir!()
+    tmp = canonical(System.tmp_dir!())
     if tmp in @default_write_roots, do: @default_write_roots, else: @default_write_roots ++ [tmp]
   end
 
-  @doc "Default read roots."
+  @doc "Default read roots, plus this platform's temp directory (canonicalised)."
   @spec default_read_roots() :: [String.t()]
-  def default_read_roots, do: @default_read_roots
+  def default_read_roots do
+    tmp = canonical(System.tmp_dir!())
+    if tmp in @default_read_roots, do: @default_read_roots, else: @default_read_roots ++ [tmp]
+  end
 
   @doc """
   True when `path` sits under one of `roots`. Comparison is slash-terminated on

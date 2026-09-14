@@ -79,7 +79,10 @@ fn pieces(content: &str) -> (Vec<Piece<'_>>, String) {
 
 /// True visible width of a [`Line`], ignoring escape bytes.
 pub fn line_width(line: &Line<'_>) -> usize {
-    line.spans.iter().map(|s| crate::util::cols(&s.content)).sum()
+    line.spans
+        .iter()
+        .map(|s| crate::util::cols(&s.content))
+        .sum()
 }
 
 /// Render `lines` into `area` of `buf`, one line per row, truncating at the
@@ -98,12 +101,15 @@ pub fn render_lines(lines: &[Line<'_>], area: Rect, buf: &mut Buffer, scroll_y: 
             break;
         }
         let y = area.top() + row as u16;
+        // Line styles own the entire row, including padding and blank rows.
+        // Ignoring this makes fenced panels end at each line's last token.
+        buf.set_style(Rect::new(area.left(), y, area.width, 1), line.style);
         let mut x = 0usize;
         // Column of the last cell we wrote, so trailing escapes have a home.
         let mut last_x: Option<usize> = None;
         let mut carry = String::new();
 
-        for span in &line.spans {
+        'spans: for span in &line.spans {
             let (parts, trailing) = pieces(&span.content);
             for p in parts {
                 if p.width == 0 {
@@ -115,23 +121,24 @@ pub fn render_lines(lines: &[Line<'_>], area: Rect, buf: &mut Buffer, scroll_y: 
                 if x + p.width > max_w {
                     // Real truncation, at the real width.
                     carry.clear();
-                    break;
+                    break 'spans;
                 }
-                let mut symbol = String::with_capacity(
-                    carry.len() + p.prefix.len() + p.grapheme.len(),
-                );
+                let mut symbol =
+                    String::with_capacity(carry.len() + p.prefix.len() + p.grapheme.len());
                 symbol.push_str(&carry);
                 carry.clear();
                 symbol.push_str(&p.prefix);
                 symbol.push_str(p.grapheme);
                 let cell = &mut buf[(area.left() + x as u16, y)];
                 cell.set_symbol(&symbol);
-                cell.set_style(span.style);
+                cell.set_style(line.style.patch(span.style));
                 // A wide glyph owns the cell to its right; blank it so a stale
                 // symbol underneath does not show through.
                 for dx in 1..p.width {
                     if x + dx < max_w {
-                        buf[(area.left() + (x + dx) as u16, y)].set_symbol("");
+                        buf[(area.left() + (x + dx) as u16, y)]
+                            .set_symbol("")
+                            .set_style(line.style.patch(span.style));
                     }
                 }
                 last_x = Some(x);
@@ -229,10 +236,15 @@ mod tests {
         assert_eq!(visible_row(&buf, 0), "Read a.rs 120 lines");
         // The escape really did reach the buffer, opener and terminator both.
         let raw = raw_row(&buf, 0);
-        assert!(raw.contains("\x1b]8;;file:///home/x/a.rs\x1b\\"), "opener missing");
+        assert!(
+            raw.contains("\x1b]8;;file:///home/x/a.rs\x1b\\"),
+            "opener missing"
+        );
         assert!(raw.contains("\x1b]8;;\x1b\\"), "terminator missing");
         // The opener rides on the cell holding the link's first glyph.
-        assert!(buf[(5, 0)].symbol().starts_with("\x1b]8;;file:///home/x/a.rs\x1b\\"));
+        assert!(buf[(5, 0)]
+            .symbol()
+            .starts_with("\x1b]8;;file:///home/x/a.rs\x1b\\"));
         assert!(buf[(5, 0)].symbol().ends_with('a'));
     }
 
@@ -291,5 +303,60 @@ mod tests {
         let link = osc8("a.rs", "file:///home/x/a.rs");
         let line = Line::from(vec![Span::raw("Read "), Span::raw(link)]);
         assert_eq!(line_width(&line), 9);
+    }
+
+    #[test]
+    fn panel_style_covers_blank_rows_padding_and_wide_cells() {
+        use ratatui::style::{Color, Modifier};
+        let panel = Style::default().bg(Color::Blue).fg(Color::White);
+        let lines = vec![
+            Line::from(vec![
+                Span::raw("界"),
+                Span::styled(
+                    "x",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])
+            .style(panel),
+            Line::from("").style(panel),
+        ];
+        let area = Rect::new(2, 1, 8, 2);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 12, 4));
+        render_lines(&lines, area, &mut buf, 0);
+        for y in 1..3 {
+            for x in 2..10 {
+                assert_eq!(buf[(x, y)].bg, Color::Blue);
+            }
+        }
+        assert_eq!(buf[(2, 1)].fg, Color::White);
+        assert_eq!(buf[(4, 1)].fg, Color::Yellow);
+        assert!(buf[(4, 1)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buf[(1, 1)].bg, Color::Reset);
+        assert_eq!(buf[(10, 1)].bg, Color::Reset);
+    }
+
+    #[test]
+    fn truncation_never_skips_a_wide_glyph_to_show_a_later_span() {
+        let line = Line::from(vec![Span::raw("ab界"), Span::raw("Z")]);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 3, 1));
+        render_lines(&[line], buf.area, &mut buf, 0);
+        assert_eq!(visible_row(&buf, 0), "ab");
+    }
+
+    #[test]
+    fn diagram_background_survives_the_actual_cell_painter() {
+        let doc =
+            crate::render::markdown::render_markdown("```text\nROOT\n  │\n\n  └── leaf\n```", 24);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 24, doc.lines.len() as u16));
+        render_lines(&doc.lines, buf.area, &mut buf, 0);
+        for (y, line) in doc.lines.iter().enumerate() {
+            if let Some(bg) = line.style.bg {
+                for x in 0..24 {
+                    assert_eq!(buf[(x, y as u16)].bg, bg);
+                }
+            }
+        }
     }
 }

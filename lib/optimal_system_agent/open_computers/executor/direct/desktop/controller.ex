@@ -46,7 +46,14 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
   use GenServer
   require Logger
 
-  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.{MacOS, Windows, X11vnc}
+  alias OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.{
+    MacOS,
+    Readiness,
+    Wayland,
+    Windows,
+    X11vnc
+  }
+
   alias OptimalSystemAgent.OpenComputers.FrameRouter
 
   @vnc_host ~c"127.0.0.1"
@@ -66,10 +73,14 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
     GenServer.cast(__MODULE__, {:frame, frame})
   end
 
+  def handle_frame(frame, context),
+    do: GenServer.cast(__MODULE__, {:authorized_frame, frame, context})
+
   # ── GenServer ────────────────────────────────────────────────────────────────
 
   @impl true
   def init(opts) when is_list(opts) do
+    Process.flag(:trap_exit, true)
     # sessions: %{session_id => %{vnc_socket, vnc_pid, queued_bytes}}
     # vnc_port_override: integer — ONLY honoured together with vnc_start_fn, i.e.
     #   in tests that point at a fake VNC server they started themselves. There
@@ -93,6 +104,18 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
 
   @impl true
   def handle_cast({:frame, {:desktop_start_request, %{session_id: session_id} = payload}}, state) do
+    handle_cast(
+      {:authorized_frame, {:desktop_start_request, Map.put(payload, :session_id, session_id)},
+       []},
+      state
+    )
+  end
+
+  def handle_cast(
+        {:authorized_frame, {:desktop_start_request, %{session_id: session_id} = payload},
+         context},
+        state
+      ) do
     width = Map.get(payload, :width, 1920)
     height = Map.get(payload, :height, 1080)
 
@@ -100,8 +123,22 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
       "[Desktop.Controller] desktop_start_request session=#{session_id} #{width}x#{height}"
     )
 
-    case start_session(session_id, %{width: width, height: height}, state) do
+    state = close_session(state, session_id, :replaced)
+
+    opts =
+      OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.launch_options(payload, context)
+
+    opts = Map.put(opts, :desktop_lease, context[:desktop_lease])
+
+    case start_session(session_id, opts, state) do
       {:ok, session_state} ->
+        lease = context[:desktop_lease]
+        if lease, do: Process.monitor(lease)
+        session_state = Map.put(session_state, :desktop_lease, lease)
+
+        if is_pid(lease) and not Process.alive?(lease),
+          do: send(self(), {:expired_desktop, session_id})
+
         new_sessions = Map.put(state.sessions, session_id, session_state)
 
         # The VNC server now requires a per-session password, and the RFB
@@ -112,7 +149,11 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
            %{
              session_id: session_id,
              vnc_password: session_state.vnc_secret,
-             capabilities: %{mouse: true, keyboard: true, clipboard: false}
+             capabilities: %{
+               mouse: opts.allow_input,
+               keyboard: opts.allow_input,
+               clipboard: false
+             }
            }},
           state
         )
@@ -120,7 +161,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
         {:noreply, %{state | sessions: new_sessions}}
 
       {:error, reason} ->
-        Logger.warning("[Desktop.Controller] failed to start session=#{session_id}: #{reason}")
+        Logger.warning(
+          "[Desktop.Controller] failed to start session=#{session_id}: #{inspect(reason)}"
+        )
 
         send_frame_via_router(
           {:desktop_error,
@@ -154,7 +197,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
 
           {:error, reason} ->
             Logger.warning(
-              "[Desktop.Controller] TCP send failed session=#{session_id}: #{reason}"
+              "[Desktop.Controller] TCP send failed session=#{session_id}: #{inspect(reason)}"
             )
 
             {:noreply, close_session(state, session_id, :tcp_error)}
@@ -172,6 +215,14 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
   # ── TCP messages from VNC socket ─────────────────────────────────────────────
 
   @impl true
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+    ids = for {id, session} <- state.sessions, session[:desktop_lease] == pid, do: id
+    {:noreply, Enum.reduce(ids, state, &close_session(&2, &1, :grant_expired))}
+  end
+
+  def handle_info({:expired_desktop, session_id}, state),
+    do: {:noreply, close_session(state, session_id, :grant_expired)}
+
   def handle_info({:tcp, socket, data}, state) do
     # Find which session this socket belongs to
     case find_session_by_socket(state.sessions, socket) do
@@ -227,7 +278,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
   def handle_info({:tcp_error, socket, reason}, state) do
     case find_session_by_socket(state.sessions, socket) do
       {session_id, _} ->
-        Logger.warning("[Desktop.Controller] TCP error session=#{session_id}: #{reason}")
+        Logger.warning("[Desktop.Controller] TCP error session=#{session_id}: #{inspect(reason)}")
 
         send_frame_via_router(
           {:desktop_error, %{session_id: session_id, reason: :failed_to_start}},
@@ -241,46 +292,96 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
     end
   end
 
+  def handle_info({port, {:exit_status, _status}}, state) when is_port(port) do
+    sessions =
+      Enum.filter(state.sessions, fn {_id, session} ->
+        match?(%{port_ref: ^port}, session.vnc_pid)
+      end)
+
+    {:noreply,
+     Enum.reduce(sessions, state, fn {id, _}, acc ->
+       send_frame_via_router({:desktop_stop, %{session_id: id}}, acc)
+       close_session(acc, id, :helper_exited)
+     end)}
+  end
+
   def handle_info(_msg, state), do: {:noreply, state}
+
+  @impl true
+  def terminate(_reason, state) do
+    Enum.each(state.sessions, fn {id, _} -> close_session(state, id, :shutdown) end)
+    :ok
+  end
 
   # ── Private — session lifecycle ───────────────────────────────────────────────
 
-  defp start_session(session_id, _opts, controller_state) do
-    with {:ok, vnc_handle} <- start_vnc(controller_state),
-         # Give x11vnc a moment to bind its port (skip in tests via vnc_start_fn)
-         :ok <- maybe_sleep(controller_state),
-         {:ok, vnc_port} <- resolve_vnc_port(vnc_handle, controller_state),
-         {:ok, socket} <- connect_vnc(vnc_port) do
-      session = %{
-        vnc_socket: socket,
-        vnc_pid: vnc_handle,
-        vnc_port: vnc_port,
-        vnc_secret: vnc_secret(vnc_handle),
-        queued_bytes: 0
-      }
+  defp start_session(session_id, opts, controller_state) do
+    with {:ok, vnc_handle} <- start_vnc(controller_state, opts) do
+      try do
+        result =
+          with :ok <- maybe_sleep(controller_state),
+               :ok <- live_grant(opts),
+               {:ok, vnc_port} <- resolve_vnc_port(vnc_handle, controller_state),
+               {:ok, socket} <- connect_vnc(vnc_port) do
+            :inet.setopts(socket, active: :once)
 
-      # Arm socket for async reads
-      :inet.setopts(socket, active: :once)
+            {:ok,
+             %{
+               vnc_socket: socket,
+               vnc_pid: vnc_handle,
+               vnc_port: vnc_port,
+               vnc_secret: vnc_secret(vnc_handle),
+               queued_bytes: 0
+             }}
+          end
 
-      Logger.info("[Desktop.Controller] session=#{session_id} started")
-      {:ok, session}
+        case result do
+          {:ok, session} ->
+            Logger.info("[Desktop.Controller] session=#{session_id} started")
+            {:ok, session}
+
+          error ->
+            stop_vnc(vnc_handle)
+            error
+        end
+      catch
+        kind, reason ->
+          stop_vnc(vnc_handle)
+          :erlang.raise(kind, reason, __STACKTRACE__)
+      end
     end
   end
 
-  defp start_vnc(%{vnc_start_fn: fun}) when is_function(fun, 0), do: fun.()
+  defp start_vnc(%{vnc_start_fn: fun}, _opts) when is_function(fun, 0), do: fun.()
+  defp start_vnc(%{vnc_start_fn: fun}, opts) when is_function(fun, 1), do: fun.(opts)
 
-  defp start_vnc(_controller_state) do
-    case os_family() do
-      :linux -> X11vnc.start()
-      :macos -> MacOS.start()
-      :windows -> Windows.start()
-      _ -> {:error, :unsupported_platform}
+  defp start_vnc(_controller_state, opts) do
+    case Readiness.backend() do
+      :x11vnc ->
+        X11vnc.start(opts)
+
+      :wayland ->
+        Wayland.start(opts)
+
+      :macos ->
+        MacOS.start(opts)
+
+      :windows ->
+        Windows.start(opts)
+
+      _ ->
+        {:error, :unsupported_platform}
     end
   end
+
+  defp live_grant(%{desktop_lease: lease}) when is_pid(lease),
+    do: if(Process.alive?(lease), do: :ok, else: {:error, :desktop_grant_expired})
+
+  defp live_grant(_), do: :ok
 
   # Skip the startup sleep when a test hook is provided (fast tests)
   defp maybe_sleep(%{vnc_start_fn: fun}) when is_function(fun, 0), do: :ok
-  defp maybe_sleep(_), do: :timer.sleep(500) |> elem(0) |> then(fn _ -> :ok end)
+  defp maybe_sleep(_), do: :timer.sleep(500)
 
   @doc false
   # The RFB port must come from the server this controller actually started.
@@ -307,9 +408,9 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
 
   # Stop whichever VNC backend was used — the ref type tells us which adapter.
   # x11vnc returns an integer OS pid; macOS/Windows return a Port reference.
-  defp stop_vnc(%{os_pid: os_pid}) when is_integer(os_pid), do: X11vnc.stop(os_pid)
-
   defp stop_vnc(%{port_ref: port_ref}) when is_port(port_ref), do: stop_native(port_ref)
+
+  defp stop_vnc(%{os_pid: os_pid}) when is_integer(os_pid), do: X11vnc.stop(os_pid)
 
   defp stop_vnc(pid_or_port) when is_integer(pid_or_port), do: X11vnc.stop(pid_or_port)
 
@@ -321,6 +422,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
     case os_family() do
       :macos -> MacOS.stop(port_ref)
       :windows -> Windows.stop(port_ref)
+      :linux -> Wayland.stop(port_ref)
       _ -> :ok
     end
   end
@@ -354,6 +456,7 @@ defmodule OptimalSystemAgent.OpenComputers.Executor.Direct.Desktop.Controller do
 
         # Stop VNC process if we started it — delegate to the platform adapter
         if session.vnc_pid, do: stop_vnc(session.vnc_pid)
+        if lease = session[:desktop_lease], do: send(lease, :revoke)
 
         %{state | sessions: Map.delete(state.sessions, session_id)}
     end

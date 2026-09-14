@@ -77,6 +77,42 @@ defmodule OptimalSystemAgent.Agent.ExecutionControlTest do
     assert snapshot.task == "Work"
   end
 
+  test "finish/3 is idempotent — a second finish on an already-terminal record is a no-op" do
+    :ok = ExecutionControl.start("worker-terminal", %{parent_session_id: "parent", task: "Work"})
+    :ok = ExecutionControl.progress("worker-terminal", %{tokens_used: 500, tool_count: 4})
+    :ok = ExecutionControl.finish("worker-terminal", :completed, %{duration_ms: 1_000})
+
+    first = ExecutionControl.get("worker-terminal")
+    assert first.status == "completed"
+    assert first.duration_ms == 1_000
+
+    # A second, contradictory `finish/3` — the exact shape of `SubagentControl`'s
+    # "stop" action racing (or being retried against) a run that already
+    # completed on its own. The record's own genuine outcome must win.
+    :ok = ExecutionControl.finish("worker-terminal", :cancelled, %{duration_ms: 999_999})
+
+    second = ExecutionControl.get("worker-terminal")
+    assert second.status == "completed", "an already-terminal record must not be re-terminated"
+    assert second.duration_ms == 1_000, "fields set by the real completion must not be clobbered"
+    assert second.completed_at == first.completed_at
+
+    # A third call — matching the "@backend x3" shape from the incident this
+    # guards against — must be equally inert.
+    :ok = ExecutionControl.finish("worker-terminal", :reassigned, %{})
+    assert ExecutionControl.get("worker-terminal").status == "completed"
+  end
+
+  test "finish/3 still terminates a genuinely running record" do
+    :ok = ExecutionControl.start("worker-live", %{parent_session_id: "parent", task: "Work"})
+    assert ExecutionControl.get("worker-live").status == "running"
+
+    :ok = ExecutionControl.finish("worker-live", :failed, %{last_error: "boom"})
+
+    snapshot = ExecutionControl.get("worker-live")
+    assert snapshot.status == "failed"
+    assert snapshot.last_error == "boom"
+  end
+
   test "increments cumulative counters atomically" do
     assert :ok = ExecutionControl.start("worker-counters", %{})
     assert :ok = ExecutionControl.increment("worker-counters", :failure_count)

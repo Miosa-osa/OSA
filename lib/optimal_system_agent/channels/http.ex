@@ -175,6 +175,16 @@ defmodule OptimalSystemAgent.Channels.HTTP do
         status: "ok",
         version: version,
         uptime_seconds: uptime,
+        # The launch directory this daemon was started in, so `bin/osa` can
+        # prove a listening daemon belongs to THIS workspace before adopting it
+        # or stopping it. `original_cwd/0` is the boot-captured launch dir (set
+        # from OSA_ORIGINAL_CWD, which the launcher exports at bin/osa:78) — NOT
+        # `Cwd.get/0`, which is session-scoped and moves per turn, and NOT
+        # `File.cwd!()`, which is the OSA source tree since the daemon starts
+        # with `cd "$ROOT"`. Without this field a healthy daemon on the expected
+        # port is indistinguishable from another folder's, which is how one
+        # workspace could attach to — and `osa stop` could kill — another's.
+        workspace: OptimalSystemAgent.Workspace.Cwd.original_cwd(),
         provider: provider,
         model: model_name,
         context_window: context_window,
@@ -1056,7 +1066,7 @@ defmodule OptimalSystemAgent.Channels.HTTP do
     ids ++ @extra_health_check_slugs
   rescue
     # Never let a catalog problem turn every key check into a 400.
-    _ -> ~w(anthropic openai ollama ollama_local ollama_cloud openrouter miosa custom)
+    _ -> ~w(anthropic openai ollama ollama_local ollama_cloud openrouter surplus miosa custom)
   end
 
   # Run a risky call, degrading to `default` on ANY exception/throw/exit

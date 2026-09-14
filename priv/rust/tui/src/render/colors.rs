@@ -275,7 +275,9 @@ pub fn blend_color(bg: Color, fg: Color, t: f32) -> Color {
     let blended = match (bg, fg) {
         (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
             let lerp = |a: u8, b: u8| -> u8 {
-                (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8
+                (a as f32 + (b as f32 - a as f32) * t)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
             };
             Color::Rgb(lerp(r1, r2), lerp(g1, g2), lerp(b1, b2))
         }
@@ -302,15 +304,24 @@ mod tests {
 
     #[test]
     fn no_color_drops_every_color_to_reset() {
-        assert_eq!(adapt_color(Color::Rgb(255, 0, 0), ColorLevel::NoColor), Color::Reset);
+        assert_eq!(
+            adapt_color(Color::Rgb(255, 0, 0), ColorLevel::NoColor),
+            Color::Reset
+        );
         assert_eq!(adapt_color(Color::Green, ColorLevel::NoColor), Color::Reset);
-        assert_eq!(adapt_color(Color::Indexed(200), ColorLevel::NoColor), Color::Reset);
+        assert_eq!(
+            adapt_color(Color::Indexed(200), ColorLevel::NoColor),
+            Color::Reset
+        );
     }
 
     #[test]
     fn ansi256_maps_rgb_to_indexed() {
         // Pure red → cube coordinate (5,0,0) = 16 + 36*5 = 196.
-        assert_eq!(adapt_color(Color::Rgb(255, 0, 0), ColorLevel::Ansi256), Color::Indexed(196));
+        assert_eq!(
+            adapt_color(Color::Rgb(255, 0, 0), ColorLevel::Ansi256),
+            Color::Indexed(196)
+        );
         // Pure white → 231 (top of the cube) or grayscale 255; both are white.
         match adapt_color(Color::Rgb(255, 255, 255), ColorLevel::Ansi256) {
             Color::Indexed(i) => assert!(i == 231 || i == 255, "got {i}"),
@@ -414,9 +425,7 @@ mod tests {
         assert_eq!(blend_color(bg, fg, 1.0), want_fg, "t=1 returns ~fg");
         // A midpoint sits between the two on at least one channel (before
         // quantization); under truecolor we can read it back directly.
-        if let (Color::Rgb(_, mg, _), Color::Rgb(_, _, _)) =
-            (blend_color(bg, fg, 0.5), fg)
-        {
+        if let (Color::Rgb(_, mg, _), Color::Rgb(_, _, _)) = (blend_color(bg, fg, 0.5), fg) {
             assert!(mg > 24 && mg < 186, "green channel interpolates, got {mg}");
         }
         // Clamps out-of-range t without panic.
@@ -453,8 +462,14 @@ mod code_block_contrast {
         vec![
             ("dark", themes::dark()),
             ("light", themes::light()),
-            ("catppuccin", themes::by_name("catppuccin").unwrap_or_else(themes::dark)),
-            ("tokyo-night", themes::by_name("tokyo-night").unwrap_or_else(themes::dark)),
+            (
+                "catppuccin",
+                themes::by_name("catppuccin").unwrap_or_else(themes::dark),
+            ),
+            (
+                "tokyo-night",
+                themes::by_name("tokyo-night").unwrap_or_else(themes::dark),
+            ),
         ]
     }
 
@@ -464,7 +479,11 @@ mod code_block_contrast {
             let fg = theme.colors.code_fg;
             let bg = theme.colors.code_bg;
 
-            for level in [ColorLevel::TrueColor, ColorLevel::Ansi256, ColorLevel::Ansi16] {
+            for level in [
+                ColorLevel::TrueColor,
+                ColorLevel::Ansi256,
+                ColorLevel::Ansi16,
+            ] {
                 let qfg = adapt_color(fg, level);
                 let qbg = adapt_color(bg, level);
                 assert_ne!(
@@ -493,5 +512,4 @@ mod code_block_contrast {
             );
         }
     }
-
 }

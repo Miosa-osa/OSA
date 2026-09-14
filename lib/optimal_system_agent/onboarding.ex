@@ -335,6 +335,19 @@ defmodule OptimalSystemAgent.Onboarding do
         ]
       },
       %{
+        id: "surplus",
+        name: "Surplus Intelligence",
+        description: "One API → a curated marketplace of frontier models",
+        group: "recommended",
+        requires_key: true,
+        env_var: "SURPLUS_API_KEY",
+        default_model: OptimalSystemAgent.Providers.SurplusModels.default_model(),
+        base_url: "https://api.surplusintelligence.ai/v1",
+        signup_url: "https://www.surplusintelligence.ai/",
+        allow_free_text: true,
+        models: OptimalSystemAgent.Providers.SurplusModels.picker_models()
+      },
+      %{
         id: "anthropic",
         name: "Anthropic",
         description: "Claude direct — best for coding",
@@ -992,6 +1005,16 @@ defmodule OptimalSystemAgent.Onboarding do
         api_key = Keyword.get(opts, :api_key) || System.get_env("MIOSA_API_KEY")
         fetch_openai_models("https://optimal.miosa.ai/v1", api_key)
 
+      "surplus" ->
+        # Surplus' catalog endpoint is public and changes as marketplace
+        # inventory changes. Keep the curated shortlist first, then expose the
+        # rest of the live catalog so the picker is useful without becoming a
+        # stale hardcoded dump of every model.
+        case fetch_surplus_models() do
+          {:ok, models} when models != [] -> {:ok, models}
+          _ -> {:ok, hardcoded_models(provider_id)}
+        end
+
       # The rows are aliases, and an alias alone does not answer "which model
       # am I actually running" — the question the picker exists to answer.
       # Claude Code resolves the alias downstream and reports the concrete id
@@ -1263,6 +1286,39 @@ defmodule OptimalSystemAgent.Onboarding do
     end
   rescue
     e -> {:error, "OpenRouter fetch failed: #{Exception.message(e)}"}
+  end
+
+  defp fetch_surplus_models do
+    case Req.get("https://api.surplusintelligence.ai/v1/models",
+           receive_timeout: 10_000,
+           retry: false
+         ) do
+      {:ok, %{status: 200, body: %{"data" => models}}} when is_list(models) ->
+        parsed = Enum.map(models, &OptimalSystemAgent.Providers.SurplusModels.parse/1)
+
+        # Surplus is a margin-charging reseller with DYNAMIC prices. The live
+        # catalog is the only place those prices exist, so capture them into the
+        # runtime rate card here — the one place they are parsed — for the
+        # authoritative billing path (`Pricing.qualify(model, :surplus)`).
+        # Previously the parsed prices were used only for the picker display and
+        # discarded, so every surplus turn mis-billed.
+        OptimalSystemAgent.Providers.SurplusModels.put_runtime_pricing(parsed)
+
+        # Attach each row's measured tok/s (from real turns — see `ModelSpeed`),
+        # if any. `nil` for a model no one has used yet; the picker shows no
+        # badge for those rather than inventing a number.
+        parsed = Enum.map(parsed, &OptimalSystemAgent.Providers.SurplusModels.with_speed/1)
+
+        {:ok, OptimalSystemAgent.Providers.SurplusModels.order_catalog(parsed)}
+
+      {:ok, %{status: status}} ->
+        {:error, "Surplus returned #{status}"}
+
+      {:error, reason} ->
+        {:error, "Can't reach Surplus: #{inspect(reason)}"}
+    end
+  rescue
+    e -> {:error, "Surplus model fetch failed: #{Exception.message(e)}"}
   end
 
   # OpenRouter prices are per-token USD strings (e.g. "0.000003"). Convert to a
@@ -3078,9 +3134,62 @@ defmodule OptimalSystemAgent.Onboarding do
 
   defp detect_key(provider_id, env_var) do
     case System.get_env(env_var) do
-      nil -> nil
-      "" -> nil
+      nil -> detect_stored_key(provider_id)
+      "" -> detect_stored_key(provider_id)
       key -> %{provider: provider_id, source: "environment", key_preview: key_preview(key)}
+    end
+  end
+
+  # A key pasted IN THE APP, which lands in `$OSA_HOME/config.json` under
+  # `api_keys` and NOT in the environment.
+  #
+  # This is the half `detect_key/2` was missing. It consulted `System.get_env`
+  # alone, so a key the user pasted into the picker was invisible to the picker
+  # that would later read it back: `detected` omitted the provider, `is_ready/1`
+  # returned false, the row kept its "needs key" badge, and pressing Enter
+  # reopened the key screen — forever, with no way to reach the model list.
+  #
+  # MEASURED 2026-09-11 against a live daemon: `/api/v1/providers/` reported
+  # Surplus `connected: true` (it reads `api_keys` from this same file) while
+  # `/onboarding/status` — the endpoint the picker actually uses — reported
+  # `auth_state: "needs_key"`. Two readers of one credential disagreeing is the
+  # whole defect.
+  #
+  # It also explains the apparent randomness: a key in `$OSA_HOME/.env` IS
+  # detected, because the launcher sources that file into the environment. So
+  # `.env` keys worked and pasted keys never did, for the same provider, which
+  # is exactly the inconsistency users reported as "sometimes it works".
+  defp detect_stored_key(provider_id) do
+    case stored_api_key(provider_id) do
+      nil -> nil
+      key -> %{provider: provider_id, source: "config", key_preview: key_preview(key)}
+    end
+  end
+
+  defp stored_api_key(provider_id) do
+    case Map.get(read_stored_api_keys(), to_string(provider_id)) do
+      key when is_binary(key) and key != "" -> key
+      _ -> nil
+    end
+  end
+
+  # Read `api_keys` from the SAME file `ProviderRoutes` writes to. Deliberately
+  # not a cached read: this runs once per picker open, and a stale cache would
+  # reproduce the very bug it is here to fix (paste a key, reopen, still
+  # missing).
+  defp read_stored_api_keys do
+    path =
+      Application.get_env(:optimal_system_agent, :bootstrap_dir, "~/.osa")
+      |> Path.expand()
+      |> Path.join("config.json")
+
+    with true <- File.exists?(path),
+         {:ok, content} <- File.read(path),
+         {:ok, parsed} <- Jason.decode(content),
+         keys when is_map(keys) <- Map.get(parsed, "api_keys", %{}) do
+      keys
+    else
+      _ -> %{}
     end
   end
 

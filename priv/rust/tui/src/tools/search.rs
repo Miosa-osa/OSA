@@ -26,7 +26,10 @@ fn found_line(verb: &str, n: usize, singular: &str, plural: &str) -> Line<'stati
 
 /// Header-only while the tool is still running (avoids bogus "Found 0 …").
 fn resolved(status: super::ToolStatus) -> bool {
-    matches!(status, super::ToolStatus::Success | super::ToolStatus::Error)
+    matches!(
+        status,
+        super::ToolStatus::Success | super::ToolStatus::Error
+    )
 }
 
 // ─── GlobRenderer ─────────────────────────────────────────────────────────────
@@ -34,12 +37,17 @@ fn resolved(status: super::ToolStatus) -> bool {
 pub struct GlobRenderer;
 
 impl ToolRenderer for GlobRenderer {
-    fn render(&self, _name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        _name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
-        let pattern =
-            parse_json_arg(args, &["pattern", "glob", "query", "regex", "path"])
-                .unwrap_or_else(|| "…".to_string());
+        let pattern = parse_json_arg(args, &["pattern", "glob", "query", "regex", "path"])
+            .unwrap_or_else(|| "…".to_string());
 
         let header = make_header(
             opts.status,
@@ -90,12 +98,17 @@ impl ToolRenderer for GlobRenderer {
 pub struct GrepRenderer;
 
 impl ToolRenderer for GrepRenderer {
-    fn render(&self, _name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        _name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
-        let pattern =
-            parse_json_arg(args, &["pattern", "query", "regex", "search", "input"])
-                .unwrap_or_else(|| "…".to_string());
+        let pattern = parse_json_arg(args, &["pattern", "query", "regex", "search", "input"])
+            .unwrap_or_else(|| "…".to_string());
 
         let header = make_header(
             opts.status,
@@ -144,11 +157,7 @@ impl ToolRenderer for GrepRenderer {
 }
 
 /// Split `file:line:content` and style the file portion in cyan+underline.
-fn render_grep_line(
-    raw: &str,
-    file_style: Style,
-    rest_style: Style,
-) -> Line<'static> {
+fn render_grep_line(raw: &str, file_style: Style, rest_style: Style) -> Line<'static> {
     // Try to split off file component (first segment before a colon that looks
     // like a path — does not start with a digit).
     let parts: Vec<&str> = raw.splitn(3, ':').collect();
@@ -177,7 +186,13 @@ fn render_grep_line(
 pub struct LsRenderer;
 
 impl ToolRenderer for LsRenderer {
-    fn render(&self, _name: &str, args: &str, result: &str, opts: &RenderOpts) -> Vec<Line<'static>> {
+    fn render(
+        &self,
+        _name: &str,
+        args: &str,
+        result: &str,
+        opts: &RenderOpts,
+    ) -> Vec<Line<'static>> {
         let theme = crate::style::theme();
 
         let path = parse_json_arg(args, &["path", "directory", "dir", "input"])

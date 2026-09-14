@@ -29,7 +29,10 @@ const DOCS_URL: &str = "https://osa.dev/docs/mcp";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpApprovalAction {
     /// Persist the per-server split (approve some, reject the rest).
-    Approve { approve: Vec<String>, reject: Vec<String> },
+    Approve {
+        approve: Vec<String>,
+        reject: Vec<String>,
+    },
     /// Enable this and all future project MCP servers.
     ApproveAll,
     /// Reject every pending project server.
@@ -50,7 +53,12 @@ pub struct McpApprovalDialog {
 impl McpApprovalDialog {
     pub fn new(servers: Vec<String>) -> Self {
         let checked = vec![true; servers.len()];
-        Self { servers, single_choice: 0, cursor: 0, checked }
+        Self {
+            servers,
+            single_choice: 0,
+            cursor: 0,
+            checked,
+        }
     }
 
     /// True when several servers are pending (multiselect variant).
@@ -85,13 +93,17 @@ impl McpApprovalDialog {
                 None
             }
             KeyCode::Char('1') => Some(McpApprovalAction::ApproveAll),
-            KeyCode::Char('2') => {
-                Some(McpApprovalAction::Approve { approve: vec![name], reject: vec![] })
-            }
+            KeyCode::Char('2') => Some(McpApprovalAction::Approve {
+                approve: vec![name],
+                reject: vec![],
+            }),
             KeyCode::Char('3') => Some(McpApprovalAction::RejectAll),
             KeyCode::Enter => Some(match self.single_choice {
                 0 => McpApprovalAction::ApproveAll,
-                1 => McpApprovalAction::Approve { approve: vec![name], reject: vec![] },
+                1 => McpApprovalAction::Approve {
+                    approve: vec![name],
+                    reject: vec![],
+                },
                 _ => McpApprovalAction::RejectAll,
             }),
             // Esc can never silently trust (CC parity: Esc = reject all).
@@ -235,10 +247,8 @@ impl McpApprovalDialog {
             cy += 1;
             put(
                 frame,
-                Paragraph::new(
-                    "Space toggle \u{00b7} Enter confirm \u{00b7} Esc reject all",
-                )
-                .style(Style::default().fg(theme.colors.muted)),
+                Paragraph::new("Space toggle \u{00b7} Enter confirm \u{00b7} Esc reject all")
+                    .style(Style::default().fg(theme.colors.muted)),
                 Rect::new(inner.x, cy, inner.width, 1),
             );
         } else {
@@ -256,10 +266,7 @@ impl McpApprovalDialog {
                 };
                 put(
                     frame,
-                    Paragraph::new(Line::from(Span::styled(
-                        truncate_chars(opt, max_w),
-                        style,
-                    ))),
+                    Paragraph::new(Line::from(Span::styled(truncate_chars(opt, max_w), style))),
                     Rect::new(inner.x, cy, inner.width, 1),
                 );
                 cy += 1;
@@ -267,8 +274,10 @@ impl McpApprovalDialog {
             cy += 1;
             put(
                 frame,
-                Paragraph::new("\u{2191}/\u{2193} choose \u{00b7} Enter confirm \u{00b7} Esc reject")
-                    .style(Style::default().fg(theme.colors.muted)),
+                Paragraph::new(
+                    "\u{2191}/\u{2193} choose \u{00b7} Enter confirm \u{00b7} Esc reject",
+                )
+                .style(Style::default().fg(theme.colors.muted)),
                 Rect::new(inner.x, cy, inner.width, 1),
             );
         }
@@ -291,14 +300,16 @@ fn wrap_two(s: &str, max: usize) -> Vec<String> {
     }
     let mut split = max;
     // Prefer the last space at/under the width.
-    if let Some(pos) = s[..s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len())]
-        .rfind(' ')
+    if let Some(pos) = s[..s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len())].rfind(' ')
     {
         split = s[..pos].chars().count();
     }
     let first: String = s.chars().take(split).collect();
     let rest: String = s.chars().skip(split).collect();
-    vec![first.trim_end().to_string(), truncate_chars(rest.trim_start(), max)]
+    vec![
+        first.trim_end().to_string(),
+        truncate_chars(rest.trim_start(), max),
+    ]
 }
 
 #[cfg(test)]
@@ -316,19 +327,37 @@ mod mcp_approval_tests {
     fn single_server_semantics() {
         let mut d = McpApprovalDialog::new(vec!["fs".into()]);
         // Default choice 0 (yes_all).
-        assert_eq!(d.handle_key(key(KeyCode::Enter)), Some(McpApprovalAction::ApproveAll));
-        assert_eq!(d.handle_key(key(KeyCode::Char('1'))), Some(McpApprovalAction::ApproveAll));
+        assert_eq!(
+            d.handle_key(key(KeyCode::Enter)),
+            Some(McpApprovalAction::ApproveAll)
+        );
+        assert_eq!(
+            d.handle_key(key(KeyCode::Char('1'))),
+            Some(McpApprovalAction::ApproveAll)
+        );
         assert_eq!(
             d.handle_key(key(KeyCode::Char('2'))),
-            Some(McpApprovalAction::Approve { approve: vec!["fs".into()], reject: vec![] })
+            Some(McpApprovalAction::Approve {
+                approve: vec!["fs".into()],
+                reject: vec![]
+            })
         );
-        assert_eq!(d.handle_key(key(KeyCode::Char('3'))), Some(McpApprovalAction::RejectAll));
-        assert_eq!(d.handle_key(key(KeyCode::Esc)), Some(McpApprovalAction::RejectAll));
+        assert_eq!(
+            d.handle_key(key(KeyCode::Char('3'))),
+            Some(McpApprovalAction::RejectAll)
+        );
+        assert_eq!(
+            d.handle_key(key(KeyCode::Esc)),
+            Some(McpApprovalAction::RejectAll)
+        );
         // Down moves to option 1 (yes).
         assert_eq!(d.handle_key(key(KeyCode::Down)), None);
         assert_eq!(
             d.handle_key(key(KeyCode::Enter)),
-            Some(McpApprovalAction::Approve { approve: vec!["fs".into()], reject: vec![] })
+            Some(McpApprovalAction::Approve {
+                approve: vec!["fs".into()],
+                reject: vec![]
+            })
         );
     }
 
@@ -354,7 +383,10 @@ mod mcp_approval_tests {
             other => panic!("unexpected {:?}", other),
         }
         // Esc rejects all regardless of ticks.
-        assert_eq!(d.handle_key(key(KeyCode::Esc)), Some(McpApprovalAction::RejectAll));
+        assert_eq!(
+            d.handle_key(key(KeyCode::Esc)),
+            Some(McpApprovalAction::RejectAll)
+        );
     }
 
     #[test]
@@ -363,7 +395,10 @@ mod mcp_approval_tests {
         d.handle_key(key(KeyCode::Char(' '))); // untick a
         d.handle_key(key(KeyCode::Down));
         d.handle_key(key(KeyCode::Char(' '))); // untick b
-        assert_eq!(d.handle_key(key(KeyCode::Enter)), Some(McpApprovalAction::RejectAll));
+        assert_eq!(
+            d.handle_key(key(KeyCode::Enter)),
+            Some(McpApprovalAction::RejectAll)
+        );
     }
 
     #[test]

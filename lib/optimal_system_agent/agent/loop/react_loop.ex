@@ -155,8 +155,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # this is roughly 23 days of continuous work, so nothing real reaches it.
   @unbounded_iterations 1_000_000
 
-  defp max_iterations do
-    Application.get_env(:optimal_system_agent, :max_iterations) || @unbounded_iterations
+  # A PER-RUN cap on `state` wins (a delegated subagent whose agent def or call
+  # set `max_iterations` — e.g. `researcher` at 30 — so it can't crawl 187 pages
+  # in one turn). Absent that, the global config, else the effectively-unbounded
+  # default. The top-level interactive loop sets no per-run cap, so it is
+  # unchanged. Hitting the cap runs `forced_wrapup` (a real handoff), not a
+  # silent halt.
+  defp max_iterations(state) do
+    case Map.get(state, :max_iterations) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> Application.get_env(:optimal_system_agent, :max_iterations) || @unbounded_iterations
+    end
   end
 
   # Explicit rather than leaning on Elixir term ordering, under which
@@ -165,6 +174,43 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   defp iteration_cap_reached?(_iter, :infinity), do: false
   defp iteration_cap_reached?(iter, max) when is_integer(max), do: iter >= max
   defp iteration_cap_reached?(_iter, _max), do: false
+
+  # Per-turn effort shaping. Planning turns are floored UP so a read-only plan
+  # gets real reasoning even if the session is on :fast; tool-loop continuations
+  # are dropped to :fast so digesting a tool result and firing the next call
+  # stays snappy (the bulk of a coding turn). The first response of a turn keeps
+  # the user's global effort - that is where their intent lives. A session that
+  # deliberately runs :high/:xhigh is never lowered; we only speed up the
+  # default (:medium). Override is process-scoped and auto-restored, so it never
+  # touches the session/global setting or a concurrent session - the same
+  # guarantee Resample relies on.
+  defp with_turn_effort(state, fun) do
+    case turn_effort(state) do
+      nil -> fun.()
+      level -> Effort.with_process_override(level, fun)
+    end
+  end
+
+  @doc false
+  def turn_effort(state) do
+    cond do
+      planning_turn?(state) and not Effort.current_at_least?(:high) ->
+        :high
+
+      not planning_turn?(state) and continuation_turn?(state) and
+          not Effort.current_at_least?(:high) ->
+        :fast
+
+      true ->
+        nil
+    end
+  end
+
+  defp planning_turn?(state) do
+    Map.get(state, :permission_mode) == :plan or Map.get(state, :plan_mode, false) == true
+  end
+
+  defp continuation_turn?(state), do: (Map.get(state, :iteration) || 0) >= 1
 
   defp max_response_tokens do
     # Check for bumped max_tokens from output token recovery.
@@ -190,6 +236,83 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
   defp paused?(_), do: false
 
+  # A goal is `:paused` for one of several reasons — a cross-turn stall
+  # (identical gaps, no work landing), a spent lifetime verification-run cap,
+  # a spent token budget, or simply the user asking for it (a manual `/goal
+  # pause`, or the TUI's own interrupt-driven pause). A turn that walks into
+  # an already-paused goal must say which one — a single hardcoded "no
+  # measurable progress" string here used to claim a stall on EVERY pause,
+  # including ones the user caused themselves (self-contradictory when
+  # `reason` is `:user`, and simply wrong for `:run_cap` / `:usage_limits`,
+  # neither of which is a stall). Mirrors the TUI's own reason-branching in
+  # `continue_goal_from` (`handle_actions.rs`) so both surfaces agree.
+  # `gaps` is the panel's own last recorded finding list (`snap.last_gaps`) —
+  # WHAT is unresolved, not just that something is. Before this, every reason
+  # (including a genuine stall) rendered a fixed, gap-free sentence, so a user
+  # walking back into a paused goal learned only its CATEGORY ("no measurable
+  # progress") and had to go dig through `/goal status` or the ledger to find
+  # out what the panel had actually been citing round after round. A manual
+  # pause (`:user`) never carries panel gaps and omits the block entirely.
+  @spec goal_pause_halt_message(GoalTracker.pause_reason(), [String.t()]) :: String.t()
+  defp goal_pause_halt_message(:no_progress, gaps) do
+    "Goal auto-paused: no measurable progress across turns — the same gap(s) kept coming " <>
+      "back with no new work landing:\n" <>
+      goal_gaps_block(gaps) <>
+      "\nReview the goal and resume, refine it, or send a new instruction."
+  end
+
+  defp goal_pause_halt_message(:off_track, gaps) do
+    "Goal auto-paused: an independent skeptic panel repeatedly judged this goal NOT " <>
+      "achievable as currently framed (not merely unfinished):\n" <>
+      goal_gaps_block(gaps) <>
+      "\nReconsider the approach, refine the goal, or send a new instruction."
+  end
+
+  defp goal_pause_halt_message(:run_cap, gaps) do
+    "Goal auto-paused: hit its lifetime verification-run cap while still incomplete." <>
+      goal_pause_gaps_suffix(gaps) <>
+      " The goal is kept — resume it, refine it, or send a new instruction."
+  end
+
+  defp goal_pause_halt_message(:usage_limits, gaps) do
+    "Goal auto-paused: spent its token budget before the panel verified it complete." <>
+      goal_pause_gaps_suffix(gaps) <>
+      " The goal is kept — resume it, refine it, or send a new instruction."
+  end
+
+  defp goal_pause_halt_message(:user, _gaps) do
+    "Goal paused (by you, or an interrupt) — not a stall. Resume it, refine it, or " <>
+      "send a new instruction."
+  end
+
+  defp goal_pause_halt_message(:blocked_on_human, gaps) do
+    "Goal auto-paused: the same blocker repeated across consecutive turns and it needs " <>
+      "something only you can do:\n" <>
+      goal_gaps_block(gaps) <>
+      "\nDo that, then resume it, refine it, or send a new instruction."
+  end
+
+  defp goal_pause_halt_message(:verification_unavailable, _gaps) do
+    "Goal auto-paused: the independent skeptic panel could not return a verdict this round " <>
+      "(a provider failure or timeout, not a finding about your work). The goal is kept — " <>
+      "resume it, refine it, or send a new instruction."
+  end
+
+  defp goal_pause_halt_message(reason, gaps) do
+    "Goal auto-paused (#{reason})." <>
+      goal_pause_gaps_suffix(gaps) <>
+      " Review the goal and resume, refine it, or send a new instruction."
+  end
+
+  defp goal_pause_gaps_suffix([]), do: ""
+
+  defp goal_pause_gaps_suffix(gaps) do
+    " Still unresolved:\n" <> goal_gaps_block(gaps)
+  end
+
+  defp goal_gaps_block([]), do: "  (no structured findings recorded)"
+  defp goal_gaps_block(gaps), do: Enum.map_join(gaps, "\n", &"  - #{&1}")
+
   @doc """
   Run the agent loop for the given state.
 
@@ -210,13 +333,37 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         # P4 (v1057): `:empty_answer_nudges` is per-turn too — the loop state
         # lives in the `Loop` GenServer across turns, so a fresh turn must start
         # with the full empty-answer nudge budget rather than a spent one.
+        #
+        # `:goal_was_driving_at_turn_start?` — captured ONCE, here, before this
+        # turn has called the model even once — is what the `awaiting_user?`/
+        # `paused?` halt clauses below actually gate on now, replacing a bare
+        # `iter > 0` check. `iter > 0` alone only exempted a turn's FIRST
+        # iteration: a plain user message that needed more than one model
+        # round trip to answer (any tool call at all) still hit the SAME halt
+        # on iteration 2+, discarding the model's real, on-topic answer and
+        # re-emitting the stale "waiting for your decision" notice instead —
+        # reported live with a plain "okay so waht" that got nothing back but
+        # the pending decision, twice. Capturing it once, at turn start, and
+        # threading it through every iteration of the SAME turn fixes that:
+        # a turn that begins while ALREADY awaiting a decision (or paused)
+        # never halts on this, no matter how many iterations it takes to
+        # answer; a turn that was genuinely driving and only THEN, mid-turn,
+        # ran into a freshly-raised decision/pause still stops there, exactly
+        # as before.
         state
         |> Map.put(:truncations, 0)
         |> Map.put(:empty_answer_nudges, 0)
         |> Map.delete(:gate_directive_iteration)
+        |> Map.put(:goal_was_driving_at_turn_start?, GoalTracker.continue?(sid))
       else
         state
       end
+
+    # Missing key (a synthetic/direct-constructed state that never passed
+    # through the `iter == 0` branch above, as some tests do to simulate a
+    # turn already in flight) defaults to `true` — the ORIGINAL "still halts"
+    # behavior for exactly that shape of caller.
+    turn_was_driving? = Map.get(state, :goal_was_driving_at_turn_start?, true)
 
     cancelled? =
       try do
@@ -228,7 +375,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         ArgumentError -> false
       end
 
-    max_iter = max_iterations()
+    max_iter = max_iterations(state)
 
     cond do
       cancelled? ->
@@ -248,6 +395,40 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
         finalize_interrupt(state, nil)
 
+      # Goal awaiting a human decision (`update_goal` requested one, or the
+      # panel's own triage classified the next useful action as a human
+      # gate — see `GoalVerifier`'s `:awaiting_user` triage outcome). This
+      # used to fire unconditionally — so a BRAND NEW top-level turn, which
+      # is exactly what a user's freshly-typed message looks like, got
+      # swallowed by this halt's canned "waiting for your decision" notice
+      # instead of ever reaching the model. Confirmed live: an anchored goal
+      # asked a decision question, and every ordinary message the user typed
+      # afterward — not `/goal approve` or `/goal reject`, just normal chat —
+      # came back with nothing but the same static notice, with no way to
+      # redirect the agent short of clearing the goal outright.
+      #
+      # The fix mirrors the `:paused` clause a few lines down, for the exact
+      # same reason: the TUI's own auto-continue driver already stops
+      # submitting another goal-continuation turn the moment it learns the
+      # goal is no longer `active` (`continue_goal_from` in
+      # `handle_actions.rs` treats `:awaiting_user` exactly like `:paused` —
+      # `GoalTracker.goal_loop?/1` is false for both), so a NEW top-level turn
+      # arriving while awaiting a decision is, by construction, the user
+      # talking, not the goal talking to itself.
+      #
+      # `turn_was_driving?` (captured once, at `iter == 0`, before this
+      # turn's own work) scopes the halt to what it can still legitimately be
+      # for. A bare `iter > 0` check exempted only a turn's FIRST iteration —
+      # a plain message that took more than one model round trip to answer
+      # (any tool call at all) still hit this halt on iteration 2+, discarding
+      # the model's real answer for the SAME stale notice. `turn_was_driving?`
+      # stays false for every iteration of a turn that started already
+      # awaiting a decision, however many it takes to answer; it stays true,
+      # and so still halts, for a turn that was genuinely driving and only
+      # THEN — mid-turn — ran into a freshly-raised decision.
+      turn_was_driving? and GoalTracker.awaiting_user?(sid) ->
+        TerminalSource.halt(GoalTracker.waiting_message(sid), state, :control)
+
       paused?(sid) ->
         Logger.info("[loop] Paused at iteration #{iter} — soft-stopping until resumed")
 
@@ -264,26 +445,46 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         )
 
       # Goal auto-pause: the cross-turn GoalTracker tripped stall detection
-      # (identical gap fingerprints) or the run cap — stop burning budget on a
-      # goal that isn't making measurable progress instead of looping forever.
-      GoalTracker.enabled?(state) and GoalTracker.paused?(sid) ->
+      # (identical gap fingerprints), the run cap, the token budget, a
+      # durably-blocked human-only blocker (`:blocked_on_human`), an
+      # unavailable verification round (`:verification_unavailable`), or the
+      # goal was paused by the user (a manual `/goal pause`, or the TUI's own
+      # interrupt-driven pause) — the goal's OWN auto-continuation must not
+      # keep driving turns toward a paused goal.
+      #
+      # A genuine USER prompt must NEVER be swallowed by this, though — and a
+      # BRAND NEW top-level turn is exactly what a user's freshly-typed
+      # message looks like. The TUI's own auto-continue driver already never
+      # submits another goal-continuation turn once it learns the goal is
+      # paused (see `continue_goal_from`/`maybe_continue_goal` in
+      # `handle_actions.rs`), so by construction a NEW top-level turn
+      # arriving while paused is the user, not the goal talking to itself —
+      # reported live: two consecutive ordinary messages ("what's the
+      # status", "EXCUSE ME") both got NOTHING but this halt's canned notice
+      # instead of an answer.
+      #
+      # `turn_was_driving?` (see its capture above, and the `awaiting_user?`
+      # clause's comment for the fuller "why not just `iter > 0`" rationale)
+      # scopes the halt to what it can actually still be for: a turn that was
+      # genuinely driving before it started and only THEN, mid-turn, ran
+      # into this SAME goal's own machinery pausing it — stopping ITS further
+      # self-driven continuation, never a turn — however many iterations it
+      # needs to answer — that started already paused.
+      turn_was_driving? and GoalTracker.enabled?(state) and GoalTracker.paused?(sid) ->
         snap = GoalTracker.snapshot(sid)
         reason = Map.get(snap || %{}, :pause_reason, :no_progress)
+        gaps = Map.get(snap || %{}, :last_gaps, []) || []
         Logger.info("[loop] Goal auto-paused (#{reason}) at iteration #{iter}")
 
         Bus.emit(:system_event, %{
           event: :goal_auto_paused,
           session_id: sid,
           iteration: iter,
-          reason: reason
+          reason: reason,
+          gaps: gaps
         })
 
-        TerminalSource.halt(
-          "Goal auto-paused (#{reason}): no measurable progress across turns. " <>
-            "Review the goal and resume, refine it, or send a new instruction.",
-          state,
-          :control
-        )
+        TerminalSource.halt(goal_pause_halt_message(reason, gaps), state, :control)
 
       # Real budget cap (primitive #29) — abort a single runaway turn mid-loop,
       # not just at the next turn boundary. Only fires when a caller set
@@ -463,7 +664,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     context = inject_pending_agent_messages(context, state)
     context = inject_iteration_budget(context, state)
 
-    max_iter = max_iterations()
+    max_iter = max_iterations(state)
 
     Logger.debug(
       "[loop] About to call LLM for #{state.session_id}, iteration #{state.iteration + 1}/#{max_iter}"
@@ -497,23 +698,35 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # wrong answer for every stored turn.
     requested_at = DateTime.utc_now()
 
-    thinking_opts = LLMClient.thinking_config(state)
-    tools_for_call = ToolFilter.filter(state.tools, state)
-
-    llm_opts = [
-      tools: tools_for_call,
-      temperature: LLMClient.temperature(),
-      max_tokens: max_response_tokens()
-    ]
-
-    llm_opts =
-      if thinking_opts, do: Keyword.put(llm_opts, :thinking, thinking_opts), else: llm_opts
-
-    # Initialize streaming tool executor — tools can start running mid-stream
+    # Initialize streaming tool executor — tools can start running mid-stream.
+    # Kept in the OUTER scope (not the effort closure below): it does not read
+    # effort, and the drain further down needs `streaming_ctx` in scope.
     streaming_ctx = StreamingToolExecutor.start(state)
     Process.put(:osa_streaming_tool_ctx, streaming_ctx)
 
-    result = LLMClient.llm_chat_stream(state, context.messages, llm_opts)
+    # The effort read by thinking_config, ToolFilter and the provider's
+    # reasoning_decision must all see the same per-turn level, so the override
+    # wraps the whole request-building region, not just the call.
+    result =
+      with_turn_effort(state, fn ->
+        thinking_opts = LLMClient.thinking_config(state)
+        tools_for_call = ToolFilter.filter(state.tools, state)
+
+        llm_opts = [
+          tools: tools_for_call,
+          temperature: LLMClient.temperature(),
+          max_tokens: max_response_tokens(),
+          # Set by the reasoning-exhaustion recovery below. Process-scoped and
+          # cleared when a generation ends on its own, exactly like
+          # `:osa_bumped_max_tokens` - see `max_response_tokens/0`.
+          thinking_disabled: Process.get(:osa_disable_thinking, false)
+        ]
+
+        llm_opts =
+          if thinking_opts, do: Keyword.put(llm_opts, :thinking, thinking_opts), else: llm_opts
+
+        LLMClient.llm_chat_stream(state, context.messages, llm_opts)
+      end)
 
     # Collect any streaming tool blocks that arrived during the LLM call
     streaming_ctx =
@@ -715,6 +928,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       # the model has produced a complete one, the recovery is over and the
       # configured ceiling is the right one again.
       Process.delete(:osa_bumped_max_tokens)
+      Process.delete(:osa_disable_thinking)
 
       {{:ok, resp}, Map.put(state, :turn_truncated, false)}
     end
@@ -773,15 +987,21 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       # role-alternation on stricter providers — so it gets only a budget-raise
       # directive telling it to answer within the larger ceiling and keep its
       # internal reasoning brief.
+      # A reasoning-only exhaustion: the model spent the WHOLE ceiling
+      # thinking and emitted nothing to deliver. Named here because the
+      # recovery below branches on it twice.
+      reasoning_only? = String.trim(to_string(content)) == ""
+
       injected =
-        if String.trim(to_string(content)) == "" do
+        if reasoning_only? do
           [
             %{
               role: "system",
               content:
                 "[Your previous attempt reached the output-token limit while reasoning and " <>
-                  "produced no answer. The output budget has been raised to #{bumped}. Give your " <>
-                  "answer now, and keep internal reasoning brief so it fits.]"
+                  "produced no answer. The output budget has been raised to #{bumped} and " <>
+                  "extended thinking has been TURNED OFF for this attempt. Answer directly, " <>
+                  "without a reasoning preamble.]"
             }
           ]
         else
@@ -804,6 +1024,23 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
       # Store bumped max_tokens for this session
       Process.put(:osa_bumped_max_tokens, bumped)
+
+      # A reasoning-only exhaustion is NOT recovered by a bigger ceiling alone,
+      # and the old directive asked the model to "keep internal reasoning
+      # brief" - a polite request against a model that had just spent 64,000
+      # tokens thinking. MEASURED 2026-09-10 on a live 21-minute session: the
+      # ceiling bump took the attempt from 32,768 all-reasoning tokens to
+      # 64,000 all-reasoning tokens and still delivered nothing, so the retry
+      # cost 2x and recovered zero. Thinking is now switched off for the
+      # recovery attempt, which is the lever that actually works on a provider
+      # that will not accept a reasoning budget (see
+      # `[OI]Compat.maybe_disable_thinking/2` for the per-provider evidence).
+      #
+      # Scoped to the reasoning-only case on purpose: a content-ful truncation
+      # is a real answer that ran long, and disabling thinking there would
+      # discard reasoning the model is mid-way through for no reason.
+      if reasoning_only?, do: Process.put(:osa_disable_thinking, true)
+
       run(state)
     end
   end
@@ -1054,6 +1291,20 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     announcement = Guardrails.announcement_continue(content, state.messages)
     announcement_spent = Map.get(state, :announcement_continues, 0)
 
+    # Captured BEFORE `maybe_wait_for_user/2` so the halt clause below can tell
+    # a goal this call JUST paused (real news, worth surfacing) apart from one
+    # that was already dormant-paused before this turn even started (a
+    # unrelated Q&A turn must not have its own answer stomped by a stale
+    # pause notice — see the halt clause's own comment).
+    goal_was_driving? = GoalTracker.continue?(state.session_id)
+
+    state =
+      if not Cancellation.cancelled?(state.session_id) do
+        GoalVerifier.maybe_wait_for_user(state, content)
+      else
+        state
+      end
+
     # An exhausted cap must be LOUD. One nudge is the whole budget, so this
     # backstop is done — and "the model announced again after being told" and
     # "the model reported a result" are different endings that used to look
@@ -1098,6 +1349,75 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         )
 
         finish_turn(content, state)
+
+      # The triage above (`maybe_wait_for_user/2`) decided the next useful action
+      # belongs to the human, so the turn stops here and returns the waiting
+      # notice instead of the answer.
+      #
+      # `content` is appended FIRST, because the answer has already streamed to
+      # the user and `Loop.run_and_reply/1` records only the RETURNED string as
+      # this turn's assistant message. Halting on the bare state wrote
+      # "Waiting for your decision - not complete." into the transcript in the
+      # place of the answer the user had just read: it was absent from
+      # `state.messages`, absent from the persisted session, and absent from
+      # context after `/goal approve` — the model resumed with no record of what
+      # it had proposed, asked to act on an approval of something it could no
+      # longer see. Every sibling clause in this `cond` appends the answer before
+      # it continues; a clause that stops must do the same before it stops.
+      #
+      # `goal_was_driving?` scopes this to a FRESH transition — the SAME guard
+      # the sibling `:paused` clause below already uses, for the identical
+      # reason. Unscoped, this fired whenever the goal was ALREADY
+      # `:awaiting_user` from an EARLIER turn too, so a genuine new user
+      # message — one directly answering the pending question in plain chat,
+      # not `/goal approve`/`/goal reject` — got its own on-topic reply
+      # discarded and replaced with the same static "waiting for your
+      # decision" notice every time, no matter what it said. A goal already
+      # dormant-awaiting before this turn even started must let THIS turn's
+      # real answer through; the pending decision is unaffected either way
+      # (only `/goal approve`/`/goal reject` resolves it).
+      goal_was_driving? and GoalTracker.awaiting_user?(state.session_id) ->
+        state = %{state | messages: state.messages ++ [%{role: "assistant", content: content}]}
+
+        TerminalSource.halt(GoalTracker.waiting_message(state.session_id), state, :control)
+
+      # `maybe_wait_for_user/2` (just above) is the ONE reverify path that can
+      # transition a goal to `:paused` without ever passing back through the
+      # top of `run/1` — its sibling, the tool-called path, always re-enters
+      # `run/1` after `GoalVerifier.maybe_gate/1`, where the `iter > 0 and
+      # GoalTracker.paused?/1` clause already halts with the reason and gaps.
+      # This one does not recurse: it falls straight through this SAME `cond`
+      # toward `finish_turn`, so before this clause a goal the panel just
+      # auto-paused (a real, unresolved-gaps stall or a persistently off-track
+      # verdict) surfaced NOTHING but the model's own last line of text — the
+      # exact silent-circling defect this halt closes.
+      #
+      # Scoped to a FRESH transition (`goal_was_driving?`, captured before
+      # `maybe_wait_for_user/2` ran): a goal already dormant-paused before this
+      # turn started must not have this turn's real answer to an unrelated
+      # question stomped by a stale pause notice — see the "never swallows a
+      # fresh turn" precedent in `goal_pause_halt_message/2`'s call site.
+      goal_was_driving? and GoalTracker.paused?(state.session_id) ->
+        snap = GoalTracker.snapshot(state.session_id)
+        reason = Map.get(snap || %{}, :pause_reason, :no_progress)
+        gaps = Map.get(snap || %{}, :last_gaps, []) || []
+
+        Logger.info(
+          "[loop] Goal auto-paused (#{reason}) after a tool-call-free reverify round " <>
+            "(iteration #{state.iteration})"
+        )
+
+        Bus.emit(:system_event, %{
+          event: :goal_auto_paused,
+          session_id: state.session_id,
+          iteration: state.iteration,
+          reason: reason,
+          gaps: gaps
+        })
+
+        state = %{state | messages: state.messages ++ [%{role: "assistant", content: content}]}
+
+        TerminalSource.halt(goal_pause_halt_message(reason, gaps), state, :control)
 
       prose_continue?(state) and state.auto_continues < 2 and
           Guardrails.wants_to_continue?(content) ->
@@ -1673,6 +1993,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       else
         content
       end
+
+    # Strip the `BACKGROUND_INTENTIONAL:` escape AFTER blocked_finish?/finish_receipt
+    # have consumed it (it releases the gate) — otherwise the internal marker leaks
+    # into the user's final answer.
+    content = VerificationGate.strip_background_marker(content)
 
     case run_stop_hooks(content, state) do
       {:continue, inject_msg, state} ->
@@ -2295,86 +2620,63 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # char/word heuristic guarded by emit_context_pressure's own rescue.
     Telemetry.emit_context_pressure(state)
 
-    # Short-circuit: if ALL tool calls were computer_use and ALL succeeded,
-    # return directly to avoid burning another LLM round-trip.
-    all_computer_use = Enum.all?(tool_calls, fn tc -> tc.name == "computer_use" end)
+    # Always return computer-use results to the model. In particular, a
+    # screenshot is an observation, not a completed task: the next iteration
+    # must inspect it, perform the requested action, and verify the outcome.
+    # The former computer_use fast-return ended the turn at the screenshot and
+    # surfaced only `[image: ...]` to the user.
+    Checkpoint.checkpoint_state(state)
 
-    all_succeeded =
-      Enum.all?(results, fn {_tc, {_msg, result_str}} ->
-        not String.starts_with?(result_str, "Error:")
-      end)
+    state = ToolExecutor.inject_read_nudges(state, tool_calls)
 
-    if all_computer_use and all_succeeded do
-      summary =
-        results
-        |> Enum.map(fn {_tc, {_msg, result_str}} -> result_str end)
-        |> Enum.join("\n")
+    # Invalidate system message cache if memory_save ran successfully
+    if Enum.any?(tool_calls, fn tc -> tc.name == "memory_save" end) and
+         Enum.any?(results, fn {tc, {_msg, result_str}} ->
+           tc.name == "memory_save" and not String.starts_with?(result_str, "Error:")
+         end) do
+      Process.put(:osa_memory_version, Process.get(:osa_memory_version, 0) + 1)
+    end
 
-      # Even on this fast-return path (no synthesis round-trip), run doom-loop
-      # detection so a pathological computer_use-only loop is still caught by the
-      # identical-call / absolute call-cap safety net, and so these calls count
-      # toward total_tool_calls (DoomLoop.check increments it). Respect a halt.
-      case DoomLoop.check(results, tool_calls, state) do
-        {:halt, doom_message, halted_state} ->
-          Resample.handle(doom_message, halted_state, resample_snapshot, &run/1)
+    state = inject_post_tool_nudges(state, tool_calls)
 
-        {:ok, state} ->
-          {summary, Map.put(state, :doom_resamples, 0)}
-      end
-    else
-      Checkpoint.checkpoint_state(state)
+    case DoomLoop.check(results, tool_calls, state) do
+      {:halt, doom_message, halted_state} ->
+        Resample.handle(doom_message, halted_state, resample_snapshot, &run/1)
 
-      state = ToolExecutor.inject_read_nudges(state, tool_calls)
+      {:ok, state} ->
+        # Clean turn — reset the consecutive-resample budget so recovery
+        # attempts bound only a *stuck* stretch, not the session lifetime.
+        state = Map.put(state, :doom_resamples, 0)
 
-      # Invalidate system message cache if memory_save ran successfully
-      if Enum.any?(tool_calls, fn tc -> tc.name == "memory_save" end) and
-           Enum.any?(results, fn {tc, {_msg, result_str}} ->
-             tc.name == "memory_save" and not String.starts_with?(result_str, "Error:")
-           end) do
-        Process.put(:osa_memory_version, Process.get(:osa_memory_version, 0) + 1)
-      end
+        # Auto-mode: if the safety Guardian paused this session after N blocked
+        # dangerous actions, halt the loop and surface a review prompt instead
+        # of recursing into another unattended iteration.
+        if state.permission_tier == :auto and
+             OptimalSystemAgent.Agent.Safety.Guardian.paused?(state.session_id) do
+          blocks = OptimalSystemAgent.Agent.Safety.Guardian.block_count(state.session_id)
 
-      state = inject_post_tool_nudges(state, tool_calls)
+          pause_message =
+            "Auto-mode paused for review: #{blocks} dangerous action(s) were blocked. " <>
+              "Review the blocked calls, then resume to continue."
 
-      case DoomLoop.check(results, tool_calls, state) do
-        {:halt, doom_message, halted_state} ->
-          Resample.handle(doom_message, halted_state, resample_snapshot, &run/1)
-
-        {:ok, state} ->
-          # Clean turn — reset the consecutive-resample budget so recovery
-          # attempts bound only a *stuck* stretch, not the session lifetime.
-          state = Map.put(state, :doom_resamples, 0)
-
-          # Auto-mode: if the safety Guardian paused this session after N blocked
-          # dangerous actions, halt the loop and surface a review prompt instead
-          # of recursing into another unattended iteration.
-          if state.permission_tier == :auto and
-               OptimalSystemAgent.Agent.Safety.Guardian.paused?(state.session_id) do
-            blocks = OptimalSystemAgent.Agent.Safety.Guardian.block_count(state.session_id)
-
-            pause_message =
-              "Auto-mode paused for review: #{blocks} dangerous action(s) were blocked. " <>
-                "Review the blocked calls, then resume to continue."
-
-            TerminalSource.halt(pause_message, state, :control)
-          else
-            # Goal-level verification runs HERE — at the tool-result boundary,
-            # before the next generation — and nowhere else. Two reasons:
-            #
-            #   1. ONE ENDING. Assistant text streams to the user token-by-token,
-            #      so a conclusion cannot be retracted once generated. Verifying
-            #      after a text response and then looping is what made a turn end
-            #      twice. Verifying here puts the panel's findings in context
-            #      *before* the model writes its conclusion, so there is exactly
-            #      one.
-            #   2. CHEAP BY DEFAULT. `maybe_gate/1` is a three-tier gate: free
-            #      local skips → one cheap triage call → the expensive skeptic
-            #      panel only on `candidate_complete`. It appends at most one
-            #      system directive and never raises.
-            state = GoalVerifier.maybe_gate(state)
-            run(state)
-          end
-      end
+          TerminalSource.halt(pause_message, state, :control)
+        else
+          # Goal-level verification runs HERE — at the tool-result boundary,
+          # before the next generation — and nowhere else. Two reasons:
+          #
+          #   1. ONE ENDING. Assistant text streams to the user token-by-token,
+          #      so a conclusion cannot be retracted once generated. Verifying
+          #      after a text response and then looping is what made a turn end
+          #      twice. Verifying here puts the panel's findings in context
+          #      *before* the model writes its conclusion, so there is exactly
+          #      one.
+          #   2. CHEAP BY DEFAULT. `maybe_gate/1` is a three-tier gate: free
+          #      local skips → one cheap triage call → the expensive skeptic
+          #      panel only on `candidate_complete`. It appends at most one
+          #      system directive and never raises.
+          state = GoalVerifier.maybe_gate(state)
+          run(state)
+        end
     end
   end
 
@@ -3173,7 +3475,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   end
 
   defp inject_iteration_budget(context, state) do
-    max_iter = max_iterations()
+    max_iter = max_iterations(state)
     remaining = max_iter - state.iteration
 
     # Only nag when GENUINELY near the ceiling — not every iteration. The old

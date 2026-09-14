@@ -183,6 +183,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.MixtureOfAgents.Handler do
         :groq -> System.get_env("GROQ_API_KEY") != nil
         :together -> System.get_env("TOGETHER_API_KEY") != nil
         :openrouter -> System.get_env("OPENROUTER_API_KEY") != nil
+        :surplus -> System.get_env("SURPLUS_API_KEY") != nil
         :google -> System.get_env("GOOGLE_API_KEY") != nil
         :cohere -> System.get_env("COHERE_API_KEY") != nil
         # Ollama is always available if running locally

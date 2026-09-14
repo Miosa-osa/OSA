@@ -143,8 +143,32 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       requires_subscription: nil,
       note: "Z.ai flagship — long-horizon agentic + coding"
     },
-    # GLM-5.3-Flash — Ollama tag `glm-5.3-flash:cloud` (the bare `glm-5.3` is
-    # still a 404; only the Flash line shipped). The FIRST natively-multimodal
+    # GLM-5.3 - the bare flagship, now live on Ollama. Probed 2026-08-30 via a
+    # signed-in local daemon: 1,048,576 ctx, tools + thinking, NO vision (the
+    # Flash sibling below is the multimodal one); 753B glm_dsa_moe. The
+    # 2026-08-01 pass recorded only a 404 here. Pricing left nil - Z.ai's
+    # first-party list rate for the bare 5.3 is unconfirmed, and a guessed price
+    # is worse than an honest $0.00 + a log.
+    %{
+      id: "glm-5.3:cloud",
+      name: "GLM-5.3",
+      ctx: 1_048_576,
+      ctx_source: :probe,
+      tools: true,
+      thinking: true,
+      vision: false,
+      audio: false,
+      # CONFIRMED 2026-09-01 from Ollama's published pricing: glm-5.3 is
+      # $1.40 in / $4.40 out per M tokens (cached input $0.26), matching the
+      # {1.40, 4.40} Z.ai lists for the bare id. Was `nil` while the rate was
+      # unconfirmed; the default model must no longer account at $0.00.
+      pricing: {1.40, 4.40},
+      recommended: false,
+      requires_subscription: nil,
+      note: "1M ctx, 753B MoE - Z.ai flagship, long-horizon agentic coding"
+    },
+    # GLM-5.3-Flash - Ollama tag `glm-5.3-flash:cloud` (the bare `glm-5.3` now
+    # ships too; see the entry above). The FIRST natively-multimodal
     # GLM text tag: image + video inline, unlike every glm-N text model before
     # it. 320B/18B MoE, 1M window, 131K output. ctx :static (from Ollama's
     # library page + Z.ai spec, not a live /api/show probe).
@@ -247,10 +271,32 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: true,
       audio: false,
-      pricing: {0.30, 1.20},
+      # CORRECTED 2026-09-01 from Ollama's published pricing: minimax-m3 is
+      # $0.60 in / $2.40 out per M tokens (cached input $0.12). It was mistakenly
+      # carrying m2.7's $0.30/$1.20 — half the true output cost, under-reported.
+      pricing: {0.60, 2.40},
       recommended: false,
       requires_subscription: nil,
       note: "512K ctx, native multimodal + agentic"
+    },
+    # MiniMax M2.7 - the M2-series predecessor to M3. Probed 2026-08-30 via a
+    # signed-in local daemon: 196,608 ctx, tools + thinking, no vision (M3 is the
+    # multimodal one); 229B, family minimax-m2.
+    %{
+      id: "minimax-m2.7:cloud",
+      name: "MiniMax M2.7",
+      ctx: 196_608,
+      ctx_source: :probe,
+      tools: true,
+      thinking: true,
+      vision: false,
+      audio: false,
+      # CONFIRMED 2026-09-01 from Ollama's published pricing: minimax-m2.7 is
+      # $0.30 in / $1.20 out per M tokens (cached input $0.06).
+      pricing: {0.30, 1.20},
+      recommended: false,
+      requires_subscription: nil,
+      note: "192K ctx, 229B - M2-series coding + agentic"
     },
     %{
       id: "deepseek-v4-pro:cloud",
@@ -267,6 +313,40 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       recommended: false,
       requires_subscription: nil,
       note: "512K ctx, frontier MoE, multiple reasoning modes"
+    },
+    # DeepSeek V4.1 Flash - probed 2026-09-10 through a signed-in local daemon:
+    # `deepseek_v41.context_length` = 1,048,576 and capabilities
+    # completion / thinking / tools / vision (no audio); 763B params, FP8.
+    # The sibling of `deepseek-v4-flash:cloud` below, a generation newer and
+    # with the vision capability that tag does not carry.
+    #
+    # PRICED AT THE PEAK RATE. DeepSeek publishes two columns for this id and
+    # the off-peak one is half the peak one: $0.15 in / $0.60 out per M
+    # (cache-hit $0.003) off-peak, $0.30 / $1.20 (cache-hit $0.006) during peak
+    # hours, which are 01:00-04:00 and 06:00-10:00 UTC Monday-Friday. The PEAK
+    # figure is recorded, the same call `glm-5.3-flash:cloud` makes about its
+    # launch promo: accounting the discounted rate would under-count every turn
+    # taken inside a peak window, and the cheap number is the floor, not the
+    # estimate. Ollama's own model page and OpenRouter's live endpoint for the
+    # bare id both report this same {0.30, 1.20}.
+    %{
+      id: "deepseek-v4.1-flash:cloud",
+      name: "DeepSeek V4.1 Flash",
+      ctx: 1_048_576,
+      ctx_source: :probe,
+      tools: true,
+      thinking: true,
+      vision: true,
+      audio: false,
+      pricing: {0.30, 1.20},
+      recommended: false,
+      requires_subscription: nil,
+      # Says what it IS, not that it is cheap: at {0.30, 1.20} this tag costs
+      # more than twice its own sibling `deepseek-v4-flash:cloud` and more per
+      # output token than `deepseek-v4-pro:cloud`. The earlier draft of this
+      # note called it DeepSeek's "cheap 1M tier", which the table itself
+      # contradicts two rows down.
+      note: "1M ctx, 763B MoE - vision + thinking, newer sibling of V4 Flash"
     },
     %{
       id: "deepseek-v4-flash:cloud",
@@ -291,7 +371,9 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: false,
       audio: false,
-      pricing: nil,
+      # CONFIRMED 2026-09-01 from Ollama's published pricing: gpt-oss:120b is
+      # $0.15 in / $0.60 out per M tokens (cached input $0.014).
+      pricing: {0.15, 0.60},
       recommended: false,
       requires_subscription: nil,
       note: "OpenAI open-weight, strong reasoning"
@@ -305,7 +387,9 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: true,
       audio: false,
-      pricing: nil,
+      # CONFIRMED 2026-09-01 from Ollama's published pricing: qwen3.5 (397b) is
+      # $0.60 in / $3.60 out per M tokens (cached input $0.60 — no cache discount).
+      pricing: {0.60, 3.60},
       recommended: false,
       requires_subscription: nil,
       note: "multimodal, vision + tools"
@@ -319,7 +403,9 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: false,
       audio: false,
-      pricing: nil,
+      # CONFIRMED 2026-09-01 from Ollama's published pricing: nemotron-3-super is
+      # $0.015 in / $0.60 out per M tokens (cached input $0.015).
+      pricing: {0.015, 0.60},
       recommended: false,
       requires_subscription: nil,
       note: "262K ctx, 120B MoE — efficient agentic"
@@ -335,7 +421,9 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       # Ollama's own /api/show reports no "audio" capability for this tag even
       # though the model card lists audio input — trust the daemon, not the card.
       audio: false,
-      pricing: nil,
+      # CONFIRMED 2026-09-01 from Ollama's published pricing: gemma4 is
+      # $0.14 in / $0.40 out per M tokens (cached input $0.05).
+      pricing: {0.14, 0.40},
       recommended: false,
       requires_subscription: nil,
       note: "262K ctx, frontier reasoning + vision"
@@ -349,7 +437,10 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: true,
       audio: false,
-      pricing: nil,
+      # Inherits gemma4's published rate (2026-09-01): Ollama lists one price for
+      # the gemma4 family, so the pinned 31B size tag bills at the same
+      # $0.14 in / $0.40 out per M tokens (cached input $0.05).
+      pricing: {0.14, 0.40},
       recommended: false,
       requires_subscription: nil,
       note: "262K ctx, pinned 31B tag of Gemma 4"
@@ -363,7 +454,9 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       thinking: true,
       vision: false,
       audio: false,
-      pricing: nil,
+      # CONFIRMED 2026-09-01 from Ollama's published pricing: gpt-oss:20b is
+      # $0.07 in / $0.30 out per M tokens (cached input $0.035).
+      pricing: {0.07, 0.30},
       recommended: false,
       requires_subscription: nil,
       note: "OpenAI open-weight, fast — light utility tier"

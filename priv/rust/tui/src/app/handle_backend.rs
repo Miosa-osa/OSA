@@ -367,12 +367,15 @@ impl App {
                     // Reasoning is over once real tokens stream. Freeze the
                     // thinking box to its done state ("∴ Thought for Ns") instead
                     // of clearing it, so the reasoning summary persists rather
-                    // than vanishing. `finish()` is idempotent, and a later
-                    // ThinkingDelta (multi-iteration turn) starts a fresh run.
-                    // thinking_buf is kept — it is the transcript accumulator.
-                    if !self.thinking_box.is_empty() {
-                        self.thinking_box.finish();
-                    }
+                    // than vanishing — UNLESS it is already frozen from an
+                    // EARLIER action (a prior tool call, a prior text chunk),
+                    // in which case that summary was already shown once and
+                    // must not keep rendering as current for this new one
+                    // (G2 — see `ThinkingBox::on_action_start`). A later
+                    // ThinkingDelta (multi-iteration turn) still starts a
+                    // fresh run. thinking_buf is kept — it is the transcript
+                    // accumulator.
+                    self.thinking_box.on_action_start();
                     // Deltas do not paint directly — they go through the
                     // de-jitter buffer, which hands back only what this instant
                     // is owed. On a stream that already arrives smoothly (and
@@ -523,14 +526,14 @@ impl App {
                 // think_row_height). If the model went thinking → straight to a
                 // tool call with no interleaved streaming text, the box would
                 // stay up and hide the live tool feed for the rest of the turn.
-                // Clear it here (StreamingToken already does the same) so each
-                // running tool is visible with its name + status + spinner.
-                // Freeze to the done state ("∴ Thought for Ns") rather than
-                // clearing so the reasoning summary persists across the
-                // reasoning→tool edge instead of silently vanishing.
-                if !self.thinking_box.is_empty() {
-                    self.thinking_box.finish();
-                }
+                // `on_action_start` (G2) freezes it to the done state ("∴
+                // Thought for Ns") the FIRST time — so the reasoning summary
+                // persists across the reasoning→tool edge instead of silently
+                // vanishing — but CLEARS it if it was already frozen from an
+                // earlier action, so a run of several tool calls with no fresh
+                // reasoning between them doesn't keep hiding the live tool
+                // feed behind the SAME stale thought for the rest of the turn.
+                self.thinking_box.on_action_start();
 
                 if !self.activity.is_active() {
                     self.activity.start();
@@ -884,11 +887,8 @@ impl App {
                 // a 0-100 percentage. If it's absent/zero but the token counts are
                 // present, derive the ratio from estimated/max so the meter still
                 // reflects real usage instead of sticking at 0%.
-                let mut ratio = if utilization > 1.0 {
-                    utilization / 100.0
-                } else {
-                    utilization
-                };
+                // The wire unit is percent, including values below 1%.
+                let mut ratio = utilization / 100.0;
                 if ratio <= 0.0 && max_tokens > 0 && estimated_tokens > 0 {
                     ratio = estimated_tokens as f64 / max_tokens as f64;
                 }
@@ -1170,6 +1170,16 @@ impl App {
                     // automatically instead of only after the dialog is opened.
                     let enabled = resp.servers.iter().filter(|s| s.enabled).count();
                     self.status.set_mcp(enabled);
+                    // Cost-visibility chip: how many tokens the currently-active
+                    // MCP tool exposure is estimated to cost. 0 against an old
+                    // backend that predates this field (no chip suffix, just the
+                    // count).
+                    self.status.set_mcp_tokens(
+                        resp.mcp_context
+                            .as_ref()
+                            .map(|c| c.estimated_tokens)
+                            .unwrap_or(0),
+                    );
                     let servers = resp
                         .servers
                         .into_iter()
@@ -1442,6 +1452,7 @@ impl App {
             },
             BackendEvent::CommandResult(result) => {
                 self.handle_command_result(result);
+                self.maybe_dequeue_message();
             }
             BackendEvent::SelfUpdate(ev) => {
                 self.handle_self_update(ev);
@@ -1452,10 +1463,7 @@ impl App {
                     // Keep occupancy. Zeroing used tokens on switch made the
                     // bar lie: the transcript is still in the session, only
                     // the ceiling changed (and may have been compacted).
-                    let used = resp
-                        .tokens_after
-                        .or(resp.tokens_before)
-                        .unwrap_or(0);
+                    let used = resp.tokens_after.or(resp.tokens_before).unwrap_or(0);
                     if let Some(ctx) = resp.context_window {
                         let ratio = if ctx > 0 {
                             used as f64 / ctx as f64
@@ -1483,10 +1491,8 @@ impl App {
                     self.toasts.push(toast, level);
                     if let Some(w) = resp.warning.clone() {
                         if !w.is_empty() {
-                            self.toasts.push(
-                                w,
-                                crate::components::toast::ToastLevel::Warning,
-                            );
+                            self.toasts
+                                .push(w, crate::components::toast::ToastLevel::Warning);
                         }
                     }
                 }
@@ -1503,6 +1509,7 @@ impl App {
 
             BackendEvent::SessionCreated(result) => match result {
                 Ok(resp) => {
+                    self.session_creation_pending = false;
                     let resumed = resp.status.as_deref() == Some("resumed");
                     self.session_id = resp.id.clone();
                     // A resumed session already has a title; a brand-new one does
@@ -1584,10 +1591,26 @@ impl App {
                             crate::components::toast::ToastLevel::Info,
                         );
                     }
+                    // No drain here on purpose: `start_sse` above reattaches the
+                    // stream to this id, and `SseConnected` is the boundary that
+                    // drains the queue. Sending a queued prompt from here would
+                    // race the attach and stream the answer into a session
+                    // nothing is listening on yet.
                 }
                 Err(e) => {
+                    // **Reopen the gate.** `create_session` closes it
+                    // (`session_creation_pending = true`) and, until this line,
+                    // only the `Ok` arm above ever reopened it — so a failed
+                    // create left `startup_session_pending` true forever. From
+                    // there `submit_input` enqueued every message and returned,
+                    // and `maybe_dequeue_message` early-returned at every
+                    // turn-completion site: the user typed, watched a dim queued
+                    // line pile up, and nothing was ever sent, with no way out
+                    // short of restarting. A failed create is a failed create —
+                    // it must not also be a wedged session.
+                    self.session_creation_pending = false;
                     self.toasts.push(
-                        format!("Session create failed: {}", e),
+                        format!("Session create failed: {} \u{2014} /new to retry", e),
                         crate::components::toast::ToastLevel::Error,
                     );
                 }
@@ -1820,8 +1843,14 @@ impl App {
             }
             BackendEvent::LocalModelRemoved(result) => {
                 let msg = match &result {
-                    Ok(tag) => Some((format!("Removed {}", tag), crate::components::toast::ToastLevel::Info)),
-                    Err(e) => Some((format!("Remove failed: {}", e), crate::components::toast::ToastLevel::Error)),
+                    Ok(tag) => Some((
+                        format!("Removed {}", tag),
+                        crate::components::toast::ToastLevel::Info,
+                    )),
+                    Err(e) => Some((
+                        format!("Remove failed: {}", e),
+                        crate::components::toast::ToastLevel::Error,
+                    )),
                 };
                 if let Some(picker) = self.model_picker.as_mut() {
                     picker.set_local_removed(result);
@@ -1931,6 +1960,7 @@ impl App {
                 subject,
                 batch_id,
                 elapsed_ms,
+                budget_cap_usd,
             } => {
                 self.agents.agent_started(
                     &agent_name,
@@ -1940,6 +1970,14 @@ impl App {
                     batch_id,
                     elapsed_ms,
                 );
+                // 2e — record the spend ceiling this run is bounded by, so the
+                // roster can show live cost WITH the cap ("$2.48 / $4") rather
+                // than a bare number with no sense of how close it is to the
+                // limit. `None` on an older backend leaves the field unset,
+                // same as every other cost reading degrading to "—"/no cap.
+                if let Some(cap) = budget_cap_usd {
+                    self.agents.set_agent_budget_cap(&agent_name, cap);
+                }
                 // Short human label, never the raw `agent:session-…:osa-x` key.
                 let short = crate::components::agents::short_agent_label(&agent_name);
                 let display = if role.is_empty() {
@@ -1965,6 +2003,8 @@ impl App {
                 failure_count,
                 delivery_status,
                 available_controls,
+                context_percent,
+                cost_usd,
             } => {
                 self.agents.agent_progress(
                     &agent_name,
@@ -1975,6 +2015,10 @@ impl App {
                     recent_actions,
                     elapsed_ms,
                 );
+                self.agents.set_agent_context(&agent_name, context_percent);
+                // Live per-worker cost (item-10): the truthful $ meter reads this,
+                // never the raw token total. `None` leaves the last value intact.
+                self.agents.set_agent_cost(&agent_name, cost_usd);
                 self.agents.agent_runtime(
                     &agent_name,
                     active_skills,
@@ -2007,6 +2051,28 @@ impl App {
                 // Trail length can change the panel height — keep layout in sync.
                 self.recompute_layout();
             }
+            // Monitors / watch-tasks (C1b): render as nodes in the agent tree,
+            // nested under their parent agent (or the root). Layout can change, so
+            // recompute after each.
+            BackendEvent::MonitorStarted {
+                id,
+                label,
+                parent_agent_id,
+            } => {
+                self.agents.monitor_started(&id, &label, parent_agent_id);
+                self.recompute_layout();
+            }
+            BackendEvent::MonitorEvent { id, detail } => {
+                self.agents.monitor_event(&id, &detail);
+            }
+            BackendEvent::MonitorDone { id, state, detail } => {
+                self.agents.monitor_done(
+                    &id,
+                    crate::components::agents::MonitorState::from_wire(&state),
+                    detail,
+                );
+                self.recompute_layout();
+            }
             BackendEvent::AgentControlResult {
                 agent_id,
                 action,
@@ -2035,17 +2101,28 @@ impl App {
                 tool_uses,
                 tokens_used,
                 summary,
+                resumable,
                 ..
             } => {
                 // The orchestrator frame always carries both counters, so they
                 // are authoritative here (unlike the background path, whose
-                // `usage` map may be absent entirely).
-                self.agents.agent_completed(
-                    &agent_name,
-                    Some(tool_uses),
-                    Some(tokens_used),
-                    summary,
-                );
+                // `usage` map may be absent entirely). A capped run is surfaced
+                // as its own resumable-partial state, never a clean "Done".
+                if resumable {
+                    self.agents.agent_partial(
+                        &agent_name,
+                        Some(tool_uses),
+                        Some(tokens_used),
+                        summary,
+                    );
+                } else {
+                    self.agents.agent_completed(
+                        &agent_name,
+                        Some(tool_uses),
+                        Some(tokens_used),
+                        summary,
+                    );
+                }
                 self.sidebar.set_current_agent("");
                 // Clear the stale "@agent: subject" spinner label set on every
                 // progress tick — otherwise the leader spinner keeps naming a
@@ -2489,12 +2566,12 @@ impl App {
                 // the agent's context — show why the agent is about to pivot.
                 let note = if summary.trim().is_empty() {
                     format!(
-                        "\u{2699} Reacting to {} completed background task(s)",
+                        "\u{2699} Reading {} completed result(s) and synthesizing\u{2026}",
                         count
                     )
                 } else {
                     format!(
-                        "\u{2699} Reacting to {} completed background task(s) \u{2014} {}",
+                        "\u{2699} Reading {} completed result(s) and synthesizing \u{2014} {}",
                         count, summary
                     )
                 };
@@ -2802,6 +2879,10 @@ impl App {
                 }
                 Err(e) => {
                     debug!("Onboarding check failed: {}", e);
+                    self.toasts.push(
+                        format!("Startup check failed: {e}. Input is queued; use /new to retry."),
+                        crate::components::toast::ToastLevel::Error,
+                    );
                 }
             },
 
@@ -2943,6 +3024,11 @@ impl App {
                     turn_count,
                     verify_run_count,
                     pause_reason,
+                    // `GoalTransition` is the routine lifecycle chatter, not
+                    // the completion overview — those fields ride on
+                    // `GoalCompletionOverview` / the `/goal` HTTP pull
+                    // (`apply_goal_status`) instead.
+                    ..Default::default()
                 };
                 self.goal_status = goal
                     .as_ref()
@@ -2958,6 +3044,41 @@ impl App {
                 }
                 self.sync_goal_indicator();
                 self.recompute_layout();
+            }
+
+            // Item #3 — a goal reached a TERMINAL status (completed/blocked/
+            // abandoned): open the full-screen completion report. Fired
+            // exactly once per terminal transition (see
+            // `GoalTracker.maybe_emit_completion_overview/1`), separately from
+            // the routine `GoalTransition` chatter above.
+            BackendEvent::GoalCompletionOverview {
+                goal_id: _,
+                goal,
+                status,
+                pause_reason,
+                gaps,
+                work_summary,
+                acceptance_criteria,
+                turn_count: _,
+                verify_run_count: _,
+                latest,
+            } => {
+                // The event only ever fires on a terminal status, but a
+                // string off the wire is never trusted blindly — an
+                // unrecognized spelling degrades to "say nothing" rather than
+                // a fabricated outcome.
+                use crate::components::completion_panel::{CompletionOutcome, CompletionReport};
+                if let Some(outcome) = CompletionOutcome::from_status(&status) {
+                    self.open_completion_panel(CompletionReport {
+                        outcome,
+                        goal: goal.unwrap_or_default(),
+                        work_summary,
+                        acceptance_criteria: acceptance_criteria.unwrap_or_default(),
+                        gaps,
+                        pause_reason: pause_reason.unwrap_or_default(),
+                        latest: latest.unwrap_or_default(),
+                    });
+                }
             }
 
             // === Context compaction: make a multi-minute blocking step visible ===
@@ -3374,11 +3495,29 @@ impl App {
                         self.transition(AppState::Idle);
                     }
 
+                    // First run has no session yet — the wizard branch replaced
+                    // the resolution step. Without this every message typed
+                    // after setup is enqueued forever.
+                    self.resolve_session_after_onboarding();
+
                     // Auto-send bootstrap message — agent speaks first
-                    // This kicks off the BOOTSTRAP.md identity ritual
-                    self.submit_prompt("Hey, I just set you up. What's good?");
+                    // This kicks off the BOOTSTRAP.md identity ritual.
+                    //
+                    // Through `submit_input`, not `submit_prompt`: the session
+                    // requested above does not exist yet, and `submit_prompt`
+                    // would fire the greeting at the provisional id that
+                    // `SessionCreated` is about to replace — the very race the
+                    // startup gate exists to prevent. `submit_input` respects
+                    // that gate, so the greeting queues and goes out the moment
+                    // the real id lands.
+                    self.submit_input("Hey, I just set you up. What's good?");
                 }
                 Err(e) => {
+                    // Setup failed, but the dialog handler already dismissed the
+                    // wizard before POSTing, so the user is sitting at an Idle
+                    // prompt that the unresolved startup gate is still swallowing
+                    // input from. Give them a session to retry in.
+                    self.resolve_session_after_onboarding();
                     self.toasts.push(
                         format!("Onboarding failed: {}", e),
                         crate::components::toast::ToastLevel::Error,

@@ -233,7 +233,14 @@ mod tests {
 
     #[test]
     fn the_native_channel_is_selectable_by_several_obvious_names() {
-        for name in ["system", "native", "desktop", "notification", "SYSTEM", " Native "] {
+        for name in [
+            "system",
+            "native",
+            "desktop",
+            "notification",
+            "SYSTEM",
+            " Native ",
+        ] {
             assert_eq!(
                 NotifyChannel::parse(name),
                 NotifyChannel::System,

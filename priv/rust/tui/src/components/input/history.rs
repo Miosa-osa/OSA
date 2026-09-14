@@ -297,8 +297,15 @@ mod tests {
             let mut h = History::load_from(Some(path.clone()));
             h.push("new entry".to_string());
 
-            assert_eq!(mode_of(&path), 0o600, "pre-existing 0644 history not repaired");
-            assert_eq!(History::load_from(Some(path)).entries(), &["old", "new entry"]);
+            assert_eq!(
+                mode_of(&path),
+                0o600,
+                "pre-existing 0644 history not repaired"
+            );
+            assert_eq!(
+                History::load_from(Some(path)).entries(),
+                &["old", "new entry"]
+            );
         }
     }
 }

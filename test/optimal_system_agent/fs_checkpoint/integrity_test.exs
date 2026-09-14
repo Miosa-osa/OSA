@@ -32,11 +32,32 @@ defmodule OptimalSystemAgent.FSCheckpoint.IntegrityTest do
         Application.delete_env(:optimal_system_agent, :fs_checkpoint_repo_path)
       end
 
-      File.rm_rf!(repo)
-      File.rm_rf!(work)
+      rm_rf_retry!(repo)
+      rm_rf_retry!(work)
     end)
 
     {:ok, repo: repo, work: work}
+  end
+
+  # `File.rm_rf!/1` lists a directory then deletes each entry, and is not
+  # atomic against the tree changing underneath it — on this filesystem that
+  # surfaces as an intermittent `could not remove files and directories
+  # recursively ... file already exists` for a temp dir nothing in THIS test
+  # writes to after the assertions run (every checkpoint write here is a
+  # synchronous `GenServer.call` to `Server`, already complete by the time
+  # `on_exit` fires — a background OS-level actor, not this suite, is the
+  # other writer). Retrying a few times is the standard shape for this exact
+  # known `File.rm_rf` race; it only touches teardown, never an assertion.
+  defp rm_rf_retry!(path, attempts \\ 5)
+
+  defp rm_rf_retry!(path, 1), do: File.rm_rf!(path)
+
+  defp rm_rf_retry!(path, attempts) do
+    File.rm_rf!(path)
+  rescue
+    File.Error ->
+      Process.sleep(20)
+      rm_rf_retry!(path, attempts - 1)
   end
 
   defp shadow_copy(repo, path), do: Path.join(repo, path)

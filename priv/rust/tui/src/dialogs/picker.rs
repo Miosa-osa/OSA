@@ -83,7 +83,10 @@ impl Picker {
 
     /// Handle a key event.  Returns `Some(action)` when the picker should close.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<DialogAction> {
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return None;
         }
 
@@ -196,10 +199,7 @@ impl Picker {
         let sep_y = inner.y + 1;
         let sep = "─".repeat(inner.width as usize);
         frame.render_widget(
-            Paragraph::new(Span::styled(
-                sep,
-                Style::default().fg(theme.colors.border),
-            )),
+            Paragraph::new(Span::styled(sep, Style::default().fg(theme.colors.border))),
             Rect::new(inner.x, sep_y, inner.width, 1),
         );
 

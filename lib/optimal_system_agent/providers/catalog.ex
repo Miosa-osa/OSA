@@ -80,7 +80,14 @@ defmodule OptimalSystemAgent.Providers.Catalog do
               structured_output: false,
               release_date: nil,
               cost: nil,
-              modalities: %{input: [], output: []}
+              modalities: %{input: [], output: []},
+              # Measured tok/s (visible-content only), from
+              # `OptimalSystemAgent.Providers.ModelSpeed` — `nil` until a real
+              # turn against this exact provider+model has produced one. Not
+              # populated by this struct's own constructors; a caller with
+              # access to the measured value (currently only `SurplusModels`)
+              # attaches it after building the row.
+              tok_s: nil
 
     @type t :: %__MODULE__{}
   end

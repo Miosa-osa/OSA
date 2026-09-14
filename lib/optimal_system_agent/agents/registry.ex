@@ -28,13 +28,34 @@ defmodule OptimalSystemAgent.Agents.Registry do
     |> Map.get(name)
   end
 
-  @doc "List all available agent definitions."
+  @doc """
+  List all available agent definitions, one row per name.
+
+  `definitions/0` is a map keyed by the declared `name`, so a byte-identical
+  repeat name can never appear twice here regardless of how many times a
+  source reloads — a project directory admitted mid-session by
+  `/trust accept`, a `create_agent` write, a resumed session re-running
+  `load/0` — later writes to the same key simply replace the earlier value.
+  The gap that survives that: two SOURCES declaring the same conceptual agent
+  under names that are not byte-identical (a stray trailing space, a
+  different case) never collide as map keys, so both load and both show up
+  here as if they were different agents — a "duplicate" the model sees on the
+  very next `list_agents` call after whatever admitted the second source.
+  `uniq_by` closes that at the one place every caller of this module reads
+  the roster from, without changing what `get/1` looks up by or what `load/0`
+  stores.
+  """
   @spec list() :: [map()]
   def list do
     definitions()
     |> Map.values()
     |> Enum.sort_by(& &1.name)
+    |> Enum.uniq_by(&dedup_key/1)
   end
+
+  # Case/whitespace-insensitive identity for de-duplication only — never used
+  # as a storage or lookup key, so `get/1`'s exact-name contract is unchanged.
+  defp dedup_key(agent), do: agent.name |> to_string() |> String.trim() |> String.downcase()
 
   @doc "List available agent role names."
   @spec role_names() :: [String.t()]
@@ -246,6 +267,7 @@ defmodule OptimalSystemAgent.Agents.Registry do
            tools_allowed: nil,
            tools_blocked: [],
            max_iterations: nil,
+           force_background: false,
            permission_tier: :subagent,
            system_prompt: OptimalSystemAgent.Utils.Bom.strip(content),
            source_path: path,
@@ -308,6 +330,9 @@ defmodule OptimalSystemAgent.Agents.Registry do
       provider: nullable_string(meta["provider"]),
       effort: nullable_string(meta["effort"]),
       background: parse_bool(meta["background"]),
+      # Force background even when the caller foregrounds (research fan-outs that
+      # must never lock the parent's turn). See delegate `background?/2`.
+      force_background: parse_bool(meta["force_background"]) == true,
       isolation: parse_isolation(meta["isolation"]),
       skills: List.wrap(first_present(meta, ["skills"]) || []) |> Enum.map(&to_string/1),
       mcp_servers: first_present(meta, ["mcp_servers", "mcpServers"]),

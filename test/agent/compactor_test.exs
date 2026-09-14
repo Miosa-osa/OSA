@@ -862,6 +862,27 @@ defmodule OptimalSystemAgent.Agent.CompactorTest do
       assert String.length(formatted) >= 5_000,
              "only role: tool content is capped by the summarization formatter"
     end
+
+    test "the summarization tool-output cap is runtime-configurable (gap #1)" do
+      prev = Application.get_env(:optimal_system_agent, :summary_tool_output_max_chars)
+      Application.put_env(:optimal_system_agent, :summary_tool_output_max_chars, 200)
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:optimal_system_agent, :summary_tool_output_max_chars, prev),
+          else: Application.delete_env(:optimal_system_agent, :summary_tool_output_max_chars)
+      end)
+
+      long_output = String.duplicate("z", 5_000)
+      messages = [%{role: "tool", name: "shell", tool_call_id: "t1", content: long_output}]
+
+      formatted = Compactor.format_for_summary(messages)
+
+      assert String.length(formatted) < 600,
+             "a tighter configured cap must bind (was ~2000-char default)"
+
+      assert String.contains?(formatted, "truncated")
+    end
   end
 
   # ---------------------------------------------------------------------------

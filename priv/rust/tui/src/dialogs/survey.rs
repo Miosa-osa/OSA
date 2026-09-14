@@ -327,7 +327,9 @@ impl SurveyDialog {
 
     /// Index of the free-text row in cursor / `checked` space.
     fn free_text_index(&self) -> usize {
-        self.current_question().map(|q| q.options.len()).unwrap_or(0)
+        self.current_question()
+            .map(|q| q.options.len())
+            .unwrap_or(0)
     }
 
     fn cursor_on_free_text(&self) -> bool {
@@ -749,7 +751,10 @@ impl SurveyDialog {
                 .map(|h| fit_cols(h, MAX_HEADER_COLS));
             let chip_w = chip.as_deref().map(|c| cols(c) as u16 + 2).unwrap_or(0);
             let text_w = panel.width.saturating_sub(2);
-            for (i, line) in wrap_to(&question.text, text_w, q_rows).into_iter().enumerate() {
+            for (i, line) in wrap_to(&question.text, text_w, q_rows)
+                .into_iter()
+                .enumerate()
+            {
                 let y = cy + i as u16;
                 let mut spans: Vec<Span> = Vec::new();
                 let mut avail = text_w;

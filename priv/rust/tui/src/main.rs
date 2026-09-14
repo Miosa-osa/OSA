@@ -16,27 +16,22 @@ mod a11y;
 mod app;
 mod client;
 mod clipboard;
-#[cfg(test)] mod tool_outcome_tests;
 mod components;
 mod config;
+mod dialogs;
 mod event;
 mod logging;
 mod notification;
 mod render;
 mod style;
-mod view;
-mod dialogs;
-mod util;
 mod terminal_title;
+#[cfg(test)]
+mod tool_outcome_tests;
 mod tools;
+mod util;
+mod view;
 mod voice;
 
-/// A vt100-backed `ratatui::Backend` giving tests a real terminal emulator.
-#[cfg(test)]
-mod test_backend;
-/// Scoped, restoring overrides for the process-global environment.
-#[cfg(test)]
-mod test_env;
 /// The band arbiter's contract: rects derive from measurements, bands tile the
 /// region, and the composer is never shed.
 #[cfg(test)]
@@ -44,6 +39,16 @@ mod layout_contract;
 /// Reserved-vs-drawn layout invariants for the live-region components.
 #[cfg(test)]
 mod layout_invariants;
+/// A vt100-backed `ratatui::Backend` giving tests a real terminal emulator.
+#[cfg(test)]
+mod test_backend;
+/// Scoped, restoring overrides for the process-global environment.
+#[cfg(test)]
+mod test_env;
+/// Cross-cutting visual invariants: fixed-column tool markers, context-meter
+/// pulse styling, and Unicode width panic-safety.
+#[cfg(test)]
+mod visual_invariants;
 
 fn main() -> Result<()> {
     // Parse CLI args
@@ -79,7 +84,13 @@ fn main() -> Result<()> {
     // Build and run
     let result = run(cli);
 
-    // Always restore terminal
+    // Always restore terminal. In practice this is already a no-op by the
+    // time we get here: `run`'s `TerminalGuard` restored it as `run`'s own
+    // stack unwound (`restore_terminal` is idempotent — see
+    // `TERMINAL_RESTORED`). Kept as an explicit, readable backstop for the one
+    // case that predates the guard and still matters: `run` never having
+    // reached `enable_raw_mode` at all (e.g. `Config::load` failing), where
+    // there is nothing to restore and this is a correct, cheap no-op too.
     restore_terminal()?;
 
     // ONLY NOW is it safe to write to the terminal. The inline viewport is
@@ -100,6 +111,37 @@ fn main() -> Result<()> {
             eprintln!("{}", msg);
             let _ = io::stderr().flush();
             std::process::exit(2);
+        }
+        // SIGTERM/SIGHUP/SIGQUIT: the chrome is already erased (event_loop's own
+        // teardown) and the terminal is already restored (`restore_terminal()?`
+        // above). Re-raise the SAME signal with its DEFAULT disposition rather
+        // than translating it into `Ok(())` (a laundered exit 0) or a made-up
+        // exit code — a supervisor, `$?`, or `set -e` should see the real cause
+        // of death, exactly as if this handler did not exist. Genuine SIGKILL
+        // is not, and cannot be, handled this way: no signal number ever
+        // reaches user code for it, so there is nothing to re-raise — an
+        // accepted, documented limitation, not a gap in this handler.
+        //
+        // On unix, `libc::raise` below terminates the process before
+        // execution ever reaches the `std::process::exit` fallback. On
+        // Windows this variant is never actually produced in the first place
+        // (no `tokio::signal::unix` listener runs there — see
+        // `spawn_signal_listener` in event_loop.rs, unix-only), so the `exit`
+        // below is dead in practice on that platform too; it stays as the one
+        // portable statement in this arm so the match itself needs no
+        // platform-specific arms.
+        Ok(app::resume::ExitOutcome::TerminatedBySignal(sig)) => {
+            #[cfg(unix)]
+            unsafe {
+                libc::signal(sig, libc::SIG_DFL);
+                libc::raise(sig);
+            }
+            // The re-raised signal's default disposition terminates the
+            // process before execution returns here for SIGTERM/SIGHUP/SIGQUIT
+            // on unix. Kept as an honest, non-zero fallback rather than
+            // falling through to `Ok(())`, in case that ever stops being true
+            // — and as the only thing this arm does at all on non-unix.
+            std::process::exit(128 + sig);
         }
         Err(e) => Err(e),
     }
@@ -133,6 +175,17 @@ fn run(cli: config::cli::Cli) -> Result<app::resume::ExitOutcome> {
     // instead of the terminal's native scrollback; users reach scrollback with
     // Shift+wheel (terminal bypass) or the Ctrl+O transcript reader.
     enable_raw_mode()?;
+    // RAII backstop: from here on, ANY return out of `run` — the normal `Ok`
+    // at the bottom, an early `?`, or a panic unwinding through this frame —
+    // drops `_terminal_guard` and restores the terminal before control reaches
+    // anywhere else. This used to rely solely on the explicit
+    // `restore_terminal()?` call in `main` below plus the panic hook; both
+    // still exist and still work, but neither covers a future early `return`
+    // added inside `run` that forgets the explicit call. `restore_terminal` is
+    // idempotent (see its `TERMINAL_RESTORED` guard), so this, the panic hook,
+    // and the explicit call in `main` can all fire — only the first one still
+    // does anything.
+    let _terminal_guard = TerminalGuard;
     // NOTE: mouse capture is intentionally NOT enabled. Capturing the mouse
     // steals the wheel from the terminal's native scrollback, which forced an
     // in-app transcript overlay on scroll — jarring and un-terminal-like. Like
@@ -216,7 +269,10 @@ fn run(cli: config::cli::Cli) -> Result<app::resume::ExitOutcome> {
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         );
     }
-    tracing::info!(kbd_enhanced, "keyboard enhancement (Shift+Enter newline) status");
+    tracing::info!(
+        kbd_enhanced,
+        "keyboard enhancement (Shift+Enter newline) status"
+    );
 
     // The burst above already sent a CPR (ESC[6n) and drained its response, so the
     // terminal is warmed up before ratatui's Viewport::Inline construction issues
@@ -308,7 +364,31 @@ fn should_push_enhancement_flags(probe: Option<bool>) -> bool {
     !matches!(probe, Some(false))
 }
 
+/// Guards [`restore_terminal`] so only the first caller does any work.
+///
+/// Three independent call sites can all reach `restore_terminal` for the same
+/// exit: the explicit call in `main` (normal return), the panic hook (runs at
+/// the panic site, before unwinding starts), and `TerminalGuard::drop` (runs
+/// as `run`'s stack unwinds — after the panic hook on a panic, or on any other
+/// early return). Without this guard a panic would restore the terminal
+/// twice, and the second call would print the exit-transcript dump a second
+/// time (`exit_dump::print_to` has no memory of already having run).
+static TERMINAL_RESTORED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// RAII backstop for terminal teardown. See its construction site in `run`
+/// for why this exists alongside the panic hook and the explicit call.
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = restore_terminal();
+    }
+}
+
 fn restore_terminal() -> Result<()> {
+    if TERMINAL_RESTORED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Ok(());
+    }
     let mut stdout = io::stdout();
     // Defensive: if a panic unwound between the paired BeginSynchronizedUpdate /
     // EndSynchronizedUpdate around a frame draw (event_loop), the terminal could
@@ -381,5 +461,89 @@ mod keyboard_enhancement_tests {
         // Some(false) is a definitive "no" (e.g. legacy terminal / tmux drop);
         // pushing is pointless there and we respect the probe.
         assert!(!should_push_enhancement_flags(Some(false)));
+    }
+}
+
+/// `restore_terminal` itself can't run in a unit test — it does real
+/// `disable_raw_mode()` / `execute!` I/O against stdout, which the codebase's
+/// existing tests never do (that class of verification lives in the PTY
+/// harness at `test/pty/`). What IS unit-testable, and is the exact primitive
+/// `restore_terminal` builds its idempotency on, is the swap-based "only the
+/// first caller acts" guard shared by the panic hook, `TerminalGuard::drop`,
+/// and the explicit call in `main`.
+#[cfg(test)]
+mod terminal_restore_idempotency_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn only_the_first_of_several_callers_is_told_to_act() {
+        // A fresh flag, standing in for `TERMINAL_RESTORED`, isolated from the
+        // real process-global so this test can't race others touching it.
+        let restored = AtomicBool::new(false);
+        // Caller 1 (whichever of panic hook / guard-drop / explicit call runs
+        // first): the swap returns the OLD value, `false`, meaning "you go".
+        assert!(
+            !restored.swap(true, Ordering::SeqCst),
+            "the first caller must be told to actually restore the terminal"
+        );
+        // Callers 2 and 3 (in either order — a panic runs the hook, then
+        // unwinds through the guard's drop): the swap now returns `true`,
+        // meaning "already done, skip" — this is what stops the exit
+        // transcript dump and the teardown escapes from being emitted twice.
+        assert!(
+            restored.swap(true, Ordering::SeqCst),
+            "a second caller must be told the work is already done"
+        );
+        assert!(
+            restored.swap(true, Ordering::SeqCst),
+            "a third caller must also see the work as already done"
+        );
+    }
+}
+
+/// Real, end-to-end proof that `TerminalGuard` does what it claims — not just
+/// that its logic compiles, but that a panic unwinding through it actually
+/// leaves the terminal in a normal (non-raw) state.
+///
+/// `#[ignore]`d because `enable_raw_mode()` needs a REAL controlling tty
+/// (`ENOTTY`/"Device not configured" under headless `cargo test`, e.g. plain
+/// CI), which is exactly the constraint that keeps the rest of this file's
+/// tests away from real terminal I/O in favor of the Python PTY harness at
+/// `test/pty/`. Run manually under a pty to verify after touching
+/// `TerminalGuard` or `restore_terminal`:
+///
+/// ```text
+/// script -q /dev/null cargo test --bin osagent -- --ignored --nocapture a_panic_after_raw_mode_leaves_it_disabled
+/// ```
+///
+/// Verified 2026-09-08: raw mode was on, the panic fired, the teardown
+/// escapes (`ESC[?2026l` end-sync-update, `ESC[<1u` pop-kbd-flags, four
+/// mouse-mode disables, `ESC[?1004l` focus-off, `ESC[?2004l` paste-off)
+/// printed as the closure unwound, and `is_raw_mode_enabled()` read back
+/// `false` afterward — with no panic hook installed, so this is
+/// `TerminalGuard::drop` alone doing the work.
+#[cfg(test)]
+mod terminal_guard_drop_tests {
+    use super::TerminalGuard;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    #[ignore = "needs a real controlling tty; run manually, see module docs"]
+    fn a_panic_after_raw_mode_leaves_it_disabled() {
+        super::TERMINAL_RESTORED.store(false, Ordering::SeqCst);
+        crossterm::terminal::enable_raw_mode().expect("real tty required for this manual check");
+        assert!(
+            crossterm::terminal::is_raw_mode_enabled().unwrap(),
+            "raw mode should be on before the panic"
+        );
+        let result = std::panic::catch_unwind(|| {
+            let _guard = TerminalGuard;
+            panic!("TEST-FORCED PANIC for terminal-restore verification");
+        });
+        assert!(result.is_err(), "the closure should have panicked");
+        assert!(
+            !crossterm::terminal::is_raw_mode_enabled().unwrap(),
+            "TerminalGuard::drop must have disabled raw mode as the panic unwound"
+        );
     }
 }

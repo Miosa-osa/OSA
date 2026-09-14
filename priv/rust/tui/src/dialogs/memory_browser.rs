@@ -75,7 +75,10 @@ impl MemoryBrowser {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> MemoryBrowserAction {
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return MemoryBrowserAction::None;
         }
         let last = self.ordered().len().saturating_sub(1);
@@ -89,16 +92,48 @@ impl MemoryBrowser {
                 self.cursor = 0;
                 self.scroll = 0;
             }
-            KeyCode::Up => { self.cursor = self.cursor.saturating_sub(1); self.adjust_scroll(); }
-            KeyCode::Down => { self.cursor = (self.cursor + 1).min(last); self.adjust_scroll(); }
-            KeyCode::Char('k') if self.filter.is_empty() => { self.cursor = self.cursor.saturating_sub(1); self.adjust_scroll(); }
-            KeyCode::Char('j') if self.filter.is_empty() => { self.cursor = (self.cursor + 1).min(last); self.adjust_scroll(); }
-            KeyCode::PageUp => { self.cursor = self.cursor.saturating_sub(page); self.adjust_scroll(); }
-            KeyCode::PageDown => { self.cursor = (self.cursor + page).min(last); self.adjust_scroll(); }
-            KeyCode::Home => { self.cursor = 0; self.adjust_scroll(); }
-            KeyCode::End => { self.cursor = last; self.adjust_scroll(); }
-            KeyCode::Backspace => { self.filter.pop(); self.cursor = 0; self.scroll = 0; }
-            KeyCode::Char(c) => { self.filter.push(c); self.cursor = 0; self.scroll = 0; }
+            KeyCode::Up => {
+                self.cursor = self.cursor.saturating_sub(1);
+                self.adjust_scroll();
+            }
+            KeyCode::Down => {
+                self.cursor = (self.cursor + 1).min(last);
+                self.adjust_scroll();
+            }
+            KeyCode::Char('k') if self.filter.is_empty() => {
+                self.cursor = self.cursor.saturating_sub(1);
+                self.adjust_scroll();
+            }
+            KeyCode::Char('j') if self.filter.is_empty() => {
+                self.cursor = (self.cursor + 1).min(last);
+                self.adjust_scroll();
+            }
+            KeyCode::PageUp => {
+                self.cursor = self.cursor.saturating_sub(page);
+                self.adjust_scroll();
+            }
+            KeyCode::PageDown => {
+                self.cursor = (self.cursor + page).min(last);
+                self.adjust_scroll();
+            }
+            KeyCode::Home => {
+                self.cursor = 0;
+                self.adjust_scroll();
+            }
+            KeyCode::End => {
+                self.cursor = last;
+                self.adjust_scroll();
+            }
+            KeyCode::Backspace => {
+                self.filter.pop();
+                self.cursor = 0;
+                self.scroll = 0;
+            }
+            KeyCode::Char(c) => {
+                self.filter.push(c);
+                self.cursor = 0;
+                self.scroll = 0;
+            }
             _ => {}
         }
         MemoryBrowserAction::None
@@ -129,35 +164,87 @@ impl MemoryBrowser {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(c.primary))
             .title(Line::from(vec![
-                Span::styled(" OSA ", Style::default().fg(c.primary).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " OSA ",
+                    Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("\u{00b7} memory ", Style::default().fg(c.muted)),
             ]))
             .style(Style::default().bg(c.dialog_bg));
         put(frame, block, rect);
-        let inner = Rect::new(rect.x + 2, rect.y + 1, rect.width.saturating_sub(4), rect.height.saturating_sub(2));
-        if inner.width < 12 || inner.height < 4 { return; }
+        let inner = Rect::new(
+            rect.x + 2,
+            rect.y + 1,
+            rect.width.saturating_sub(4),
+            rect.height.saturating_sub(2),
+        );
+        if inner.width < 12 || inner.height < 4 {
+            return;
+        }
         let iw = inner.width;
         let maxw = iw as usize;
         let mut cy = inner.y;
         let ordered = self.ordered();
         let total = self.entries.len();
         let shown = ordered.len();
-        let count = if self.filter.is_empty() { format!("{total} memories") } else { format!("{shown}/{total} memories") };
-        put(frame, Paragraph::new(Line::from(Span::styled(count, Style::default().fg(c.primary).add_modifier(Modifier::BOLD)))), Rect::new(inner.x, cy, iw, 1));
+        let count = if self.filter.is_empty() {
+            format!("{total} memories")
+        } else {
+            format!("{shown}/{total} memories")
+        };
+        put(
+            frame,
+            Paragraph::new(Line::from(Span::styled(
+                count,
+                Style::default().fg(c.primary).add_modifier(Modifier::BOLD),
+            ))),
+            Rect::new(inner.x, cy, iw, 1),
+        );
         cy += 1;
         let search = truncate_chars(&format!("search: {}\u{2588}", self.filter), maxw);
-        let search_style = if self.filter.is_empty() { Style::default().fg(c.dim) } else { Style::default().fg(c.secondary) };
-        put(frame, Paragraph::new(Line::from(Span::styled(search, search_style))), Rect::new(inner.x, cy, iw, 1));
+        let search_style = if self.filter.is_empty() {
+            Style::default().fg(c.dim)
+        } else {
+            Style::default().fg(c.secondary)
+        };
+        put(
+            frame,
+            Paragraph::new(Line::from(Span::styled(search, search_style))),
+            Rect::new(inner.x, cy, iw, 1),
+        );
         cy += 1;
-        put(frame, Paragraph::new(Span::styled("\u{2500}".repeat(maxw), Style::default().fg(c.dim))), Rect::new(inner.x, cy, iw, 1));
+        put(
+            frame,
+            Paragraph::new(Span::styled(
+                "\u{2500}".repeat(maxw),
+                Style::default().fg(c.dim),
+            )),
+            Rect::new(inner.x, cy, iw, 1),
+        );
         cy += 1;
         let list_h = inner.height.saturating_sub(4);
         self.list_viewport.set((list_h as usize).max(1));
         if shown == 0 {
-            let msg = if self.filter.is_empty() { "No memories stored yet".to_string() } else { format!("No memories match \u{201c}{}\u{201d}", self.filter) };
-            put(frame, Paragraph::new(Span::styled(truncate_chars(&msg, maxw), Style::default().fg(c.muted))).alignment(Alignment::Center), Rect::new(inner.x, cy + list_h / 2, iw, 1));
+            let msg = if self.filter.is_empty() {
+                "No memories stored yet".to_string()
+            } else {
+                format!("No memories match \u{201c}{}\u{201d}", self.filter)
+            };
+            put(
+                frame,
+                Paragraph::new(Span::styled(
+                    truncate_chars(&msg, maxw),
+                    Style::default().fg(c.muted),
+                ))
+                .alignment(Alignment::Center),
+                Rect::new(inner.x, cy + list_h / 2, iw, 1),
+            );
         } else {
-            let scroll = crate::dialogs::clamp_scroll_to_cursor(self.scroll, self.cursor, (list_h as usize).max(1));
+            let scroll = crate::dialogs::clamp_scroll_to_cursor(
+                self.scroll,
+                self.cursor,
+                (list_h as usize).max(1),
+            );
             for rel in 0..(list_h as usize) {
                 let pos = rel + scroll;
                 let Some(&ei) = ordered.get(pos) else { break };
@@ -169,43 +256,95 @@ impl MemoryBrowser {
                 if selected {
                     let raw = format!("{cat} {}   {ts}", e.content);
                     let s = crate::util::pad_cols(&raw, maxw);
-                    put(frame, Paragraph::new(Line::from(Span::styled(s, theme.button_active()))), Rect::new(inner.x, ry, iw, 1));
+                    put(
+                        frame,
+                        Paragraph::new(Line::from(Span::styled(s, theme.button_active()))),
+                        Rect::new(inner.x, ry, iw, 1),
+                    );
                 } else {
-                    let mut spans = vec![Span::styled(format!("{cat} "), Style::default().fg(Self::cat_color(&e.category, c)).add_modifier(Modifier::BOLD))];
+                    let mut spans = vec![Span::styled(
+                        format!("{cat} "),
+                        Style::default()
+                            .fg(Self::cat_color(&e.category, c))
+                            .add_modifier(Modifier::BOLD),
+                    )];
                     let used = crate::util::cols(&cat) + 1;
-                    let ts_w = if ts.is_empty() { 0 } else { crate::util::cols(&ts) + 2 };
+                    let ts_w = if ts.is_empty() {
+                        0
+                    } else {
+                        crate::util::cols(&ts) + 2
+                    };
                     let body_w = maxw.saturating_sub(used + ts_w);
                     let body = truncate_chars(&e.content, body_w);
                     let body_used = used + crate::util::cols(&body);
                     spans.push(Span::styled(body, Style::default().fg(c.secondary)));
                     if ts_w > 0 {
                         let gap = maxw.saturating_sub(body_used + crate::util::cols(&ts));
-                        spans.push(Span::styled(format!("{}{ts}", " ".repeat(gap)), Style::default().fg(c.dim)));
+                        spans.push(Span::styled(
+                            format!("{}{ts}", " ".repeat(gap)),
+                            Style::default().fg(c.dim),
+                        ));
                     }
-                    put(frame, Paragraph::new(Line::from(spans)), Rect::new(inner.x, ry, iw, 1));
+                    put(
+                        frame,
+                        Paragraph::new(Line::from(spans)),
+                        Rect::new(inner.x, ry, iw, 1),
+                    );
                 }
             }
         }
         let hint_y = inner.y + inner.height.saturating_sub(1);
-        put(frame, Paragraph::new(Line::from(vec![
-            Span::styled("type", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
-            Span::styled(" filter  ", Style::default().fg(c.dim)),
-            Span::styled("\u{2191}\u{2193}", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
-            Span::styled(" nav  ", Style::default().fg(c.dim)),
-            Span::styled("esc", Style::default().fg(c.secondary).add_modifier(Modifier::BOLD)),
-            Span::styled(if self.filter.is_empty() { " close" } else { " clear" }, Style::default().fg(c.dim)),
-        ])), Rect::new(inner.x, hint_y, iw, 1));
+        put(
+            frame,
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "type",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" filter  ", Style::default().fg(c.dim)),
+                Span::styled(
+                    "\u{2191}\u{2193}",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" nav  ", Style::default().fg(c.dim)),
+                Span::styled(
+                    "esc",
+                    Style::default()
+                        .fg(c.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    if self.filter.is_empty() {
+                        " close"
+                    } else {
+                        " clear"
+                    },
+                    Style::default().fg(c.dim),
+                ),
+            ])),
+            Rect::new(inner.x, hint_y, iw, 1),
+        );
     }
 }
 
 fn tag_label(cat: &str) -> String {
     let c = cat.trim();
-    if c.is_empty() { "[memory]".to_string() } else { format!("[{c}]") }
+    if c.is_empty() {
+        "[memory]".to_string()
+    } else {
+        format!("[{c}]")
+    }
 }
 
 fn fmt_time(ts: &str) -> String {
     let s = ts.trim();
-    if s.is_empty() { return String::new(); }
+    if s.is_empty() {
+        return String::new();
+    }
     let cleaned = s.replace('T', " ");
     truncate_plain(&cleaned, 16)
 }

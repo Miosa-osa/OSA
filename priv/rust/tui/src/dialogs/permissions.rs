@@ -193,7 +193,10 @@ impl Permissions {
 
     /// Handle a key event.  Returns `Some(action)` when the dialog should close.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<DialogAction> {
-        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return None;
         }
 
@@ -295,7 +298,7 @@ impl Permissions {
     pub fn content_height(&self, width: u16) -> u16 {
         const BODY_CAP: u16 = 8;
         let mut h: u16 = 1; // header (tool) line
-        // Width-AWARE: these wrap, so reserve the rows they will actually occupy.
+                            // Width-AWARE: these wrap, so reserve the rows they will actually occupy.
         if let Some(warning) = &self.warning {
             h += wrapped_rows(WARN_PREFIX, warning, width).len().max(1) as u16;
         }
@@ -425,10 +428,7 @@ impl Permissions {
         if cursor_y < inner.y + inner.height {
             let sep = "─".repeat(inner.width as usize);
             frame.render_widget(
-                Paragraph::new(Span::styled(
-                    sep,
-                    Style::default().fg(theme.colors.border),
-                )),
+                Paragraph::new(Span::styled(sep, Style::default().fg(theme.colors.border))),
                 Rect::new(inner.x, cursor_y, inner.width, 1),
             );
             cursor_y += 1;
@@ -462,8 +462,7 @@ impl Permissions {
                         self.diff_language().as_deref(),
                     );
                     let total_lines = diff_lines.len() as u16;
-                    let scroll_clamped =
-                        self.scroll.min(total_lines.saturating_sub(viewport_h));
+                    let scroll_clamped = self.scroll.min(total_lines.saturating_sub(viewport_h));
                     let visible: Vec<Line> = diff_lines
                         .into_iter()
                         .skip(scroll_clamped as usize)
@@ -538,10 +537,7 @@ impl Permissions {
                 "  y/s/a/n · Tab cycle · c clarify · Enter confirm · Esc deny"
             };
             frame.render_widget(
-                Paragraph::new(Span::styled(
-                    hint,
-                    Style::default().fg(theme.colors.dim),
-                )),
+                Paragraph::new(Span::styled(hint, Style::default().fg(theme.colors.dim))),
                 Rect::new(inner.x, hint_y, inner.width, 1),
             );
         }
@@ -760,4 +756,3 @@ mod tests {
         assert_eq!(d.display_label(), "file_edit");
     }
 }
-

@@ -124,6 +124,34 @@ defmodule OptimalSystemAgent.Agent.Orchestrator.BoundedStallRecoveryTest do
       assert %{status: :cancelled} = RunStore.get(id)
     end
 
+    test "auto_stop_stalled is a no-op on a run that already reached its own terminal state",
+         %{parent: parent} do
+      # `watch_for_stall/5` re-matches `%{status: :running}` right before calling
+      # `auto_stop_stalled/6`, but that match and this call are two separate
+      # RunStore reads — the subagent can complete ITS OWN work in between.
+      # Calling `auto_stop_stalled/6` directly (it is `@doc false`, not private,
+      # for exactly this) pins that guard deterministically instead of racing
+      # real timing against the watcher's poll loop.
+      id = "stallhard-already-done-" <> Integer.to_string(System.unique_integer([:positive]))
+
+      RunStore.start_run(%{
+        agent_id: id,
+        parent_session_id: parent,
+        role: "tester",
+        task: "finished just in time"
+      })
+
+      RunStore.complete(id, %{status: :completed, summary: "genuinely finished"})
+
+      :ok = Orchestrator.auto_stop_stalled(parent, id, "hanger", "tester", :working, 999_999)
+
+      refute_receive {:osa_event, %{type: :background_agent_auto_stopped, agent_id: ^id}}, 200
+
+      assert %{status: :completed, result: %{summary: "genuinely finished"}} = RunStore.get(id),
+             "a run's real outcome must survive a stall-watcher call that arrives after " <>
+               "the run already finished on its own"
+    end
+
     test "a healthy agent that keeps progressing is NEVER auto-stopped", %{parent: parent} do
       Application.put_env(:optimal_system_agent, :stall_poll_interval_ms, 30)
       Application.put_env(:optimal_system_agent, :stall_threshold_starting_ms, 40)

@@ -24,8 +24,18 @@ defmodule OptimalSystemAgent.Agent.BudgetTest do
 
   defp record_cost(name, provider, model, tokens_in, tokens_out, session_id) do
     GenServer.cast(name, {:record_cost, provider, model, tokens_in, tokens_out, session_id})
-    # Small sleep to ensure cast is processed
-    Process.sleep(10)
+
+    # A fixed sleep here is a race, not a wait: under real scheduler pressure
+    # (an 11k-test full-suite run) 10ms is not a guarantee the cast has been
+    # processed, only a bet that usually pays off — the observed failure
+    # (`check_budget/0` seeing the state from BEFORE this cast landed) is that
+    # bet losing. A `call` to the SAME GenServer right behind the cast is not
+    # a longer bet, it is a proof: Erlang delivers messages from one sender to
+    # one recipient in the order they were sent, and a GenServer drains its
+    # mailbox one message at a time, so this reply cannot arrive until the
+    # cast above has already been handled.
+    GenServer.call(name, :get_status)
+    :ok
   end
 
   defp check_budget(name) do
@@ -38,7 +48,11 @@ defmodule OptimalSystemAgent.Agent.BudgetTest do
 
   defp reset_daily(name) do
     GenServer.cast(name, :reset_daily)
-    Process.sleep(10)
+    # Same fix as `record_cost/6` above: a `call` right behind the `cast`
+    # proves the reset was handled instead of betting a fixed sleep was long
+    # enough.
+    GenServer.call(name, :get_status)
+    :ok
   end
 
   # ---------------------------------------------------------------------------

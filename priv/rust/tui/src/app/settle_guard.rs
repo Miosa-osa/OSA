@@ -201,7 +201,10 @@ mod tests {
         assert!(contains_leak_fingerprint(
             "the orchestration layer picks a provider"
         ));
-        assert!(contains_leak_fingerprint("SIGNAL THEORY"), "case-insensitive");
+        assert!(
+            contains_leak_fingerprint("SIGNAL THEORY"),
+            "case-insensitive"
+        );
         assert!(!contains_leak_fingerprint(
             "a perfectly ordinary paragraph about cats"
         ));
@@ -242,7 +245,11 @@ mod tests {
         // What the normaliser does to already-committed text when a dead phrase
         // in the tail triggers it: `[ \t]{2,}` → " " and `\n{3,}` → "\n\n".
         assert!(common_prefix_modulo_whitespace("a b\n\nrest", "a    b\n\n\n\n").is_some());
-        assert!(common_prefix_modulo_whitespace("fn main() {\n let x;\n}\n\nX", "fn main() {\n    let x;\n}\n\n").is_some());
+        assert!(common_prefix_modulo_whitespace(
+            "fn main() {\n let x;\n}\n\nX",
+            "fn main() {\n    let x;\n}\n\n"
+        )
+        .is_some());
         // A single newline is NOT interchangeable with a blank line — that is a
         // real block boundary, not whitespace noise.
         assert_eq!(common_prefix_modulo_whitespace("a\nb", "a\n\nb"), None);
@@ -293,8 +300,7 @@ mod tests {
         // `@dead_phrases` is a list of {phrase, replacement} tuples: the phrases
         // are the even-indexed strings.
         let dead = attr_strings(&text, "@dead_phrases [");
-        let mut backend_dead: Vec<String> =
-            dead.iter().step_by(2).map(|s| s.to_string()).collect();
+        let mut backend_dead: Vec<String> = dead.iter().step_by(2).map(|s| s.to_string()).collect();
         let mut ours_dead: Vec<String> = DEAD_PHRASES.iter().map(|s| s.to_string()).collect();
         backend_dead.sort();
         ours_dead.sort();
