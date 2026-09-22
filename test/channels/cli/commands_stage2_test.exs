@@ -32,6 +32,18 @@ defmodule OptimalSystemAgent.Channels.CLI.CommandsStage2Test do
       assert "rename" in list
     end
 
+    test "/model and /models are different commands" do
+      by_name = Map.new(Commands.list_with_descriptions())
+      model = Map.fetch!(by_name, "model")
+      models = Map.fetch!(by_name, "models")
+
+      assert model == "Choose a provider, then one of its models"
+      assert models == "Pick a model from the current provider"
+      refute model == models
+      refute models =~ ~r/local/i
+      refute model =~ ~r/local ollama/i
+    end
+
     test "unknown slash routes through dispatch and suggests, returning session_id" do
       out = capture_io(fn -> assert "sess-x" = Commands.dispatch("saandbox", "sess-x") end)
       assert out =~ "unknown command"

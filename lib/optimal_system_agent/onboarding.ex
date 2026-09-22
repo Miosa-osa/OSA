@@ -3133,7 +3133,7 @@ defmodule OptimalSystemAgent.Onboarding do
   # ── Private: Detection Helpers ───────────────────────────────────────
 
   defp detect_key(provider_id, env_var) do
-    case System.get_env(env_var) do
+    case live_env(env_var) do
       nil -> detect_stored_key(provider_id)
       "" -> detect_stored_key(provider_id)
       key -> %{provider: provider_id, source: "environment", key_preview: key_preview(key)}
@@ -3408,6 +3408,10 @@ defmodule OptimalSystemAgent.Onboarding do
         sub && sub.connected? && sub.expired? -> "expired"
         sub && sub.connected? && sub.verified? -> "connected"
         sub && sub.connected? -> "connected_unverified"
+        # A pasted key is a finished connection. Dual-mode rows used to skip
+        # this and land on "needs_sign_in", so the TUI treated Ollama Cloud as
+        # unconfigured and /models jumped to the local daemon instead.
+        live_api_key?(id) -> "connected"
         :oauth in usable -> "needs_sign_in"
         true -> "needs_key"
       end
@@ -3421,6 +3425,21 @@ defmodule OptimalSystemAgent.Onboarding do
       expires_at: sub && sub.expires_at
     }
   end
+
+  defp live_api_key?(id) when is_binary(id) do
+    case provider_env_var(id) do
+      env_var when is_binary(env_var) ->
+        case live_env(env_var) do
+          v when is_binary(v) and v != "" -> true
+          _ -> false
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  defp live_api_key?(_), do: false
 
   defp safe_status(id) do
     OptimalSystemAgent.Auth.Subscription.status(id)

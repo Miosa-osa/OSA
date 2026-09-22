@@ -37,11 +37,11 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "clear" => {"Clear conversation and start fresh session", :cmd_clear},
     "new" => {"Start a new session (alias for /clear)", :cmd_clear},
     "compact" => {"Force context compaction", :cmd_compact},
-    "model" => {"Show or switch the current model (list = local Ollama models)", :cmd_model},
+    "model" => {"Choose a provider, then one of its models", :cmd_model},
     "system" =>
       {"Inject into or replace the system prompt for the current model (persists)", :cmd_system},
     "models" =>
-      {"Local models: what fits this machine, install, remove, load, unload, bench", :cmd_models},
+      {"Pick a model from the current provider", :cmd_models},
     "uncensored" =>
       {"Hop the current model to its unfiltered twin (off to return)", :cmd_uncensored},
     "jailbreak" =>

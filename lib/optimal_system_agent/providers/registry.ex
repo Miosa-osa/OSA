@@ -2561,7 +2561,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # Ollama Cloud's own host (OLLAMA_URL=https://ollama.com) requires the API key
   # on /api/show; a local daemon ignores the header. Harmless either way.
   defp probe_auth_headers do
-    case Application.get_env(:optimal_system_agent, :ollama_api_key) do
+    case Providers.Ollama.resolved_api_key() do
       key when is_binary(key) and key != "" ->
         [headers: [{"authorization", "Bearer #{key}"}]]
 
@@ -2587,9 +2587,9 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # Ollama Cloud is configured when an OLLAMA_API_KEY is present OR a signed-in
   # local Ollama daemon can proxy :cloud models via device identity.
   def provider_configured?(:ollama_cloud) do
-    case Application.get_env(:optimal_system_agent, :ollama_api_key) do
+    case Providers.Ollama.resolved_api_key() do
       key when is_binary(key) and key != "" -> true
-      _ -> live_cloud_key_present?(:ollama_cloud) or provider_configured?(:ollama)
+      _ -> provider_configured?(:ollama)
     end
   end
 
@@ -2677,6 +2677,17 @@ defmodule OptimalSystemAgent.Providers.Registry do
   # heuristic below — Ollama's own reachability probe already covers it, and
   # checking it here would mean a network round-trip on every chat call.
   @keyless_providers [:ollama, :ollama_cloud, :lmstudio, :llamacpp, :mock]
+
+  # `ollama_cloud` is a picker id. The env var the rest of OSA writes and
+  # reads is `OLLAMA_API_KEY`, not `OLLAMA_CLOUD_API_KEY`. Deriving the name
+  # from the atom made a saved cloud key look missing, so the picker kept
+  # asking for it.
+  defp live_cloud_key_present?(:ollama_cloud) do
+    case OptimalSystemAgent.Onboarding.live_env("OLLAMA_API_KEY") do
+      v when is_binary(v) and v != "" -> true
+      _ -> false
+    end
+  end
 
   defp live_cloud_key_present?(provider) do
     env_var = provider |> Atom.to_string() |> String.upcase() |> Kernel.<>("_API_KEY")
