@@ -59,6 +59,20 @@ defmodule OptimalSystemAgent.Agent.Safety.UntrustedContent do
   @role_tag ~r/<\s*(\/?)\s*(system|instructions?|prompt|context|rules?)\s*>/i
   @bracket_role_tag ~r/(\[|<<)\s*(SYSTEM|INST|SYS|ASSISTANT|USER)\s*(\]|>>)/
 
+  # OSA's OWN harness-boundary tags: `Agent.Reminders`' `<system-reminder>`
+  # and `Agent.TaskNotifications`' `<task-notification>`. `@role_tag` above
+  # catches generic prompt-injection role markers but does not match these —
+  # "system-reminder" and "task-notification" are not "system" alone — so
+  # content that spells one out literally could close a REAL wrapper early and
+  # open a forged one once this text is embedded inside it (both callers
+  # splice untrusted text straight into their own same-named tag: subagent
+  # output is embedded in a `<system-reminder>` block, task summaries in a
+  # `<task-notification>` block). Neutralized the same way `escape_fence/2`
+  # neutralizes a literal `<untrusted-data>` occurrence — hardcoded here
+  # rather than read from `Reminders`/`TaskNotifications` to avoid a circular
+  # dependency; this module is the security-policy leaf, they are callers.
+  @harness_tag ~r/<\s*(\/?)\s*(system-reminder|task-notification)\b[^>]*>/i
+
   @line_prefix "| "
 
   @doc """
@@ -196,6 +210,7 @@ defmodule OptimalSystemAgent.Agent.Safety.UntrustedContent do
     text
     |> String.replace(@role_tag, fn m -> "&lt;" <> String.trim_leading(m, "<") end)
     |> String.replace(@bracket_role_tag, fn m -> "&#91;" <> String.slice(m, 1..-1//1) end)
+    |> String.replace(@harness_tag, fn m -> "&lt;" <> String.trim_leading(m, "<") end)
   end
 
   # Prefix every line. This is what actually disarms the line-anchored

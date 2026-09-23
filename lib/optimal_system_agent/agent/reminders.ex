@@ -58,6 +58,7 @@ defmodule OptimalSystemAgent.Agent.Reminders do
   require Logger
 
   alias OptimalSystemAgent.Agent.RunStore
+  alias OptimalSystemAgent.Agent.Safety.UntrustedContent
   alias OptimalSystemAgent.Agent.TaskNotifications
   alias OptimalSystemAgent.Shell.BackgroundManager
 
@@ -223,10 +224,25 @@ defmodule OptimalSystemAgent.Agent.Reminders do
       |> subagent_result_text()
       |> String.slice(0, @subagent_preview_bytes)
 
-    tail = if preview == "", do: "", else: "\nResult: #{preview}"
+    tail = if preview == "", do: "", else: "\nResult:\n" <> fence_subagent_output(preview, role)
 
     "Background subagent #{quote_cmd(role)} (#{run.agent_id}) #{status_word}#{dur}." <>
       tail <> "\nDo not poll for this subagent again."
+  end
+
+  # A subagent's own report is DATA, not an instruction to the parent — it may
+  # have relayed a web page, a file, or another process's output verbatim, and
+  # this reminder is about to be spliced, unescaped, straight into the SAME
+  # `<system-reminder>` block the harness uses to steer the model (see
+  # `format_with_reminders/2`). Without fencing, a result containing something
+  # shaped like `</system-reminder>\n<system-reminder>\n...` could close the
+  # real block early and open a forged one the model would read as trusted.
+  # `UntrustedContent.wrap/2` is the SAME fence-and-defang the web/MCP tool
+  # path already uses (`ToolExecutor.fence_untrusted/2`) — one mechanism for
+  # "text that did not come from the operator," not a second one that could
+  # drift. See Claude Code 2.1.261.
+  defp fence_subagent_output(preview, role) do
+    UntrustedContent.wrap(preview, source: "subagent:#{role}", max_bytes: byte_size(preview))
   end
 
   defp subagent_result_text(%{summary: s}) when is_binary(s), do: s

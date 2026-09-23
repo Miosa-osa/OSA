@@ -429,6 +429,20 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       match?({:blocked, _}, hard_deny) ->
         hard_deny
 
+      # Step 1c′ — a recursive/forced delete whose target the breaker cannot
+      # statically resolve (`rm -rf "$(pwd)"`, backticks, `${VAR}`, a glob
+      # at/near a filesystem root — `DangerousCommands` `:confirm_required`)
+      # ALWAYS prompts, overdrive included. The breaker cannot prove such a
+      # command is `/` any more than it can prove it is `./build`, so neither
+      # guess is made: overdrive's blanket `:allow` below must never be the
+      # thing that answers this question, which is exactly the gap that let
+      # `rm -rf "$(pwd)"` run unattended with no confirmation. Ordered before
+      # the mode short-circuits for the same reason step 1c is.
+      match?({:blocked, _, :confirm_required}, circuit_breaker) and mode != :plan and
+          permission_tier_allows?(state.permission_tier, tool_call.name) ->
+        {:blocked, confirm_reason, :confirm_required} = circuit_breaker
+        unresolvable_delete_prompt(tool_call, confirm_reason, state)
+
       # Step 1c — bypass-immune safety ask: mutating writes to .git/ internals,
       # OSA settings/permission files, and shell startup files ALWAYS prompt —
       # overdrive/accept_edits included — and saved allow rules or session
@@ -786,6 +800,38 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     end
   end
 
+  # A recursive/forced delete whose target the breaker cannot statically
+  # resolve (`DangerousCommands` `:confirm_required`) gets its OWN, SHORTER
+  # wait than the default 300s ask (`@unresolvable_delete_timeout_ms`,
+  # `await_permission/4`): unlike an ordinary ask, a timeout here should not
+  # leave the model simply retrying the identical unresolvable command, so the
+  # timeout message tells it how to rewrite the call instead of just saying no.
+  @unresolvable_delete_timeout_ms 120_000
+
+  defp unresolvable_delete_prompt(tool_call, reason, state) do
+    if attended?(state) do
+      summary =
+        tool_call
+        |> permission_summary("Safety check (not bypassable): #{reason}")
+        |> Map.put(:timeout_ms, @unresolvable_delete_timeout_ms)
+        |> Map.put(:timeout_message, unresolvable_delete_timeout_message(tool_call))
+
+      {:ask, PermissionBroker.new_request_id(), summary}
+    else
+      non_interactive_decision(tool_call, state)
+    end
+  end
+
+  defp unresolvable_delete_timeout_message(tool_call) do
+    "Blocked: permission request for #{tool_call.name} timed out after 120s with no response — " <>
+      "not run. This command's delete target could not be resolved without running the shell " <>
+      "(a command substitution, an unresolved variable, or a glob at/near a filesystem root), " <>
+      "so it cannot be auto-approved. Resolve the path FIRST — run `pwd` or the equivalent " <>
+      "lookup as its own call, or read the value another way — then re-issue the delete naming " <>
+      "the literal, explicit path scoped to the project (e.g. `rm -rf ./build`, not " <>
+      "`rm -rf \"$(pwd)\"` or `rm -rf \"$SOME_VAR\"`)."
+  end
+
   defp saved_rule_for(tool_call),
     do: Permissions.suggested_rule(tool_call.name, Map.get(tool_call, :arguments) || %{})
 
@@ -1090,13 +1136,25 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     rule_suggestion ++ dir_suggestion
   end
 
+  @doc false
   # Emit `permission_required` (mirrors the plan_proposed emit path) then block
   # on PermissionBroker until the client responds / the wait aborts, and map the
-  # decision onto an execution outcome.
-  defp await_permission(tool_call, state, request_id, summary) do
+  # decision onto an execution outcome. Public (@doc false), like
+  # `emit_permission_required/4` and `apply_permission_decision/4` beside it,
+  # so the summary-carried timeout override can be unit-tested without waiting
+  # out a real 120s/300s wall-clock wait.
+  #
+  # `summary` may carry `:timeout_ms` / `:timeout_message` overrides (set by
+  # `unresolvable_delete_prompt/3` for the `:confirm_required` breaker class,
+  # which waits a shorter 120s and explains how to rewrite the command instead
+  # of the generic "not run"). Every other caller leaves them unset and gets
+  # the unchanged default — `PermissionBroker.default_timeout_ms/0` and the
+  # original message.
+  def await_permission(tool_call, state, request_id, summary) do
     emit_permission_required(state, request_id, tool_call, summary)
+    timeout_ms = Map.get(summary, :timeout_ms) || PermissionBroker.default_timeout_ms()
 
-    case PermissionBroker.await(state.session_id, request_id, state: state) do
+    case PermissionBroker.await(state.session_id, request_id, state: state, timeout: timeout_ms) do
       {:ok, %{decision: decision, note: note}} ->
         apply_permission_decision(decision, note, tool_call, state)
 
@@ -1110,7 +1168,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
       {:error, :timeout} ->
         {:blocked,
-         "Blocked: permission request for #{tool_call.name} timed out with no response — not run"}
+         Map.get(
+           summary,
+           :timeout_message,
+           "Blocked: permission request for #{tool_call.name} timed out with no response — not run"
+         )}
 
       {:error, :cancelled} ->
         {:blocked, "Blocked: #{tool_call.name} cancelled before approval"}
@@ -1193,8 +1255,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       reason: Map.get(summary, :reason),
       suggestions: Map.get(summary, :suggestions, []),
       # The wait `await_permission/4` is about to enter, so the prompt can
-      # show a countdown to the moment the call is skipped.
-      timeout_ms: PermissionBroker.default_timeout_ms()
+      # show a countdown to the moment the call is skipped. Most callers leave
+      # `summary[:timeout_ms]` unset and get the default; `unresolvable_delete_prompt/3`
+      # sets a shorter one, and this field is what keeps the TUI's countdown
+      # honest about it (see `await_permission/4`, which enters the same wait).
+      timeout_ms: Map.get(summary, :timeout_ms) || PermissionBroker.default_timeout_ms()
     }
 
     # Who is asking. Empty for a top-level session (the lead's own calls are
