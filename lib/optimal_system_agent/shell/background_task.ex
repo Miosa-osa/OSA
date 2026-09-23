@@ -69,9 +69,18 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
   @spec snapshot(pid()) :: map()
   def snapshot(pid), do: GenServer.call(pid, :snapshot)
 
-  @doc "Send SIGTERM (then SIGKILL) to the OS process. Returns a snapshot."
-  @spec kill(pid()) :: map()
-  def kill(pid), do: GenServer.call(pid, :kill)
+  @doc """
+  Send SIGTERM (then SIGKILL) to the OS process. Returns a snapshot.
+
+  `reason` is a short, human-readable phrase logged alongside the stop (e.g.
+  `"requested via bash_output tool"`, `"session ended"`, `"cascading
+  cancel"`) — Claude Code parity: OSA never stops a background command on its
+  own (no idle timeout, no mild-memory-pressure kill), so every stop is
+  either an explicit request or a session teardown, and each must say WHY in
+  the log, not just THAT.
+  """
+  @spec kill(pid(), String.t()) :: map()
+  def kill(pid, reason \\ "requested"), do: GenServer.call(pid, {:kill, reason})
 
   defp via(id), do: {:via, Registry, {@registry, id}}
 
@@ -222,7 +231,7 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
   end
 
   def handle_info({port, {:exit_status, code}}, %{port: port} = state) do
-    status = if code == 0, do: :done, else: :failed
+    status = classify_exit(state.command, code)
     # Preserve an explicit :killed status if a kill was already recorded.
     status = if state.status == :killed, do: :killed, else: status
 
@@ -257,8 +266,10 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
     {:reply, to_map(state), state}
   end
 
-  def handle_call(:kill, _from, %{status: :running} = state) do
+  def handle_call({:kill, reason}, _from, %{status: :running} = state) do
     do_kill(state.os_pid, state.wrapper?)
+
+    Logger.info("[bg:#{state.id}] stopped (#{reason}): #{state.command}")
 
     state = %{
       state
@@ -273,12 +284,30 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
     {:reply, to_map(state), state}
   end
 
-  def handle_call(:kill, _from, state) do
+  def handle_call({:kill, _reason}, _from, state) do
     # Already finished — nothing to kill; just report current state.
     {:reply, to_map(state), state}
   end
 
   # ── Private ──────────────────────────────────────────────────────────
+
+  # Claude Code parity: a non-zero exit is only ever `:failed` for a real
+  # failure. `grep`/`rg`/`diff`/`cmp`/`test` exit 1 is a normal, meaningful
+  # answer (no matches / differs / false), not a fault — see
+  # `ExitClassifier` moduledoc. Reported downstream as `:done`, which every
+  # consumer (`BackgroundNotifier`'s verb, the TUI toast, the
+  # `<task-notification>` completion-vs-failure instruction) already treats
+  # as success; only the classification of WHICH exit codes count as success
+  # changes here.
+  defp classify_exit(_command, 0), do: :done
+
+  defp classify_exit(command, code) do
+    if OptimalSystemAgent.Shell.ExitClassifier.benign_exit?(command, code) do
+      :done
+    else
+      :failed
+    end
+  end
 
   defp append(%{truncated: true} = state, _data), do: state
 

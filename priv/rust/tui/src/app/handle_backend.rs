@@ -2538,6 +2538,7 @@ impl App {
                 exit_code,
                 command,
                 task_id,
+                status,
             } => {
                 if self.bg_shell_count > 0 {
                     self.bg_shell_count -= 1;
@@ -2557,17 +2558,58 @@ impl App {
                 } else {
                     command.clone()
                 };
+                // `status` is the backend's own classification, the SOURCE OF
+                // TRUTH — not `exit_code == 0`. A background `grep`/`diff`/`test`
+                // that exits 1 for a normal, meaningful reason (no matches /
+                // differs / false) is classified "done" even though
+                // `exit_code != 0`; painting that red would show a failure toast
+                // for a correct, negative answer. An older backend that has not
+                // been upgraded yet sends no `status` at all — fall back to the
+                // exit-code check so this degrades gracefully rather than
+                // misreporting every completion as a failure.
+                let verb = match status.as_str() {
+                    "killed" => "was stopped",
+                    "failed" => "failed",
+                    "done" => "completed",
+                    "" if exit_code == 0 => "completed",
+                    "" => "failed",
+                    _ => "completed",
+                };
                 let note = format!(
-                    "Background command '{}' completed (exit code {})",
-                    label, exit_code
+                    "Background command '{}' {} (exit code {})",
+                    label, verb, exit_code
                 );
-                let (severity, level) = if exit_code == 0 {
-                    ("info", crate::components::toast::ToastLevel::Success)
-                } else {
-                    ("error", crate::components::toast::ToastLevel::Error)
+                let (severity, level) = match verb {
+                    "failed" => ("error", crate::components::toast::ToastLevel::Error),
+                    "was stopped" => ("warning", crate::components::toast::ToastLevel::Warning),
+                    _ => ("info", crate::components::toast::ToastLevel::Success),
                 };
                 self.chat.add_system_message(&note, severity);
                 self.toasts.push(note, level);
+                self.recompute_layout();
+            }
+            BackendEvent::DaemonMemoryWarning {
+                rss_mb,
+                beam_mb,
+                limit_mb,
+                message,
+            } => {
+                // Warn-only: this never stops anything on its own, so the
+                // message (composed on the backend) names concrete steps —
+                // finish/stop background tasks, compact, restart.
+                let note = if message.trim().is_empty() {
+                    format!(
+                        "\u{26a0} OSA is using {} MB (BEAM {} MB), over the {} MB critical threshold.",
+                        rss_mb, beam_mb, limit_mb
+                    )
+                } else {
+                    message
+                };
+                self.chat.add_system_message(&note, "warning");
+                self.toasts.push(
+                    format!("Memory critical: {} MB (limit {} MB)", rss_mb, limit_mb),
+                    crate::components::toast::ToastLevel::Warning,
+                );
                 self.recompute_layout();
             }
             BackendEvent::TaskNotification { count, summary } => {

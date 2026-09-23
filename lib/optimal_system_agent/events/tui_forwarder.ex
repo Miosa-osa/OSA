@@ -56,7 +56,18 @@ defmodule OptimalSystemAgent.Events.TuiForwarder do
     model_switched
     phase_changed
     tool_call_stalled
+    daemon_memory_warning
   )a
+
+  # Sub-events with no natural session_id — they describe the DAEMON, not one
+  # session (today: the memory watchdog). `@forward_events`' `is_binary(session_id)`
+  # guard would silently drop these forever, so they get fanned out to every
+  # LIVE root session's topic instead of the one topic a session-scoped emit
+  # would target. "Root" excludes subagent (`agent:<parent>:...`) and internal
+  # (`bg-notifier:...`) registry keys, which have no TUI listening on their own
+  # topic — broadcasting to them would just be wasted work, not a correctness
+  # issue (nothing subscribes to a topic nobody streams).
+  @broadcast_all_events ~w(daemon_memory_warning)a
 
   def start_link(_opts \\ []) do
     GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
@@ -79,20 +90,15 @@ defmodule OptimalSystemAgent.Events.TuiForwarder do
     sub = normalize_event(data[:event] || data["event"])
     session_id = data[:session_id] || data["session_id"] || payload[:session_id]
 
-    if sub in @forward_events and is_binary(session_id) do
-      {out_sub, out_data} = shape(sub, data)
+    cond do
+      sub in @forward_events and is_binary(session_id) ->
+        broadcast_to(sub, data, session_id)
 
-      event =
-        out_data
-        |> Map.put(:type, :system_event)
-        |> Map.put(:event, out_sub)
-        |> Map.put(:session_id, session_id)
+      sub in @broadcast_all_events ->
+        Enum.each(live_root_session_ids(), &broadcast_to(sub, data, &1))
 
-      Phoenix.PubSub.broadcast(
-        OptimalSystemAgent.PubSub,
-        "osa:session:#{session_id}",
-        {:osa_event, event}
-      )
+      true ->
+        :ok
     end
 
     :ok
@@ -105,6 +111,37 @@ defmodule OptimalSystemAgent.Events.TuiForwarder do
       Logger.warning("[TuiForwarder] forward #{kind}: #{inspect(reason)}")
       :ok
   end
+
+  defp broadcast_to(sub, data, session_id) do
+    {out_sub, out_data} = shape(sub, data)
+
+    event =
+      out_data
+      |> Map.put(:type, :system_event)
+      |> Map.put(:event, out_sub)
+      |> Map.put(:session_id, session_id)
+
+    Phoenix.PubSub.broadcast(
+      OptimalSystemAgent.PubSub,
+      "osa:session:#{session_id}",
+      {:osa_event, event}
+    )
+  end
+
+  # Every session id currently registered as a live `Agent.Loop` — same
+  # `Registry.select` shape `Loop.cancel/1`'s fallback scan already uses —
+  # filtered down to ROOT sessions: ids containing `:` are a subagent
+  # (`agent:<parent>:...`) or an internal singleton (`bg-notifier:...`), never
+  # a session a TUI streams on its own topic.
+  defp live_root_session_ids do
+    Registry.select(OptimalSystemAgent.SessionRegistry, [{{:"$1", :_, :_}, [], [:"$1"]}])
+    |> Enum.filter(&root_session_id?/1)
+  rescue
+    _ -> []
+  end
+
+  defp root_session_id?(id) when is_binary(id), do: not String.contains?(id, ":")
+  defp root_session_id?(_), do: false
 
   # ── Sub-event reshaping ───────────────────────────────────────────────
   #

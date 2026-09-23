@@ -391,10 +391,27 @@ pub enum BackendEvent {
     },
     /// A background shell command finished. Rendered as a toast + scrollback line
     /// `Background command '{command}' completed (exit code {exit_code})`.
+    ///
+    /// `status` is the backend's own classification (`"done"` | `"failed"` |
+    /// `"killed"`) — the SOURCE OF TRUTH for toast severity, not
+    /// `exit_code == 0`. A background `grep`/`diff`/`test` that exits 1 for a
+    /// normal, meaningful reason (no matches / differs / false) is classified
+    /// `"done"` even though `exit_code != 0`; using the raw exit code here
+    /// used to paint that a red failure toast for a correct answer.
     BackgroundCommandCompleted {
         exit_code: i32,
         command: String,
         task_id: String,
+        status: String,
+    },
+    /// The daemon's OWN memory (not an MCP child's) crossed a critical
+    /// threshold. Warn-only — nothing here ever stops a background task on
+    /// its own; the message names concrete steps for the user to take.
+    DaemonMemoryWarning {
+        rss_mb: u64,
+        beam_mb: u64,
+        limit_mb: u64,
+        message: String,
     },
     /// Queued background `<task-notification>`s were folded into the agent's
     /// context (busy-turn drain or idle poke). Rendered as a system line so

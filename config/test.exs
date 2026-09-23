@@ -229,3 +229,8 @@ config :optimal_system_agent, :stay_awake_command, :disabled
 # The MCP memory watchdog samples child RSS by shelling out to `ps`. Tests must
 # not fire it on a timer; the cases that exercise it call the functions directly.
 config :optimal_system_agent, :mcp_memory_check_ms, nil
+
+# Same reasoning for the daemon's own memory watchdog (`System.MemoryMonitor`):
+# samples RSS by shelling out to `ps` on a timer. Tests exercise the pure
+# `decide/4` core and the measurement functions directly instead.
+config :optimal_system_agent, :daemon_memory_check_ms, nil

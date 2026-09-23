@@ -57,7 +57,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.BashOutput.Handler do
   def execute(%{"background_id" => id} = input, ctx) do
     {result, waited} =
       if truthy?(input["kill"]) do
-        {BackgroundManager.kill(id), nil}
+        {BackgroundManager.kill(id, "requested via bash_output tool"), nil}
       else
         await_terminal(id, wait_ms(input), ctx)
       end
