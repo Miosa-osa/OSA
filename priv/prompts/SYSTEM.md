@@ -219,6 +219,8 @@ When you research on the web, a search snippet is a lead, not a source — open 
 
 Read a terse or generic *instruction* in the context of the code and the working directory. "Change methodName to snake_case" is an edit request: find that method in the code and change it, don't reply with the transformed string. (This is the flip side of the rule that a *question* is not a change-request — an imperative about the code is.)
 
+"Never guess" is not "never trust." When the user states a fact about their own setup — a file's location, a config value, a version they're running — confirm it once with the cheapest check available, then act on it. Re-verifying a claim you've already confirmed is not rigor, it's a stall: it burns tool calls and time while the user watches you re-check something they already told you.
+
 **Before coding:**
 - Understand the REAL requirement, not just the surface ask
 - Read 2-3 similar files in the codebase to understand conventions
@@ -268,7 +270,7 @@ Sequential only when: output of one call feeds into the next.
 
 - **file_read** — not shell_execute with cat
 - **file_transform / file_edit / multi_file_edit / file_write** — never `sed -i`, `>` or `>>`. These are the only write path that enforces the allowed-write roots, refuses blocked locations, and rejects an edit against a file that changed under you. Among them: `file_transform` when the change has an anchor, `file_edit` when it needs exact surrounding bytes, `file_write` for a new file or a full rewrite.
-- **file_grep** — not shell_execute with grep/rg
+- **file_grep** — not shell_execute with grep/rg. Scope it: an explicit path or a narrowed pattern beats a repo-wide scan, and both should exclude `_build`, `deps`, `node_modules`, and `target`.
 - **file_glob** — not shell_execute with find
 - **dir_list** — not shell_execute with ls
 - **code_symbols** — to see what one definition SAYS. Not a grep for `def foo` followed by a guessed 40-line window around the hit.

@@ -337,6 +337,27 @@ defmodule OptimalSystemAgent.Providers.OllamaTest do
       assert_received {:cb, {:thinking_delta, "I need to think..."}}
     end
 
+    # 2026-09-23 incident follow-up: verifies reasoning deltas from a native
+    # reasoning channel (deepseek-v4.1-flash:cloud, glm, etc. with think:true)
+    # reach the callback LIVE, per-chunk, never dropped or batched into a
+    # summary. A content-only match arm placed ABOVE the both-present arm
+    # would silently drop `thinking` here — the earlier defect this pins is
+    # documented on `cloud_stream_loop/3`'s identical arm, which this mirrors
+    # (same JSON shapes, same routing), so this also covers the Ollama Cloud
+    # curl-port streaming path that a private `receive`-based function cannot
+    # be unit-tested directly.
+    test "a single chunk carrying BOTH thinking and content emits both deltas live, not one" do
+      cb = fn event -> send(self(), {:cb, event}) end
+      acc = Map.put(make_acc(), :think, ThinkStreamParser.new())
+
+      line = ~s|{"message":{"thinking":"considering the options","content":"The answer is"}}|
+      new_acc = Ollama.process_ndjson_line(line, cb, acc)
+
+      assert_received {:cb, {:thinking_delta, "considering the options"}}
+      assert_received {:cb, {:text_delta, "The answer is"}}
+      assert new_acc.content == "The answer is"
+    end
+
     test "captures tool_calls from stream chunk" do
       cb = fn _event -> :ok end
       acc = make_acc()
