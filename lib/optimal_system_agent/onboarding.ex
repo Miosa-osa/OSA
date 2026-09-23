@@ -12,8 +12,20 @@ defmodule OptimalSystemAgent.Onboarding do
 
   ## Config Path
 
-  Single source of truth: `~/.osa/.env`
-  runtime.exs loads it on boot (lines 31-64). No config.exs. No fighting configs.
+  `write_setup/1` writes `~/.osa/.env` (provider keys, channel tokens,
+  identity) AND syncs the chosen provider/model into `~/.osa/config.json` via
+  `ModelSelection.persist/2` - the SAME store the in-TUI model picker writes.
+  This is deliberate: `config.json` outranks `.env`'s `OLLAMA_MODEL`/`OSA_MODEL`
+  at boot (see `Application.model_for_provider/3`), so a stale config.json left
+  by an earlier picker choice must not be able to silently override a fresh
+  onboarding selection - every "user chose a default" surface has to write
+  through the one authoritative store or the two can disagree (this used to
+  be `.env`-only and was the root cause of the "it keeps reverting to
+  glm-5.2:cloud" bug: re-running setup changed `.env`, but an older
+  config.json kept winning at boot regardless).
+  `config/runtime.exs` loads `.env` on boot (lines 31-64); `ConfigFile` loads
+  `config.json`/`config.toml` (see its own moduledoc for the full precedence:
+  defaults < config.json < config.toml).
   """
 
   require Logger
@@ -2003,7 +2015,13 @@ defmodule OptimalSystemAgent.Onboarding do
   Write setup configuration and seed workspace.
 
   1. Writes ~/.osa/.env with provider config
-  2. Sets env vars in-process — takes effect immediately, no restart, **but
+  2. When a model was chosen, syncs `{provider, model}` into `~/.osa/config.json`
+     via `ModelSelection.persist/2` - the store that OUTRANKS `.env` at boot
+     (`Application.model_for_provider/3`), so this run's selection can't be
+     silently overridden by whatever config.json an earlier model-picker
+     choice left behind. A blank/absent model is left untouched (never writes
+     a placeholder).
+  3. Sets env vars in-process - takes effect immediately, no restart, **but
      only for the OS process this function runs in**. Called from the
      in-daemon HTTP flow (`POST /onboarding/setup`, `/setup` in the TUI) that
      process IS the serving daemon, so this is true and the very next request
@@ -2017,8 +2035,8 @@ defmodule OptimalSystemAgent.Onboarding do
      `Providers.OpenAICompatProvider` also re-reads `~/.osa/.env` live via
      `live_env/1` as a second line of defense, so a key already works even
      if some other caller skips the restart.
-  3. Seeds workspace templates (BOOTSTRAP.md, IDENTITY.md, USER.md, SOUL.md, HEARTBEAT.md)
-  4. Reloads Soul cache
+  4. Seeds workspace templates (BOOTSTRAP.md, IDENTITY.md, USER.md, SOUL.md, HEARTBEAT.md)
+  5. Reloads Soul cache
   """
   @spec write_setup(map()) :: :ok | {:error, String.t()}
   def write_setup(%{} = params) do
@@ -2060,6 +2078,27 @@ defmodule OptimalSystemAgent.Onboarding do
         # Apply env vars in-process so they take effect immediately
         apply_env_vars(provider, model, api_key, base_url)
         apply_channel_tokens(channel_tokens)
+
+        # Sync the SAME selection into ~/.osa/config.json via the shared
+        # ModelSelection store, not just .env.
+        #
+        # `Application.model_for_provider/3` (see application.ex) gives
+        # config.json ABSOLUTE priority over an OLLAMA_MODEL/OSA_MODEL env var
+        # at boot ("config.json is the user's PERSISTED selection, it beats a
+        # possibly-stale env var" - by design, so a picker choice survives a
+        # `.env` written by some other tool). Onboarding/`osa setup` used to
+        # write ONLY `.env`, so a config.json left behind by an EARLIER visit
+        # to the in-TUI model picker would permanently outrank every later
+        # onboarding run - re-running setup with a new model looked like it
+        # worked (this process picked it up immediately) and then silently
+        # reverted to the old model on the next restart. That is the
+        # "it always selects glm-5.2, randomly" bug report: whether a fresh
+        # choice stuck depended entirely on whether a config.json happened to
+        # exist, not on which choice was more recent. Writing here makes
+        # onboarding and the picker share one authoritative store.
+        if is_binary(model) and model != "" do
+          OptimalSystemAgent.ModelSelection.persist(runtime_provider_id(provider), model)
+        end
 
         # Set identity env vars in-process
         if user_name, do: System.put_env("OSA_USER_NAME", user_name)

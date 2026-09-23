@@ -832,6 +832,19 @@ defmodule OptimalSystemAgent.CLI.Setup do
       if provider in [:ollama, :ollama_cloud] do
         Application.put_env(:optimal_system_agent, :ollama_model, model)
       end
+
+      # Sync into ~/.osa/config.json (the same store the in-TUI model picker
+      # writes via ModelSelection.persist/2). config.json OUTRANKS the .env
+      # OLLAMA_MODEL/OSA_MODEL vars this function just wrote at boot (see
+      # `OptimalSystemAgent.Application.model_for_provider/3`), so without
+      # this a `/setup` re-run that only touched `.env` could be silently
+      # overridden by whatever config.json a previous picker selection left
+      # behind - the same "sticks now, reverts after restart" bug fixed in
+      # `Onboarding.write_setup/1`.
+      OptimalSystemAgent.ModelSelection.persist(
+        to_string(runtime_provider_atom(provider)),
+        model
+      )
     end
 
     :ok

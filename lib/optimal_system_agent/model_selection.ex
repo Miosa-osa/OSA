@@ -4,13 +4,22 @@ defmodule OptimalSystemAgent.ModelSelection do
 
   A model switch that only mutates the live `Loop` struct is forgotten the
   moment a new session starts or the daemon restarts - the next boot falls back
-  to the compiled default (glm-5.2:cloud). `persist/2` is the single place that
-  makes a selection survive: it sets the runtime app-env keys the request/boot
-  path reads AND merges the choice into `~/.osa/config.json` so it outlives the
-  process.
+  to whatever `.env`/env vars or the compiled default resolve to (see
+  `config/runtime.exs`'s `:ollama_model` chain). `persist/2` is the single
+  place that makes a selection survive: it sets the runtime app-env keys the
+  request/boot path reads AND merges the choice into `~/.osa/config.json` so
+  it outlives the process.
 
-  Callers (the `/models` HTTP routes and the session hot-swap route) delegate
-  here so the write mechanism lives in exactly one place.
+  `~/.osa/config.json` is the SINGLE authoritative store for the user's
+  chosen default - `Application.model_for_provider/3` gives it priority over
+  every env-derived model at boot. Every surface that lets a user set a
+  default (the in-TUI model picker via the `/models` HTTP routes and the
+  session hot-swap route below, plus `Onboarding.write_setup/1` and
+  `CLI.Setup.write_config/3` for onboarding/`/setup`) MUST funnel through
+  `persist/2` - a surface that only writes `.env` can be silently overridden
+  by a stale config.json left by an earlier picker choice, which was exactly
+  the "it always reverts to glm-5.2:cloud, randomly" bug this module's callers
+  were extended to close.
   """
 
   require Logger

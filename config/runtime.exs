@@ -395,9 +395,16 @@ config :optimal_system_agent,
        nil -> "q4_0"
        s -> String.downcase(String.trim(s))
      end),
+  # The literal fallback here used to read "glm-5.2:cloud" - a value that could
+  # never actually be returned. `config/config.exs` ALWAYS sets `:ollama_model`
+  # at compile time (currently "qwen3-next:80b"), so `compile_env/3`'s third
+  # argument only fires if that line is ever deleted; a stale, unrelated
+  # literal there just misled anyone reading this as "the real default".
+  # Mirror config.exs's actual value instead of inventing a second one that
+  # can drift out of sync with it.
   ollama_model:
     System.get_env("OLLAMA_MODEL") ||
-      Application.compile_env(:optimal_system_agent, :ollama_model, "glm-5.2:cloud"),
+      Application.compile_env(:optimal_system_agent, :ollama_model, "qwen3-next:80b"),
   ollama_api_key: System.get_env("OLLAMA_API_KEY"),
   # OLLAMA_THINK: force extended reasoning on ("true") or off ("false") for ALL
   # Ollama models, overriding the serving-mode default in both directions.
@@ -464,11 +471,13 @@ config :optimal_system_agent,
            System.get_env("MIOSA_MODEL") || "nemotron-3-miosa"
 
          :ollama ->
+           # Same dead-literal fix as `ollama_model` above: mirror config.exs's
+           # actual compiled default instead of a stale, unrelated string.
            System.get_env("OLLAMA_MODEL") ||
              Application.compile_env(
                :optimal_system_agent,
                :ollama_model,
-               "glm-5.2:cloud"
+               "qwen3-next:80b"
              )
 
          :groq ->
