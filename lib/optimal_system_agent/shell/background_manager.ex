@@ -117,9 +117,14 @@ defmodule OptimalSystemAgent.Shell.BackgroundManager do
     if len > max_chars, do: String.slice(collapsed, len - max_chars, max_chars), else: collapsed
   end
 
-  @doc "Kill a running background command by id. Returns its final snapshot."
-  @spec kill(String.t()) :: {:ok, map()} | {:error, :not_found}
-  def kill(id), do: with_worker(id, &BackgroundTask.kill/1)
+  @doc """
+  Kill a running background command by id. Returns its final snapshot.
+
+  `reason` is logged by the worker (`BackgroundTask.kill/2`) so every stop —
+  whatever triggers it — says WHY, not just THAT.
+  """
+  @spec kill(String.t(), String.t()) :: {:ok, map()} | {:error, :not_found}
+  def kill(id, reason \\ "requested"), do: with_worker(id, &BackgroundTask.kill(&1, reason))
 
   @doc """
   Kill every RUNNING background command belonging to `session_id` — orphan
@@ -130,7 +135,7 @@ defmodule OptimalSystemAgent.Shell.BackgroundManager do
     list()
     |> Enum.filter(&(&1.status == :running and &1[:session_id] == session_id))
     |> Enum.reduce(0, fn snap, acc ->
-      case kill(snap.id) do
+      case kill(snap.id, "session ended") do
         {:ok, _} -> acc + 1
         _ -> acc
       end
@@ -151,7 +156,7 @@ defmodule OptimalSystemAgent.Shell.BackgroundManager do
     list()
     |> Enum.filter(&(&1.status == :running and MapSet.member?(wanted, &1[:session_id])))
     |> Enum.reduce(0, fn snap, acc ->
-      case kill(snap.id) do
+      case kill(snap.id, "cascading cancel") do
         {:ok, _} -> acc + 1
         _ -> acc
       end

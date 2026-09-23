@@ -934,6 +934,11 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                 // decoded task_id (shown in the completion toast) is populated.
                 #[serde(default, alias = "background_id")]
                 task_id: String,
+                // The backend's own classification ("done" | "failed" |
+                // "killed") — absent on an older backend, in which case the
+                // handler falls back to exit_code == 0.
+                #[serde(default)]
+                status: String,
             }
             let ev: Ev = match serde_json::from_slice(data) {
                 Ok(e) => e,
@@ -943,6 +948,31 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                 exit_code: ev.exit_code,
                 command: ev.command,
                 task_id: ev.task_id,
+                status: ev.status,
+            })
+        }
+
+        "daemon_memory_warning" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                rss_mb: u64,
+                #[serde(default)]
+                beam_mb: u64,
+                #[serde(default)]
+                limit_mb: u64,
+                #[serde(default)]
+                message: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("daemon_memory_warning", e)),
+            };
+            Some(BackendEvent::DaemonMemoryWarning {
+                rss_mb: ev.rss_mb,
+                beam_mb: ev.beam_mb,
+                limit_mb: ev.limit_mb,
+                message: ev.message,
             })
         }
 
@@ -2308,6 +2338,7 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
         "agent_finished"
         | "agent_message"
         | "background_command_completed"
+        | "daemon_memory_warning"
         | "turn_recap"
         | "provider_retry"
         | "error" => parse_sse_event(base.event.as_str(), data),
@@ -3095,6 +3126,76 @@ mod tests {
         let legacy = br#"{"type":"agent_finished","display_name":"explorer","duration_ms":1200}"#;
         match parse_sse_event("agent_finished", legacy) {
             Some(BackendEvent::AgentFinished { status, .. }) => assert_eq!(status, ""),
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    /// Claude Code parity: `status` (the backend's own classification), not
+    /// `exit_code == 0`, is the source of truth for a completed background
+    /// command — see `BackendEvent::BackgroundCommandCompleted`.
+    #[test]
+    fn background_command_completed_carries_its_status() {
+        let done = br#"{"type":"background_command_completed","command":"grep TODO f.ex","background_id":"bg_1","exit_code":1,"status":"done"}"#;
+        match parse_sse_event("background_command_completed", done) {
+            Some(BackendEvent::BackgroundCommandCompleted {
+                status, exit_code, ..
+            }) => {
+                assert_eq!(status, "done");
+                assert_eq!(exit_code, 1);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        let failed = br#"{"type":"background_command_completed","command":"./deploy.sh","background_id":"bg_2","exit_code":1,"status":"failed"}"#;
+        match parse_sse_event("background_command_completed", failed) {
+            Some(BackendEvent::BackgroundCommandCompleted { status, .. }) => {
+                assert_eq!(status, "failed");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // Legacy frame with no status → empty, so the handler falls back to
+        // exit_code == 0 rather than misreporting every completion as failed.
+        let legacy = br#"{"type":"background_command_completed","command":"echo hi","background_id":"bg_3","exit_code":0}"#;
+        match parse_sse_event("background_command_completed", legacy) {
+            Some(BackendEvent::BackgroundCommandCompleted { status, .. }) => {
+                assert_eq!(status, "");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    /// The daemon's own memory warning has no session_id at the wire level —
+    /// the backend fans it out to every live root session's topic before it
+    /// ever reaches this client, so the frame it decodes is an ordinary
+    /// session-scoped event by the time it gets here.
+    #[test]
+    fn daemon_memory_warning_parses_with_concrete_numbers() {
+        let frame = br#"{"type":"daemon_memory_warning","rss_mb":5000,"beam_mb":3000,"limit_mb":4096,"message":"OSA is using 5000 MB, over the 4096 MB threshold."}"#;
+        match parse_sse_event("daemon_memory_warning", frame) {
+            Some(BackendEvent::DaemonMemoryWarning {
+                rss_mb,
+                beam_mb,
+                limit_mb,
+                message,
+            }) => {
+                assert_eq!(rss_mb, 5000);
+                assert_eq!(beam_mb, 3000);
+                assert_eq!(limit_mb, 4096);
+                assert!(message.contains("5000 MB"));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    /// Also reachable via a raw `system_event` frame (an SSE producer that does
+    /// not pre-unwrap sub-events), the same fallback path `background_command_completed`
+    /// and `agent_finished` already have.
+    #[test]
+    fn daemon_memory_warning_also_parses_wrapped_in_a_system_event_frame() {
+        let frame = br#"{"type":"system_event","event":"daemon_memory_warning","rss_mb":5000,"beam_mb":3000,"limit_mb":4096,"message":"critical"}"#;
+        match parse_sse_event("system_event", frame) {
+            Some(BackendEvent::DaemonMemoryWarning { rss_mb, .. }) => assert_eq!(rss_mb, 5000),
             other => panic!("unexpected: {:?}", other),
         }
     }
