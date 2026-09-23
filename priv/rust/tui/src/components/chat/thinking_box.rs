@@ -166,6 +166,22 @@ impl ThinkingBox {
         self.content.is_empty()
     }
 
+    /// True while reasoning is streaming (before [`finish`](Self::finish)).
+    pub fn is_running(&self) -> bool {
+        self.running
+    }
+
+    /// Whether the box is showing a FINISHED thought as a one-row summary.
+    ///
+    /// Once reasoning ends (the answer or a tool took over), the tail stops
+    /// being news: it shrinks to its `∴ Thought for Ns` header so the row
+    /// beneath it can show what is happening NOW — the running tool, or the
+    /// wait on the model. Expanded mode is the user's explicit choice and keeps
+    /// the body.
+    pub fn is_summary(&self) -> bool {
+        !self.running && !self.content.is_empty() && self.mode != DisplayMode::Expanded
+    }
+
     /// The elapsed reasoning time — frozen value once finished, else the live
     /// value ticking up from `started_at`.
     pub fn elapsed(&self) -> Option<Duration> {
@@ -190,6 +206,9 @@ impl ThinkingBox {
 
     pub fn height(&self, _width: u16) -> u16 {
         if self.content.is_empty() {
+            return 1;
+        }
+        if self.is_summary() {
             return 1;
         }
         match self.mode {
@@ -220,8 +239,17 @@ impl ThinkingBox {
         let theme = crate::style::theme();
         let header = self.header_text();
 
-        if matches!(self.mode, DisplayMode::Truncated) && !self.content.is_empty() {
+        if matches!(self.mode, DisplayMode::Truncated) && self.running && !self.content.is_empty() {
             self.draw_tail_window(frame, area, &header, &theme);
+            return;
+        }
+
+        if self.is_summary() {
+            let line = Line::from(Span::styled(
+                header,
+                theme.faint().add_modifier(Modifier::ITALIC),
+            ));
+            frame.render_widget(Paragraph::new(line), area);
             return;
         }
 
@@ -296,8 +324,20 @@ impl ThinkingBox {
         theme: &crate::style::Theme,
     ) {
         let inner_w = (area.width as usize).saturating_sub(2).max(1);
-        let body = self.body_lines(inner_w);
-        let window = (Self::TAIL_ROWS as usize).saturating_sub(1);
+        // Blank rows are paragraph spacing, not reasoning. In a 3-row window
+        // they cost a third of the view each, and with the window cut short
+        // the one row left could be a blank or a lone "Output." while the
+        // model had just written a whole sentence. Show text rows only.
+        let body: Vec<Line<'static>> = self
+            .body_lines(inner_w)
+            .into_iter()
+            .filter(|l| l.spans.iter().any(|s| !s.content.trim().is_empty()))
+            .collect();
+        // Fit the window to the rows actually granted, not to the rows asked
+        // for: a short band must drop the OLDEST lines, never the newest.
+        let window = (area.height as usize)
+            .saturating_sub(1)
+            .min((Self::TAIL_ROWS as usize).saturating_sub(1));
         let start = body.len().saturating_sub(window);
 
         let mut text_lines: Vec<Line<'static>> = Vec::with_capacity(window + 1);
@@ -628,5 +668,59 @@ mod tests {
         let header = tb.header_text();
         assert!(header.contains("Inspecting PR workflow"), "{header}");
         assert!(header.contains("Thought for"), "{header}");
+    }
+
+    fn render_rows(tb: &ThinkingBox, w: u16, h: u16) -> Vec<String> {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| tb.draw(f, f.area())).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The operator's report: a 118s reasoning call showed `∴ Thinking… 1m 53s`
+    /// and one word under it. The band had been granted one row fewer than
+    /// the tail window assumed, and the window filled from the TOP — so the
+    /// NEWEST line was the one cut off, and paragraph blanks ate the rest.
+    #[test]
+    fn a_short_band_drops_the_oldest_reasoning_never_the_newest() {
+        let mut tb = ThinkingBox::new();
+        tb.update("First thought.\n\nSecond thought.\n\nPlan: run the tests.\n\nNewest line here.");
+        let rows = render_rows(&tb, 60, 3);
+        assert!(rows[0].contains("Thinking"), "{rows:?}");
+        assert_eq!(rows[1].trim(), "Plan: run the tests.", "{rows:?}");
+        assert_eq!(rows[2].trim(), "Newest line here.", "{rows:?}");
+    }
+
+    #[test]
+    fn the_live_tail_shows_three_text_rows_not_paragraph_blanks() {
+        let mut tb = ThinkingBox::new();
+        tb.update("one.\n\ntwo.\n\nthree.\n\nfour.");
+        let rows = render_rows(&tb, 40, ThinkingBox::TAIL_ROWS);
+        let body: Vec<&str> = rows[1..].iter().map(|r| r.trim()).collect();
+        assert_eq!(body, vec!["two.", "three.", "four."]);
+    }
+
+    /// Once reasoning ends it is a one-row summary, so the activity row
+    /// beneath it can name the tool that is now running.
+    #[test]
+    fn a_finished_thought_is_a_one_row_summary() {
+        let mut tb = ThinkingBox::new();
+        tb.update("thinking hard\nabout it");
+        assert!(tb.is_running());
+        assert!(!tb.is_summary());
+        tb.on_action_start();
+        assert!(tb.is_summary());
+        assert_eq!(tb.height(80), 1);
+        let rows = render_rows(&tb, 60, 1);
+        assert!(rows[0].contains("Thought for"), "{rows:?}");
     }
 }
