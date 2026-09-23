@@ -274,12 +274,22 @@ fn run(cli: config::cli::Cli) -> Result<app::resume::ExitOutcome> {
         "keyboard enhancement (Shift+Enter newline) status"
     );
 
-    // The burst above already sent a CPR (ESC[6n) and drained its response, so the
-    // terminal is warmed up before ratatui's Viewport::Inline construction issues
-    // its own DSR cursor query below. The inline-viewport creation still retries
-    // (see below) as a final graceful fallback for stubborn launch contexts.
-    let rows = app::frame_size::probe().rows;
-    let viewport_h = compute_viewport_height(rows);
+    // The burst above already sent a CPR (ESC[6n) and read its answer, so when the
+    // terminal replied we already know where the cursor is and hand ratatui that
+    // row instead of letting `Viewport::Inline` ask a second time (nothing has
+    // been printed since the probe, so the cursor has not moved). Only a probe
+    // that went unanswered falls back to ratatui's own query, and that still
+    // retries (see below) as a final graceful fallback for stubborn launch
+    // contexts.
+    let boot_size = app::frame_size::probe();
+    let viewport_h = compute_viewport_height(boot_size.rows);
+    let boot_backend = || {
+        use crate::app::inline_backend::InlineBackend;
+        match probe.cursor_position {
+            Some(pos) => InlineBackend::primed_at(io::stdout(), pos.y, boot_size.as_size()),
+            None => InlineBackend::inline(io::stdout(), boot_size.as_size()),
+        }
+    };
 
     // Create the inline viewport, retrying if the cursor query still times out
     // (intermittent DSR flakiness) instead of aborting the whole TUI.
@@ -287,7 +297,7 @@ fn run(cli: config::cli::Cli) -> Result<app::resume::ExitOutcome> {
     let mut last_err = None;
     for attempt in 0..6u64 {
         match Terminal::with_options(
-            crate::app::inline_backend::InlineBackend::new(io::stdout()),
+            boot_backend(),
             TerminalOptions {
                 viewport: Viewport::Inline(viewport_h),
             },
