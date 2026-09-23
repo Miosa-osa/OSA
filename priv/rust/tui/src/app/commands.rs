@@ -50,6 +50,10 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "lean",
         "Lean view — print the model's words, not its tool calls",
     ),
+    (
+        "lean-prompt",
+        "Show/toggle the lean system-prompt template (backend, persists)",
+    ),
     ("theme", "Switch the color theme"),
     ("keybindings", "Show the keybinding map + config file"),
     ("config", "Open the settings editor"),

@@ -61,6 +61,16 @@ defmodule OptimalSystemAgent.Settings.Schema do
     "mcp_exclude" =>
       {:string_list,
        ~s(Use a list of server names to never load, from any source: {"mcp_exclude": ["serena"]})},
+    "lean_prompt" =>
+      {:boolean,
+       "Use true or false — skip unfilled bundled rule templates in the system prompt " <>
+         "(a prompt-cleanliness cut, not a content cut). Default true"},
+    "lean_system_prompt" =>
+      {:boolean,
+       "Use true or false — serve the condensed SYSTEM_LEAN.md instead of the full " <>
+         "SYSTEM.md. Default false; the full template is the default so the model gets " <>
+         "the complete instruction set. Opt in for constrained context windows or local " <>
+         "models where the extra prompt cost hurts"},
 
     # ── CC-parity keys (camelCase to match Claude Code settings.json) ──
     # Read by OSA today: disableAllHooks (agent/hooks/shell_hook.ex). The rest
