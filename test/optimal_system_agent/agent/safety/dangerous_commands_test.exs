@@ -28,6 +28,72 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommandsTest do
       assert DC.check_command("rm -" <> "rf /home/user/project/tmp") == :ok
       assert DC.check_command("rm build/output.o") == :ok
     end
+
+    for {label, cmd} <- [
+          {"$PWD", "rm -" <> "rf " <> "$PWD"},
+          {"${PWD}", "rm -" <> "rf " <> "${PWD}"},
+          {"$OLDPWD", "rm -" <> "rf " <> "$OLDPWD"},
+          {"${OLDPWD}", "rm -" <> "rf " <> "${OLDPWD}"}
+        ] do
+      test "blocks (same class as $HOME): #{label}" do
+        assert {:blocked, _, :catastrophic} = DC.check_command_classified(unquote(cmd))
+      end
+    end
+  end
+
+  # ── rm -rf UNRESOLVABLE target: always confirm, never silently allowed or
+  # hard-blocked (the audited overdrive gap) ─────────────────────────────
+  describe "rm -rf unresolvable target (:confirm_required — always asks)" do
+    for {label, cmd} <- [
+          {"command substitution, double-quoted", "rm -" <> "rf " <> "\"$(pwd)\""},
+          {"command substitution, bare", "rm -" <> "rf " <> "$(pwd)"},
+          {"backtick substitution", "rm -" <> "rf " <> "`git rev-parse --show-toplevel`"},
+          {"brace parameter expansion", "rm -" <> "rf " <> "\"${SOME_VAR}\""},
+          {"command substitution mid-wrapper", "bash -c \"rm -" <> "rf \\\"$(pwd)\\\"\""},
+          {"near-root glob: /etc/*", "rm -" <> "rf " <> "/etc/*"},
+          {"near-root glob: $HOME/*", "rm -" <> "rf " <> "\"$HOME\"/*"},
+          {"near-root glob: ${HOME}/*", "rm -" <> "rf " <> "${HOME}/*"}
+        ] do
+      test "classifies as :confirm_required (never silently allowed or hard-blocked): #{label}" do
+        assert {:blocked, _, :confirm_required} = DC.check_command_classified(unquote(cmd))
+        # `blocked?/1` / `check_command/1` (severity dropped) still report it as
+        # a match — callers with no permission mode to reason about fail closed.
+        assert {:blocked, _} = DC.check_command(unquote(cmd))
+      end
+    end
+
+    test "a literal broad root still outranks an unresolvable one when both match" do
+      # `rm -rf / "$(pwd)"` — first argument is a LITERAL broad root, so the
+      # command is unrecoverable regardless of what the second argument
+      # resolves to. Catastrophic must win, never be downgraded to a prompt.
+      cmd = "rm -" <> "rf / \"$(pwd)\""
+      assert {:blocked, _, :catastrophic} = DC.check_command_classified(cmd)
+    end
+
+    test "negatives: ordinary scoped deletes are untouched by the new class" do
+      for cmd <- [
+            "rm -" <> "rf build",
+            "rm -" <> "rf ./tmp/x",
+            "rm -" <> "rf ./build",
+            "rm -" <> "rf node_modules",
+            "rm -" <> "rf /home/x/project/tmp/cache"
+          ] do
+        assert DC.check_command_classified(cmd) == :ok, "unexpectedly flagged: #{cmd}"
+      end
+    end
+
+    test "negatives: an unrelated command substitution elsewhere in the line is not enough" do
+      # The dynamic marker must follow the `rm` invocation; a substitution used
+      # for something else entirely (not the delete target) must not flip an
+      # ordinary scoped delete into :confirm_required.
+      cmd = "echo $(date) && rm -" <> "rf ./build"
+      assert DC.check_command_classified(cmd) == :ok
+    end
+
+    test "negatives: reading a variable is not a delete at all" do
+      assert DC.check_command_classified("echo $(pwd)") == :ok
+      assert DC.check_command_classified("echo \"${HOME}\"") == :ok
+    end
   end
 
   describe "force push to protected branch (always blocked)" do

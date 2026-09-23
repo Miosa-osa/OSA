@@ -1,15 +1,15 @@
 defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
   @moduledoc """
-  POLICY DATA: the circuit-breaker blocklist, in two severity classes.
+  POLICY DATA: the circuit-breaker blocklist, in three severity classes.
 
   This module is the last line of defence. Unlike the auto-mode `Rules`
   (which are risk-tiered — `:caution`/`:dangerous` verdicts that the Guardian
   may *allow*, block, or pause depending on the session's permission tier), the
-  patterns here are blocked **in every permission tier**, with exactly one
-  documented exception described below. There is no counter, no pause-after-N,
-  no allowlist, no config toggle.
+  patterns here are blocked **in every permission tier**, with exactly the
+  documented exceptions described below. There is no counter, no
+  pause-after-N, no allowlist, no config toggle.
 
-  ## The two classes, and why there are two
+  ## The three classes, and why there are three
 
   A breaker that blocks work the operator explicitly authorised is not a safety
   feature — it is a bug that teaches people to switch the breaker off. Overdrive
@@ -22,6 +22,18 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
       filesystem, or a database is destroyed, and no amount of operator intent
       makes that a thing OSA should do on its behalf. `rm -rf /`, fork bombs,
       `dd` to a block device, `mkfs`, `DROP DATABASE`, `TRUNCATE` on prod.
+
+    * `:confirm_required` — **always prompts, in every mode, overdrive
+      included — but is never hard-blocked either.** The target of a recursive
+      force delete that the breaker cannot statically resolve: a command
+      substitution (`$(pwd)`, `` `git rev-parse --show-toplevel` ``), a brace
+      parameter expansion (`${DIR}`), or a glob anchored at/near a filesystem
+      root (`/etc/*`, `$HOME/*`). The breaker cannot prove such a target is `/`
+      any more than it can prove it is `./build` — silently deciding either way
+      (hard-block *or* allow) is a guess with an unrecoverable downside, so
+      neither guess is made: the operator is asked, in every mode, and
+      `overdrive` does not waive the question the way it waives `:overridable`.
+      Claude Code shipped the equivalent fix in 2.1.281.
 
     * `:overridable` — **blocked in every mode EXCEPT `:overdrive`/`:bypass`.**
       These are genuinely risky *conventions*, not destruction: the blast radius
@@ -36,7 +48,7 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
   Enforcement of that distinction lives in ONE place —
   `OptimalSystemAgent.Agent.Loop.ToolExecutor.approve_tool_call/2` — which
   consults `classify/1`. Every other caller uses `blocked?/1` / `check_command/1`
-  and gets the strict, mode-independent verdict (both classes blocked), because
+  and gets the strict, mode-independent verdict (every class blocked), because
   those callers have no permission mode to reason about.
 
   Separation of concerns:
@@ -65,14 +77,24 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
 
   `:catastrophic` (never overridable):
 
-    * `rm -rf /`, `rm -rf ~`, `rm -rf $HOME`, `rm -rf /*`, `rm -rf .` and other
-      recursive-force deletes rooted at a broad root.
+    * `rm -rf /`, `rm -rf ~`, `rm -rf $HOME`, `rm -rf $PWD`, `rm -rf $OLDPWD`,
+      `rm -rf /*`, `rm -rf .` and other recursive-force deletes rooted at a
+      literal broad root.
     * Fork bombs (`:(){ :|:& };:` and obfuscated variants).
     * `dd` writing to a block device (`of=/dev/sda`, `/dev/nvme…`, `/dev/disk…`).
     * `mkfs` / filesystem creation on any device.
     * `DROP DATABASE` / `DROP SCHEMA`.
     * `DROP TABLE` / `TRUNCATE` targeting a production database/table.
     * `file_delete` on a root/home path.
+
+  `:confirm_required` (always prompts, overdrive included; never silently
+  allowed or hard-blocked):
+
+    * `rm -rf "$(pwd)"`, `` rm -rf `git rev-parse --show-toplevel` ``,
+      `rm -rf "${SOME_VAR}"` — a recursive-force delete whose target is a
+      command substitution or brace parameter expansion.
+    * `rm -rf /etc/*`, `rm -rf "$HOME"/*` — a recursive-force delete whose
+      target is a glob anchored at, or one segment below, a filesystem root.
 
   `:overridable` (blocked everywhere except overdrive/bypass):
 
@@ -91,11 +113,15 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
   Severity class of a breaker match.
 
     * `:catastrophic` — unrecoverable destruction. Blocked in EVERY mode.
+    * `:confirm_required` — the target cannot be statically proven safe OR
+      unsafe (a command substitution, backtick, brace expansion, or a glob
+      at/near a filesystem root). Always prompts, in EVERY mode — overdrive
+      included — and is never silently allowed or hard-blocked.
     * `:overridable` — bounded, recoverable risk. Blocked in every mode except
       `:overdrive`/`:bypass`, where the operator has taken explicit
       responsibility for unattended execution.
   """
-  @type severity :: :catastrophic | :overridable
+  @type severity :: :catastrophic | :confirm_required | :overridable
   @type classified :: {:blocked, reason(), severity()} | :ok
 
   # Tool names whose primary argument is a shell command string.
@@ -119,10 +145,46 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
   @rm_recursive_flag ~r/\brm\b[^\n]*\s-\w*r|\brm\b[^\n]*\s--recursive\b/i
   @rm_force_flag ~r/\brm\b[^\n]*\s-\w*f|\brm\b[^\n]*\s--force\b/i
 
-  # A broad root target: /, /*, ~, ~/, ~/*, $HOME (opt /), ., .., *, or a bare
-  # top-level system directory (/etc, /usr, /home, …). Must be delimited so it
-  # is the whole argument, not a prefix of a deeper, scoped path.
-  @broad_root_target ~r/(?:^|\s)(?:\/|\/\*|~|~\/|~\/\*|\$\{?HOME\}?\/?|\.|\.\.|\*|\/(?:etc|usr|bin|sbin|boot|dev|lib|lib64|proc|root|run|sys|var|opt|home|Users|System|Library))(?=[\s;&|)]|$)/
+  # A broad root target: /, /*, ~, ~/, ~/*, $HOME/$PWD/$OLDPWD (opt /), ., ..,
+  # *, or a bare top-level system directory (/etc, /usr, /home, …). Must be
+  # delimited so it is the whole argument, not a prefix of a deeper, scoped
+  # path. $PWD/$OLDPWD sit beside $HOME here (not in the unresolvable-target
+  # class below) because, like $HOME, their *meaning* is not in doubt — they
+  # denote the whole current/previous working directory, the same breadth as
+  # the bare `.` two rows down, not an opaque value only the shell can
+  # resolve.
+  @broad_root_target ~r/(?:^|\s)(?:\/|\/\*|~|~\/|~\/\*|\$\{?HOME\}?\/?|\$\{?PWD\}?\/?|\$\{?OLDPWD\}?\/?|\.|\.\.|\*|\/(?:etc|usr|bin|sbin|boot|dev|lib|lib64|proc|root|run|sys|var|opt|home|Users|System|Library))(?=[\s;&|)]|$)/
+
+  # ── rm -rf UNRESOLVABLE target ──────────────────────────────────────
+  #
+  # `rm_rf_broad_root?/1` above only fires when the delete target is a
+  # LITERAL, complete argument sitting right there in the command line. A
+  # target built from a command substitution (`$(pwd)`, `` `git rev-parse
+  # --show-toplevel` ``), a brace parameter expansion (`${DIR}`), or a glob
+  # anchored at/near a filesystem root (`/etc/*`, `$HOME/*`) is resolved only
+  # by the SHELL, at run time — the breaker can prove `./build` is scoped and
+  # `/` is not, but it cannot prove anything about a value it never sees.
+  # Guessing either way (hard-block, which would refuse plenty of innocent
+  # commands, or silently allow, which is the gap this class closes) is wrong
+  # with an unrecoverable downside on one side, so `check_variant/1` reports
+  # `:confirm_required` instead of `:catastrophic`/`:overridable`/`:ok` and
+  # `ToolExecutor.approve_tool_call/2` turns that into an interactive prompt
+  # in EVERY permission mode, overdrive included.
+
+  # Command substitution / backtick / brace-expansion anywhere after an `rm`
+  # invocation: the delete target depends on a value only known once the
+  # shell has already evaluated something else. Bounded to start a shell word
+  # (after whitespace, a quote, or the start of the remaining text) so a
+  # `$`/backtick embedded mid-token (not a real expansion) is not what this
+  # matches.
+  @rm_dynamic_target ~r/\brm\b[^\n]*(?:^|[\s"'])(?:\$\(|`|\$\{)/i
+
+  # A delete target that is a glob anchored at, or one path segment below, a
+  # filesystem root — `/etc/*`, `$HOME/*`, `${HOME}/*`, `$PWD/*` — not already
+  # caught by `@broad_root_target` (which matches the bare directory only, no
+  # glob suffix). Bounded the same way broad_root_target is: the glob must be
+  # a complete argument, not a prefix of a deeper path.
+  @rm_near_root_glob ~r/(?:^|\s)(?:\/(?:etc|usr|bin|sbin|boot|dev|lib|lib64|proc|root|run|sys|var|opt|home|Users|System|Library)\/\*|\$\{?HOME\}?\/\*|\$\{?PWD\}?\/\*|\$\{?OLDPWD\}?\/\*)(?=[\s;&|)]|$)/i
 
   # ── force push to protected branch ──────────────────────────────────
   @force_push_flag ~r/\bgit\s+push\b[^\n]*(?:--force\b(?!-with-lease)|--force-with-lease\b|(?:^|\s)-\w*f\w*\b|\s\+[\w\/.-]+)/i
@@ -196,10 +258,11 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
   @doc """
   Like `blocked?/1`, but keeps the severity class of the match.
 
-  Returns `{:blocked, reason, :catastrophic | :overridable}` or `:ok`. Only the
-  permission boundary (`ToolExecutor.approve_tool_call/2`) should use this — it
-  is the one caller that knows the session's permission mode and can therefore
-  decide whether an `:overridable` match has been authorised.
+  Returns `{:blocked, reason, :catastrophic | :confirm_required | :overridable}`
+  or `:ok`. Only the permission boundary (`ToolExecutor.approve_tool_call/2`)
+  should use this — it is the one caller that knows the session's permission
+  mode and can therefore decide whether an `:overridable` match has been
+  authorised, or turn a `:confirm_required` match into a prompt.
   """
   @spec classify(map() | String.t() | any()) :: classified()
   def classify(%{name: name} = call) do
@@ -303,11 +366,16 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
   def check_command_classified(command) when is_binary(command) do
     variants = CommandVariants.variants(command)
 
-    # A catastrophic match anywhere in the variant set outranks an overridable
-    # one: `curl x | sh` next to `rm -rf /` must report as catastrophic, or
-    # overdrive would waive the whole command on the strength of the weaker
-    # match. Scan for catastrophic first, then for overridable.
-    find_match(variants, :catastrophic) || find_match(variants, :overridable) || :ok
+    # A catastrophic match anywhere in the variant set outranks a
+    # confirm-required or overridable one: `curl x | sh` next to `rm -rf /`
+    # must report as catastrophic, or overdrive would waive the whole command
+    # on the strength of the weaker match. Likewise a confirm-required match
+    # outranks an overridable one — a command that both force-pushes to main
+    # AND deletes an unresolvable target must still prompt, not silently run
+    # under overdrive on the strength of the force-push half alone. Scan in
+    # that priority order.
+    find_match(variants, :catastrophic) || find_match(variants, :confirm_required) ||
+      find_match(variants, :overridable) || :ok
   end
 
   def check_command_classified(_), do: :ok
@@ -345,8 +413,9 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
   # A single variant against every pattern.
   #
   # ORDER IS LOAD-BEARING: every `:catastrophic` clause precedes every
-  # `:overridable` one, so a command that matches both classes reports as
-  # catastrophic and can never be waived on the strength of the weaker match
+  # `:confirm_required` one, which in turn precedes every `:overridable` one,
+  # so a command that matches more than one class reports as the STRICTER
+  # class and can never be waived on the strength of the weaker match
   # (`git push --force origin main && mkfs.ext4 /dev/sda1`).
   defp check_variant(command) when is_binary(command) do
     cond do
@@ -370,6 +439,20 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
       Regex.match?(@drop_truncate_prod, command) ->
         {:blocked, "DROP TABLE/TRUNCATE on a production database is never permitted",
          :catastrophic}
+
+      # ── :confirm_required — cannot be proven safe OR unsafe; always ask ─
+      #
+      # A recursive force delete whose target is a command substitution,
+      # backtick, brace expansion, or a glob at/near a filesystem root. Unlike
+      # every other clause here this is not a verdict about the command — it
+      # is an admission that the breaker cannot render one statically, so the
+      # decision goes to the operator instead of being guessed in either
+      # direction. See the moduledoc's `## The three classes`.
+      rm_rf_unresolvable_target?(command) ->
+        {:blocked,
+         "recursive force-delete whose target cannot be resolved without running the shell " <>
+           "(a command substitution, variable expansion, or a glob at/near a filesystem root)",
+         :confirm_required}
 
       # ── :overridable — recoverable, waived only under overdrive/bypass ─
       #
@@ -474,6 +557,16 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
       Regex.match?(@rm_recursive_flag, command) and
       Regex.match?(@rm_force_flag, command) and
       Regex.match?(@broad_root_target, command)
+  end
+
+  # rm + recursive + force + a target the breaker cannot statically resolve
+  # (command substitution/backtick/brace-expansion, or a glob at/near a
+  # filesystem root). See `:confirm_required` in the moduledoc.
+  defp rm_rf_unresolvable_target?(command) do
+    Regex.match?(@rm_invocation, command) and
+      Regex.match?(@rm_recursive_flag, command) and
+      Regex.match?(@rm_force_flag, command) and
+      (Regex.match?(@rm_dynamic_target, command) or Regex.match?(@rm_near_root_glob, command))
   end
 
   defp force_push_protected?(command) do
