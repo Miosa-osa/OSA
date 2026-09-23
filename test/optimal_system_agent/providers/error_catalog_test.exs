@@ -162,6 +162,57 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalogTest do
     end
   end
 
+  describe "a refused model shows the SERVER's sentence, never raw JSON or request ids" do
+    test "Anthropic 404 body: the error.message is shown and request_id dropped" do
+      reason =
+        ~s(Anthropic returned 404: {"type":"error","error":{"type":"not_found_error","message":"model: claude-nope"},"request_id":"req_011CXyZabc123"})
+
+      msg = Catalog.user_message(reason)
+      assert msg =~ "model: claude-nope"
+      assert msg =~ "Anthropic"
+      assert msg =~ "/model"
+      refute msg =~ "req_011"
+      refute msg =~ "{"
+    end
+
+    test "OpenAI 404 body" do
+      reason =
+        ~s(HTTP 404: {"error":{"message":"The model `gpt-9` does not exist or you do not have access to it.","type":"invalid_request_error","code":"model_not_found"}})
+
+      msg = Catalog.user_message(reason)
+      assert msg =~ "The model `gpt-9` does not exist or you do not have access to it."
+      refute msg =~ "invalid_request_error"
+    end
+
+    test "Ollama bare error string" do
+      msg =
+        Catalog.user_message(
+          ~S(Ollama returned 404: {"error":"model \"llama9\" not found, try pulling it first"})
+        )
+
+      assert msg =~ ~s(model "llama9" not found, try pulling it first)
+      refute msg =~ "{"
+    end
+
+    test "unknown errors carry the sentence, not the JSON envelope" do
+      msg =
+        Catalog.user_message(
+          ~s(HTTP 418: {"error":{"message":"This model is not available on your plan.","code":418},"user_id":"user_2x"} request id: req_abcdef123)
+        )
+
+      assert msg =~ "This model is not available on your plan."
+      refute msg =~ "user_2x"
+      refute msg =~ "req_abcdef123"
+    end
+
+    test "server_message/1 strips request ids from prose" do
+      assert Catalog.server_message("Model refused (request id: req_abc123XYZ).") ==
+               "Model refused."
+
+      assert Catalog.server_message("plain text") == "plain text"
+    end
+  end
+
   describe "empty-response classification (flaky-provider retry)" do
     test "the SSE empty-stream recovery strings classify as :empty_response" do
       assert Catalog.classify("SSE recovery: stream completed without a result") ==

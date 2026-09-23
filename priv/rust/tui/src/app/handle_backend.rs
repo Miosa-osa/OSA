@@ -1506,8 +1506,10 @@ impl App {
                     }
                 }
                 Err(e) => {
+                    // The server's own sentence, never the raw JSON body or a
+                    // request id (see `client::error_text`).
                     self.toasts.push(
-                        format!("Model switch failed: {}", e),
+                        model_switch_error_text(&e),
                         crate::components::toast::ToastLevel::Error,
                     );
                 }
@@ -4199,5 +4201,47 @@ mod handle_backend_tests {
         assert!(is_orphan_tool_end(false));
         // A real start queued args → render the tool line as usual.
         assert!(!is_orphan_tool_end(true));
+    }
+}
+
+/// Toast text for a refused model switch: the server's human-readable message
+/// (`error.message`, `details`, Ollama's bare `error`), with request ids
+/// stripped. Any caller-added context before the HTTP status (e.g.
+/// "--model/--provider could not be applied: ") is kept.
+pub(crate) fn model_switch_error_text(raw: &str) -> String {
+    let (context, body) = match raw.find("HTTP ") {
+        Some(i) if i > 0 => (raw[..i].trim_end(), &raw[i..]),
+        _ => ("", raw),
+    };
+    let msg = crate::client::error_text::human_error_message(body);
+    if context.is_empty() {
+        format!("Model switch failed: {msg}")
+    } else {
+        format!("Model switch failed: {context} {msg}")
+    }
+}
+
+#[cfg(test)]
+mod model_switch_error_text_tests {
+    use super::model_switch_error_text;
+
+    #[test]
+    fn a_refused_switch_shows_the_server_sentence_not_json() {
+        let raw = r#"HTTP 400 Bad Request from /api/v1/sessions/abc/provider: {"error":"invalid_model","details":"unknown model \"gpt-9\" for provider openai"}"#;
+        let t = model_switch_error_text(raw);
+        assert_eq!(
+            t,
+            r#"Model switch failed: unknown model "gpt-9" for provider openai"#
+        );
+        assert!(!t.contains('{') && !t.contains("/api/v1"), "{t}");
+    }
+
+    #[test]
+    fn caller_context_survives() {
+        let raw = r#"--model/--provider could not be applied: HTTP 400 Bad Request from /p: {"error":"invalid_model","details":"unknown model \"x\" for provider ollama"}"#;
+        assert_eq!(
+            model_switch_error_text(raw),
+            r#"Model switch failed: --model/--provider could not be applied: unknown model "x" for provider ollama"#
+        );
     }
 }

@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod error_text;
 // Generated from the Elixir protocol (OptimalSystemAgent.Protocol.TUISchema) by
 // `mix osa.gen.tui_types`. Re-exported through `types` so callers keep using
 // `crate::client::types::*`; do not edit generated.rs by hand.
