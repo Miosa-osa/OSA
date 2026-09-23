@@ -28,6 +28,18 @@ defmodule OptimalSystemAgent.Tools.ConflictScope do
 
     * `:parallel` — touches no comparable resource; conflicts with nothing
       except a `:barrier`.
+    * `:read_any` — reads an UNENUMERATED set of paths (a shell command whose
+      exact targets cannot be listed, a filesystem glob, a codebase symbol
+      scan) but is provably read-only — it writes nothing. Conflicts with a
+      `:barrier` and with any scope that has a non-empty `writes` set;
+      otherwise it runs alongside anything, including another `:read_any`.
+      This exists because `:parallel` is too strong a claim for these tools:
+      "I touch nothing comparable" is false (a shell `grep` on a file a
+      batched `file_edit` is rewriting is a torn read) but "I touch this
+      exact, enumerable set of paths" is also false (the targets are
+      dynamic/globbed). `:read_any` says the one true thing — "I only read,
+      somewhere" — which is exactly enough to conflict with any concurrent
+      WRITE without needing to name what is read.
     * `:scoped`   — touches an enumerable, canonicalised set of paths. Two
       scoped calls conflict iff a write on one side meets a read or a write on
       the other.
@@ -68,8 +80,24 @@ defmodule OptimalSystemAgent.Tools.ConflictScope do
 
   defstruct mode: :barrier, reads: nil, writes: nil
 
-  @type mode :: :parallel | :scoped | :barrier
+  @type mode :: :parallel | :read_any | :scoped | :barrier
   @type t :: %__MODULE__{mode: mode(), reads: MapSet.t(String.t()), writes: MapSet.t(String.t())}
+
+  # Tools that read an unenumerated set of paths but are PROVABLY read-only —
+  # no path list to compare, so they cannot be `:scoped`, but they are not
+  # touch-nothing either, so `:parallel` overclaims. `:read_any` (see the
+  # moduledoc) is the honest middle: conflicts with a write, not with another
+  # read.
+  #
+  #   * `shell_execute` — a command line proven read-only by
+  #     `ShellExecute.ReadOnly.provably_read_only?/1` (its own
+  #     `concurrency_safe?/2`, i.e. `per_call_safe?` here) still names no
+  #     specific path; a batched `grep foo file.txt` next to a `file_edit` on
+  #     `file.txt` must not race it.
+  #   * `file_glob` / `code_symbols` — always `concurrency_safe? true`
+  #     (pure reads), but the paths matched are a glob/index result, not an
+  #     input the caller declared. Same shape, same fix.
+  @read_any_tools ~w(shell_execute file_glob code_symbols)
 
   # Tools whose ONLY reason to serialise is the file they touch. Each entry
   # names the argument(s) carrying the target and the root a relative path is
@@ -141,6 +169,14 @@ defmodule OptimalSystemAgent.Tools.ConflictScope do
   def conflict?(%__MODULE__{mode: :parallel}, %__MODULE__{}), do: false
   def conflict?(%__MODULE__{}, %__MODULE__{mode: :parallel}), do: false
 
+  # `:read_any` reaches here only against `:scoped` or another `:read_any`
+  # (barrier/parallel already resolved above, on EITHER side). It conflicts
+  # iff the other side actually writes something — a read-only `:read_any`
+  # against a read-only `:scoped` (or another `:read_any`, whose own `writes`
+  # is always empty) is not a conflict.
+  def conflict?(%__MODULE__{mode: :read_any}, %__MODULE__{writes: w}), do: has_writes?(w)
+  def conflict?(%__MODULE__{writes: w}, %__MODULE__{mode: :read_any}), do: has_writes?(w)
+
   def conflict?(%__MODULE__{} = a, %__MODULE__{} = b) do
     not disjoint?(a.writes, b.writes) or
       not disjoint?(a.writes, b.reads) or
@@ -170,6 +206,7 @@ defmodule OptimalSystemAgent.Tools.ConflictScope do
   end
 
   def describe(%__MODULE__{mode: :parallel}), do: "parallel-safe"
+  def describe(%__MODULE__{mode: :read_any}), do: "read-only (unscoped)"
   def describe(_), do: "unknown"
 
   @doc "Whether cross-call conflict detection is active (default: true)."
@@ -197,6 +234,10 @@ defmodule OptimalSystemAgent.Tools.ConflictScope do
       spec = Map.get(@writers, name) -> scoped_writer(spec, input, name)
       spec = Map.get(@list_writers, name) -> scoped_list_writer(spec, input, name)
       spec = Map.get(@readers, name) -> scoped_reader(spec, input, per_call_safe?)
+      # Only ever reached when the tool ALSO says `per_call_safe? true` — a
+      # `:read_any` call that its own `concurrency_safe?/2` refused is a
+      # `:barrier` like anything else unsafe, below.
+      name in @read_any_tools and per_call_safe? -> %__MODULE__{mode: :read_any, writes: @empty}
       per_call_safe? -> %__MODULE__{mode: :parallel}
       true -> %__MODULE__{mode: :barrier}
     end
@@ -233,7 +274,7 @@ defmodule OptimalSystemAgent.Tools.ConflictScope do
 
   defp known_name?(name) do
     Map.has_key?(@writers, name) or Map.has_key?(@list_writers, name) or
-      Map.has_key?(@readers, name)
+      Map.has_key?(@readers, name) or name in @read_any_tools
   end
 
   defp alias_target(name) do
@@ -398,4 +439,12 @@ defmodule OptimalSystemAgent.Tools.ConflictScope do
   defp disjoint?(nil, _), do: true
   defp disjoint?(_, nil), do: true
   defp disjoint?(a, b), do: MapSet.disjoint?(a, b)
+
+  # Every `:scoped`/`:read_any` struct this module actually constructs sets
+  # `writes` to a real (possibly empty) `MapSet`, so `nil` should never reach
+  # here — but per this module's own "a wrong :barrier costs latency, a wrong
+  # disjoint costs a file" rule, an unpopulated `writes` fails closed (assume
+  # it writes) rather than open.
+  defp has_writes?(nil), do: true
+  defp has_writes?(writes), do: MapSet.size(writes) > 0
 end
