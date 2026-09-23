@@ -1399,6 +1399,24 @@ impl App {
                 self.send_queued_now();
                 false
             }
+            // Ctrl+Enter — the same send-now action as Alt+Enter, for the muscle
+            // memory that reaches for it. ONLY bound when the keyboard-
+            // enhancement protocol is active (`kbd_enhanced`): without it,
+            // crossterm cannot tell Ctrl+Enter from a bare Enter, and a bare
+            // Enter on an empty composer already send-nows via the portable arm
+            // below — so binding it here off-protocol would either double-fire
+            // or, worse, silently swallow a plain submit. Gated on an EMPTY
+            // composer too, so Ctrl+Enter still SUBMITS typed text (its
+            // `is_submit` meaning) whenever the composer has any.
+            (KeyCode::Enter, m)
+                if m.contains(KeyModifiers::CONTROL)
+                    && self.input.kbd_enhanced()
+                    && self.input.is_empty()
+                    && !self.message_queue.is_empty() =>
+            {
+                self.send_queued_now();
+                false
+            }
             // Portable send-now (works on EVERY terminal, no kitty protocol):
             // a CLEAN bare Enter on an empty composer, with messages queued,
             // delivers them into the running turn — same action as Alt+Enter,

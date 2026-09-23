@@ -350,6 +350,7 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
     state =
       if compacted != original_messages do
         %{state | last_input_tokens: ContextEngine.estimate_tokens(compacted)}
+        |> Map.put(:last_input_message_count, length(compacted))
       else
         state
       end

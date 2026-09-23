@@ -202,7 +202,7 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
         connection_error_message(reason)
 
       :unknown ->
-        "#{@api_error_prefix}: #{truncate(to_string_reason(reason), 300)} · Try again, or run /model to switch models."
+        "#{@api_error_prefix}: #{truncate(server_message(to_string_reason(reason)), 300)} · Try again, or run /model to switch models."
 
       category ->
         "#{@api_error_prefix}: #{Map.fetch!(@messages, category)}"
@@ -500,13 +500,152 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
         nil -> nil
       end
 
-    case provider do
-      nil ->
+    # The server's own sentence ("model: claude-nope", "The model `gpt-9` does
+    # not exist or you do not have access to it.") is what tells the user WHY
+    # the pick was refused — a plan restriction reads very differently from a
+    # typo. Shown whenever the reason carries one beyond a bare code.
+    detail =
+      case server_message(text) do
+        "" -> nil
+        d -> if bare_not_found?(d), do: nil, else: truncate(d, 200)
+      end
+
+    case {provider, detail} do
+      {nil, nil} ->
         "#{@api_error_prefix}: #{Map.fetch!(@messages, :model_not_found)}"
 
-      p ->
+      {nil, d} ->
+        "#{@api_error_prefix}: Model unavailable: #{d} · Run /model to pick a different model."
+
+      {p, nil} ->
         "#{@api_error_prefix}: Model not found for #{p} (404) · Run /model to pick a valid model."
+
+      {p, d} ->
+        "#{@api_error_prefix}: Model not found for #{p} (404): #{d} · Run /model to pick a valid model."
     end
+  end
+
+  # A reason that is nothing but a status code / error-type token carries no
+  # sentence worth repeating after "Model not found".
+  defp bare_not_found?(d) do
+    String.downcase(d) in ["not_found_error", "model_not_found", "not found", "model not found"] or
+      Regex.match?(~r/^(?:not[_ ]found[_ ]error|404)$/i, d)
+  end
+
+  @doc """
+  The provider's human-readable message inside a raw error reason — never the
+  JSON envelope and never a request id.
+
+  Providers format failures for logs: `Anthropic returned 404: {"type":"error",
+  "error":{"message":"model: x"},"request_id":"req_…"}`, `HTTP 404: {"error":
+  {"message":…}}`, Ollama's `{"error":"model \"x\" not found"}`. This drops the
+  `<Provider> returned NNN:` / `HTTP NNN:` prefix, unwraps JSON (nested bodies
+  too) to its message field, and strips request ids. Text with no JSON passes
+  through, minus request ids.
+  """
+  @spec server_message(term()) :: String.t()
+  def server_message(text) when is_binary(text) do
+    text
+    |> unwrap_json(4)
+    |> strip_status_prefix()
+    |> strip_request_ids()
+  end
+
+  def server_message(other), do: server_message(to_string_reason(other))
+
+  defp strip_status_prefix(text) do
+    text
+    |> String.replace(
+      ~r/^\s*(?:[A-Za-z][\w .-]*? returned \d{3}|HTTP \d{3}(?: [A-Za-z ]+)?)\s*:\s*/,
+      ""
+    )
+    |> String.trim()
+  end
+
+  defp unwrap_json(text, 0), do: text
+
+  defp unwrap_json(text, depth) do
+    case first_json_object(text) do
+      {prefix, map} ->
+        case json_message(map) do
+          nil ->
+            case prefix |> String.trim() |> String.trim_trailing(":") |> String.trim() do
+              "" -> "the provider returned an error without a message"
+              p -> p
+            end
+
+          msg ->
+            unwrap_json(msg, depth - 1)
+        end
+
+      nil ->
+        text
+    end
+  end
+
+  # The first `{` from which a JSON object decodes. Text after the object
+  # (" request id: …") is allowed: each closing brace is tried from the right
+  # until one yields a valid object.
+  defp first_json_object(text) do
+    case :binary.match(text, "{") do
+      {start, _} ->
+        prefix = binary_part(text, 0, start)
+        rest = binary_part(text, start, byte_size(text) - start)
+
+        rest
+        |> :binary.matches("}")
+        |> Enum.map(fn {pos, _} -> pos end)
+        |> Enum.reverse()
+        |> Enum.find_value(fn pos ->
+          case Jason.decode(binary_part(rest, 0, pos + 1)) do
+            {:ok, map} when is_map(map) -> {prefix, map}
+            _ -> nil
+          end
+        end)
+
+      :nomatch ->
+        nil
+    end
+  end
+
+  defp json_message(map) do
+    error = map["error"]
+    key = Enum.find(["details", "message", "detail", "error_description"], &present?(map[&1]))
+
+    cond do
+      is_map(error) and present?(error["message"]) ->
+        error["message"]
+
+      key != nil ->
+        map[key]
+
+      match?([%{"message" => m} | _] when is_binary(m), map["errors"]) ->
+        hd(map["errors"])["message"]
+
+      present?(error) ->
+        if String.contains?(error, " "), do: error, else: String.replace(error, "_", " ")
+
+      true ->
+        nil
+    end
+  end
+
+  defp present?(v), do: is_binary(v) and String.trim(v) != ""
+
+  defp strip_request_ids(text) do
+    text
+    |> String.replace(
+      ~r/(?i)\b(?:x-request-id|request[_ -]?id)\b["']?\s*[:=]?\s*["']?[\w-]+["']?/,
+      ""
+    )
+    |> String.replace(~r/\breq_[\w-]{4,}/, "")
+    |> String.replace(~r/\(\s*\)|\[\s*\]/, "")
+    |> String.replace(~r/\s+/, " ")
+    |> String.replace(~r/\s+([.,])/, "\\1")
+    |> String.trim()
+    |> String.trim_trailing(",")
+    |> String.trim_trailing(":")
+    |> String.trim()
   end
 
   # Actionable, provider-aware message for a connection failure. The generic

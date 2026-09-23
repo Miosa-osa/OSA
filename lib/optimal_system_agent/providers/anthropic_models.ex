@@ -75,6 +75,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
   @typedoc "A single Anthropic model offering."
   @type model :: %{
           optional(:cache_read) => number(),
+          optional(:thinking_can_disable) => boolean(),
           id: String.t(),
           name: String.t(),
           ctx: pos_integer(),
@@ -124,6 +125,9 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
       # below and `Agent.Pricing.@cache_read_modules` correct it the same way
       # xAI's and Z.ai's published cache columns do.
       cache_read: 0.20,
+      # The capability behind "don't offer thinking off": read by
+      # `Providers.ReasoningCapability.can_disable?/2`.
+      thinking_can_disable: false,
       recommended: false,
       legacy: false,
       note: "1M ctx — newest Opus, cheaper than Opus 5. Thinking cannot be disabled; no prefill."
@@ -529,6 +533,19 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
     case resolve(id) do
       nil -> :adaptive
       m -> m.thinking
+    end
+  end
+
+  @doc """
+  False when this model reasons no matter what is sent (`:thinking_can_disable`
+  is `false` in its entry — Opus 5.5 today). Unknown ids and every entry that
+  does not say otherwise answer `true`.
+  """
+  @spec thinking_can_disable?(String.t() | nil) :: boolean()
+  def thinking_can_disable?(id) do
+    case resolve(id) do
+      %{thinking_can_disable: false} -> false
+      _ -> true
     end
   end
 

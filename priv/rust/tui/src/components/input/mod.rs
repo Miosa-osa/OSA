@@ -440,6 +440,13 @@ impl InputComponent {
         self.kbd_enhanced = enabled;
     }
 
+    /// Whether the terminal's keyboard-enhancement protocol is active, so
+    /// chords like Ctrl+Enter arrive distinct from a bare Enter. Read by the
+    /// App-level key handler to gate the Ctrl+Enter send-now binding.
+    pub fn kbd_enhanced(&self) -> bool {
+        self.kbd_enhanced
+    }
+
     pub fn value(&self) -> &str {
         &self.content
     }
@@ -720,14 +727,15 @@ impl InputComponent {
         (2 + text_lines).min(11) + queued // top divider + text + bottom divider, cap at 11
     }
 
-    /// WS5 — rows used by the queued-message display above the composer: one
-    /// per item (each clipped to a single row), capped at 4 items plus a
-    /// "+N more queued" overflow row.
+    /// Rows used by the composer's queued affordance: a single count-plus-how-
+    /// to-send row when anything is queued, 0 otherwise. The message texts
+    /// themselves are shown in the conversation (`Chat::draw_queued`), not here,
+    /// so this never grows with the queue.
     fn queued_lines(&self) -> usize {
-        match self.queued_items.len() {
-            0 => 0,
-            n if n <= 4 => n,
-            _ => 5,
+        if self.queued_items.is_empty() {
+            0
+        } else {
+            1
         }
     }
 
@@ -2739,84 +2747,46 @@ impl Component for InputComponent {
     fn draw(&self, frame: &mut Frame, area: Rect) {
         let theme = style::theme();
 
-        // WS5 — queued messages (typed mid-turn) render as dim one-row lines
-        // directly above the composer (CC PromptInputQueuedCommands) so the
-        // user can see and verify what they queued; ↑ / Esc pops them back
-        // into the composer for editing.
+        // Item 2 — the queued MESSAGES themselves now render in the conversation
+        // above the spinner (see `Chat::draw_queued`), where a mid-turn keystroke
+        // is visibly part of the transcript flow. What stays here, right at the
+        // composer, is a single affordance row: the count and how to send them
+        // into the turn now. It never repeats the message texts (that would be
+        // the same content on screen twice) and never costs more than one row.
         let mut area = area;
         let queued_rows = self.queued_lines() as u16;
         if queued_rows > 0 && area.height > queued_rows + 1 {
-            let max_items = 4usize;
-            let shown = self.queued_items.len().min(max_items);
-            for (i, item) in self.queued_items.iter().take(shown).enumerate() {
-                let one_line = item.replace('\n', " ");
-                let mut spans = vec![
-                    Span::styled("\u{29d6} ", theme.hint()),
-                    Span::styled(one_line.clone(), theme.hint()),
-                ];
-
-                // Say WHEN it runs, on the first row only.
-                //
-                // A queued message rendered as a dim line and nothing else,
-                // which during a long turn is indistinguishable from the app
-                // ignoring the keystroke. Reported after a 14-minute fan-out:
-                // typing appeared to do nothing, and the user interrupted to
-                // force it — which worked, but only by accident of the queue
-                // draining on interrupt.
-                //
-                // Naming the trigger turns "nothing happened" into "I know what
-                // happens next, and what to do if I want it sooner". The
-                // interrupt half is accurate: `turn_done` is set on the
-                // interrupt path, so a queued message fires promptly rather
-                // than waiting out the cancel timeout.
-                //
-                // Only when it fits: this must never push the composer down or
-                // wrap, so it is dropped on a narrow terminal rather than
-                // costing a row.
-                if i == 0 {
-                    let used = unicode_width::UnicodeWidthStr::width(one_line.as_str()) + 2;
-                    let fits = |h: &str| {
-                        used + unicode_width::UnicodeWidthStr::width(h) <= area.width as usize
-                    };
-                    // Widest truthful form first, then the short form, then
-                    // nothing. Two tiers rather than one so a narrow terminal
-                    // keeps "sends when this turn ends" — the half that fixed
-                    // the "typing appeared to do nothing" report — instead of
-                    // losing the whole row's explanation to a longer sentence.
-                    //
-                    // The FULL form is the only one that names `alt+enter`, and
-                    // alt+enter only reaches OSA on kitty-protocol terminals —
-                    // elsewhere (GNOME Terminal etc.) it is bound to fullscreen
-                    // or collapses to a bare Enter. So only OFFER the alt+enter
-                    // tier when the protocol is actually active; otherwise the
-                    // widest form is MID ("enter again sends it now"), the
-                    // portable gesture that works on every terminal. Advertising
-                    // a key that does nothing here is the exact defect this row
-                    // has been bitten by before.
-                    let candidates: &[&str] = if self.kbd_enhanced {
-                        &[QUEUED_HINT_FULL, QUEUED_HINT_MID, QUEUED_HINT_SHORT]
-                    } else {
-                        &[QUEUED_HINT_MID, QUEUED_HINT_SHORT]
-                    };
-                    let hint = candidates.iter().copied().find(|h| fits(h));
-                    if let Some(hint) = hint {
-                        spans.push(Span::styled(hint.to_string(), theme.recede()));
-                    }
-                }
-
-                let line = Line::from(spans);
-                frame.render_widget(
-                    Paragraph::new(line),
-                    Rect::new(area.x, area.y + i as u16, area.width, 1),
-                );
+            let count = self.queued_items.len();
+            let badge = if count == 1 {
+                "\u{29d6} 1 queued".to_string()
+            } else {
+                format!("\u{29d6} {count} queued")
+            };
+            let used = unicode_width::UnicodeWidthStr::width(badge.as_str());
+            let fits =
+                |h: &str| used + unicode_width::UnicodeWidthStr::width(h) <= area.width as usize;
+            // Widest truthful form first, then the short form, then nothing.
+            // The FULL form is the only one that names `alt+enter`, and
+            // alt+enter only reaches OSA on kitty-protocol terminals —
+            // elsewhere it is bound to fullscreen or collapses to a bare Enter.
+            // So only OFFER the alt+enter tier when the protocol is active;
+            // otherwise the widest form is MID ("enter again sends it now"),
+            // the portable gesture that works on every terminal. Advertising a
+            // key that does nothing here is the exact defect this row has been
+            // bitten by before.
+            let candidates: &[&str] = if self.kbd_enhanced {
+                &[QUEUED_HINT_FULL, QUEUED_HINT_MID, QUEUED_HINT_SHORT]
+            } else {
+                &[QUEUED_HINT_MID, QUEUED_HINT_SHORT]
+            };
+            let mut spans = vec![Span::styled(badge, theme.hint())];
+            if let Some(hint) = candidates.iter().copied().find(|h| fits(h)) {
+                spans.push(Span::styled(hint.to_string(), theme.recede()));
             }
-            if self.queued_items.len() > max_items {
-                let more = format!("  +{} more queued", self.queued_items.len() - max_items);
-                frame.render_widget(
-                    Paragraph::new(Span::styled(more, theme.hint())),
-                    Rect::new(area.x, area.y + shown as u16, area.width, 1),
-                );
-            }
+            frame.render_widget(
+                Paragraph::new(Line::from(spans)),
+                Rect::new(area.x, area.y, area.width, 1),
+            );
             area = Rect::new(
                 area.x,
                 area.y + queued_rows,
@@ -5018,8 +4988,11 @@ mod queued_affordance {
 
     #[test]
     fn the_first_queued_row_names_its_trigger() {
+        // Item 2: the message TEXT now renders in the conversation
+        // (`Chat::draw_queued`), not here. What stays at the composer is the
+        // affordance row: the count and WHEN/how it runs.
         let row = queued_row_text(vec!["check the god files"], 120);
-        assert!(row.contains("check the god files"), "{row:?}");
+        assert!(row.contains("queued"), "the count must show: {row:?}");
         assert!(
             row.contains("sends when this turn ends"),
             "a queued message must say WHEN it runs: {row:?}"
@@ -5148,20 +5121,31 @@ mod queued_affordance {
 
     #[test]
     fn the_hint_is_dropped_rather_than_wrapping_on_a_narrow_terminal() {
-        // It must never push the composer down or cost a row — the queued
-        // display's height is computed from the item count alone.
-        let row = queued_row_text(vec!["a message that is quite long indeed"], 44);
+        // On a terminal too narrow for the badge PLUS the shortest hint, the
+        // hint is dropped rather than wrapped — the affordance row is always
+        // exactly one row.
+        let row = queued_row_text(vec!["a message that is quite long indeed"], 24);
         assert!(
             !row.contains("sends when this turn ends"),
             "the hint should be dropped at narrow widths, not wrapped: {row:?}"
         );
+        // The count still shows even when the hint does not.
+        assert!(row.contains("queued"), "the count must survive: {row:?}");
     }
 
     #[test]
-    fn only_the_first_row_carries_the_hint() {
+    fn the_affordance_is_a_single_row_regardless_of_queue_depth() {
+        // Item 2: the message texts live in the conversation, so the composer's
+        // affordance never grows with the queue — it is one row for any depth.
         let mut input = InputComponent::new();
         input.set_queued_items(vec!["one".into(), "two".into()]);
-        // Height must not change with the hint — it is drawn inside row 0.
-        assert_eq!(input.queued_lines(), 2);
+        assert_eq!(input.queued_lines(), 1);
+        input.set_queued_items(vec![
+            "one".into(),
+            "two".into(),
+            "three".into(),
+            "four".into(),
+        ]);
+        assert_eq!(input.queued_lines(), 1);
     }
 }

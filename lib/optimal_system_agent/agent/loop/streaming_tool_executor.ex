@@ -161,7 +161,10 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
           await_predecessors(predecessors)
           OptimalSystemAgent.Workspace.Cwd.put_process_override(caller_cwd)
           if is_binary(sid) and sid != "", do: Process.put(:osa_session_id, sid)
-          executor.execute_tool_call(tool_call, state)
+          result = executor.execute_tool_call(tool_call, state)
+          # Claim the result for the turn — or, if send-now already moved this
+          # call to the background, deliver it as a task-notification.
+          OptimalSystemAgent.Agent.Loop.SendNow.task_finished(sid, tool_call, result)
         end
       )
 
@@ -261,40 +264,94 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
   also escapable directly - the turn is interruptible - but the backstop means
   it cannot hang indefinitely on its own.
   """
+  # Poll cadence while awaiting streamed tools, so send-now can break the wait
+  # (the same reason `ToolOrchestrator.collect_tasks/5` polls rather than
+  # blocking in one `Task.await`).
+  @collect_poll_ms 200
+
   def collect_results(ctx) do
-    # Wait for all in-flight tasks
+    sid = ctx |> Map.get(:state, %{}) |> Map.get(:session_id)
+    deadline = System.monotonic_time(:millisecond) + await_timeout_ms()
+    ctx_calls = Map.get(ctx, :calls, %{})
+
     results =
-      Enum.reduce(ctx.in_flight, ctx.completed, fn {tool_id, task}, acc ->
-        result =
-          try do
-            Task.await(task, await_timeout())
-          catch
-            # RESPOND-TO-MODEL (non-fatal tool error contract): a timeout or a
-            # crashed tool task is a readable tool result, not a dead turn. The
-            # "Error:" prefix is the convention finalize_result/Reminders/
-            # DoomLoop key on — the old "[timeout]"/"[crash]" bodies were
-            # invisible to every one of those checks.
-            #
-            # On the absolute backstop (default 20 minutes) the tool task is
-            # wedged: kill it so it cannot keep running invisibly after the turn
-            # recovers, then report a readable tool error naming the bound and
-            # that the tool was cancelled.
-            :exit, {:timeout, _} ->
-              Task.shutdown(task, :brutal_kill)
-              failure(tool_id, "tool timed out after #{timeout_text()} and was cancelled")
+      await_streamed(Map.to_list(ctx.in_flight), ctx.completed, sid, deadline, ctx_calls)
 
-            :exit, reason ->
-              failure(tool_id, ToolError.exit_text(reason))
-          end
-
-        Map.put(acc, tool_id, result)
-      end)
+    # Drop the per-call `:finished` markers the tasks set, so a later generation
+    # that happens to reuse an id does not read a stale "already finished".
+    OptimalSystemAgent.Agent.Loop.SendNow.forget(sid, Map.values(ctx_calls))
 
     # Return in order
     ctx.order
     |> Enum.map(fn tool_id -> Map.get(results, tool_id) end)
     |> Enum.reject(&is_nil/1)
   end
+
+  # Await the in-flight streamed tools, polling so a send-now (or the absolute
+  # backstop) can end the wait without killing work: on a send-now every task
+  # still running moves to the background and reports back as a notification.
+  defp await_streamed([], acc, _sid, _deadline, _calls), do: acc
+
+  defp await_streamed(pending, acc, sid, deadline, ctx_calls) do
+    cond do
+      OptimalSystemAgent.Agent.Loop.SendNow.yield?(sid) ->
+        moved =
+          OptimalSystemAgent.Agent.Loop.SendNow.background_pending(
+            Enum.map(pending, fn {id, task} -> {id_tc(ctx_calls, id), task} end),
+            sid
+          )
+
+        Enum.reduce(moved, acc, fn {tc, result}, a ->
+          Map.put(a, tc.id, streamed_result(tc.id, result))
+        end)
+
+      System.monotonic_time(:millisecond) > deadline ->
+        Enum.reduce(pending, acc, fn {tool_id, task}, a ->
+          Task.shutdown(task, :brutal_kill)
+
+          Map.put(
+            a,
+            tool_id,
+            failure(tool_id, "tool timed out after #{timeout_text()} and was cancelled")
+          )
+        end)
+
+      true ->
+        yielded = Task.yield_many(Enum.map(pending, &elem(&1, 1)), @collect_poll_ms)
+        by_ref = Map.new(yielded, fn {task, res} -> {task.ref, res} end)
+
+        {still, acc} =
+          Enum.reduce(pending, {[], acc}, fn {tool_id, task}, {p, a} ->
+            case Map.get(by_ref, task.ref) do
+              nil ->
+                {[{tool_id, task} | p], a}
+
+              {:ok, result} ->
+                {p, Map.put(a, tool_id, result)}
+
+              {:exit, reason} ->
+                {p, Map.put(a, tool_id, failure(tool_id, ToolError.exit_text(reason)))}
+            end
+          end)
+
+        await_streamed(Enum.reverse(still), acc, sid, deadline, ctx_calls)
+    end
+  end
+
+  # `background_pending/3` speaks in `{tool_call, task}` pairs; the streaming
+  # ctx only kept the id, so rebuild a minimal tool_call carrying the id and,
+  # when known, the name (so a moved shell call is recognised for detach).
+  defp id_tc(calls, id) do
+    case Map.get(calls, id) do
+      %{} = tc -> Map.put_new(tc, :name, Map.get(tc, :name))
+      _ -> %{id: id, name: nil}
+    end
+  end
+
+  defp streamed_result(id, {msg, str}) when is_map(msg),
+    do: {Map.put(msg, :tool_call_id, id), str}
+
+  defp streamed_result(_id, result), do: result
 
   # Executor seam, mirroring `ToolOrchestrator`'s `:executor` option: the loop
   # state may name the module that runs a tool call. Production never sets it
@@ -411,6 +468,8 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
   # enough that a genuinely long-running tool is not cut off mid-work. Override
   # with :tool_await_timeout_ms (a positive integer) to tighten it in tests.
   @default_await_timeout_ms 1_200_000
+
+  defp await_timeout_ms, do: await_timeout()
 
   defp await_timeout do
     case Application.get_env(

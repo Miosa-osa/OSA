@@ -702,18 +702,13 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
   # user saw an "Unknown command" suggestion instead of the command running.
 
   defp handle_api_only_command(conn, "reasoning", arg) do
-    # The TUI reasoning selector sends off|fast|medium|high|xhigh|ultra; the
-    # backend's canonical implementation is /effort
-    # (fast|medium|high|xhigh|ultra). "off" maps to the lowest effort tier
-    # (fast). Legacy low/max pass through and are normalized by /effort.
-    level =
-      case arg |> String.trim() |> String.downcase() do
-        "off" -> "fast"
-        other -> other
-      end
+    {provider, model} = session_model(conn.body_params["session_id"])
 
-    line = if level == "", do: "effort", else: "effort " <> level
-    execute_cli_command(conn, line)
+    case String.downcase(String.trim(arg)) == "off" and
+           reasoning_off_refusal(provider, model) do
+      refusal when is_binary(refusal) -> respond_output(conn, "reasoning", refusal)
+      _ -> run_reasoning_command(conn, arg)
+    end
   end
 
   defp handle_api_only_command(conn, "mem-save", arg) do
@@ -792,6 +787,54 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.ToolRoutes do
       end
 
     respond_output(conn, "desktop", output)
+  end
+
+  @doc """
+  The refusal shown for `/reasoning off` on a model that reasons regardless
+  (`Providers.ReasoningCapability`), or `nil` when off is a real choice.
+  """
+  @spec reasoning_off_refusal(atom() | String.t() | nil, String.t() | nil) :: String.t() | nil
+  def reasoning_off_refusal(provider, model) do
+    alias OptimalSystemAgent.Providers.ReasoningCapability
+
+    if ReasoningCapability.can_disable?(provider, model),
+      do: nil,
+      else: ReasoningCapability.cannot_disable_message(model)
+  end
+
+  # The model the command applies to: the live session's, falling back to the
+  # daemon default (what a session without a loop would start on).
+  defp session_model(session_id) do
+    snap =
+      if is_binary(session_id) and session_id != "" do
+        case OptimalSystemAgent.Agent.Loop.get_state(session_id) do
+          {:ok, %{provider: p, model: m}} when is_binary(m) -> {p, m}
+          _ -> nil
+        end
+      end
+
+    snap ||
+      {Application.get_env(:optimal_system_agent, :default_provider),
+       OptimalSystemAgent.Runtime.Identity.model()}
+  rescue
+    _ -> {nil, nil}
+  catch
+    :exit, _ -> {nil, nil}
+  end
+
+  defp run_reasoning_command(conn, arg) do
+    # The TUI reasoning selector sends off|fast|medium|high|xhigh|ultra; the
+    # backend's canonical implementation is /effort
+    # (fast|medium|high|xhigh|ultra). "off" maps to the lowest effort tier
+    # (fast). Legacy low/max pass through and are normalized by /effort.
+    level =
+      case arg |> String.trim() |> String.downcase() do
+        "off" -> "fast"
+        other -> other
+      end
+
+    line = if level == "", do: "effort", else: "effort " <> level
+    execute_cli_command(conn, line)
   end
 
   defp respond_output(conn, command, output) do

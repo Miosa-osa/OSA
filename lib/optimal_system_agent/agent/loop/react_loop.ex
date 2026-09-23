@@ -547,6 +547,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # just one-shot context) so the directive is visible for the rest of the turn.
     state = inject_pending_steer(state)
 
+    # Send-now (item 1): this drain is exactly the boundary a send-now was
+    # racing to reach. The queued steer is now folded in, so lower the yield
+    # flag — the tool collectors and stream watcher stop treating this turn as
+    # one to interrupt.
+    OptimalSystemAgent.Agent.Loop.SendNow.clear(state.session_id)
+
     # WS6: drain background task-notifications at the same step boundary — a
     # BUSY turn sees background completions here; an IDLE loop is handled by
     # Loop.poke/1 instead. The drain is destructive → exactly-once either way.
@@ -2122,6 +2128,32 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     finalize_interrupt(state, partial)
   end
 
+  # Send-now: the stream was cut so the user's queued message could be read
+  # now, not at the end of the current generation. Unlike a cancel, the turn
+  # KEEPS GOING: commit the partial text (so its already-executed streamed
+  # tool_use ids are owned by a real assistant message) and re-enter run/1,
+  # whose next `do_iteration` drains the queued steer at the top and folds the
+  # user's message in before the model's next action.
+  defp handle_result({:send_now, %{content: partial}}, state, _context) do
+    Logger.info("[loop] Send-now at iteration #{state.iteration} — pausing to read a new message")
+
+    {state, _names} = commit_streamed_tool_results(state, :send_now)
+
+    state =
+      if is_binary(partial) and String.trim(partial) != "" and
+           not last_message_is_this_assistant?(state.messages, partial) do
+        %{state | messages: state.messages ++ [%{role: "assistant", content: partial}]}
+      else
+        state
+      end
+
+    # Fresh segment: the paused generation is closed, and the continuation the
+    # steer drives is a new assistant message, not a weld onto the cut one.
+    LLMClient.start_new_message_segment()
+
+    run(%{state | iteration: state.iteration + 1})
+  end
+
   # Turn-level retry budget for a stream idle timeout. Small on purpose: each
   # attempt costs a full generation, and the committed tool results mean the
   # retry resumes rather than restarts.
@@ -2938,11 +2970,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   defp refresh_tokens_after_fold(state, false), do: state
 
   defp refresh_tokens_after_fold(state, true) do
-    Map.put(
-      state,
+    state
+    |> Map.put(
       :last_input_tokens,
       OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
     )
+    |> Map.put(:last_input_message_count, length(state.messages))
   rescue
     _ -> state
   end
@@ -3234,6 +3267,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
   # Drain the streaming tool executor into message history on the ERROR path.
   # Returns `{state, executed_tool_names}`.
+  # Guard against double-appending the partial when `commit_streamed_tool_results`
+  # already synthesized an assistant message carrying it (the streamed-tools
+  # path uses the partial as that message's content).
+  defp last_message_is_this_assistant?(messages, partial) do
+    case List.last(messages) do
+      %{role: "assistant", content: ^partial} -> true
+      _ -> false
+    end
+  end
+
   defp commit_streamed_tool_results(state, reason) do
     ctx = Process.get(:osa_streaming_tool_ctx)
 

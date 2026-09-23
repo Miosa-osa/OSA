@@ -96,6 +96,14 @@ defmodule OptimalSystemAgent.Test.MockProvider do
 
   defp with_forced_usage(other), do: other
 
+  # Same opt-in usage on the STREAMING path the agent loop actually takes.
+  defp stream_usage(result) do
+    case with_forced_usage({:ok, result}) do
+      {:ok, r} -> r
+      _ -> result
+    end
+  end
+
   # Real providers report a terminal stop/finish reason; this mock did not, so
   # nothing could test the harness's truncation handling end to end — the exact
   # gap that let a generation cut off at the output ceiling be delivered as a
@@ -268,7 +276,7 @@ defmodule OptimalSystemAgent.Test.MockProvider do
           ]
         }
 
-        callback.({:done, result})
+        callback.({:done, stream_usage(result)})
         :ok
 
       _ ->
@@ -276,7 +284,7 @@ defmodule OptimalSystemAgent.Test.MockProvider do
         text = "Mock final answer from OSA."
         callback.({:text_delta, text})
         result = %{content: text, tool_calls: []}
-        callback.({:done, result})
+        callback.({:done, stream_usage(result)})
         :ok
     end
   end

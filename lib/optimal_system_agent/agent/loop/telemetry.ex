@@ -49,10 +49,7 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
     # Actual current usage: prefer the provider-reported input tokens; when the
     # provider does not return usage (glm/Ollama) fall back to the char/word
     # estimate so the meter reflects real occupancy instead of sticking at 0.
-    estimated =
-      if state.last_input_tokens > 0,
-        do: state.last_input_tokens,
-        else: OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
+    estimated = context_occupancy(state)
 
     # Display occupancy against the SAME denominator emitted as max_tokens.
     # Reserve-based warning/compaction thresholds remain independent below.
@@ -223,6 +220,41 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
   end
 
   defp normalize_provider(_), do: nil
+
+  @doc """
+  Tokens the context holds RIGHT NOW — the one number behind both the
+  status-bar meter and `/context`'s total.
+
+  Once a provider has reported a request size (`last_input_tokens`), that
+  report plus an estimate of every message appended after that request (the
+  model's reply, tool results folded since, the user's next message). Before
+  any report, the char/word estimate of the whole history.
+
+  A history that shrank below the recorded baseline (a compaction) adds
+  nothing: the fold paths re-estimate `last_input_tokens` themselves.
+  """
+  @spec context_occupancy(map()) :: non_neg_integer()
+  def context_occupancy(state) do
+    messages = Map.get(state, :messages) || []
+
+    case Map.get(state, :last_input_tokens, 0) do
+      n when is_integer(n) and n > 0 ->
+        n + tokens_since_last_request(messages, Map.get(state, :last_input_message_count))
+
+      _ ->
+        OptimalSystemAgent.Agent.Compactor.estimate_tokens(messages)
+    end
+  end
+
+  defp tokens_since_last_request(messages, count)
+       when is_integer(count) and count >= 0 and count <= length(messages) do
+    case Enum.drop(messages, count) do
+      [] -> 0
+      since -> OptimalSystemAgent.Agent.Compactor.estimate_tokens(since)
+    end
+  end
+
+  defp tokens_since_last_request(_messages, _count), do: 0
 
   @doc """
   Estimate token count for session introspection (`:get_state` response).

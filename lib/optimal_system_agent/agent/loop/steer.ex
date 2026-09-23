@@ -98,36 +98,59 @@ defmodule OptimalSystemAgent.Agent.Loop.Steer do
   @doc false
   def release(session_id, receipt), do: DurableInbox.release(@table, session_id, receipt)
 
+  # The minimal neutral marker prepended to a steer's text: it says only that
+  # the message arrived while the model was working, nothing more. Deliberately
+  # source-neutral ("received", not "the user sent") because this same builder
+  # also carries the goal-tracker's own mid-turn nudges (which self-label with a
+  # "[Goal tracker]" prefix); a marker asserting "the user sent this" would be a
+  # lie on that path. For a real user steer the marker + the user's verbatim
+  # text still reads as the user's own words with a timing note. See
+  # `to_messages/1`.
+  @marker "[Received while you were working]"
+
+  @doc "The neutral mid-turn marker prepended to a steer (test seam)."
+  @spec marker() :: String.t()
+  def marker, do: @marker
+
   @doc """
   Build the message list injected into the conversation for a set of steer
-  texts. A steer is surfaced as a `system` directive (consistent with every
-  other mid-turn injection in `ReactLoop`, which avoids provider role-alternation
-  issues) but is clearly labelled as coming from the user.
+  texts.
 
-  ## Why the framing is imperative
+  ## Delivered as the user's own words (Claude Code parity)
 
-  The earlier wording ("adapt your current work to incorporate this now, without
-  discarding progress already made") was too soft: a model with momentum on a
-  plan read "without discarding progress" as licence to FINISH the whole plan
-  first and only acknowledge the steer at the very end - reported as "it told me
-  at the end, it didn't take what I said into consideration as it was working".
-  The framing now names and forbids that exact failure so the model treats the
-  steer as an interrupt to act on BEFORE its next action, not a closing note.
-  "User steer" is preserved as a stable, testable marker.
+  A message the user sends mid-turn reaches the model as the USER'S OWN WORDS,
+  as a `user`-role turn, with only a minimal neutral marker that it arrived
+  while the model was working. There are NO imperatives, no "URGENT", and no
+  instruction to drop the current plan — that earlier ~80-word framing was
+  reported to confuse the model (it "adds extra instructions or context… it
+  should have less than what it has"). The model decides what the message means
+  for its work, exactly as it would for any user turn; the framing's only job is
+  to say when the message arrived.
+
+  ## Role and ordering
+
+  `user` is valid after tool results on every provider path OSA uses: Anthropic
+  takes user content after `tool_result` blocks (the interrupt marker in
+  `ReactLoop.finalize_interrupt/2` already appends a `user` message right after
+  tool results on this same path), and OpenAI-compat / Ollama both accept a
+  `user` message after tool messages. So there is no system-role fallback to
+  make here — the previous `system` role existed only to carry the imperative
+  framing that is now gone.
+
+  ## Identifying a steer
+
+  A steer is identified INTERNALLY by the `steer: true` metadata key, not by any
+  string in its prompt text — so tests and any future consumer key on structure,
+  not on wording that is meant to stay minimal and may change. `format_messages`
+  in every provider matches on `role`/`content` and ignores the extra key.
   """
   @spec to_messages([String.t()]) :: [map()]
   def to_messages(texts) when is_list(texts) do
     Enum.map(texts, fn text ->
       %{
-        role: "system",
-        content:
-          "[URGENT User steer - a mid-turn course correction the user sent WHILE you are " <>
-            "working. Treat it as the user interrupting you right now. Before your very next " <>
-            "action, act on it: change your current plan to satisfy it, carrying forward the " <>
-            "progress you have already made. Do NOT finish your existing plan first and only " <>
-            "mention this at the end - that is the exact failure this directive exists to " <>
-            "prevent. If it changes what you should be doing, change course immediately.]: " <>
-            text
+        role: "user",
+        content: "#{@marker}\n\n#{text}",
+        steer: true
       }
     end)
   end

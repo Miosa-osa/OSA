@@ -1151,8 +1151,14 @@ defmodule OptimalSystemAgent.Agent.Loop.Accounting do
 
   defp provider_atom(_), do: :default
 
-  defp maybe_put_last_input(state, input) when input > 0,
-    do: put(state, :last_input_tokens, input)
+  # The message count rides along so `Telemetry.context_occupancy/1` can add
+  # what is appended AFTER this request (the reply, later tool results, the
+  # next user message) on top of the provider's own count.
+  defp maybe_put_last_input(state, input) when input > 0 do
+    state
+    |> put(:last_input_tokens, input)
+    |> put(:last_input_message_count, length(Map.get(state, :messages) || []))
+  end
 
   defp maybe_put_last_input(state, _), do: state
 
