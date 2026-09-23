@@ -3155,6 +3155,32 @@ def test_a_glyph_split_across_two_reads_still_renders(backend: StubBackend) -> N
             )
 
 
+def test_every_second_of_a_turn_is_attributed_to_model_tool_or_user(
+    backend: StubBackend,
+) -> None:
+    """The v1.0.201 report: a 202s approval read as OSA grinding, a 124s
+    command had no row or timer, and a 118s reasoning call showed one word.
+
+    `turn_attribution_probe.run` drives each state on a real PTY — model wait,
+    streamed reasoning, the 2nd call of a batch, a call past 60s, an approval
+    (answered and expired), turn end — and asserts each is named on screen,
+    nothing is left behind, and the chrome stays single. See that module.
+    """
+    import turn_attribution_probe
+
+    screens, problems = turn_attribution_probe.run(backend.base_url)
+    if problems:
+        shown = "\n".join(
+            f"=== {label} ===\n{turn_attribution_probe.numbered(s)}"
+            for label, s in screens.items()
+        )
+        raise AssertionError(
+            "turn states not attributed on screen:\n  - "
+            + "\n  - ".join(problems)
+            + f"\n{shown}"
+        )
+
+
 TESTS = [
     test_a_glyph_split_across_two_reads_still_renders,
     test_fast_updates_the_persistent_effort_chip,
@@ -3192,6 +3218,7 @@ TESTS = [
     test_goal_is_anchored_on_the_backend_not_graded_in_the_client,
     test_reconnect_restores_a_paused_goal_footer,
     test_a_running_subagent_is_not_squeezed_off_screen_by_a_plan,
+    test_every_second_of_a_turn_is_attributed_to_model_tool_or_user,
 ]
 
 

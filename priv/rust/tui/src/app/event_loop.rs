@@ -767,6 +767,22 @@ pub(crate) fn settle_working_chrome(
 /// and the final response came out truncated with the plan block sitting where
 /// the rest of it should have been. Every band that consumes stream rows must be
 /// counted in BOTH terms.
+/// The smallest viewport in which [`fit_bands`] places every band it was asked
+/// for while a TURN band (checklist, activity, roster, survey) is up, or 0 when
+/// none is — an idle region keeps its tight `LIVE_H_BASE` sizing and its
+/// existing behaviour (a toast alone does not grow it).
+///
+/// `fit_bands` always keeps [`STREAM_FLOOR`] for the reply, so a band is only
+/// placeable when the viewport covers `reserved() + STREAM_FLOOR`.
+pub(crate) fn transient_bands_floor(b: &Bands) -> u16 {
+    let transient = b.checklist | b.think | b.agents | b.survey;
+    if transient == 0 {
+        0
+    } else {
+        b.reserved().saturating_add(STREAM_FLOOR)
+    }
+}
+
 pub(crate) fn streaming_inline_height(
     base: u16,
     overhead: u16,
@@ -2162,18 +2178,23 @@ impl App {
             .saturating_add(b.popup)
             .saturating_add(b.think)
             .min(hi0);
+        // The arbiter keeps a STREAM_FLOOR row for the reply; `live_region_height`
+        // does not (an idle region reserves no dead rows). With a transient band
+        // wanted that disagreement cost exactly one row, and the arbiter shed it
+        // from the FRONT of `SHED_ORDER` — the toast, then the activity row. So
+        // between tool rounds (no reply streaming, no toast padding the sum) the
+        // spinner, the running-tool feed and the model-wait label were all
+        // reserved by nothing and silently dropped. Size to what the arbiter will
+        // actually place.
+        let base = transient_bands_floor(&b).max(base).min(hi0);
 
         // A pending permission prompt renders inline above the composer; grow the
         // live region to fit its compact height so the ask isn't clipped.
         if let Some(perm) = self.permissions.displayed() {
             let perm_rows = perm.desired_height(size.cols);
-            let overhead: u16 = b.think + b.hint + b.status;
-            let want = overhead
-                .saturating_add(input_needed)
-                .saturating_add(perm_rows)
-                .saturating_add(b.agents)
-                .saturating_add(b.toast)
-                .saturating_add(b.popup);
+            // Every measured band, not a hand-picked subset: a band left out
+            // here is carved out of the prompt's own rows by `fit_bands`.
+            let want = b.reserved().saturating_add(perm_rows);
             let hi = term_rows.saturating_sub(1).max(1);
             return want.clamp(base, hi);
         }
@@ -2186,13 +2207,9 @@ impl App {
         // the same fixed-slot principle as the streaming preview below. Mirrors
         // the permission-prompt branch above.
         if let Some(ref review) = self.plan_review {
-            let overhead: u16 = b.think + b.hint + b.status;
-            let want = overhead
-                .saturating_add(input_needed)
-                .saturating_add(review.desired_height(size.cols))
-                .saturating_add(b.agents)
-                .saturating_add(b.toast)
-                .saturating_add(b.popup);
+            let want = b
+                .reserved()
+                .saturating_add(review.desired_height(size.cols));
             let hi = term_rows.saturating_sub(1).max(1);
             return want.clamp(base, hi);
         }
@@ -2319,7 +2336,10 @@ impl App {
             // rows beneath it, so a MOVING spinner + elapsed stays on screen
             // instead of a frozen box. `activity.height()` is the exact count the
             // draw swap carves off the bottom of this band, so the two agree.
-            if self.activity.is_waiting() {
+            // Likewise once the thought is a finished one-row summary: the
+            // activity row beneath it names the tool now running (or the wait
+            // on the model), which a frozen thought must never hide.
+            if self.activity.is_waiting() || self.thinking_box.is_summary() {
                 box_h.saturating_add(self.activity.height())
             } else {
                 box_h
@@ -2421,7 +2441,7 @@ impl App {
         // In screen-reader mode the boxed thinking display is skipped in favor of
         // the activity's plain-text status line (screen readers choke on the box).
         if !self.thinking_box.is_empty() && !self.activity.a11y() {
-            if self.activity.is_waiting() {
+            if self.activity.is_waiting() || self.thinking_box.is_summary() {
                 // B3-stall — the stream went silent after reasoning, so a static
                 // thinking box alone reads as frozen. Split this band: reasoning
                 // box on top, the LIVE activity spinner (+ "Waiting for
@@ -5297,5 +5317,53 @@ mod cadence_tests {
         assert!(!is_cadence_event(&Event::Terminal(
             crossterm::event::Event::Resize(80, 24)
         )));
+    }
+}
+
+#[cfg(test)]
+mod transient_band_sizing_tests {
+    use super::{fit_bands, transient_bands_floor, Bands, STREAM_FLOOR};
+
+    fn bands(think: u16, toast: u16) -> Bands {
+        Bands {
+            toast,
+            checklist: 0,
+            think,
+            agents: 0,
+            survey: 0,
+            popup: 0,
+            input: 3,
+            hint: 1,
+            status: 2,
+            agents_floor: 0,
+        }
+    }
+
+    /// The v1.0.201 defect: between tool rounds the viewport was sized to
+    /// `LIVE_H_BASE + think` = 7 rows while the arbiter needed 8 (it keeps
+    /// STREAM_FLOOR for the reply), so it shed the activity row — the spinner,
+    /// the running tool and the model-wait label all vanished. The floor must
+    /// be a height at which `fit_bands` places every transient band it was given.
+    #[test]
+    fn the_activity_row_survives_the_arbiter_between_tool_rounds() {
+        for (think, toast) in [(1, 0), (4, 0), (1, 1), (5, 1)] {
+            let want = bands(think, toast);
+            let floor = transient_bands_floor(&want);
+            assert_eq!(floor, want.reserved() + STREAM_FLOOR);
+            let fit = fit_bands(want, floor);
+            assert_eq!(
+                fit.think, think,
+                "activity/thinking band shed at {floor} rows"
+            );
+            assert_eq!(fit.toast, toast, "toast shed at {floor} rows");
+        }
+    }
+
+    /// An idle region keeps its tight sizing: no turn band, no floor — and an
+    /// idle toast does not grow the viewport either.
+    #[test]
+    fn an_idle_region_reserves_no_extra_row() {
+        assert_eq!(transient_bands_floor(&bands(0, 0)), 0);
+        assert_eq!(transient_bands_floor(&bands(0, 1)), 0);
     }
 }

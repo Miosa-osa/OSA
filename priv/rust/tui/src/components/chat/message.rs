@@ -68,8 +68,32 @@ pub struct ToolCallData {
     /// scratch, and a bracket appended once at construction would silently
     /// vanish the moment either happened.
     pub hook_runs: crate::tools::collapse::HookRunCounts,
+    /// Whole seconds of `duration_ms` the call spent parked on the user's
+    /// approval. Stored on the cell (like `hook_runs`) so a re-render keeps the
+    /// note that says whose time the duration was.
+    pub approval_wait_secs: u64,
     /// Pre-rendered styled lines from the tool renderer
     pub lines: Vec<Line<'static>>,
+}
+
+/// Say, on a finished call's title row, how much of its duration was spent
+/// waiting for the user's approval. The backend's `duration_ms` spans the whole
+/// call, prompt included, so `Edit settings.json 3m 22s` read as three minutes
+/// of OSA grinding when it was three minutes of the prompt waiting on the user.
+/// A no-op at zero, so every re-render path can call it unconditionally.
+pub(crate) fn append_approval_note(lines: &mut [Line<'static>], secs: u64) {
+    if secs == 0 {
+        return;
+    }
+    if let Some(first) = lines.first_mut() {
+        first.spans.push(Span::styled(
+            format!(
+                " \u{00b7} {} waiting for your approval",
+                crate::util::fmt_elapsed(secs)
+            ),
+            crate::style::theme().faint(),
+        ));
+    }
 }
 
 /// Append the compact hook bracket to a cell's header row, in place.
@@ -221,6 +245,7 @@ impl Message {
             success: true,
             expanded: false,
             hook_runs: Default::default(),
+            approval_wait_secs: 0,
             lines: vec![Line::from("")], // 1 row; real rule drawn in draw_tool_call
         })
     }

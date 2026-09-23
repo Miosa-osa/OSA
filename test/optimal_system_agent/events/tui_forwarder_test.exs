@@ -217,6 +217,26 @@ defmodule OptimalSystemAgent.Events.TuiForwarderTest do
     end
   end
 
+  test "forwards tool_call_stalled so a long tool says so on screen, not only in the log",
+       %{session_id: sid} do
+    # `tool_orchestrator` emits this Bus-only report every 60s a call stays in
+    # flight. It used to reach the log and nothing else, so a 124s command was
+    # indistinguishable on screen from a wedged turn.
+    Bus.emit(:system_event, %{
+      event: :tool_call_stalled,
+      session_id: sid,
+      tools: "shell_execute",
+      elapsed_s: 60,
+      pending: 1
+    })
+
+    assert_receive {:osa_event, event}, 2000
+    assert event.type == :system_event
+    assert event.event == :tool_call_stalled
+    assert event.tools == "shell_execute"
+    assert event.elapsed_s == 60
+  end
+
   test "does NOT forward a sub-event absent from the allowlist", %{session_id: sid} do
     Bus.emit(:system_event, %{
       event: :some_unlisted_internal_event,

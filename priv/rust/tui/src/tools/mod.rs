@@ -153,6 +153,69 @@ pub fn render_tool(name: &str, args: &str, result: &str, opts: &RenderOpts) -> V
     lines
 }
 
+/// One-line plain-text name of a tool call, as its transcript cell will title it:
+/// `Bash(make test)`, `Edit(settings.json)`, `Read(src/main.rs)`.
+///
+/// Derived from the SAME renderer that builds the finished cell, so the live
+/// "running" row and the committed row can never name a call differently. The
+/// status glyph, the duration and every escape (OSC 8 link wrappers included)
+/// are dropped; what remains is safe to paint on a single row.
+pub fn headline(name: &str, args: &str) -> String {
+    let opts = RenderOpts {
+        status: ToolStatus::Running,
+        width: 200,
+        expanded: false,
+        compact: true,
+        spinner_frame: None,
+        duration_ms: 0,
+        truncated: false,
+    };
+    let lines = render_tool(name, args, "", &opts);
+    let raw: String = lines
+        .first()
+        .map(|l| {
+            // Span 0 is the status glyph, span 1 the gap after it.
+            l.spans.iter().skip(2).map(|s| s.content.as_ref()).collect()
+        })
+        .unwrap_or_default();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if let Some(len) = crate::util::escape_len_at(&raw, i) {
+            i += len;
+            continue;
+        }
+        let ch = raw[i..].chars().next().unwrap_or(' ');
+        if !ch.is_control() {
+            out.push(ch);
+        }
+        i += ch.len_utf8();
+    }
+    // Keep the title only: renderers append stats after a two-space gap at
+    // paren depth 0 (`Edit settings.json  +1 -1  L1`); a gap INSIDE the
+    // parentheses belongs to the command itself and is kept.
+    let mut depth = 0i32;
+    let mut cut = out.len();
+    let bytes = out.as_bytes();
+    for (i, b) in bytes.iter().enumerate() {
+        match b {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b' ' if depth <= 0 && bytes.get(i + 1) == Some(&b' ') => {
+                cut = i;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let out = out[..cut].trim().to_string();
+    if out.is_empty() {
+        name.to_string()
+    } else {
+        out
+    }
+}
+
 /// Default ceiling on the rows one committed tool block may occupy.
 ///
 /// In a retained-widget TUI an expanded 5000-row body is merely long. OSA is
@@ -1593,5 +1656,33 @@ mod commit_cap_tests {
             .join("\n");
         let lines = render_tool("bash", r#"{"command":"seq 5000"}"#, &result, &opts(false));
         assert!(lines.len() <= 5, "header + a small window: {}", lines.len());
+    }
+}
+
+#[cfg(test)]
+mod headline_tests {
+    use super::headline;
+
+    #[test]
+    fn a_shell_call_is_titled_like_its_transcript_cell() {
+        assert_eq!(headline("shell_execute", "make test"), "Bash(make test)");
+    }
+
+    /// Stats after the title (`  +1 -1  L1`) are the finished cell's business;
+    /// a gap INSIDE the parentheses belongs to the command and is kept.
+    #[test]
+    fn stats_are_dropped_but_the_command_is_kept_whole() {
+        let edit = r#"{"path":"settings.json","old_string":"1","new_string":"2"}"#;
+        let h = headline("file_edit", edit);
+        assert!(h.starts_with("Edit"), "{h}");
+        assert!(h.contains("settings.json"), "{h}");
+        assert!(!h.contains("+1"), "{h}");
+        assert_eq!(headline("shell_execute", "echo a  b"), "Bash(echo a  b)");
+    }
+
+    #[test]
+    fn escapes_never_reach_the_live_row() {
+        let h = headline("shell_execute", "cat \u{1b}]0;PWNED\u{7} x");
+        assert!(!h.contains('\u{1b}'), "{h:?}");
     }
 }

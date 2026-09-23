@@ -102,6 +102,14 @@ pub enum BackendEvent {
         tool_call_id: Option<String>,
     },
 
+    /// The daemon's "still running after Ns" report for a tool batch
+    /// (`tool_orchestrator`, `tool_call_stalled`). `tools` is a comma-joined list
+    /// of the tool names still in flight. Not a timeout — a liveness report.
+    ToolCallStalled {
+        tools: String,
+        elapsed_s: u64,
+    },
+
     /// Live stdout/stderr from a still-running foreground shell command
     /// (`command_output_delta`). Emitted at most ~4/sec while the command runs
     /// so a long build isn't a silent spinner. `chunk` is the incremental bytes
@@ -810,6 +818,9 @@ pub enum BackendEvent {
         warning: Option<String>,
         /// Why the prompt fired (ask rule, out-of-scope path, safety path).
         reason: Option<String>,
+        /// How long the backend waits for an answer before skipping the call.
+        /// `None` on an older backend (which waited its fixed 300s).
+        timeout_ms: Option<u64>,
     },
     /// Backend proposing a plan for the user to review before execution.
     PlanProposed {
