@@ -185,6 +185,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ModelSwap do
     state =
       if did? do
         %{state | messages: compacted, last_input_tokens: tokens_after}
+        |> Map.put(:last_input_message_count, length(compacted))
       else
         state
       end

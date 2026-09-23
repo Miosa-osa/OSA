@@ -2664,11 +2664,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   defp refresh_tokens_after_fold(state, false), do: state
 
   defp refresh_tokens_after_fold(state, true) do
-    Map.put(
-      state,
+    state
+    |> Map.put(
       :last_input_tokens,
       OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
     )
+    |> Map.put(:last_input_message_count, length(state.messages))
   rescue
     _ -> state
   end
