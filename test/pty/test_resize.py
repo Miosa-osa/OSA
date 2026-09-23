@@ -2350,10 +2350,12 @@ def test_a_queued_message_does_not_make_the_interrupt_harder_to_reach(
         release_turn()
 
 
-#: The wire path the send-now feature rides. The real backend parks the text in
-#: an ETS queue a busy loop can still read and folds it in at the next ReAct
-#: step boundary; nothing about that needs a model to be exercised here.
-STEER_PATH = "/api/v1/sessions/pty-stub-session/steer"
+#: The wire path the send-now feature rides. Send-now delivers every queued
+#: message in one request to `/send-now`, which queues each as a steer (an ETS
+#: queue a busy loop can still read) AND raises a yield flag that interrupts the
+#: current step so the message is folded in NOW, not at the next natural
+#: boundary. Nothing about that needs a model to be exercised here.
+STEER_PATH = "/api/v1/sessions/pty-stub-session/send-now"
 CANCEL_PATH = "/api/v1/sessions/pty-stub-session/cancel"
 
 
