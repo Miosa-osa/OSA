@@ -535,6 +535,14 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
       tool_calls: %{},
       usage: %{},
       finish_reason: nil,
+      # Did a `data: [DONE]` line ever arrive? Every OpenAI-compatible backend
+      # OSA speaks to (OpenAI, Groq, xAI, DeepSeek, OpenRouter, Together, a
+      # local vLLM/Ollama-compat endpoint, ...) terminates a successful stream
+      # with it — it is the one universal signal of "the response actually
+      # finished". Read by `do_finalize_sse_stream/4` to flag
+      # `stream_incomplete` when the connection closed without it (P2 audit
+      # gap A).
+      saw_done: false,
       # Native reasoning channel (`reasoning` / `reasoning_content` /
       # `reasoning_details`), kept separate from `content` for the whole stream.
       reasoning: "",
@@ -691,7 +699,13 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
     {sse_data, remainder}
   end
 
-  defp process_sse_line("[DONE]", _callback, acc), do: acc
+  # `[DONE]` is the OpenAI-compatible protocol's own terminal marker — every
+  # backend OSA speaks through this module sends it at the end of a
+  # successfully-completed stream. Recording that it arrived (rather than
+  # silently discarding the line, as before) is what lets
+  # `do_finalize_sse_stream/4` tell a real finish from a connection that
+  # simply closed mid-response (P2 audit gap A).
+  defp process_sse_line("[DONE]", _callback, acc), do: Map.put(acc, :saw_done, true)
 
   defp process_sse_line(json_str, callback, acc) do
     case Jason.decode(json_str) do
@@ -986,6 +1000,18 @@ defmodule OptimalSystemAgent.Providers.OpenAICompat do
 
       {:error, @empty_response_reason}
     else
+      # A non-empty result (real content/tool_calls/reasoning was produced) but
+      # the stream closed WITHOUT ever seeing `data: [DONE]` — the connection
+      # ended, but the model's own protocol never confirmed it was finished.
+      # That used to be indistinguishable from a clean stop; flag it so
+      # `ReactLoop` can retry (nothing shown yet) or deliver it marked cut
+      # short instead of as a complete answer (P2 audit gap A). The empty case
+      # above is unaffected — it already retries via `Resilience.with_retry/2`.
+      result =
+        if Map.get(acc, :saw_done, false),
+          do: result,
+          else: Map.put(result, :stream_incomplete, true)
+
       callback.({:done, result})
       :ok
     end

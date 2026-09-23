@@ -88,6 +88,27 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
   waits inside its own Task for the calls already in flight. See the moduledoc.
   """
   def tool_block_complete(ctx, tool_call, state) do
+    if Map.has_key?(Map.get(ctx, :calls, %{}), tool_call.id) do
+      # DEFENSIVE (P2 audit gap B): the provider layer
+      # (`Providers.Anthropic`/`ToolCallDedup`) already drops an exact-duplicate
+      # `tool_use` block before it ever calls back, but this is the single
+      # place a tool actually STARTS running — belt and suspenders against any
+      # emitter (present or future) that hands the same id to
+      # `tool_block_complete/3` twice. `:calls` is never pruned for the life of
+      # the turn, so this catches a duplicate whether its first copy is still
+      # in flight or has already completed.
+      Logger.warning(
+        "[streaming_tools] refusing to start tool_use id=#{inspect(tool_call.id)} " <>
+          "(#{tool_call.name}) a second time this turn — already started"
+      )
+
+      ctx
+    else
+      do_tool_block_complete(ctx, tool_call, state)
+    end
+  end
+
+  defp do_tool_block_complete(ctx, tool_call, state) do
     executor = executor_for(state)
 
     scope = scope_of(tool_call, state)

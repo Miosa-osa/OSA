@@ -25,6 +25,10 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipelineResetTest do
         goal_verifier_runs: 3,
         goal_verifier_stall_count: 5,
         target_continues: 5,
+        # P2 audit gap C's shared recovery budget — added after this test's
+        # original reset list, exactly the "added later, forgot to reset"
+        # shape this file exists to catch.
+        recovery_attempts: 5,
         # Fields NOT part of the reset contract — must survive untouched.
         session_id: "sess-1",
         messages: [%{role: "user", content: "hi"}]
@@ -45,6 +49,9 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipelineResetTest do
       assert reset.goal_verifier_runs == 0
       assert reset.goal_verifier_stall_count == 0
       assert reset.target_continues == 0
+
+      # P2 audit gap C:
+      assert reset.recovery_attempts == 0
 
       # Untouched fields survive.
       assert reset.session_id == "sess-1"

@@ -412,6 +412,60 @@ defmodule OptimalSystemAgent.Providers.OllamaTest do
       assert "tool_b" in names
     end
 
+    # P2 audit gap B: a cumulative (rather than delta) tool_calls chunk must
+    # not double the call — the SAME id/name/arguments arriving twice used to
+    # both execute (`ToolOrchestrator.uniquify_ids/1` renamed the repeat
+    # instead of dropping it).
+    test "an EXACT repeat of an already-streamed tool call is dropped, not duplicated" do
+      cb = fn _event -> :ok end
+
+      line =
+        Jason.encode!(%{
+          "message" => %{
+            "tool_calls" => [
+              %{"id" => "a", "function" => %{"name" => "tool_a", "arguments" => %{"x" => 1}}}
+            ]
+          }
+        })
+
+      acc = make_acc()
+      acc = Ollama.process_ndjson_line(line, cb, acc)
+      # Same chunk arrives again (a cumulative re-send).
+      acc = Ollama.process_ndjson_line(line, cb, acc)
+
+      assert length(acc.tool_calls) == 1
+    end
+
+    test "a same-id call with DIFFERENT arguments is kept (genuine conflict), not dropped" do
+      cb = fn _event -> :ok end
+
+      line1 =
+        Jason.encode!(%{
+          "message" => %{
+            "tool_calls" => [
+              %{"id" => "a", "function" => %{"name" => "tool_a", "arguments" => %{"x" => 1}}}
+            ]
+          }
+        })
+
+      line2 =
+        Jason.encode!(%{
+          "message" => %{
+            "tool_calls" => [
+              %{"id" => "a", "function" => %{"name" => "tool_a", "arguments" => %{"x" => 2}}}
+            ]
+          }
+        })
+
+      acc = make_acc()
+      acc = Ollama.process_ndjson_line(line1, cb, acc)
+      acc = Ollama.process_ndjson_line(line2, cb, acc)
+
+      # Both kept — ToolOrchestrator.uniquify_ids/1 (react_loop.ex) is the
+      # place a genuine id conflict gets repaired, not this layer.
+      assert length(acc.tool_calls) == 2
+    end
+
     test "ignores malformed JSON without crashing" do
       cb = fn event -> send(self(), {:cb, event}) end
       acc = make_acc()
@@ -446,8 +500,155 @@ defmodule OptimalSystemAgent.Providers.OllamaTest do
       new_acc = Ollama.process_ndjson_line(~s|{"done":true,"done_reason":"stop"}|, cb, acc)
 
       assert new_acc.stop_reason == "stop"
-      assert Map.delete(new_acc, :stop_reason) == Map.delete(acc, :stop_reason)
+      # `:saw_done` is the ONE other field a done:true line is allowed to add
+      # (P2 audit gap A — see the `finalize_stream/2` describe block below).
+      assert Map.delete(new_acc, :stop_reason) |> Map.delete(:saw_done) ==
+               Map.delete(acc, :stop_reason)
+
       refute_received {:cb, _}
+    end
+
+    test "a done chunk marks saw_done: true, regardless of done_reason" do
+      cb = fn _event -> :ok end
+      acc = make_acc()
+
+      new_acc = Ollama.process_ndjson_line(~s|{"done":true}|, cb, acc)
+      assert new_acc.saw_done == true
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # finalize_stream/2 — P2 audit gap A (local/Finch path).
+  #
+  # A stream that closes cleanly (Req returns `{:ok, _}`) WITHOUT ever seeing a
+  # `{"done":true, ...}` NDJSON line — a killed container, a proxy timeout, a
+  # server-side hangup mid-response — used to finalize identically to a real
+  # stop: `stop_reason: nil`, no signal anything was cut off.
+  # ---------------------------------------------------------------------------
+
+  describe "finalize_stream/2" do
+    defp finalize_result(acc) do
+      test_pid = self()
+      cb = fn msg -> send(test_pid, {:finalize_cb, msg}) end
+      Ollama.finalize_stream(acc, cb)
+
+      receive do
+        {:finalize_cb, {:done, result}} -> result
+      after
+        0 -> raise "finalize_stream/2 never called back with :done"
+      end
+    end
+
+    test "a stream that never saw done:true is flagged stream_incomplete" do
+      cb = fn _ -> :ok end
+      acc = make_acc() |> Map.put(:usage, %{})
+      acc = Ollama.process_ndjson_line(~s|{"message":{"content":"Let me check the "}}|, cb, acc)
+
+      result = finalize_result(acc)
+
+      assert result.content == "Let me check the"
+      assert result.stream_incomplete == true
+    end
+
+    test "a stream that DID see done:true is NOT flagged incomplete" do
+      cb = fn _ -> :ok end
+      acc = make_acc() |> Map.put(:usage, %{})
+      acc = Ollama.process_ndjson_line(~s|{"message":{"content":"All done."}}|, cb, acc)
+      acc = Ollama.process_ndjson_line(~s|{"done":true,"done_reason":"stop"}|, cb, acc)
+
+      result = finalize_result(acc)
+
+      assert result.content == "All done."
+      refute Map.get(result, :stream_incomplete, false)
+    end
+
+    test "a stream with tool calls but no done:true is still flagged" do
+      cb = fn _ -> :ok end
+
+      line =
+        Jason.encode!(%{
+          "message" => %{
+            "tool_calls" => [
+              %{"id" => "a", "function" => %{"name" => "file_read", "arguments" => %{}}}
+            ]
+          }
+        })
+
+      acc = make_acc() |> Map.put(:usage, %{})
+      acc = Ollama.process_ndjson_line(line, cb, acc)
+
+      result = finalize_result(acc)
+
+      assert result.tool_calls != []
+      assert result.stream_incomplete == true
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # stream_from_curl_lines/2 — P2 audit gap A (Ollama Cloud / curl-port path).
+  #
+  # `cloud_stream_loop/3` is exercised end to end here (no real curl process):
+  # `curl exited 0` without a `"done":true` line used to finalize as an
+  # ordinary success (`stop_reason: nil`), indistinguishable from the model
+  # finishing on its own.
+  # ---------------------------------------------------------------------------
+
+  describe "stream_from_curl_lines/2 (cloud port path)" do
+    test "curl exit 0 WITHOUT a done:true line is flagged stream_incomplete" do
+      lines = [
+        Jason.encode!(%{"message" => %{"content" => "Partial answer, "}}),
+        Jason.encode!(%{"message" => %{"content" => "cut off here"}})
+      ]
+
+      assert {:done, result} = Ollama.stream_from_curl_lines(lines)
+
+      assert result.content == "Partial answer, cut off here"
+      assert result.stream_incomplete == true
+    end
+
+    test "curl exit 0 WITH a done:true line is a normal, complete finish" do
+      lines = [
+        Jason.encode!(%{"message" => %{"content" => "All done."}}),
+        Jason.encode!(%{
+          "done" => true,
+          "done_reason" => "stop",
+          "model" => "glm-5.2:cloud",
+          "message" => %{"tool_calls" => []}
+        })
+      ]
+
+      assert {:done, result} = Ollama.stream_from_curl_lines(lines)
+
+      assert result.content == "All done."
+      refute Map.get(result, :stream_incomplete, false)
+    end
+
+    test "a NON-zero curl exit is a hard error, not a stream_incomplete success" do
+      lines = [Jason.encode!(%{"message" => %{"content" => "partial"}})]
+
+      assert {:error, reason} = Ollama.stream_from_curl_lines(lines, exit_status: 7)
+      assert reason =~ "exit 7"
+    end
+
+    test "an EXACT duplicate tool call across chunks is dropped (P2 audit gap B, cloud path)" do
+      call_json = fn id ->
+        Jason.encode!(%{
+          "message" => %{
+            "tool_calls" => [
+              %{"id" => id, "function" => %{"name" => "file_read", "arguments" => %{"x" => 1}}}
+            ]
+          }
+        })
+      end
+
+      lines = [
+        call_json.("a"),
+        # A cumulative re-send of the SAME call.
+        call_json.("a")
+      ]
+
+      assert {:done, result} = Ollama.stream_from_curl_lines(lines)
+      assert length(result.tool_calls) == 1
     end
   end
 

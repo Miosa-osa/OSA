@@ -68,6 +68,24 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolArgValidator do
     end
   end
 
+  @doc """
+  True when `content` is a REASK or terminal invalid-arguments message THIS
+  module produced (the body of `validate/2`'s `{:reask, _}` / `{:error, _}`
+  results, after it becomes a plain tool-result string).
+
+  Exposed so `ReactLoop` can count these against the shared per-turn recovery
+  budget (P2 audit gap C) without re-deriving or duplicating the message text
+  here and there — matched by prefix, not by the whole body, so the tool name
+  and reason embedded in the text don't have to be reproduced to recognise it.
+  """
+  @spec reask_message?(term()) :: boolean()
+  def reask_message?(content) when is_binary(content) do
+    String.starts_with?(content, "Error: Your tool input for") or
+      String.starts_with?(content, "Error: Tool input for")
+  end
+
+  def reask_message?(_), do: false
+
   # --- Private ---
 
   defp reask(session_id, tool_name, reason) do

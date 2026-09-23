@@ -36,6 +36,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
   alias OptimalSystemAgent.Providers.AnthropicModels
   alias OptimalSystemAgent.Providers.CacheAttribution
   alias OptimalSystemAgent.Providers.PromptCache
+  alias OptimalSystemAgent.Providers.ToolCallDedup
 
   @impl true
   def default_model, do: AnthropicModels.default_model()
@@ -288,6 +289,13 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
             current_thinking: nil,
             stream_error: nil,
             stop_reason: nil,
+            # Did a `message_stop` SSE event ever arrive? That is Anthropic's
+            # own terminal marker for the whole response; end-of-connection
+            # (Req's `:done` part in `collect_stream/3`) is a TRANSPORT signal
+            # and used to be treated as identical to it. Read at finalization
+            # to flag `stream_incomplete` when the socket closed first (P2
+            # audit gap A).
+            saw_message_stop: false,
             cache_scope: cache_scope,
             cache_fp: cache_fp,
             # Carried purely so the MID-STREAM ERROR path can bill what this
@@ -357,6 +365,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       current_thinking: nil,
       stream_error: nil,
       stop_reason: nil,
+      saw_message_stop: false,
       usage: %{
         input_tokens: 0,
         output_tokens: 0,
@@ -377,6 +386,7 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
 
     %{
       content: acc.content,
+      stream_incomplete: not Map.get(acc, :saw_message_stop, false),
       tool_calls: Enum.reverse(acc.tool_calls),
       stop_reason: acc.stop_reason,
       usage: Map.get(acc, :usage, %{})
@@ -434,11 +444,19 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
                 acc = finalize_current_tool(acc)
                 acc = finalize_current_thinking(acc)
 
+                # `done?` only means Req's connection-level `:done` part
+                # arrived — the HTTP body finished. That is a TRANSPORT
+                # signal, not Anthropic's own confirmation the response is
+                # complete (`event: message_stop`), and the two used to be
+                # treated as identical. Flag it so `ReactLoop` can tell a
+                # clean finish from a connection that closed before Anthropic
+                # said it was done (P2 audit gap A).
                 result = %{
                   content: acc.content,
                   tool_calls: Enum.reverse(acc.tool_calls),
                   stop_reason: acc.stop_reason,
-                  usage: Map.get(acc, :usage, %{})
+                  usage: Map.get(acc, :usage, %{}),
+                  stream_incomplete: not Map.get(acc, :saw_message_stop, false)
                 }
 
                 result =
@@ -642,8 +660,28 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
           end
 
         tool_call = %{id: tool.id, name: tool.name, arguments: arguments}
-        callback.({:tool_use_block, tool_call})
-        %{acc | tool_calls: [tool_call | acc.tool_calls], current_tool: nil}
+
+        # DEDUPE (P2 audit gap B): `acc.tool_calls` is built newest-first, so
+        # compare against it BEFORE the callback fires. An exact repeat (same
+        # id, name AND arguments) of a block already streamed this turn is
+        # dropped WITHOUT calling back — the callback is what starts
+        # `StreamingToolExecutor.tool_block_complete/3`, and firing it twice
+        # for the same id runs the tool's side effect twice. A same-id
+        # conflict (different name/arguments) is kept, exactly as before, so
+        # `ToolOrchestrator.uniquify_ids/1` still repairs it downstream.
+        case ToolCallDedup.classify(acc.tool_calls, tool_call) do
+          :exact_duplicate ->
+            %{acc | current_tool: nil}
+
+          _ ->
+            callback.({:tool_use_block, tool_call})
+
+            %{
+              acc
+              | tool_calls: ToolCallDedup.prepend(acc.tool_calls, tool_call),
+                current_tool: nil
+            }
+        end
       else
         finalize_current_tool(acc)
       end
@@ -651,7 +689,16 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
     finalize_current_thinking(acc)
   end
 
-  defp process_stream_event(%{"type" => "message_stop"}, _callback, acc), do: acc
+  # Anthropic's own terminal marker for the whole response. Recording that it
+  # arrived (rather than discarding the event, as before) is what lets
+  # `collect_stream/3` tell "the model finished" from "the connection just
+  # closed" (P2 audit gap A). `Map.has_key?` guards an accumulator shape from
+  # before this field existed (a hand-built fixture in an older test).
+  defp process_stream_event(%{"type" => "message_stop"}, _callback, acc) do
+    if Map.has_key?(acc, :saw_message_stop),
+      do: %{acc | saw_message_stop: true},
+      else: acc
+  end
 
   # `message_start` carries the initial usage snapshot: input_tokens plus any
   # prompt-cache creation/read counts (output_tokens is 0/near-0 at this
@@ -729,7 +776,9 @@ defmodule OptimalSystemAgent.Providers.Anthropic do
       end
 
     tool_call = %{id: tool.id, name: tool.name, arguments: arguments}
-    %{acc | tool_calls: [tool_call | acc.tool_calls], current_tool: nil}
+    # Same dedup as `content_block_stop`'s tool-completion arm — belt and
+    # suspenders for this second accumulation site (P2 audit gap B).
+    %{acc | tool_calls: ToolCallDedup.prepend(acc.tool_calls, tool_call), current_tool: nil}
   end
 
   defp finalize_current_thinking(%{current_thinking: nil} = acc), do: acc
