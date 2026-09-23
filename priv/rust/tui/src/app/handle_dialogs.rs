@@ -507,7 +507,12 @@ impl App {
 
     pub(crate) fn open_reasoning_selector(&mut self) {
         use crate::dialogs::reasoning::{ReasoningLevel, ReasoningSelector};
-        self.reasoning_selector = Some(ReasoningSelector::new(ReasoningLevel::Off));
+        // An always-on reasoner gets no "Off" row: choosing it would claim a
+        // state the model cannot be put in.
+        self.reasoning_selector = Some(ReasoningSelector::with_off(
+            ReasoningLevel::Off,
+            self.thinking_can_disable,
+        ));
     }
 
     // ── /theme, /keybindings, /tools, /context overlays ──────────────────

@@ -131,6 +131,11 @@ pub struct App {
     /// the one the user was reading (approving B while looking at A).
     pub permissions: self::permission_queue::PermissionQueue,
     pub reasoning_selector: Option<ReasoningSelector>,
+    /// Whether the CURRENT model can stop reasoning at all. `false` for
+    /// always-on reasoners (Claude Opus 5.5, the GLM tags on Ollama Cloud) —
+    /// then no surface offers "thinking off". Fed from the backend's catalog
+    /// capability (`/health`, `/model` switch), never from the model name.
+    pub thinking_can_disable: bool,
     pub rewind_dialog: Option<RewindDialog>,
     pub config_editor: Option<ConfigEditor>,
     pub file_picker: Option<FilePicker>,
@@ -773,6 +778,7 @@ impl App {
             plan_review: None,
             permissions: self::permission_queue::PermissionQueue::new(),
             reasoning_selector: None,
+            thinking_can_disable: true,
             rewind_dialog: None,
             config_editor: None,
             file_picker: None,

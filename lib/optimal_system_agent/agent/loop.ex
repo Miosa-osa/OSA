@@ -130,6 +130,9 @@ defmodule OptimalSystemAgent.Agent.Loop do
     current_input: nil,
     started_at: nil,
     last_input_tokens: 0,
+    # `length(messages)` when `last_input_tokens` was reported — the baseline
+    # `Telemetry.context_occupancy/1` counts later messages from.
+    last_input_message_count: nil,
     # Per-turn correlation id (a prompt.id-style field) minted by
     # `Observability.new_turn_id/0` at turn start. Threaded into the CloudEvent
     # envelope of every lifecycle event so the per-session event stream is a
@@ -1746,6 +1749,16 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   def handle_call(:context_budget, _from, state) do
     budget = OptimalSystemAgent.Agent.Context.token_budget(state)
+
+    # `/context`'s total is the SAME number the status-bar meter shows: once a
+    # provider has reported a request size, that report plus what was appended
+    # after it (`Telemetry.context_occupancy/1`), not a second, independent
+    # estimate of the whole history. The breakdown rows stay estimates.
+    budget =
+      if Map.get(state, :last_input_tokens, 0) > 0,
+        do: Map.put(budget, :occupied_tokens, used_context_tokens(state)),
+        else: budget
+
     {:reply, {:ok, budget}, state}
   end
 
@@ -2003,11 +2016,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   defp republish_context(state, true) do
     state =
-      Map.put(
-        state,
+      state
+      |> Map.put(
         :last_input_tokens,
         OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
       )
+      |> Map.put(:last_input_message_count, length(state.messages))
 
     Telemetry.emit_context_pressure(state)
     state
@@ -2898,7 +2912,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   # never counted, not a miscount on either side of it.
   defp used_context_tokens(state) do
     case Map.get(state, :last_input_tokens, 0) do
-      n when is_integer(n) and n > 0 -> n
+      n when is_integer(n) and n > 0 -> Telemetry.context_occupancy(state)
       _ -> pre_response_context_estimate(state)
     end
   end

@@ -296,6 +296,21 @@ defmodule OptimalSystemAgent.Providers.ZaiModels do
   def model(_), do: nil
 
   @doc """
+  Whether reasoning can be switched OFF on this model, read from its entry's
+  effort vocabulary: a model with no effort ladder takes the plain
+  `thinking: enabled | disabled` toggle, and a ladder that includes `"none"`
+  can go to zero. A ladder WITHOUT `"none"` (GLM-5.3 Flash: `low/high/max`)
+  reasons always. Unknown ids answer `true`.
+  """
+  @spec thinking_can_disable?(String.t() | nil) :: boolean()
+  def thinking_can_disable?(id) do
+    case resolve(id) do
+      %{reasoning: true, efforts: [_ | _] = efforts} -> "none" in efforts
+      _ -> true
+    end
+  end
+
+  @doc """
   Look up a model by id, tolerating the three decorations OSA actually sees:
 
     * a vendor prefix — `z-ai/glm-5.2`, `accounts/fireworks/models/glm-5.2`

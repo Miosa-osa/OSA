@@ -645,7 +645,17 @@ impl App {
                     // an unvalidated typo would display a bogus effort while
                     // the backend rejects it.
                     let lvl = arg.to_ascii_lowercase();
-                    if matches!(
+                    if lvl == "off" && !self.thinking_can_disable {
+                        self.chat.add_system_message(
+                            &format!(
+                                "{} always reasons \u{2014} thinking can't be turned off for \
+                                 this model. Pick a lower effort with /reasoning, or /model \
+                                 to switch models.",
+                                self.status.model_name()
+                            ),
+                            "warning",
+                        );
+                    } else if matches!(
                         lvl.as_str(),
                         "off" | "fast" | "medium" | "high" | "xhigh" | "ultra"
                     ) {

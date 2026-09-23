@@ -80,6 +80,9 @@ impl App {
                 // send simply leaves its chip off (no "effort:" / "$" shown).
                 self.status.set_effort(health.effort.clone());
                 self.status.set_reasoning(health.reasoning.clone());
+                if let Some(can) = health.thinking_can_disable {
+                    self.thinking_can_disable = can;
+                }
                 self.status.set_billing(health.billing.clone());
 
                 // Update-available signal (Codex parity: understated, no

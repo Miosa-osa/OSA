@@ -56,6 +56,7 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
 
   @typedoc "A single Ollama Cloud model offering."
   @type model :: %{
+          optional(:thinking_always_on) => boolean(),
           id: String.t(),
           name: String.t(),
           ctx: pos_integer(),
@@ -125,6 +126,9 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       ctx_source: :probe,
       tools: true,
       thinking: true,
+      # Reasons regardless of `think` — `think: false` only moves the
+      # chain-of-thought into `content`. See `thinking_always_on?/1`.
+      thinking_always_on: true,
       vision: false,
       audio: false,
       # CORRECTED 2026-08-15 from {0.60, 2.20}, which is GLM-**4.7**'s rate
@@ -156,6 +160,9 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       ctx_source: :probe,
       tools: true,
       thinking: true,
+      # Reasons regardless of `think` — `think: false` only moves the
+      # chain-of-thought into `content`. See `thinking_always_on?/1`.
+      thinking_always_on: true,
       vision: false,
       audio: false,
       # CONFIRMED 2026-09-01 from Ollama's published pricing: glm-5.3 is
@@ -179,6 +186,9 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       ctx_source: :static,
       tools: true,
       thinking: true,
+      # Reasons regardless of `think` — `think: false` only moves the
+      # chain-of-thought into `content`. See `thinking_always_on?/1`.
+      thinking_always_on: true,
       vision: true,
       audio: false,
       # Z.ai list price: $0.15 in / $0.50 out per 1M, cross-checked on Ollama's
@@ -203,6 +213,9 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       ctx_source: :static,
       tools: true,
       thinking: true,
+      # Reasons regardless of `think` — `think: false` only moves the
+      # chain-of-thought into `content`. See `thinking_always_on?/1`.
+      thinking_always_on: true,
       vision: false,
       audio: false,
       # {0.60, 2.20} is correct HERE — it is GLM-4.7's own published rate. It
@@ -223,6 +236,9 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       ctx_source: :probe,
       tools: true,
       thinking: true,
+      # Reasons regardless of `think` — `think: false` only moves the
+      # chain-of-thought into `content`. See `thinking_always_on?/1`.
+      thinking_always_on: true,
       vision: false,
       audio: false,
       # CORRECTED 2026-08-15 from {0.60, 2.20} — see `glm-5.2:cloud` above.
@@ -508,6 +524,18 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
     @models
     |> Enum.filter(&(&1.pricing != nil))
     |> Map.new(&{&1.id, &1.pricing})
+  end
+
+  @doc """
+  True when this tag reasons no matter what `think` says (`:thinking_always_on`
+  in its entry — the GLM tags). Unknown tags answer `false`.
+  """
+  @spec thinking_always_on?(String.t() | nil) :: boolean()
+  def thinking_always_on?(id) do
+    case model(id) do
+      %{thinking_always_on: true} -> true
+      _ -> false
+    end
   end
 
   @doc """

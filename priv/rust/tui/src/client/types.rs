@@ -542,6 +542,10 @@ pub struct ModelSwitchResponse {
     pub compacted: Option<bool>,
     #[serde(default)]
     pub warning: Option<String>,
+    /// `false` when the newly-selected model reasons no matter what, so the
+    /// TUI stops offering "thinking off". Absent ⇒ treated as `true`.
+    #[serde(default)]
+    pub thinking_can_disable: Option<bool>,
 }
 
 // === Classify ===
@@ -1159,6 +1163,21 @@ mod health_update_parse_tests {
         let update = h.update.expect("update object present");
         assert!(!update.available);
         assert_eq!(update.latest_version, None);
+    }
+
+    #[test]
+    fn thinking_can_disable_decodes_and_defaults_to_absent() {
+        let json = format!(r#"{BASE}","thinking_can_disable":false}}"#);
+        let h: HealthResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(h.thinking_can_disable, Some(false));
+        let old: HealthResponse = serde_json::from_str(&format!(r#"{BASE}"}}"#)).unwrap();
+        assert_eq!(old.thinking_can_disable, None);
+
+        let sw: super::ModelSwitchResponse = serde_json::from_str(
+            r#"{"provider":"anthropic","model":"claude-opus-5-5","status":"ok","thinking_can_disable":false}"#,
+        )
+        .unwrap();
+        assert_eq!(sw.thinking_can_disable, Some(false));
     }
 
     #[test]
