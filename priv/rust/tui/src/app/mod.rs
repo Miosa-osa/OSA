@@ -1114,6 +1114,7 @@ impl App {
         let Some(expired) = self.permissions.expire_current(std::time::Instant::now()) else {
             return;
         };
+        self.activity.note_approval_expired();
         self.toasts.push(
             format!(
                 "Not run: approval timed out for {}",

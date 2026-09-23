@@ -464,6 +464,9 @@ struct InFlightCall {
     /// Time this call spent parked on the user's approval. That is the USER's
     /// time, not the tool's, and is excluded from the running figure.
     approval_wait: std::time::Duration,
+    /// Its approval prompt expired: the backend skipped it, so it will never
+    /// run. Held only until the backend's end frame retires the call.
+    not_run: bool,
 }
 
 impl InFlightCall {
@@ -710,6 +713,9 @@ pub struct Activity {
     model_wait_since: Option<std::time::Instant>,
     /// The approval prompt the turn is parked on, if any.
     approval: Option<ApprovalWait>,
+    /// Tool calls started this turn. Before the first, a model wait is the
+    /// whole turn and needs no clock of its own.
+    tools_started: u32,
 }
 
 /// Default cap on the number of `  └ ` detail rows shown under the status line
@@ -1081,6 +1087,7 @@ impl Activity {
             in_flight: Vec::new(),
             model_wait_since: None,
             approval: None,
+            tools_started: 0,
         }
     }
 
@@ -1155,6 +1162,17 @@ impl Activity {
         self.approval = wait;
     }
 
+    /// The displayed approval expired unanswered: mark its call as not run,
+    /// so the row stops counting a call the backend has already skipped.
+    pub fn note_approval_expired(&mut self) {
+        let Some(tool) = self.approval.as_ref().map(|a| a.tool.clone()) else {
+            return;
+        };
+        if let Some(call) = self.in_flight.iter_mut().rev().find(|c| c.name == tool) {
+            call.not_run = true;
+        }
+    }
+
     /// The approval prompt the turn is parked on, if any.
     pub fn approval_wait(&self) -> Option<&ApprovalWait> {
         self.approval.as_ref()
@@ -1201,6 +1219,13 @@ impl Activity {
     /// running time (`running 4s` / `still running 1m02s`).
     fn in_flight_row(&self, now: std::time::Instant) -> Option<(&str, String, bool)> {
         let call = self.in_flight.last()?;
+        if call.not_run {
+            return Some((
+                call.headline.as_str(),
+                "not run, approval timed out".into(),
+                true,
+            ));
+        }
         let secs = call.running(now).as_secs();
         let still = call.still_running(now);
         let label = if still {
@@ -1231,13 +1256,19 @@ impl Activity {
         if !on_model {
             return None;
         }
-        let since = self.model_wait_since.or(self.phase_since)?;
-        let secs = now.saturating_duration_since(since).as_secs();
         let who = if self.model_name.is_empty() {
             "the model"
         } else {
             self.model_name.as_str()
         };
+        // Until the turn has done anything else, this wait and the turn are
+        // the same stretch of time, and the turn timer in the status group
+        // already counts it. A second clock would print the same number twice.
+        if self.tools_started == 0 && self.llm_iteration <= 1 {
+            return Some(format!("Waiting for {}", who));
+        }
+        let since = self.model_wait_since.or(self.phase_since)?;
+        let secs = now.saturating_duration_since(since).as_secs();
         Some(format!(
             "Waiting for {} \u{00b7} {}",
             who,
@@ -1427,6 +1458,7 @@ impl Activity {
         self.active = true;
         self.phase = ProcessingPhase::Waiting;
         self.running_tools = 0;
+        self.tools_started = 0;
         self.clear_command_output();
         self.input_tokens = 0;
         self.output_tokens = 0;
@@ -1918,6 +1950,7 @@ impl Activity {
     /// a run commits as one summary line, which already counts its calls.
     pub fn tool_start_with_id(&mut self, name: &str, args: &str, call_id: Option<&str>) {
         self.running_tools += 1;
+        self.tools_started = self.tools_started.saturating_add(1);
         // A replayed start (SSE reconnect) must not open a second row.
         let replay = call_id.is_some()
             && self
@@ -1933,6 +1966,7 @@ impl Activity {
                 reported: None,
                 flagged: false,
                 approval_wait: std::time::Duration::ZERO,
+                not_run: false,
             });
         }
         self.model_wait_since = None;
@@ -2432,8 +2466,9 @@ impl Component for Activity {
         if cached > 0 {
             parts.push(format!("\u{26A1} {} cached", format_count(cached as usize)));
         }
-        // "thinking" while reasoning deltas stream; "thought for Ns" lingers 2s
-        // after the stretch ends. Lowest of the triple → first to width-gate out.
+        // "thinking" while reasoning deltas stream. The finished duration is
+        // NOT repeated here: the thinking box's `∴ Thought for Ns` summary row,
+        // directly above this one, is its single home.
         if self.phase == ProcessingPhase::Thinking {
             // CC-style live thinking segment: the verb escalates with the
             // thinking-phase elapsed ("thinking" → "thinking more" → "thinking
@@ -2444,10 +2479,6 @@ impl Component for Activity {
             match self.current_effort.as_deref() {
                 Some(eff) => parts.push(format!("{} with {} effort", phrase, eff)),
                 None => parts.push(phrase.to_string()),
-            }
-        } else if let Some((secs, at)) = self.thought_for {
-            if at.elapsed() < std::time::Duration::from_secs(2) {
-                parts.push(format!("thought for {}s", secs));
             }
         }
         // U-T24 — messages queued behind the running turn. Lowest priority.
@@ -4428,12 +4459,51 @@ mod attribution_tests {
         act.set_model_name("deepseek-v4.1-flash");
         act.note_model_request();
         let text = row(&act);
+        assert!(text.contains("Waiting for deepseek-v4.1-flash"), "{text}");
+        // Named once, not also as the row's model prefix.
+        assert_eq!(text.matches("deepseek-v4.1-flash").count(), 1, "{text}");
+        // The first wait IS the turn so far: one clock (the turn timer), not two.
+        assert!(!text.contains("flash · 0s"), "{text}");
+        // Once a round has passed, the wait gets its own clock.
+        act.set_iteration(2);
+        let text = row(&act);
         assert!(
             text.contains("Waiting for deepseek-v4.1-flash · 0s"),
             "{text}"
         );
-        // Named once, not also as the row's model prefix.
-        assert_eq!(text.matches("deepseek-v4.1-flash").count(), 1, "{text}");
+    }
+
+    /// "Thought for Ns" has one home, the thinking box's summary row; the
+    /// activity row beneath it must not repeat it.
+    #[test]
+    fn the_finished_thought_duration_is_not_repeated_on_the_row() {
+        let mut act = Activity::new();
+        act.start();
+        act.set_phase(ProcessingPhase::Thinking);
+        act.set_phase(ProcessingPhase::ToolCall);
+        assert!(!row(&act).contains("thought for"), "{}", row(&act));
+    }
+
+    #[test]
+    fn an_expired_approval_is_not_shown_as_running() {
+        let mut act = Activity::new();
+        act.start();
+        running_tool(&mut act, "c1", "rm -rf build");
+        act.set_approval_wait(Some(ApprovalWait {
+            request_id: "p".into(),
+            tool: "shell_execute".into(),
+            what: "Bash(rm -rf build)".into(),
+            deadline: Some(Instant::now()),
+            since: Instant::now(),
+        }));
+        act.note_approval_expired();
+        act.set_approval_wait(None);
+        let text = row(&act);
+        assert!(
+            text.contains("Bash(rm -rf build) · not run, approval timed out"),
+            "{text}"
+        );
+        assert!(!text.contains("running 0s"), "{text}");
     }
 
     #[test]
