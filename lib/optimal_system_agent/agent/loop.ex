@@ -185,7 +185,14 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # Speed/cost priority for this session (:immediate | :standard | :loose),
     # inherited from the delegating task's config. Read by LLMClient to select a
     # provider service_tier (OpenAI flex/priority) for cheaper long-horizon work.
-    priority: :standard
+    priority: :standard,
+    # One-shot guard for `ReactLoop`'s last-resort overflow recovery: the
+    # LATEST user message trimmed to a head+tail excerpt (full text on disk,
+    # readable via file_read) after `Loop.ContextCollapse.collapse/2` and a
+    # full compaction pass both fail to shrink the turn below budget. Set the
+    # first time that trim is attempted so a turn can never retry it twice —
+    # see `Loop.ContextCollapse.trim_oversized_latest_message/3`.
+    latest_message_trimmed: false
   ]
 
   @cancel_table :osa_cancel_flags
@@ -1287,6 +1294,24 @@ defmodule OptimalSystemAgent.Agent.Loop do
           [] -> load_persisted_messages(session_id)
           checkpoint_msgs -> checkpoint_msgs
         end
+
+    # A crash mid tool-call leaves a `tool_use` in the restored transcript
+    # with no `tool_result` at all — `DurableLog` gives at-least-once
+    # replay for a step it actually RECORDED, but a call that was in flight
+    # when the process died was never recorded either way. Fill each with a
+    # placeholder that says the outcome is UNKNOWN (not "interrupted, safe to
+    # retry" — the call may have already completed and mutated real state),
+    # so the model checks current state before deciding whether to repeat it.
+    # A no-op on a clean restore (fresh session, or resumed after a turn that
+    # ended cleanly, when the checkpoint is empty).
+    {messages, _repaired?} =
+      OptimalSystemAgent.Providers.HistorySanitizer.fill_missing_tool_results(
+        messages,
+        "[System: this tool call was interrupted by a process restart. Its outcome is " <>
+          "UNKNOWN — it may or may not have completed before the crash. Check current state " <>
+          "(re-read the file, re-list the directory, re-run a read-only check, etc.) before " <>
+          "deciding whether to repeat it.]"
+      )
 
     resumed? = restored != %{} or messages != []
 
