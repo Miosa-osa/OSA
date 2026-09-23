@@ -438,6 +438,76 @@ impl Verbosity {
 }
 
 /// Activity panel showing real-time processing state, tool feed, and backend metrics
+/// Seconds a tool may run before its live row says "still running". The same
+/// cadence as the daemon's own stall report (`tool_orchestrator`
+/// `@default_stall_report_ms`), so the screen and the log agree on when a call
+/// became long.
+pub const STILL_RUNNING_SECS: u64 = 60;
+
+/// A tool call the backend has started and not yet finished.
+///
+/// The live row names the NEWEST one, so the 2nd and 3rd calls of a batch are
+/// on screen from their first frame, not only once they have finished.
+#[derive(Debug, Clone)]
+struct InFlightCall {
+    call_id: Option<String>,
+    name: String,
+    /// `Bash(make test)` — the committed cell's own title (`tools::headline`).
+    headline: String,
+    started: std::time::Instant,
+    /// Backend-measured elapsed from the latest `tool_heartbeat`, and when it
+    /// arrived. The daemon's clock starts at execution (after any approval), so
+    /// it is the authoritative "running" figure once it exists.
+    reported: Option<(std::time::Duration, std::time::Instant)>,
+    /// The daemon reported this call past its stall-report threshold.
+    flagged: bool,
+    /// Time this call spent parked on the user's approval. That is the USER's
+    /// time, not the tool's, and is excluded from the running figure.
+    approval_wait: std::time::Duration,
+}
+
+impl InFlightCall {
+    fn running(&self, now: std::time::Instant) -> std::time::Duration {
+        let local = now
+            .saturating_duration_since(self.started)
+            .saturating_sub(self.approval_wait);
+        let reported = self
+            .reported
+            .map(|(d, at)| d + now.saturating_duration_since(at))
+            .unwrap_or_default();
+        local.max(reported)
+    }
+
+    fn still_running(&self, now: std::time::Instant) -> bool {
+        self.flagged || self.running(now).as_secs() >= STILL_RUNNING_SECS
+    }
+}
+
+/// A permission prompt the turn is parked on — the one wait that is the USER's.
+#[derive(Debug, Clone)]
+pub struct ApprovalWait {
+    /// The backend request this wait is for (one prompt at a time is shown).
+    pub request_id: String,
+    /// Tool the prompt is for, to attribute the wait to its in-flight call.
+    pub tool: String,
+    /// What OSA wants to do, as the user will recognise it (`Edit(settings.json)`).
+    pub what: String,
+    /// When the backend gives up waiting and skips the call.
+    pub deadline: Option<std::time::Instant>,
+    pub since: std::time::Instant,
+}
+
+impl ApprovalWait {
+    /// Whole seconds left before the backend's timeout, rounded UP so the
+    /// countdown never reads 0 while the request can still be answered.
+    pub fn secs_left(&self, now: std::time::Instant) -> Option<u64> {
+        self.deadline.map(|d| {
+            let left = d.saturating_duration_since(now);
+            left.as_secs() + u64::from(left.subsec_nanos() > 0)
+        })
+    }
+}
+
 pub struct Activity {
     active: bool,
     phase: ProcessingPhase,
@@ -631,6 +701,15 @@ pub struct Activity {
     /// Key of the stream most recently written to — the one the preview shows.
     /// (The activity slot has room for one tail; the freshest wins.)
     live_command: Option<String>,
+
+    // ── Attribution: every second of a turn is the model's, a tool's, or yours
+    /// Tool calls started and not yet ended, oldest first.
+    in_flight: Vec<InFlightCall>,
+    /// When the current model request went out (`llm_request`, or the post-tool
+    /// hand-back). Drives "Waiting for <model> · 12s".
+    model_wait_since: Option<std::time::Instant>,
+    /// The approval prompt the turn is parked on, if any.
+    approval: Option<ApprovalWait>,
 }
 
 /// Default cap on the number of `  └ ` detail rows shown under the status line
@@ -999,6 +1078,9 @@ impl Activity {
             paused_at: None,
             live_streams: std::collections::HashMap::new(),
             live_command: None,
+            in_flight: Vec::new(),
+            model_wait_since: None,
+            approval: None,
         }
     }
 
@@ -1037,7 +1119,130 @@ impl Activity {
     /// Item 3 — name the current blocking reason (or `None` to fall back to the
     /// flavor verb). Only surfaced while the phase is `Waiting`.
     pub fn set_waiting_reason(&mut self, reason: Option<WaitingReason>) {
+        if reason == Some(WaitingReason::Model)
+            && (self.waiting_reason != reason || self.model_wait_since.is_none())
+        {
+            self.model_wait_since = Some(std::time::Instant::now());
+        }
         self.waiting_reason = reason;
+    }
+
+    /// A model request just went out (`llm_request`): the turn is now waiting on
+    /// the model, and that wait gets its own clock.
+    pub fn note_model_request(&mut self) {
+        if self.phase != ProcessingPhase::ToolCall || self.in_flight.is_empty() {
+            self.set_phase(ProcessingPhase::Waiting);
+        }
+        self.waiting_reason = Some(WaitingReason::Model);
+        self.model_wait_since = Some(std::time::Instant::now());
+    }
+
+    /// Park the turn on (or release it from) an approval prompt. Releasing it
+    /// books the time spent on the prompt against the call that asked, so that
+    /// call's "running" figure stays the tool's own time.
+    pub fn set_approval_wait(&mut self, wait: Option<ApprovalWait>) {
+        if let Some(prev) = self.approval.take() {
+            let waited = prev.since.elapsed();
+            if let Some(call) = self
+                .in_flight
+                .iter_mut()
+                .rev()
+                .find(|c| c.name == prev.tool)
+            {
+                call.approval_wait += waited;
+            }
+        }
+        self.approval = wait;
+    }
+
+    /// The approval prompt the turn is parked on, if any.
+    pub fn approval_wait(&self) -> Option<&ApprovalWait> {
+        self.approval.as_ref()
+    }
+
+    /// The newest in-flight call's title, for naming it in an approval banner.
+    pub fn in_flight_headline(&self, tool: &str) -> Option<&str> {
+        self.in_flight
+            .iter()
+            .rev()
+            .find(|c| c.name == tool)
+            .map(|c| c.headline.as_str())
+    }
+
+    /// A `tool_heartbeat` arrived: adopt the backend's own elapsed for the call.
+    pub fn note_tool_heartbeat(&mut self, call_id: Option<&str>, name: &str, elapsed_ms: u64) {
+        let now = std::time::Instant::now();
+        let call = match call_id {
+            Some(id) => self
+                .in_flight
+                .iter_mut()
+                .find(|c| c.call_id.as_deref() == Some(id)),
+            None => self.in_flight.iter_mut().rev().find(|c| c.name == name),
+        };
+        if let Some(call) = call {
+            call.reported = Some((std::time::Duration::from_millis(elapsed_ms), now));
+        }
+        // A heartbeat is proof of life, not silence.
+        self.last_output_at = Some(now);
+    }
+
+    /// The daemon's "still running after Ns" report (`tool_call_stalled`):
+    /// flag every in-flight call it names (`tools` is a comma-joined list).
+    pub fn note_tools_still_running(&mut self, tools: &str) {
+        let names: Vec<&str> = tools.split(',').map(str::trim).collect();
+        for call in &mut self.in_flight {
+            if names.iter().any(|n| *n == call.name) {
+                call.flagged = true;
+            }
+        }
+    }
+
+    /// The live row for the newest in-flight call: its title and the labelled
+    /// running time (`running 4s` / `still running 1m02s`).
+    fn in_flight_row(&self, now: std::time::Instant) -> Option<(&str, String, bool)> {
+        let call = self.in_flight.last()?;
+        let secs = call.running(now).as_secs();
+        let still = call.still_running(now);
+        let label = if still {
+            format!("still running {}", fmt_compact_tight(secs))
+        } else {
+            format!("running {}", fmt_compact_tight(secs))
+        };
+        Some((call.headline.as_str(), label, still))
+    }
+
+    /// "Waiting for <model> · 12s" whenever the turn is blocked on the model:
+    /// the request is out and nothing — no token, no tool — has come back.
+    fn model_wait_label(&self, now: std::time::Instant) -> Option<String> {
+        if self.phase != ProcessingPhase::Waiting || self.pending_user {
+            return None;
+        }
+        let on_model = match (self.waiting_reason, self.named_phase) {
+            (Some(WaitingReason::Model), _) => true,
+            (Some(_), _) => false,
+            (None, Some(StreamPhase::WaitingModel)) => true,
+            (None, Some(_)) => false,
+            // The pre-first-event fallback `spinner_verb` already names.
+            (None, None) => {
+                self.model_wait_since.is_some()
+                    || self.elapsed_secs().unwrap_or(0) >= FLAVOR_VERB_GRACE_SECS
+            }
+        };
+        if !on_model {
+            return None;
+        }
+        let since = self.model_wait_since.or(self.phase_since)?;
+        let secs = now.saturating_duration_since(since).as_secs();
+        let who = if self.model_name.is_empty() {
+            "the model"
+        } else {
+            self.model_name.as_str()
+        };
+        Some(format!(
+            "Waiting for {} \u{00b7} {}",
+            who,
+            fmt_compact_tight(secs)
+        ))
     }
 
     /// Feed the live "what a task_wait/join is blocked on" description (1/2d
@@ -1107,8 +1312,27 @@ impl Activity {
     fn a11y_status(&self) -> String {
         // Blocking states take precedence so a screen reader announces WHY the
         // turn is stalled, not a flavor verb.
+        let now = std::time::Instant::now();
         if self.pending_user {
+            if let Some(a) = self.approval.as_ref() {
+                return match a.secs_left(now) {
+                    Some(left) => format!(
+                        "waiting for you to approve {}, {} left, y to allow, n to deny",
+                        a.what,
+                        crate::util::fmt_elapsed(left)
+                    ),
+                    None => format!("waiting for you to approve {}", a.what),
+                };
+            }
             return "waiting for your input".to_string();
+        }
+        if self.phase == ProcessingPhase::ToolCall {
+            if let Some((headline, running, _)) = self.in_flight_row(now) {
+                return format!("{headline}, {running}");
+            }
+        }
+        if let Some(label) = self.model_wait_label(now) {
+            return label.replace(" \u{00b7} ", ", ").to_lowercase();
         }
         if let Some(r) = self.retry.as_ref() {
             return format!("retrying, attempt {} of {}", r.attempt, r.max_attempts);
@@ -1239,6 +1463,9 @@ impl Activity {
         self.pending_user = false;
         self.interrupt_armed = false;
         self.queued = 0;
+        self.in_flight.clear();
+        self.model_wait_since = None;
+        self.approval = None;
     }
 
     pub fn stop(&mut self) {
@@ -1266,6 +1493,9 @@ impl Activity {
         self.pending_user = false;
         self.interrupt_armed = false;
         self.queued = 0;
+        self.in_flight.clear();
+        self.model_wait_since = None;
+        self.approval = None;
     }
 
     /// Mark/unmark the turn as being cancelled, driving the red "Cancelling…"
@@ -1557,6 +1787,8 @@ impl Activity {
         // Any real work phase counts as progress, so it also refreshes the
         // stall clock (a phase change is the turn moving forward, not frozen).
         if phase != ProcessingPhase::Waiting {
+            // The model answered (or a tool took over): that wait is over.
+            self.model_wait_since = None;
             self.last_output_at = Some(std::time::Instant::now());
         }
         self.phase = phase;
@@ -1684,8 +1916,26 @@ impl Activity {
     /// when several same-name calls were in flight, and there are no rows left to
     /// close. The concurrent-identical fold died with them for the same reason —
     /// a run commits as one summary line, which already counts its calls.
-    pub fn tool_start_with_id(&mut self, _name: &str, _args: &str, _call_id: Option<&str>) {
+    pub fn tool_start_with_id(&mut self, name: &str, args: &str, call_id: Option<&str>) {
         self.running_tools += 1;
+        // A replayed start (SSE reconnect) must not open a second row.
+        let replay = call_id.is_some()
+            && self
+                .in_flight
+                .iter()
+                .any(|c| c.call_id.as_deref() == call_id);
+        if !replay {
+            self.in_flight.push(InFlightCall {
+                call_id: call_id.map(str::to_string),
+                name: name.to_string(),
+                headline: crate::tools::headline(name, args),
+                started: std::time::Instant::now(),
+                reported: None,
+                flagged: false,
+                approval_wait: std::time::Duration::ZERO,
+            });
+        }
+        self.model_wait_since = None;
         // The stall clock. A tool starting IS output flowing: without this a
         // tool-heavy turn reddens as though it had frozen.
         self.last_output_at = Some(std::time::Instant::now());
@@ -1693,7 +1943,7 @@ impl Activity {
 
     /// Record a tool call end
     pub fn tool_end(&mut self, name: &str, duration_ms: u64, success: bool) {
-        self.tool_end_with_id(name, duration_ms, success, None);
+        let _ = self.tool_end_with_id(name, duration_ms, success, None);
     }
 
     /// Close a tool call.
@@ -1702,15 +1952,28 @@ impl Activity {
     /// `saturating_sub` rather than `-= 1` because an end without a matching start
     /// is reachable (a reconnect mid-run replays ends the TUI never saw begin), and
     /// an underflow here would wrap to a permanently "running" spinner.
+    ///
+    /// Returns how long the call sat on the user's approval, so the committed
+    /// cell can say whose time its duration was.
     pub fn tool_end_with_id(
         &mut self,
-        _name: &str,
+        name: &str,
         _duration_ms: u64,
         _success: bool,
-        _call_id: Option<&str>,
-    ) {
+        call_id: Option<&str>,
+    ) -> std::time::Duration {
         self.running_tools = self.running_tools.saturating_sub(1);
         self.last_output_at = Some(std::time::Instant::now());
+        let idx = match call_id {
+            Some(id) => self
+                .in_flight
+                .iter()
+                .position(|c| c.call_id.as_deref() == Some(id)),
+            None => None,
+        }
+        .or_else(|| self.in_flight.iter().position(|c| c.name == name));
+        idx.map(|i| self.in_flight.remove(i).approval_wait)
+            .unwrap_or_default()
     }
 
     /// Report token counts for the CURRENT LLM iteration. `output` is the
@@ -2065,11 +2328,33 @@ impl Component for Activity {
         // stop it — are the last to be shed. Codex states the rule directly: "Keep
         // optional context after elapsed/interrupt text so that core interrupt
         // affordances stay in a fixed visual location."
-        let mut parts: Vec<String> = vec![format!(
-            "{} · {}",
-            turn_timer,
-            interrupt_affordance(self.interrupt_armed)
-        )];
+        let now = std::time::Instant::now();
+        // What the turn is blocked on RIGHT NOW, most specific first: the user
+        // (an approval prompt), a named tool call, or the model.
+        let approval = self.approval.as_ref().filter(|_| self.pending_user);
+        let in_flight = if self.phase == ProcessingPhase::ToolCall && !self.pending_user {
+            self.in_flight_row(now)
+        } else {
+            None
+        };
+        let model_wait = self.model_wait_label(now);
+
+        let mut parts: Vec<String> = vec![match approval {
+            // Esc DENIES while a prompt is up, so "esc to interrupt" would be a
+            // lie here. The row instead says how long is left and how to answer.
+            Some(a) => {
+                let answer = "y allow \u{00b7} n deny";
+                match a.secs_left(now) {
+                    Some(left) => format!("{} left \u{00b7} {}", fmt_compact_tight(left), answer),
+                    None => answer.to_string(),
+                }
+            }
+            None => format!(
+                "{} · {}",
+                turn_timer,
+                interrupt_affordance(self.interrupt_armed)
+            ),
+        }];
 
         // 1/2d — a `task_wait`/join is a DELIBERATE block on other agents, and
         // it can legitimately run minutes. `silent_secs` only ever measures
@@ -2099,6 +2384,9 @@ impl Component for Activity {
         } else {
             self.silent_secs()
         };
+        // Kept even beside the model-wait label: that clock runs from the
+        // REQUEST, this one from the last byte, and reasoning deltas can keep
+        // the second low while the first climbs. Only this one means "wrong".
         if let Some(secs) = silence {
             parts.push(format!("no response for {}", fmt_compact_tight(secs)));
         }
@@ -2190,7 +2478,9 @@ impl Component for Activity {
         // So the row is budgeted in priority order: model prefix + spinner glyph
         // (fixed), then the required status part, then the verb takes whatever
         // remains. All measured in COLUMNS (`util::cols`), never chars/bytes.
-        let model_cols = if self.model_name.is_empty() {
+        // The model-wait label names the model itself; do not say it twice.
+        let show_model_prefix = !self.model_name.is_empty() && model_wait.is_none();
+        let model_cols = if !show_model_prefix {
             0
         } else {
             crate::util::cols(&self.model_name) + 3
@@ -2210,6 +2500,34 @@ impl Component for Activity {
                     "Cancelling\u{2026}".to_string(),
                     err.add_modifier(Modifier::BOLD),
                 )],
+            )
+        } else if let Some(a) = approval {
+            // The turn is parked on YOU. This must never read like OSA grinding:
+            // it says who is waiting, on what, and (in the status group) how
+            // long is left and how to answer.
+            let color = if pulse_bright(self.phrase_tick) {
+                theme.colors.warning
+            } else {
+                theme.colors.primary
+            };
+            let strong = Style::default()
+                .fg(theme.colors.warning)
+                .add_modifier(Modifier::BOLD);
+            let lead = "Waiting for you: allow ";
+            let what_budget = verb_budget.saturating_sub(crate::util::cols(lead) + 1);
+            (
+                Span::styled(
+                    "\u{25C6} ".to_string(),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                vec![
+                    Span::styled(lead.to_string(), strong),
+                    Span::styled(
+                        fit_verb(&a.what, what_budget.max(MIN_VERB_COLS)),
+                        theme.tool_name().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("?".to_string(), strong),
+                ],
             )
         } else if self.pending_user {
             // Pulsing ◆ in the accent color — one consistent "your turn" cue.
@@ -2241,6 +2559,54 @@ impl Component for Activity {
                     ),
                     warn.add_modifier(Modifier::BOLD),
                 )],
+            )
+        } else if let Some((headline, running, still)) = in_flight {
+            // The call that is running NOW — the 2nd or 3rd of a batch included —
+            // with its own labelled clock. Past STILL_RUNNING_SECS it says so, in
+            // warning colour, instead of looking like every other second.
+            let label = format!(" \u{00b7} {}", running);
+            let base = self.verb_base_color(&theme, 0.0);
+            let style = if still {
+                Style::default().fg(theme.colors.warning)
+            } else {
+                Style::default().fg(base)
+            };
+            let head_budget = verb_budget.saturating_sub(crate::util::cols(&label));
+            let mut spans = vec![Span::styled(
+                fit_verb(headline, head_budget.max(MIN_VERB_COLS)),
+                Style::default().fg(base).add_modifier(Modifier::BOLD),
+            )];
+            spans.push(Span::styled(label, style));
+            if self.in_flight.len() > 1 {
+                spans.push(Span::styled(
+                    format!(" +{} more", self.in_flight.len() - 1),
+                    theme.faint(),
+                ));
+            }
+            (
+                Span::styled(
+                    format!("{} ", spinner_char),
+                    Style::default().fg(base).add_modifier(Modifier::BOLD),
+                ),
+                spans,
+            )
+        } else if let Some(label) = model_wait.as_deref() {
+            // Blocked on the model, named with the model and this wait's clock.
+            let style = if silence.is_some() {
+                Style::default().fg(theme.colors.warning)
+            } else {
+                theme.spinner_verb()
+            };
+            // Once the stall notice fires it carries the clock that matters
+            // ("no response for 4m"), and it must outlive every other segment
+            // as the pane narrows — so the label sheds its own clock first.
+            let label = match silence {
+                Some(_) => label.split(" \u{00b7} ").next().unwrap_or(label),
+                None => label,
+            };
+            (
+                Span::styled(format!("{} ", spinner_char), style),
+                vec![Span::styled(fit_verb(label, verb_budget), style)],
             )
         } else if self.phase == ProcessingPhase::Waiting && self.waiting_reason.is_some() {
             // This branch used to ignore the stall entirely — it painted
@@ -2323,7 +2689,7 @@ impl Component for Activity {
         ));
 
         // Model name prefix (e.g. "qwen3-coder:480b ∙ ")
-        if !self.model_name.is_empty() {
+        if show_model_prefix {
             spinner_spans.insert(
                 0,
                 Span::styled(format!("{} \u{2219} ", self.model_name), theme.faint()),
@@ -3331,7 +3697,7 @@ mod activity_tests {
         // The turn timer and the interrupt affordance still survive alongside it.
         assert!(text.contains("esc to interrupt"), "{text}");
         // And the state the user was actually stuck in is still named.
-        assert!(text.contains("Waiting for response"), "{text}");
+        assert!(text.contains("Waiting for the model"), "{text}");
     }
 
     // ── 1/2d: a healthy task_wait/join must not read like a hang ───────────
@@ -3436,7 +3802,7 @@ mod activity_tests {
         let mut act = wedged_turn(6670);
         act.set_join_wait_detail(Some("waiting on backend \u{2014} grep\u{2026} 4m".into()));
         let text = render_activity_text(&act);
-        assert!(text.contains("Waiting for response"), "{text}");
+        assert!(text.contains("Waiting for the model"), "{text}");
         assert!(text.contains("no response for"), "{text}");
         assert!(!text.contains("waiting on backend"), "{text}");
     }
@@ -3969,5 +4335,186 @@ mod turn_start_indicator_tests {
              sees a blank gap and an idle composer while the turn runs",
             activity.height()
         );
+    }
+}
+
+#[cfg(test)]
+mod attribution_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn row(act: &Activity) -> String {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut term = Terminal::new(TestBackend::new(160, 1)).unwrap();
+        term.draw(|f| act.draw(f, f.area())).unwrap();
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    fn running_tool(act: &mut Activity, id: &str, cmd: &str) {
+        act.tool_start_with_id("shell_execute", cmd, Some(id));
+        act.set_phase(ProcessingPhase::ToolCall);
+    }
+
+    #[test]
+    fn the_running_call_is_named_with_its_own_clock() {
+        let mut act = Activity::new();
+        act.start();
+        running_tool(&mut act, "c1", "cargo build");
+        let text = row(&act);
+        assert!(text.contains("Bash(cargo build) · running 0s"), "{text}");
+    }
+
+    /// The 2nd call of a sequential batch is on screen from its first frame.
+    #[test]
+    fn the_second_call_of_a_batch_takes_the_row_while_it_runs() {
+        let mut act = Activity::new();
+        act.start();
+        running_tool(&mut act, "c1", "ls");
+        let _ = act.tool_end_with_id("shell_execute", 5, true, Some("c1"));
+        running_tool(&mut act, "c2", "make test");
+        let text = row(&act);
+        assert!(text.contains("Bash(make test)"), "{text}");
+        assert!(!text.contains("Bash(ls)"), "{text}");
+    }
+
+    #[test]
+    fn a_heartbeat_past_the_threshold_reads_still_running() {
+        let mut act = Activity::new();
+        act.start();
+        running_tool(&mut act, "c1", "sleep 120");
+        act.note_tool_heartbeat(Some("c1"), "shell_execute", 62_000);
+        let text = row(&act);
+        assert!(text.contains("still running 1m02s"), "{text}");
+    }
+
+    #[test]
+    fn the_daemons_stall_report_flags_the_named_calls() {
+        let mut act = Activity::new();
+        act.start();
+        running_tool(&mut act, "c1", "sleep 120");
+        act.note_tools_still_running("file_read, shell_execute");
+        assert!(row(&act).contains("still running"));
+    }
+
+    #[test]
+    fn a_replayed_start_does_not_open_a_second_row() {
+        let mut act = Activity::new();
+        act.start();
+        running_tool(&mut act, "c1", "ls");
+        running_tool(&mut act, "c1", "ls");
+        assert!(!row(&act).contains("more"));
+    }
+
+    #[test]
+    fn concurrent_calls_say_how_many_more_are_running() {
+        let mut act = Activity::new();
+        act.start();
+        running_tool(&mut act, "c1", "ls");
+        running_tool(&mut act, "c2", "pwd");
+        assert!(row(&act).contains("+1 more"));
+    }
+
+    #[test]
+    fn a_model_wait_names_the_model_and_its_own_clock() {
+        let mut act = Activity::new();
+        act.start();
+        act.set_model_name("deepseek-v4.1-flash");
+        act.note_model_request();
+        let text = row(&act);
+        assert!(
+            text.contains("Waiting for deepseek-v4.1-flash · 0s"),
+            "{text}"
+        );
+        // Named once, not also as the row's model prefix.
+        assert_eq!(text.matches("deepseek-v4.1-flash").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn a_tool_ending_hands_the_row_back_to_the_model() {
+        let mut act = Activity::new();
+        act.start();
+        act.set_model_name("m1");
+        running_tool(&mut act, "c1", "ls");
+        let _ = act.tool_end_with_id("shell_execute", 5, true, Some("c1"));
+        act.set_phase(ProcessingPhase::Waiting);
+        act.set_waiting_reason(Some(WaitingReason::Model));
+        assert!(row(&act).contains("Waiting for m1 · 0s"));
+    }
+
+    #[test]
+    fn an_approval_wait_says_who_is_waiting_on_what_and_for_how_long() {
+        let mut act = Activity::new();
+        act.start();
+        running_tool(&mut act, "c1", "rm -rf build");
+        act.set_pending_user(true);
+        act.set_approval_wait(Some(ApprovalWait {
+            request_id: "perm_1".into(),
+            tool: "shell_execute".into(),
+            what: "Bash(rm -rf build)".into(),
+            deadline: Some(Instant::now() + Duration::from_secs(300)),
+            since: Instant::now(),
+        }));
+        let text = row(&act);
+        assert!(
+            text.contains("Waiting for you: allow Bash(rm -rf build)?"),
+            "{text}"
+        );
+        assert!(text.contains("5m00s left"), "{text}");
+        assert!(text.contains("y allow · n deny"), "{text}");
+        // Esc DENIES while the prompt is up; the row must not promise otherwise.
+        assert!(!text.contains("esc to interrupt"), "{text}");
+    }
+
+    /// Approval time is the user's, not the tool's: it is booked against the
+    /// call and excluded from its running clock.
+    #[test]
+    fn approval_time_is_returned_on_end_and_not_counted_as_running() {
+        let mut act = Activity::new();
+        act.start();
+        running_tool(&mut act, "c1", "rm -rf build");
+        act.set_approval_wait(Some(ApprovalWait {
+            request_id: "perm_1".into(),
+            tool: "shell_execute".into(),
+            what: "Bash(rm -rf build)".into(),
+            deadline: None,
+            since: Instant::now() - Duration::from_secs(200),
+        }));
+        act.set_approval_wait(None);
+        assert!(row(&act).contains("running 0s"), "{}", row(&act));
+        let waited = act.tool_end_with_id("shell_execute", 202_000, true, Some("c1"));
+        assert!(waited >= Duration::from_secs(200), "{waited:?}");
+    }
+
+    #[test]
+    fn the_countdown_rounds_up_and_never_reads_zero_while_answerable() {
+        let now = Instant::now();
+        let a = ApprovalWait {
+            request_id: "r".into(),
+            tool: "t".into(),
+            what: "w".into(),
+            deadline: Some(now + Duration::from_millis(400)),
+            since: now,
+        };
+        assert_eq!(a.secs_left(now), Some(1));
+        assert_eq!(a.secs_left(now + Duration::from_secs(1)), Some(0));
+    }
+
+    #[test]
+    fn turn_end_leaves_nothing_in_flight() {
+        let mut act = Activity::new();
+        act.start();
+        running_tool(&mut act, "c1", "ls");
+        act.note_model_request();
+        act.stop();
+        act.start();
+        act.set_phase(ProcessingPhase::ToolCall);
+        assert!(!row(&act).contains("Bash(ls)"));
     }
 }

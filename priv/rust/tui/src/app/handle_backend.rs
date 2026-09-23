@@ -660,7 +660,7 @@ impl App {
                 if self.hook_runs_current_call.as_deref() == Some(pending_key.as_str()) {
                     self.hook_runs_current_call = None;
                 }
-                self.activity.tool_end_with_id(
+                let approval_wait = self.activity.tool_end_with_id(
                     &name,
                     duration_ms,
                     success,
@@ -749,6 +749,10 @@ impl App {
                     // the completed numerator and only `failed` gets its own
                     // number. Zero runs render nothing at all.
                     crate::components::chat::message::append_hook_bracket(&mut lines, call_hooks);
+                    crate::components::chat::message::append_approval_note(
+                        &mut lines,
+                        approval_wait.as_secs(),
+                    );
                     if !lines.is_empty() {
                         use crate::components::chat::message::ToolCallData;
                         self.chat.add_tool_message_rich(ToolCallData {
@@ -760,6 +764,7 @@ impl App {
                             success,
                             expanded: false,
                             hook_runs: call_hooks,
+                            approval_wait_secs: approval_wait.as_secs(),
                             lines,
                         });
                         built_tool_message = true;
@@ -832,18 +837,19 @@ impl App {
                 name,
                 elapsed_ms,
                 stalled,
-                ..
+                tool_call_id,
             } => {
-                if stalled {
-                    self.toasts.push(
-                        format!(
-                            "{} has been running for {}s. It is still connected; press Esc to interrupt.",
-                            name,
-                            elapsed_ms / 1_000
-                        ),
-                        crate::components::toast::ToastLevel::Warning,
-                    );
-                }
+                // The live row adopts the daemon's own clock for this call and,
+                // past the stall threshold, says "still running" in place. That
+                // row replaced a one-shot toast, which expired while the call
+                // kept running and left nothing on screen to say so.
+                let _ = stalled;
+                self.activity
+                    .note_tool_heartbeat(tool_call_id.as_deref(), &name, elapsed_ms);
+            }
+            BackendEvent::ToolCallStalled { tools, elapsed_s } => {
+                debug!("tool_call_stalled: {} after {}s", tools, elapsed_s);
+                self.activity.note_tools_still_running(&tools);
             }
             BackendEvent::LlmRequest {
                 iteration,
@@ -851,6 +857,9 @@ impl App {
             } => {
                 self.activity.set_iteration(iteration as u32);
                 self.activity.set_max_iterations(max_iterations);
+                // A request just went out: until a token or a tool comes back,
+                // this time is the MODEL's, and the row says so.
+                self.activity.note_model_request();
                 self.status.set_iteration(iteration as u32);
                 debug!("LLM request iteration {}", iteration);
             }
@@ -3553,6 +3562,7 @@ impl App {
                 new_content,
                 warning,
                 reason,
+                timeout_ms,
             } => {
                 // Show the permission dialog — transition from Processing (or Idle) to Permissions.
                 // Carry the backend-assigned request_id so the user's decision can
@@ -3572,6 +3582,15 @@ impl App {
                     new_content,
                     warning,
                     reason,
+                    // The backend's clock started when it emitted this ask; the
+                    // TUI's deadline can only be later, never earlier, so the
+                    // countdown never tells the user they have time they don't.
+                    deadline: Some(
+                        std::time::Instant::now()
+                            + std::time::Duration::from_millis(
+                                timeout_ms.unwrap_or(PERMISSION_TIMEOUT_MS),
+                            ),
+                    ),
                 };
                 if self.permissions.submit(req)
                     == crate::app::permission_queue::Submission::Displayed
@@ -3579,6 +3598,7 @@ impl App {
                     // Item 5 — the turn is now blocked on YOU: pulse the ◆ cue so
                     // the spinner telegraphs "you're the blocker". Cleared on resume.
                     self.activity.set_pending_user(true);
+                    self.sync_approval_wait();
                     if self.state.can_transition_to(AppState::Permissions) {
                         self.enter_overlay(AppState::Permissions);
                     }
@@ -3869,6 +3889,10 @@ fn tool_result_should_stash(call_args_still_queued: bool) -> bool {
 /// out-of-order / duplicated / reconnect-replayed end frame) is an ORPHAN.
 /// Rendering it would build a permanent Read/Edit scrollback line with an empty
 /// filename, so the handler suppresses the line for an orphan. Pure predicate.
+/// The backend's approval wait when a `permission_required` frame does not say
+/// (`PermissionBroker` `@default_timeout_ms`).
+const PERMISSION_TIMEOUT_MS: u64 = 300_000;
+
 fn is_orphan_tool_end(had_pending_args: bool) -> bool {
     !had_pending_args
 }

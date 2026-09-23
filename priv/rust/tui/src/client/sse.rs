@@ -695,6 +695,7 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
         | "budget_warning"
         | "budget_exceeded"
         | "permission_required"
+        | "tool_call_stalled"
         | "plan_proposed"
         | "ask_user_question"
         | "survey_answered"
@@ -2069,6 +2070,8 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 warning: Option<String>,
                 #[serde(default)]
                 reason: Option<String>,
+                #[serde(default)]
+                timeout_ms: Option<u64>,
             }
             let ev: Ev = match serde_json::from_slice(data) {
                 Ok(e) => e,
@@ -2093,6 +2096,25 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 new_content: ev.new_content,
                 warning: ev.warning,
                 reason: ev.reason,
+                timeout_ms: ev.timeout_ms,
+            })
+        }
+
+        "tool_call_stalled" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                tools: String,
+                #[serde(default)]
+                elapsed_s: u64,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("tool_call_stalled", e)),
+            };
+            Some(BackendEvent::ToolCallStalled {
+                tools: ev.tools,
+                elapsed_s: ev.elapsed_s,
             })
         }
 
@@ -2515,6 +2537,40 @@ mod tests {
                 assert_eq!(elapsed_ms, 31_000);
                 assert!(stalled);
                 assert_eq!(tool_call_id.as_deref(), Some("call-7"));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    /// The daemon's "still running after 60s" report, as `TuiForwarder`
+    /// re-broadcasts it (a system_event: the sub-event rides in `event`).
+    #[test]
+    fn parses_the_forwarded_tool_call_stalled_report() {
+        let data = br#"{"type":"system_event","event":"tool_call_stalled","tools":"shell_execute, file_read","elapsed_s":60,"pending":2}"#;
+        match parse_sse_event("tool_call_stalled", data) {
+            Some(BackendEvent::ToolCallStalled { tools, elapsed_s }) => {
+                assert_eq!(tools, "shell_execute, file_read");
+                assert_eq!(elapsed_s, 60);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    /// `timeout_ms` drives the approval countdown; an older backend omits it.
+    #[test]
+    fn permission_required_carries_its_timeout_when_sent() {
+        let with = br#"{"event":"permission_required","tool":"file_edit","args":"x","request_id":"p1","timeout_ms":300000}"#;
+        let without =
+            br#"{"event":"permission_required","tool":"file_edit","args":"x","request_id":"p2"}"#;
+        match parse_sse_event("permission_required", with) {
+            Some(BackendEvent::PermissionRequired { timeout_ms, .. }) => {
+                assert_eq!(timeout_ms, Some(300_000));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+        match parse_sse_event("permission_required", without) {
+            Some(BackendEvent::PermissionRequired { timeout_ms, .. }) => {
+                assert_eq!(timeout_ms, None);
             }
             other => panic!("unexpected: {:?}", other),
         }

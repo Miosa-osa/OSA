@@ -1057,13 +1057,78 @@ impl App {
     pub(crate) fn clear_permission_prompts(&mut self) {
         if !self.permissions.is_active() {
             self.permissions.clear();
+            self.sync_approval_wait();
             return;
         }
         self.permissions.clear();
+        self.sync_approval_wait();
         self.activity.set_pending_user(false);
         if self.state == AppState::Permissions {
             self.exit_overlay();
         }
+    }
+
+    /// Mirror the displayed permission prompt into the live activity row, so
+    /// the one row the user watches says the turn is parked on THEM, on what,
+    /// and for how long. Idempotent; called whenever the queue changes and on
+    /// every tick (which is also what notices a prompt the backend gave up on).
+    pub(crate) fn sync_approval_wait(&mut self) {
+        let shown = self.permissions.displayed().map(|d| {
+            (
+                d.request_id().to_string(),
+                d.tool_name.clone(),
+                d.display_label().to_string(),
+                d.deadline(),
+            )
+        });
+        let current = self.activity.approval_wait().map(|a| a.request_id.clone());
+        match shown {
+            Some((id, tool, label, deadline)) if current.as_deref() != Some(id.as_str()) => {
+                let what = self
+                    .activity
+                    .in_flight_headline(&tool)
+                    .map(str::to_string)
+                    .unwrap_or(label);
+                self.activity
+                    .set_approval_wait(Some(crate::components::activity::ApprovalWait {
+                        request_id: id,
+                        tool,
+                        what,
+                        deadline,
+                        since: std::time::Instant::now(),
+                    }));
+            }
+            Some(_) => {}
+            None if current.is_some() => self.activity.set_approval_wait(None),
+            None => {}
+        }
+    }
+
+    /// Retire a prompt whose deadline has passed. The backend has already
+    /// skipped the call (`permission request … timed out`), so the dialog is
+    /// answering nothing; leaving it up is exactly the stale-chrome failure.
+    /// No decision is sent — the backend decided — and the next queued ask, if
+    /// any, takes the screen.
+    pub(crate) fn expire_permission_prompt(&mut self) {
+        let what = self.activity.approval_wait().map(|a| a.what.clone());
+        let Some(expired) = self.permissions.expire_current(std::time::Instant::now()) else {
+            return;
+        };
+        self.toasts.push(
+            format!(
+                "Not run: approval timed out for {}",
+                what.unwrap_or_else(|| "the tool call".into())
+            ),
+            crate::components::toast::ToastLevel::Warning,
+        );
+        self.sync_approval_wait();
+        if !expired.has_more {
+            self.activity.set_pending_user(false);
+            if self.state == AppState::Permissions {
+                self.exit_overlay();
+            }
+        }
+        self.recompute_layout();
     }
 
     /// Settle the working chrome at the TURN-end edge, so what the user is left

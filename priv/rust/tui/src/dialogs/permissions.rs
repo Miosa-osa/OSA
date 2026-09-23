@@ -81,6 +81,9 @@ pub struct Permissions {
     /// Measured on each draw call via `Cell` so `handle_key` can clamp page
     /// scrolls without requiring a mutable receiver on `draw`.
     viewport_height: Cell<u16>,
+    /// When the backend stops waiting and skips the call. Drives the countdown
+    /// in the title, so a prompt nobody is watching says how long it has left.
+    deadline: Option<std::time::Instant>,
 }
 
 /// Number of allow/deny buttons in the row.
@@ -104,7 +107,56 @@ impl Permissions {
             clarify_mode: false,
             clarify_input: String::new(),
             viewport_height: Cell::new(0),
+            deadline: None,
         }
+    }
+
+    /// When the backend stops waiting for this answer.
+    pub fn set_deadline(&mut self, deadline: Option<std::time::Instant>) {
+        self.deadline = deadline;
+    }
+
+    pub fn deadline(&self) -> Option<std::time::Instant> {
+        self.deadline
+    }
+
+    /// `4m47s left`, rounded up so it never reads 0 while still answerable.
+    fn countdown(&self) -> Option<String> {
+        let left = self
+            .deadline?
+            .saturating_duration_since(std::time::Instant::now());
+        let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+        Some(if secs >= 60 {
+            format!("{}m{:02}s left", secs / 60, secs % 60)
+        } else {
+            format!("{}s left", secs)
+        })
+    }
+
+    /// The title row: WHO is waiting (OSA, on you), WHAT for, and how long is
+    /// left, with the countdown right-aligned so it survives a narrow pane.
+    fn title_line(&self, width: u16) -> Line<'static> {
+        let theme = crate::style::theme();
+        let strong = Style::default()
+            .fg(theme.colors.warning)
+            .add_modifier(Modifier::BOLD);
+        let mut spans = vec![
+            Span::styled("▐ ", strong),
+            Span::styled("Waiting for you \u{00b7} ", strong),
+            Span::styled("Allow ", Style::default().fg(theme.colors.muted)),
+            Span::styled(self.display_label().to_string(), theme.tool_name()),
+            Span::styled("?", Style::default().fg(theme.colors.muted)),
+        ];
+        if let Some(left) = self.countdown() {
+            let used: usize = spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            let pad = (width as usize).saturating_sub(used + left.len()).max(2);
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.push(Span::styled(left, strong));
+        }
+        Line::from(spans)
     }
 
     /// Set the tool being requested and the backend-assigned request identifier.
@@ -334,18 +386,11 @@ impl Permissions {
         // Degenerate room: collapse to a single-line ask so the prompt is never
         // invisible (the user can still answer with y/s/a/n).
         if h < 4 {
-            let line = Line::from(vec![
-                Span::styled(
-                    "▐ ",
-                    Style::default()
-                        .fg(theme.colors.warning)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("Allow ", Style::default().fg(theme.colors.muted)),
-                Span::styled(self.display_label().to_string(), theme.tool_name()),
-                Span::styled("?  ", Style::default().fg(theme.colors.muted)),
-                Span::styled("y/s/a/n", Style::default().fg(theme.colors.dim)),
-            ]);
+            let mut line = self.title_line(area.width);
+            line.spans.insert(
+                5,
+                Span::styled("  y/s/a/n", Style::default().fg(theme.colors.dim)),
+            );
             let y = area.y + area.height.saturating_sub(1);
             frame.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
             return;
@@ -360,17 +405,7 @@ impl Permissions {
 
         // ── Tool name ────────────────────────────────────────────────────────
         if cursor_y < inner.y + inner.height {
-            let tool_line = Line::from(vec![
-                Span::styled(
-                    "▐ ",
-                    Style::default()
-                        .fg(theme.colors.warning)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("Allow ", Style::default().fg(theme.colors.muted)),
-                Span::styled(self.display_label().to_string(), theme.tool_name()),
-                Span::styled("?", Style::default().fg(theme.colors.muted)),
-            ]);
+            let tool_line = self.title_line(inner.width);
             frame.render_widget(
                 Paragraph::new(tool_line),
                 Rect::new(inner.x, cursor_y, inner.width, 1),

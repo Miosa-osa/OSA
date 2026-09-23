@@ -1644,6 +1644,10 @@ impl App {
             }
         }
 
+        // A prompt the backend already gave up on must not stay on screen.
+        self.expire_permission_prompt();
+        self.sync_approval_wait();
+
         if self.state.is_processing() {
             if let Some(start) = self.processing_start {
                 let ms = start.elapsed().as_millis() as u64;
