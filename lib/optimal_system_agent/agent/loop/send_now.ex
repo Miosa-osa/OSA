@@ -1,7 +1,7 @@
 defmodule OptimalSystemAgent.Agent.Loop.SendNow do
   @moduledoc """
   Send-now: the user's queued messages interrupt the running turn instead of
-  waiting for its current step to finish (Claude Code 2.1.268/2.1.275 parity).
+  waiting for its current step to finish.
 
   A plain mid-turn steer (`Loop.steer/2`) is folded in at the next ReAct step
   boundary, and a step boundary is only reached once every tool in the current

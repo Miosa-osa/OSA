@@ -67,7 +67,7 @@ defmodule OptimalSystemAgent.Agent.Loop.SteerTest do
     test "to_messages/1 delivers the steer as the user's own words in a user turn" do
       [msg] = Steer.to_messages(["do X instead"])
 
-      # Delivered as a user turn (Claude Code parity), identified internally by
+      # Delivered as a user turn, identified internally by
       # the `steer: true` metadata — NOT by any string in the prompt text.
       assert msg.role == "user"
       assert msg.steer == true

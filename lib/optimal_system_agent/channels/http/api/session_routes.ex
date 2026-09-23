@@ -836,7 +836,7 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
 
   # ── POST /sessions/:id/send-now ────────────────────────────────────
   #
-  # Send-now (Claude Code 2.1.268/2.1.275 parity): deliver the user's queued
+  # Send-now: deliver the user's queued
   # message(s) into the RUNNING turn AND interrupt its current step so they are
   # read now, not after the current tools finish. Still-running tools move to
   # the background (their results arrive later as notifications) rather than

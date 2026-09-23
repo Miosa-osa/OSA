@@ -116,7 +116,7 @@ defmodule OptimalSystemAgent.Agent.Loop.Steer do
   Build the message list injected into the conversation for a set of steer
   texts.
 
-  ## Delivered as the user's own words (Claude Code parity)
+  ## Delivered as the user's own words
 
   A message the user sends mid-turn reaches the model as the USER'S OWN WORDS,
   as a `user`-role turn, with only a minimal neutral marker that it arrived

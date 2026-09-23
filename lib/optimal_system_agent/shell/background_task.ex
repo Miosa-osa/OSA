@@ -74,7 +74,7 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
 
   `reason` is a short, human-readable phrase logged alongside the stop (e.g.
   `"requested via bash_output tool"`, `"session ended"`, `"cascading
-  cancel"`) — Claude Code parity: OSA never stops a background command on its
+  cancel"`): OSA never stops a background command on its
   own (no idle timeout, no mild-memory-pressure kill), so every stop is
   either an explicit request or a session teardown, and each must say WHY in
   the log, not just THAT.
@@ -291,7 +291,7 @@ defmodule OptimalSystemAgent.Shell.BackgroundTask do
 
   # ── Private ──────────────────────────────────────────────────────────
 
-  # Claude Code parity: a non-zero exit is only ever `:failed` for a real
+  # A non-zero exit is only ever `:failed` for a real
   # failure. `grep`/`rg`/`diff`/`cmp`/`test` exit 1 is a normal, meaningful
   # answer (no matches / differs / false), not a fault — see
   # `ExitClassifier` moduledoc. Reported downstream as `:done`, which every

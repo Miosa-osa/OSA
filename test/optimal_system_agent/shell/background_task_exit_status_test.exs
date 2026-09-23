@@ -1,6 +1,6 @@
 defmodule OptimalSystemAgent.Shell.BackgroundTaskExitStatusTest do
   @moduledoc """
-  Claude Code parity for background shell commands:
+  Background shell commands:
 
     1. A benign non-zero exit (`grep`/`diff`/`test` returning "no matches" /
        "differs" / "false") must complete as `:done`, not `:failed` — see

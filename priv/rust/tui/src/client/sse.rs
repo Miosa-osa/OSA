@@ -3130,7 +3130,7 @@ mod tests {
         }
     }
 
-    /// Claude Code parity: `status` (the backend's own classification), not
+    /// `status` (the backend's own classification), not
     /// `exit_code == 0`, is the source of truth for a completed background
     /// command — see `BackendEvent::BackgroundCommandCompleted`.
     #[test]

@@ -3,7 +3,7 @@ defmodule OptimalSystemAgent.Agent.Loop.SendNowReachesModelTest do
   Item 2 correctness guarantee: a message the user sends mid-turn ALWAYS reaches
   the model.
 
-  Claude Code fixed a case where queued messages were sometimes ignored. Here we
+  Queued messages must never be ignored. Here we
   prove the property directly against the real loop: a message queued while the
   model is generating is folded into history and is present on the NEXT
   generation the model sees — as a `user`-role turn carrying the user's own words

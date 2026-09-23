@@ -33,7 +33,6 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
       (hard-block *or* allow) is a guess with an unrecoverable downside, so
       neither guess is made: the operator is asked, in every mode, and
       `overdrive` does not waive the question the way it waives `:overridable`.
-      Claude Code shipped the equivalent fix in 2.1.281.
 
     * `:overridable` — **blocked in every mode EXCEPT `:overdrive`/`:bypass`.**
       These are genuinely risky *conventions*, not destruction: the blast radius

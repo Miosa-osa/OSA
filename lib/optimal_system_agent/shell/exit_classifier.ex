@@ -1,7 +1,7 @@
 defmodule OptimalSystemAgent.Shell.ExitClassifier do
   @moduledoc """
   Classifies a shell command's non-zero exit code as a real failure or a
-  BENIGN answer (Claude Code parity).
+  BENIGN answer.
 
   A handful of POSIX utilities use exit code 1 to report a normal, meaningful
   outcome rather than an error: `grep`/`egrep`/`fgrep`/`rg` exit 1 means "no

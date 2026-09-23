@@ -1,6 +1,6 @@
 defmodule OptimalSystemAgent.Shell.ExitClassifierTest do
   @moduledoc """
-  Claude Code parity: `grep`/`rg`/`diff`/`cmp`/`test` exit 1 is a normal,
+  `grep`/`rg`/`diff`/`cmp`/`test` exit 1 is a normal,
   meaningful answer (no matches / differs / false) and must not be reported
   as a background-command FAILURE. See `ExitClassifier` moduledoc.
   """

@@ -34,7 +34,7 @@ defmodule OptimalSystemAgent.System.MemoryMonitor do
   warning names concrete steps (finish/stop background tasks, compact,
   restart) and leaves the choice to the user. This is also why OSA's
   background shell commands are never auto-stopped for idle time or mild
-  memory pressure (see `Shell.BackgroundTask.kill/2`) — Claude Code parity:
+  memory pressure (see `Shell.BackgroundTask.kill/2`):
   a background command stops only on an explicit request, a session
   teardown, or (here) the user's own choice after being warned.
 
@@ -127,7 +127,7 @@ defmodule OptimalSystemAgent.System.MemoryMonitor do
 
   @doc """
   The critical-level notice: names the numbers AND concrete next steps
-  (Claude Code parity — a warning that doesn't say what to do is noise).
+  (a warning that doesn't say what to do is noise).
   """
   @spec warning_message(integer(), integer()) :: String.t()
   def warning_message(mb, limit) do

@@ -240,7 +240,7 @@ defmodule OptimalSystemAgent.Agent.Reminders do
   # `UntrustedContent.wrap/2` is the SAME fence-and-defang the web/MCP tool
   # path already uses (`ToolExecutor.fence_untrusted/2`) — one mechanism for
   # "text that did not come from the operator," not a second one that could
-  # drift. See Claude Code 2.1.261.
+  # drift.
   defp fence_subagent_output(preview, role) do
     UntrustedContent.wrap(preview, source: "subagent:#{role}", max_bytes: byte_size(preview))
   end

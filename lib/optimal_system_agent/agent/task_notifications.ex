@@ -326,7 +326,7 @@ defmodule OptimalSystemAgent.Agent.TaskNotifications do
   instruction the parent should follow. Escaping alone stops it from breaking
   the surrounding XML; it does not stop the parent model from reading
   "ignore your previous instructions" inside a `<summary>` as a directive if
-  nothing ever says otherwise. See Claude Code 2.1.261.
+  nothing ever says otherwise.
   """
   @spec to_xml(notification()) :: String.t()
   def to_xml(n) when is_map(n) do
