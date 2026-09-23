@@ -26,7 +26,13 @@ defmodule OptimalSystemAgent.Providers.CodexContextOverrideTest do
     }
 
     assert OptimalSystemAgent.Agent.Loop.ContextWindow.resolve(state) == {:ok, 800_000}
-    assert OptimalSystemAgent.Agent.Context.token_budget(state).max_tokens == 800_000
+
+    # The override resolves (above); the LIVE budget is then clamped to the 200k
+    # default ceiling like any other large window. Opting into the whole window
+    # (`compaction_context_ceiling_share: 1.0`) is covered in the sync
+    # FullContextWindowsTest, since this module is async and must not flip
+    # global app env.
+    assert OptimalSystemAgent.Agent.Context.token_budget(state).max_tokens == 200_000
 
     assert OptimalSystemAgent.Providers.Registry.effective_context_window("gpt-6-astra", :openai) ==
              1_050_000
