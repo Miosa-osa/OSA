@@ -48,6 +48,10 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
   @spec run(term(), keyword(), map()) ::
           {:reply, term(), map()} | {:dispatch, map(), boolean()}
   def run(message, opts, state) do
+    if System.get_env("OSA_TTFT_TRACE") == "1" do
+      Logger.info("[ttft] turn_pipeline start session=#{state.session_id}")
+    end
+
     skip_plan = Keyword.get(opts, :skip_plan, false)
 
     # A fresh turn — release the previous turn's terminal-frame claim, so this
