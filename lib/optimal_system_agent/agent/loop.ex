@@ -80,6 +80,16 @@ defmodule OptimalSystemAgent.Agent.Loop do
     messages: [],
     iteration: 0,
     overflow_retries: 0,
+    # ONE shared per-turn budget spent by EVERY failure-recovery path in
+    # `ReactLoop` — a truncated generation (with or without tool calls), a
+    # stream that ended without its provider's terminal marker, and a
+    # REASK/terminal invalid-tool-argument result from `ToolArgValidator`.
+    # Each of those used to own an independent counter (or, for the
+    # truncated-tool-calls path, none at all), so a turn that alternated
+    # between different failure kinds could recover-and-fail indefinitely with
+    # nothing watching the total (P2 audit gap C). Reset each user turn in
+    # `TurnPipeline.reset_per_turn_fields/1`. See `ReactLoop.spend_recovery/2`.
+    recovery_attempts: 0,
     recent_failure_signatures: [],
     total_tool_calls: 0,
     # Doom-loop detection counters — explicit state (formerly process-dict).

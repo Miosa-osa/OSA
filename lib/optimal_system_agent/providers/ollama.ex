@@ -18,6 +18,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   require Logger
 
   alias OptimalSystemAgent.Providers.ThinkStreamParser
+  alias OptimalSystemAgent.Providers.ToolCallDedup
   alias OptimalSystemAgent.Providers.ToolCallParsers
   alias OptimalSystemAgent.Utils.Mojibake
   alias OptimalSystemAgent.Utils.Text
@@ -461,7 +462,14 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   # Read streaming NDJSON from curl port line by line.
   # Each line is a JSON object with {"message": {"content": "token"}, "done": false}.
   # Final line has "done": true with usage stats.
-  defp cloud_stream_loop(port, callback, acc) do
+  #
+  # `def`, not `defp`: exposed (undocumented, `@doc false`) so tests can drive
+  # it directly against a synthetic `port` term (any value works — it is only
+  # ever used to match `{^port, _}` messages the test sends to its own
+  # mailbox), without spawning a real curl subprocess. See
+  # `stream_from_curl_lines/2` for the wrapper tests actually call.
+  @doc false
+  def cloud_stream_loop(port, callback, acc) do
     receive do
       {^port, {:data, {:eol, tail}}} ->
         # Raw bytes arrived → reset the idle watchdog BEFORE parsing, so even a
@@ -481,8 +489,13 @@ defmodule OptimalSystemAgent.Providers.Ollama do
             raw_tool_calls = get_in(resp, ["message", "tool_calls"]) || []
             model = get_in(resp, ["model"]) || ""
             final_tool_calls = parse_tool_calls(%{"tool_calls" => raw_tool_calls}, model)
-            # Merge: tool calls from mid-stream chunks + any in the final chunk
-            tool_calls = acc.tool_calls ++ final_tool_calls
+            # Merge: tool calls from mid-stream chunks + any in the final chunk.
+            # Deduped by id — the done:true chunk can repeat a call already
+            # delivered mid-stream (WS-dup: a cumulative rather than delta
+            # tool_calls array), and appending blindly used to hand
+            # `ToolOrchestrator.uniquify_ids/1` an exact duplicate, which
+            # RENAMES it so both copies execute instead of dropping the repeat.
+            tool_calls = ToolCallDedup.append_all(acc.tool_calls, final_tool_calls)
 
             usage = %{
               input_tokens: resp["prompt_eval_count"] || 0,
@@ -536,7 +549,11 @@ defmodule OptimalSystemAgent.Providers.Ollama do
             model = get_in(resp, ["model"]) || ""
             tool_calls = parse_tool_calls(%{"tool_calls" => tool_calls_raw}, model)
             Logger.info("[Ollama] Cloud stream: got #{length(tool_calls)} tool calls mid-stream")
-            cloud_stream_loop(port, callback, %{acc | tool_calls: acc.tool_calls ++ tool_calls})
+
+            cloud_stream_loop(port, callback, %{
+              acc
+              | tool_calls: ToolCallDedup.append_all(acc.tool_calls, tool_calls)
+            })
 
           {:ok, %{"message" => %{"thinking" => think_token, "content" => token}}}
           when is_binary(think_token) and think_token != "" and
@@ -615,10 +632,16 @@ defmodule OptimalSystemAgent.Providers.Ollama do
         cloud_stream_loop(port, callback, %{acc | partial: Map.get(acc, :partial, "") <> fragment})
 
       {^port, {:exit_status, 0}} ->
-        # curl exited cleanly but we didn't get a done:true — finalize.
-        # Always call done callback even when content is empty (tool-call-only
-        # responses have no text but do have tool_calls; skipping would block
-        # the caller indefinitely on its receive loop).
+        # curl exited cleanly but we never saw a `"done":true` chunk — the
+        # connection closed (server-side hangup, proxy timeout, killed
+        # container) before Ollama's own terminal marker arrived. That used to
+        # be handed back as an ordinary success with `stop_reason: nil`,
+        # indistinguishable from a model that finished on its own. It is not:
+        # flag it `stream_incomplete: true` so `ReactLoop` treats it as CUT
+        # OFF rather than as a clean stop (P2 audit gap A). Always call the
+        # done callback even when content is empty (tool-call-only responses
+        # have no text but do have tool_calls; skipping would block the caller
+        # indefinitely on its receive loop).
         flush_think(acc, callback)
         content = Text.strip_thinking_tokens(acc.content)
 
@@ -628,7 +651,8 @@ defmodule OptimalSystemAgent.Providers.Ollama do
              content: content,
              tool_calls: acc.tool_calls,
              usage: acc.usage,
-             stop_reason: Map.get(acc, :stop_reason)
+             stop_reason: Map.get(acc, :stop_reason),
+             stream_incomplete: true
            }}
         )
 
@@ -641,6 +665,51 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       300_000 ->
         Port.close(port)
         {:error, "Ollama Cloud timeout after 300s"}
+    end
+  end
+
+  @doc """
+  Test seam: drive `cloud_stream_loop/3` from a list of raw NDJSON `data:`
+  lines (each the exact text of one curl `{:line, _}` chunk) without a real
+  curl subprocess or Erlang port.
+
+  Queues `{ref, {:data, {:eol, line}}}` for each of `lines` into the CALLING
+  process's own mailbox, then `{ref, {:exit_status, exit_status}}` (default
+  `0`, i.e. "curl exited cleanly") — `cloud_stream_loop/3` only ever matches
+  `{^port, _}` messages, so any term works as `port`; a real port is never
+  needed. Returns the `{:done, result}` (or `{:error, _}`) callback payload,
+  or raises if `cloud_stream_loop/3` returns without ever calling back.
+  """
+  @spec stream_from_curl_lines([String.t()], keyword()) :: {:done, map()} | {:error, term()}
+  def stream_from_curl_lines(lines, opts \\ []) when is_list(lines) do
+    test_pid = self()
+    callback = fn msg -> send(test_pid, {:ollama_curl_test_callback, msg}) end
+    ref = make_ref()
+
+    Enum.each(lines, fn line -> send(self(), {ref, {:data, {:eol, line}}}) end)
+    send(self(), {ref, {:exit_status, Keyword.get(opts, :exit_status, 0)}})
+
+    init_acc = %{
+      content: "",
+      tool_calls: [],
+      usage: %{},
+      partial: "",
+      stop_reason: nil,
+      think: ThinkStreamParser.new(),
+      heartbeat: nil
+    }
+
+    case cloud_stream_loop(ref, callback, init_acc) do
+      :ok ->
+        receive do
+          {:ollama_curl_test_callback, {:done, result}} -> {:done, result}
+          {:ollama_curl_test_callback, {:error, _} = err} -> err
+        after
+          0 -> raise "stream_from_curl_lines/2: no :done/:error callback received"
+        end
+
+      {:error, _} = err ->
+        err
     end
   end
 
@@ -675,6 +744,11 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       usage: %{},
       # Terminal `done_reason` from the final NDJSON chunk ("stop" | "length").
       stop_reason: nil,
+      # Did a `{"done":true, ...}` NDJSON line ever arrive? `stop_reason` alone
+      # cannot answer that — a done chunk with a blank/absent `done_reason`
+      # leaves `stop_reason` `nil` too, indistinguishable from "no done chunk
+      # ever came". Read by `finalize_stream/2` to flag `stream_incomplete`.
+      saw_done: false,
       think: ThinkStreamParser.new()
     })
 
@@ -1545,7 +1619,11 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     Enum.reduce(lines, acc, &process_ndjson_line(&1, callback, &2))
   end
 
-  defp finalize_stream(acc, callback) do
+  # `def`, not `defp`: exposed (`@doc false`) so tests can build an `acc` via
+  # `process_ndjson_line/3` and finalize it directly, without a live Finch
+  # connection.
+  @doc false
+  def finalize_stream(acc, callback) do
     flush_think(acc, callback)
     content = Text.strip_thinking_tokens(acc.content)
 
@@ -1559,15 +1637,24 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     # `stop_reason` comes from the same chunk's `done_reason` — "length" means
     # the model was cut off at `num_predict`, which the loop must never deliver
     # as a final answer.
-    callback.(
-      {:done,
-       %{
-         content: content,
-         tool_calls: tool_calls,
-         usage: acc.usage,
-         stop_reason: Map.get(acc, :stop_reason)
-       }}
-    )
+    #
+    # `stream_incomplete: true` when no `{"done":true, ...}` line ever arrived
+    # — the HTTP response body ended (Req's `{:ok, _resp}`) without Ollama's
+    # own terminal marker, which used to finalize identically to a clean stop
+    # (P2 audit gap A).
+    result = %{
+      content: content,
+      tool_calls: tool_calls,
+      usage: acc.usage,
+      stop_reason: Map.get(acc, :stop_reason)
+    }
+
+    result =
+      if Map.get(acc, :saw_done, false),
+        do: result,
+        else: Map.put(result, :stream_incomplete, true)
+
+    callback.({:done, result})
 
     :ok
   end
@@ -1675,7 +1762,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
             end
           end)
 
-        %{acc | tool_calls: acc.tool_calls ++ tool_calls}
+        %{acc | tool_calls: ToolCallDedup.append_all(acc.tool_calls, tool_calls)}
 
       # Final chunk — capture usage stats so context pressure reports correctly.
       # Keys normalised to :input_tokens/:output_tokens to match what loop.ex reads.
@@ -1684,6 +1771,12 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       {:ok, %{"done" => true} = resp} ->
         input = resp["prompt_eval_count"] || 0
         output = resp["eval_count"] || 0
+
+        # Terminal marker seen — `finalize_stream/2` reads this to tell "the
+        # model finished" from "the connection just ended" (P2 audit gap A).
+        # `Map.put` (not `%{acc | ...}`) so an acc shape from before this field
+        # existed still works.
+        acc = Map.put(acc, :saw_done, true)
 
         # Terminal stop reason. Captured UNCONDITIONALLY — independently of the
         # token counts, because a done chunk may carry `done_reason` with no

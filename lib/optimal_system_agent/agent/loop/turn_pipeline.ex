@@ -461,6 +461,14 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
     # and `%{state | key: val}` raises `KeyError`/`BadKeyError` for a key that
     # isn't already present — `Map.merge/2` sets it either way.
     Map.merge(state, %{
+      # Shared failure-recovery budget (P2 audit gap C) — see the field
+      # comment on `Agent.Loop`'s defstruct. A fresh user turn gets a fresh
+      # budget; left un-reset it would self-disable after the first turn that
+      # exhausted it, exactly like `doom_recovery_count` above. `Map.merge`,
+      # not struct-update: a hand-built test state map predating this field
+      # genuinely lacks the key, and `%{state | recovery_attempts: 0}` would
+      # raise for it.
+      recovery_attempts: 0,
       # Clear the terminal-source mark each new user turn. This is what makes
       # `TerminalSource`'s opt-in marking safe: without it, one guard halt would
       # make every later turn in the session render as a system message instead
