@@ -674,7 +674,15 @@ defmodule OptimalSystemAgent.Agent.Pricing do
   # `catalog_cache_read/1` walks `lookup_keys/1`, which includes the bare id, so
   # a prefix-tolerant reseller catalog would hand Anthropic's own turns this
   # gateway's resale cache rate.
+  #
+  # `AnthropicModels` joined the list for Opus 5.5 alone: every other Claude
+  # model reads cache at exactly `input_rate * @cache_read_multiplier` (10%),
+  # so `AnthropicModels.cache_read_rate/1` returns `nil` for them and the flat
+  # multiplier below still fires — unchanged for anything but Opus 5.5, whose
+  # published $0.20 read (5% of its $4.00 input rate) the multiplier would
+  # otherwise double to $0.40.
   @cache_read_modules [
+    OptimalSystemAgent.Providers.AnthropicModels,
     OptimalSystemAgent.Providers.XAIModels,
     OptimalSystemAgent.Providers.ZaiModels,
     OptimalSystemAgent.Providers.DeepSeekModels,

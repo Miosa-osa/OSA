@@ -1790,6 +1790,7 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
     # A catalog carrying the right answer that billing ignores is worse than no
     # catalog: it looks like coverage.
     @cache_read_catalogs [
+      OptimalSystemAgent.Providers.AnthropicModels,
       OptimalSystemAgent.Providers.XAIModels,
       OptimalSystemAgent.Providers.ZaiModels,
       OptimalSystemAgent.Providers.DeepSeekModels

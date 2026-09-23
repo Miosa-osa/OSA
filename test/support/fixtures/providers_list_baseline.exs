@@ -295,6 +295,20 @@
     base_url: "https://api.anthropic.com",
     default_model: "claude-opus-5",
     models: [
+      # DELIBERATE post-snapshot addition, not drift. Claude Opus 5.5 shipped
+      # 2026-09-22 and was added to `Providers.AnthropicModels`, so it flows
+      # into `Onboarding.providers_list/0` and the frozen baseline has to
+      # carry it too. `claude-opus-5` stays the default and the recommended
+      # entry — see the module doc.
+      %{
+        id: "claude-opus-5-5",
+        name: "Claude Opus 5.5",
+        tools: true,
+        note:
+          "1M ctx — newest Opus, cheaper than Opus 5. Thinking cannot be disabled; no prefill.",
+        ctx: 1_000_000,
+        recommended: false
+      },
       %{
         id: "claude-opus-5",
         name: "Claude Opus 5",
@@ -345,6 +359,27 @@
         name: "GPT-6 Astra",
         tools: true,
         note: "Responses API required for tools; availability depends on account access",
+        ctx: 1_050_000,
+        recommended: false
+      },
+      # DELIBERATE post-snapshot addition, not drift. GPT-6 Sol and GPT-6 Luna
+      # shipped alongside Opus 5.5 and were added to `Providers.OpenAIModels`,
+      # so they flow into `Onboarding.providers_list/0` and the frozen
+      # baseline has to carry them too. `gpt-5.6-terra` stays the default and
+      # the recommended entry.
+      %{
+        id: "gpt-6-sol",
+        name: "GPT-6 Sol",
+        tools: true,
+        note: "1.05M ctx — most capable GPT-6; long-context (>272K in) bills $4/$15",
+        ctx: 1_050_000,
+        recommended: false
+      },
+      %{
+        id: "gpt-6-luna",
+        name: "GPT-6 Luna",
+        tools: true,
+        note: "1.05M ctx — cheapest GPT-6; long-context (>272K in) bills $0.20/$0.75",
         ctx: 1_050_000,
         recommended: false
       },

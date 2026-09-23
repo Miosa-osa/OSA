@@ -77,6 +77,32 @@ defmodule OptimalSystemAgent.Providers.OpenAIModels do
       note: "Responses API required for tools; availability depends on account access"
     },
     %{
+      id: "gpt-6-sol",
+      name: "GPT-6 Sol",
+      ctx: 1_050_000,
+      max_output: 128_000,
+      reasoning: true,
+      vision: true,
+      tools: true,
+      pricing: {2.00, 10.00},
+      recommended: false,
+      legacy: false,
+      note: "1.05M ctx — most capable GPT-6; long-context (>272K in) bills $4/$15"
+    },
+    %{
+      id: "gpt-6-luna",
+      name: "GPT-6 Luna",
+      ctx: 1_050_000,
+      max_output: 128_000,
+      reasoning: true,
+      vision: true,
+      tools: true,
+      pricing: {0.10, 0.50},
+      recommended: false,
+      legacy: false,
+      note: "1.05M ctx — cheapest GPT-6; long-context (>272K in) bills $0.20/$0.75"
+    },
+    %{
       id: "gpt-5.6-terra",
       name: "GPT-5.6 Terra",
       ctx: 1_050_000,
