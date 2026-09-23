@@ -80,7 +80,9 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
         "not the model — switching models will not help. Retry; if it repeats, run /compact " <>
         "or start a new session, and please report it.",
     tool_use_mismatch:
-      "Conversation history is out of sync (a tool call has no result) · Start a new session or /resume an earlier one.",
+      "Conversation history is out of sync (a tool call and its result don't match) · " <>
+        "OSA already tried to repair and resend it; if this keeps happening, start a new " <>
+        "session or /resume an earlier one.",
     duplicate_tool_use:
       "Conversation history is corrupted (duplicate tool call IDs) · Start a new session or /resume an earlier one.",
     image_too_large:
@@ -324,7 +326,14 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
       harness_error?(down) ->
         :harness_error
 
-      String.contains?(down, "ids were found without") ->
+      # Both directions of the same corruption: a `tool_use` with no
+      # `tool_result` ("...ids were found without tool_result blocks...") and
+      # a `tool_result` with no matching `tool_use` ("unexpected `tool_use_id`
+      # ... no such tool_use block was found"). `Providers.HistorySanitizer`
+      # repairs both before every request and again, once, after this 400.
+      String.contains?(down, "ids were found without") or
+        (String.contains?(down, "unexpected") and String.contains?(down, "tool_use_id")) or
+          String.contains?(down, "no such tool_use") ->
         :tool_use_mismatch
 
       String.contains?(down, "ids must be unique") ->
@@ -420,13 +429,18 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
   # model-switching fixes. Kept deliberately narrow: each phrase is a verbatim
   # provider 400 string.
   #
-  # The last two are the same fault seen by two parsers: a tool call in the
+  # The middle two are the same fault seen by two parsers: a tool call in the
   # HISTORY whose `arguments` is not an object. Anthropic names the field
   # (`tool_use.input`), Ollama's Go decoder just fails to find the closing brace.
   # Every provider rejects the identical body, so "/model to switch models" is
   # the one thing guaranteed not to help — which is exactly what users tried
   # first while the compactor was writing a string placeholder into persisted
   # sessions.
+  #
+  # The last is a THIRD parser catching the same class: a text content block
+  # (or a message's whole `content`) that serialized as empty — the shape
+  # `Providers.HistorySanitizer` prunes/merges away before every request, and
+  # repairs once more on exactly this 400 if it slipped through.
   defp request_shape_error?(down) do
     String.contains?(down, "assistant message prefill") or
       String.contains?(down, "must end with a user message") or
@@ -435,7 +449,9 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalog do
       String.contains?(down, "unexpected role") or
       String.contains?(down, "is not supported on this model") or
       String.contains?(down, "input should be an object") or
-      String.contains?(down, "can't find closing '}' symbol")
+      String.contains?(down, "can't find closing '}' symbol") or
+      (String.contains?(down, "text content blocks") and String.contains?(down, "empty")) or
+      String.contains?(down, "all messages must have non-empty content")
   end
 
   # True when the reason describes a key that was never configured (as opposed

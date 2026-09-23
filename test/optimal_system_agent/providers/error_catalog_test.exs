@@ -206,4 +206,50 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalogTest do
       assert msg =~ "/model"
     end
   end
+
+  describe "self-heal gap: request-shape corruption `HistorySanitizer` repairs (audit item 1)" do
+    test "an orphan tool_use with no result still classifies as :tool_use_mismatch" do
+      reason =
+        "Anthropic returned 400: the following tool_use ids were found without tool_result " <>
+          "blocks immediately after: toolu_01."
+
+      assert Catalog.classify(reason) == :tool_use_mismatch
+    end
+
+    test "the OTHER direction — a tool_result with no matching tool_use — ALSO classifies as :tool_use_mismatch" do
+      reason =
+        "Anthropic returned 400: unexpected `tool_use_id` found in `tool_result` blocks: " <>
+          "toolu_ghost. Each `tool_result` block must have a corresponding `tool_use` block " <>
+          "in the previous message."
+
+      assert Catalog.classify(reason) == :tool_use_mismatch
+    end
+
+    test "the alternate 'no such tool_use' phrasing also classifies as :tool_use_mismatch" do
+      reason = "no such tool_use block was found for tool_result toolu_ghost"
+      assert Catalog.classify(reason) == :tool_use_mismatch
+    end
+
+    test "an empty text content block classifies as :request_shape, not :unknown" do
+      reason = "Anthropic returned 400: text content blocks must be non-empty"
+      assert Catalog.classify(reason) == :request_shape
+    end
+
+    test "the generic 'all messages must have non-empty content' 400 also classifies as :request_shape" do
+      reason = "Anthropic returned 400: all messages must have non-empty content"
+      assert Catalog.classify(reason) == :request_shape
+    end
+
+    test ":tool_use_mismatch is direction-agnostic in its user-facing message and mentions the repair attempt" do
+      msg = Catalog.user_message("ids were found without a corresponding tool_use")
+      assert msg =~ "a tool call and its result don't match"
+      assert msg =~ "already tried to repair"
+    end
+
+    test "both repairable categories remain OSA-harness faults, not provider faults" do
+      assert Catalog.fault_owner("ids were found without a matching tool_result") == :osa
+      assert Catalog.fault_owner("unexpected `tool_use_id` found") == :osa
+      assert Catalog.fault_owner("text content blocks must be non-empty") == :osa
+    end
+  end
 end
