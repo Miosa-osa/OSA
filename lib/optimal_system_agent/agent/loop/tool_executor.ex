@@ -1191,7 +1191,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       new_content: Map.get(summary, :new_content),
       warning: Map.get(summary, :warning),
       reason: Map.get(summary, :reason),
-      suggestions: Map.get(summary, :suggestions, [])
+      suggestions: Map.get(summary, :suggestions, []),
+      # The wait `await_permission/4` is about to enter, so the prompt can
+      # show a countdown to the moment the call is skipped.
+      timeout_ms: PermissionBroker.default_timeout_ms()
     }
 
     # Who is asking. Empty for a top-level session (the lead's own calls are

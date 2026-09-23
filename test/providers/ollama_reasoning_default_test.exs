@@ -114,6 +114,86 @@ defmodule OptimalSystemAgent.Providers.OllamaReasoningDefaultTest do
     end
   end
 
+  # ── Reasoning-runaway stop-loss (2026-09-23 incident) ───────────────────
+  #
+  # `ReactLoop`'s overflow-recovery clause sets `opts[:thinking_disabled]` on
+  # the ONE retry it grants a generation that spent its whole output budget on
+  # reasoning and produced no answer (see
+  # `test/agent/loop/truncated_response_test.exs`, "retried with thinking
+  # TURNED OFF"). That flag was already reaching every provider via
+  # `llm_opts`, but this module never read it, so the Ollama Cloud retry
+  # carried the exact same `think: true` as the call it was supposed to
+  # recover from. Measured live: `deepseek-v4.1-flash:cloud`, effort medium,
+  # 78,111 input tokens, TWO back-to-back calls of ~110,000 output tokens
+  # each, 0 bytes of content, before the turn gave up with an INCOMPLETE
+  # message telling the user to lower reasoning effort manually — the thing
+  # the harness was supposed to have already done for them.
+  describe "the overflow-recovery stop-loss forces think: false" do
+    # deepseek-v4.1-flash:cloud is the exact model from the incident. It is a
+    # reasoning-capable, cloud-served, NON-always-on-reasoner model, so
+    # `think: false` genuinely stops it from reasoning (unlike glm).
+    @incident_model "deepseek-v4.1-flash:cloud"
+
+    test "thinking_disabled: true turns off reasoning on a cloud model that defaults to think: true" do
+      Effort.with_process_override(:medium, fn ->
+        assert {true, :cloud_default} = Ollama.reasoning_decision(@incident_model, [])
+
+        assert {false, :recovery_disabled} =
+                 Ollama.reasoning_decision(@incident_model, thinking_disabled: true)
+      end)
+    end
+
+    test "thinking_disabled: false (the default) does not touch the decision" do
+      Effort.with_process_override(:medium, fn ->
+        assert Ollama.reasoning_decision(@incident_model, thinking_disabled: false) ==
+                 Ollama.reasoning_decision(@incident_model, [])
+      end)
+    end
+
+    test "an explicit opts[:think] = true still outranks the recovery override" do
+      # `opts[:think]` is a human/caller decision made on purpose (the same
+      # invariant the "explicit configuration" describe block below pins); the
+      # recovery flag is automatic and must not be able to override a choice
+      # someone actually made. In production `ReactLoop` never sets `:think`
+      # itself, so this combination does not occur outside a test/explicit
+      # caller — but the ranking must still be deliberate, not accidental.
+      assert {true, :opt} =
+               Ollama.reasoning_decision(@incident_model, think: true, thinking_disabled: true)
+    end
+
+    test "OLLAMA_THINK=true config still outranks the recovery override" do
+      Application.put_env(:optimal_system_agent, :ollama_think, true)
+
+      assert {true, :config} =
+               Ollama.reasoning_decision(@incident_model, thinking_disabled: true)
+    end
+
+    test "the recovery override reaches the cloud streaming request body" do
+      msgs = [%{role: "user", content: "the user already told you the answer"}]
+
+      body = Ollama.build_cloud_body(@incident_model, msgs, [thinking_disabled: true], [])
+
+      assert body["think"] == false,
+             "the Ollama Cloud request body must carry think: false on the recovery " <>
+               "retry — got #{inspect(body["think"])}"
+    end
+
+    test "even an always-on reasoner (glm) gets think: false attempted — no downside, no guaranteed win" do
+      # glm reasons regardless of the `think` field (see `always_on_reasoner?/1`
+      # docs), so this cannot be relied on to save a glm turn — but attempting
+      # it is harmless (ThinkStreamParser strips inline <think> tags the same
+      # way it strips the native channel), and the recovery must not special-
+      # case around a model family.
+      assert {false, :recovery_disabled} =
+               Ollama.reasoning_decision(@cloud, thinking_disabled: true)
+    end
+
+    test "a non-reasoning model stays a no-op under the recovery flag too" do
+      assert {nil, :unsupported} =
+               Ollama.reasoning_decision(@flat, thinking_disabled: true)
+    end
+  end
+
   describe "explicit configuration overrides BOTH directions and BOTH modes" do
     test "opts[:think] = false disables a cloud model" do
       assert {false, :opt} = Ollama.reasoning_decision(@cloud, think: false)

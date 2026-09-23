@@ -13,7 +13,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool do
 
   use OptimalSystemAgent.Tools.Behaviour
 
-  alias OptimalSystemAgent.Tools.Builtins.ShellExecute.{Constants, Handler, Prompt, UI}
+  alias OptimalSystemAgent.Tools.Builtins.ShellExecute.{Constants, Handler, Prompt, ReadOnly, UI}
 
   # ── Identity ──────────────────────────────────────────────────────────
   @impl true
@@ -92,8 +92,14 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Tool do
 
   # ── Execution semantics (per-input) ───────────────────────────────────
   @impl true
-  # NOT concurrency-safe — commands can cd, mutate env, write files.
-  # Conservative: always false, matching flat-layout concurrent?/0 → false.
+  # Parallel-safe ONLY when the WHOLE command line is provably read-only —
+  # see `ReadOnly.provably_read_only?/1` for the exact rule (every
+  # `;`/`&&`/`||`/`|`/`&`-segment's head on the read-only allowlist, no write
+  # redirect, no command substitution, no backgrounding, no partially
+  # analysed wrapper). Fail-closed: `cd`, env mutation, `sudo`, an unknown
+  # head, or anything the parser could not fully account for stays serial,
+  # matching the previous unconditional `false`.
+  def concurrency_safe?(%{"command" => command}, _ctx), do: ReadOnly.provably_read_only?(command)
   def concurrency_safe?(_input, _ctx), do: false
 
   @impl true

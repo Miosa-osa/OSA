@@ -180,6 +180,17 @@ the TUI stays in `Processing`. Both release on demand and both carry a ceiling.
   a "no answer" line, and the very next message must still reach the backend,
   since a notice that documented a wedge would be no better than the wedge.
 
+- **`test_every_second_of_a_turn_is_attributed_to_model_tool_or_user`** — runs
+  `turn_attribution_probe.py` (also runnable alone, `--binary PATH` to compare
+  builds). A long turn must never look frozen: a model wait reads
+  `Waiting for <model> · 12s`, streamed reasoning shows its live tail and a
+  timer, the running call (the 2nd of a batch included) has its own row and
+  clock and says `still running` past 60s, and an approval prompt says OSA is
+  waiting for YOU, on what, how to answer, and how long is left. Against the
+  v1.0.201 binary 15 of its assertions fail; the root cause of most was the
+  viewport being sized one row short of what the band arbiter keeps, so it
+  shed the activity row between tool rounds.
+
 Measured against a binary with both defects restored: the three new
 behaviour tests fail (`Ctrl+C` on the splash did not exit within 5s; the typed
 text never appeared; no cancel POST after the slow Esc) and the fourth passes,

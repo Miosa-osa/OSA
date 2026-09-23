@@ -300,6 +300,7 @@ impl Chat {
                 success: true,
                 expanded: false,
                 hook_runs: Default::default(),
+                approval_wait_secs: 0,
                 lines: vec![Line::from("")],
             }));
         }
@@ -480,6 +481,7 @@ impl Chat {
             success: true,
             expanded: false,
             hook_runs: Default::default(),
+            approval_wait_secs: 0,
             lines: vec![line],
         }));
     }
@@ -540,6 +542,7 @@ impl Chat {
                     // bracket, which lives on the cell precisely because every
                     // re-render would otherwise drop it.
                     self::message::append_hook_bracket(&mut td.lines, td.hook_runs);
+                    self::message::append_approval_note(&mut td.lines, td.approval_wait_secs);
                     msg.invalidate_cache();
                     break;
                 }
@@ -569,6 +572,7 @@ impl Chat {
                 };
                 td.lines = crate::tools::render_tool(&td.name, &td.args, &td.result, &opts);
                 self::message::append_hook_bracket(&mut td.lines, td.hook_runs);
+                self::message::append_approval_note(&mut td.lines, td.approval_wait_secs);
                 msg.invalidate_cache();
                 break;
             }
@@ -1168,6 +1172,7 @@ mod concurrent_tool_pairing_tests {
             success: true,
             expanded: false,
             hook_runs: Default::default(),
+            approval_wait_secs: 0,
             lines: vec![Line::from(args.to_string())],
         }
     }
@@ -1310,6 +1315,7 @@ mod lean_view_tests {
             success: true,
             expanded: false,
             hook_runs: Default::default(),
+            approval_wait_secs: 0,
             lines: vec![Line::from(format!("{name} ran"))],
         }
     }

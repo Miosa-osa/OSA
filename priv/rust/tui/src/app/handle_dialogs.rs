@@ -404,6 +404,7 @@ impl App {
                 .permission_respond(&request_id, decision, note.as_deref())
                 .await;
         });
+        self.sync_approval_wait();
         if answered.has_more {
             // The next ask took the screen: stay parked on the user.
             self.recompute_layout();

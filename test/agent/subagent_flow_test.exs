@@ -217,6 +217,10 @@ defmodule OptimalSystemAgent.Agent.SubagentFlowTest do
       assert ev.request_id == request_id
       assert ev.tool == "shell_execute"
 
+      # The wait the broker is about to enter, so the prompt can count down to
+      # the moment the call is skipped instead of leaving the user to guess.
+      assert ev.timeout_ms == OptimalSystemAgent.Agent.Loop.PermissionBroker.default_timeout_ms()
+
       # Attribution: the root session never made this call, so the dialog has
       # to be able to say who did.
       assert ev.agent_id == child

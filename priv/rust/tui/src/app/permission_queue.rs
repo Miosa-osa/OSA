@@ -31,6 +31,8 @@ pub struct PermissionRequest {
     pub new_content: Option<String>,
     pub warning: Option<String>,
     pub reason: Option<String>,
+    /// When the backend stops waiting for an answer (arrival + its timeout).
+    pub deadline: Option<std::time::Instant>,
 }
 
 impl PermissionRequest {
@@ -46,6 +48,7 @@ impl PermissionRequest {
             dialog.set_diff(old, new);
         }
         dialog.set_meta(self.warning, self.reason);
+        dialog.set_deadline(self.deadline);
         dialog
     }
 }
@@ -149,6 +152,22 @@ impl PermissionQueue {
         })
     }
 
+    /// The displayed request's deadline has passed: the backend already gave up
+    /// and skipped the call, so the prompt is retired WITHOUT sending a decision
+    /// (there is nothing left to resume) and the next queued ask takes the screen.
+    pub fn expire_current(&mut self, now: std::time::Instant) -> Option<Answered> {
+        let expired = self
+            .displayed
+            .as_ref()
+            .and_then(|d| d.deadline())
+            .is_some_and(|d| now >= d);
+        if expired {
+            self.answer_current()
+        } else {
+            None
+        }
+    }
+
     /// Drop the visible prompt and everything behind it — the turn they belong
     /// to is gone, so answering them would resume nothing.
     pub fn clear(&mut self) {
@@ -171,6 +190,7 @@ mod tests {
             new_content: Some(format!("new-{id}")),
             warning: None,
             reason: None,
+            deadline: None,
         }
     }
 
@@ -274,5 +294,30 @@ mod tests {
         assert_eq!(q.pending_len(), 0);
         assert_eq!(q.current_request_id(), None);
         assert_eq!(q.answer_current(), None);
+    }
+
+    /// A prompt the backend already gave up on is retired without a decision,
+    /// and the next ask takes the screen. Before its deadline it stays put.
+    #[test]
+    fn expire_current_retires_only_a_prompt_past_its_deadline() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let mut q = PermissionQueue::new();
+        let mut a = req("A", "shell_execute");
+        a.deadline = Some(now + Duration::from_secs(10));
+        q.submit(a);
+        q.submit(req("B", "file_edit"));
+
+        assert_eq!(q.expire_current(now), None);
+        assert_eq!(q.current_request_id(), Some("A"));
+
+        let expired = q
+            .expire_current(now + Duration::from_secs(11))
+            .expect("A is past its deadline");
+        assert_eq!(expired.request_id, "A");
+        assert!(expired.has_more);
+        assert_eq!(q.current_request_id(), Some("B"));
+        // B carries no deadline (an older backend): it never self-expires.
+        assert_eq!(q.expire_current(now + Duration::from_secs(9999)), None);
     }
 }
