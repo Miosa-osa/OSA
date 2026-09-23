@@ -1305,6 +1305,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   | `opts[:think]` set | that value | `:opt` |
   | `:ollama_think` app env set (`OLLAMA_THINK`) | that value | `:config` |
   | not a reasoning model | `nil` (no field) | `:unsupported` |
+  | `opts[:thinking_disabled]` true (overflow recovery) | `false` | `:recovery_disabled` |
   | glm cloud model (always-on reasoner), any effort | `true` | `:cloud_default` |
   | reasoning model, cloud-served, effort `:fast` | `false` | `:fast_effort` |
   | reasoning model, cloud-served, effort > `:fast` | `true` | `:cloud_default` |
@@ -1317,10 +1318,51 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   The value is constant for a given model + configuration, so it does not vary
   turn-to-turn within a session; and it is a request-body field rather than
   prompt content, so it cannot perturb a cached prompt prefix either way.
+
+  ## The `:thinking_disabled` recovery override
+
+  `ReactLoop` sets `opts[:thinking_disabled]` (via `llm_opts` on every call —
+  see `max_response_tokens/0`'s sibling `Process.get(:osa_disable_thinking)`)
+  after a generation for this turn came back with a ceiling stop reason
+  (`"length"` / `"max_tokens"`) AND empty content — the model spent its ENTIRE
+  output budget on internal reasoning and produced no answer. The retry is
+  supposed to be the one attempt that forces an answer by turning reasoning
+  off outright.
+
+  This was WIRED but not READ here: `OpenAICompat.maybe_disable_thinking/2`
+  consumed the same opt for the `surplus` route, but this module's
+  `reasoning_decision/2` had no clause for it, so the Ollama Cloud retry sent
+  the exact same `think: true` as the failed attempt it was supposed to be
+  recovering from — spending a SECOND full (bumped) budget on reasoning before
+  the turn gave up and told the user to lower reasoning effort manually.
+  Measured live 2026-09-23 on `deepseek-v4.1-flash:cloud`, effort medium:
+  78,111 input tokens in, 110,879 output tokens out, 0 bytes of content,
+  twice in a row, ~2 minutes each.
+
+  Ranked BELOW the explicit routes and the unsupported check (never invent a
+  `think` field on a model that has no such field, no matter how the call got
+  here) but ABOVE every automatic default below it — a human's explicit
+  `opts[:think]` / `OLLAMA_THINK` stays authoritative because it is a decision
+  someone made on purpose, but the harness's own automatic defaults
+  (`:cloud_default`, `:fast_effort`, `:local_stall_guard`) are exactly what
+  just failed, so the recovery overrides all three of them.
+
+  Note this does not reduce reasoning TOKEN SPEND on an always-on reasoner
+  (`always_on_reasoner?/1`, e.g. glm-5.x) — those models reason regardless of
+  the `think` field. It still changes the wire shape (native `thinking` field
+  → inline `<think>` tags in `content`), which `ThinkStreamParser` strips back
+  out identically either way, so there is no downside to attempting it even
+  there; it is simply not expected to be the lever that saves a glm turn.
   """
   @spec reasoning_decision(String.t() | nil, keyword()) ::
           {boolean() | nil,
-           :opt | :config | :unsupported | :cloud_default | :fast_effort | :local_stall_guard}
+           :opt
+           | :config
+           | :unsupported
+           | :cloud_default
+           | :fast_effort
+           | :local_stall_guard
+           | :recovery_disabled}
   def reasoning_decision(model, opts \\ []) do
     cond do
       is_boolean(val = Keyword.get(opts, :think)) ->
@@ -1331,6 +1373,9 @@ defmodule OptimalSystemAgent.Providers.Ollama do
 
       not thinking_model?(model) ->
         {nil, :unsupported}
+
+      Keyword.get(opts, :thinking_disabled, false) == true ->
+        {false, :recovery_disabled}
 
       # glm cloud models reason ALWAYS-ON. With think:false they do not emit the
       # native `thinking` field, so their chain-of-thought spills into `content`
