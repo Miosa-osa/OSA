@@ -83,7 +83,12 @@ defmodule OptimalSystemAgent.Providers.ClaudeCli do
   # and OSA never offered it — the same way the Codex catalogue silently aged
   # out. Re-check this against `claude --help` when the CLI updates; it is the
   # only source that cannot disagree with the binary actually installed.
-  @models ["fable", "opus", "sonnet", "haiku"]
+  #
+  # `claude-opus-5-5` is the one full name listed: `--model` also takes "a
+  # model's full name", and a subscriber who wants Opus 5.5 specifically
+  # should not depend on when the `opus` alias gets repointed. It is an
+  # undated moving id, so the no-dated-ids rule above still holds.
+  @models ["fable", "opus", "claude-opus-5-5", "sonnet", "haiku"]
 
   # The tool-call marker OSA asks for. `<tool_call>` is what
   # `ToolCallParsers.parse_hermes/1` reads, so this reuses a parser that is
