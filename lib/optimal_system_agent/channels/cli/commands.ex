@@ -37,11 +37,13 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "clear" => {"Clear conversation and start fresh session", :cmd_clear},
     "new" => {"Start a new session (alias for /clear)", :cmd_clear},
     "compact" => {"Force context compaction", :cmd_compact},
-    "model" => {"Show or switch the current model (list = local Ollama models)", :cmd_model},
+    "model" => {"Choose a provider, then one of its models", :cmd_model},
     "system" =>
       {"Inject into or replace the system prompt for the current model (persists)", :cmd_system},
-    "models" =>
-      {"Local models: what fits this machine, install, remove, load, unload, bench", :cmd_models},
+    "lean-prompt" =>
+      {"Show/toggle the lean system-prompt template (persists to settings.json; not /lean — see TUI's lean view)",
+       :cmd_lean_prompt},
+    "models" => {"Pick a model from the current provider", :cmd_models},
     "uncensored" =>
       {"Hop the current model to its unfiltered twin (off to return)", :cmd_uncensored},
     "jailbreak" =>
@@ -710,6 +712,86 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     IO.puts(
       "  #{@dim}Add --all after the verb to target every model. Use \\n for newlines inline. Saved in #{PromptOverrides.path()}#{@reset}"
     )
+  end
+
+  # ── /lean-prompt — persist the two system-prompt size switches ────────────
+  #
+  # NOT named `/lean` — that name is already the TUI's client-side "lean
+  # view" (hide tool-call cells, see `priv/rust/tui/src/app/commands.rs`),
+  # a display preference intercepted before it ever reaches the backend.
+  # Reusing the name here would silently shadow this command for every TUI
+  # user, so it gets its own name instead of colliding with a shipped
+  # feature.
+  #
+  # `Soul.lean_prompt?/0` and `Soul.lean_system_prompt?/0` used to be
+  # Application-env-only, which meant the only way to flip them was to hand-
+  # edit the compiled release's `sys.config` — reverted on every OSA update.
+  # This command writes the settings-cascade key instead (same pattern as
+  # `/mcp exclude` → `mcp_exclude` and the `mcp_import_foreign` toggle), so
+  # the choice survives an update.
+  #
+  #   /lean-prompt              show both flags' current state and source
+  #   /lean-prompt on | off     set lean_system_prompt (persists)
+  def cmd_lean_prompt(args, session_id) do
+    IO.puts("")
+
+    case parse_on_off(args) do
+      :show ->
+        print_lean_prompt_state()
+
+      {:ok, on?} ->
+        case OptimalSystemAgent.Settings.set_user("lean_system_prompt", on?) do
+          :ok ->
+            OptimalSystemAgent.Soul.invalidate_static_base()
+            print_lean_prompt_state(changed?: true)
+
+          other ->
+            IO.puts("  #{@red}✗#{@reset} Could not write settings: #{inspect(other)}")
+        end
+
+      :error ->
+        IO.puts("  #{@yellow}usage: /lean-prompt [on|off]#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  defp print_lean_prompt_state(opts \\ []) do
+    changed? = Keyword.get(opts, :changed?, false)
+    system_on? = OptimalSystemAgent.Soul.lean_system_prompt?()
+    rules_on? = OptimalSystemAgent.Soul.lean_prompt?()
+
+    IO.puts("  #{@bold}Lean system prompt#{@reset}")
+    IO.puts("")
+
+    state = if system_on?, do: "#{@green}on#{@reset}", else: "#{@dim}off#{@reset}"
+
+    IO.puts(
+      "  lean_system_prompt  #{state}  #{@dim}(SYSTEM_LEAN.md vs SYSTEM.md — default off)#{@reset}"
+    )
+
+    rules_state = if rules_on?, do: "#{@green}on#{@reset}", else: "#{@dim}off#{@reset}"
+
+    IO.puts(
+      "  lean_prompt         #{rules_state}  #{@dim}(skip unfilled bundled rule templates — default on)#{@reset}"
+    )
+
+    IO.puts("")
+
+    if changed? do
+      IO.puts(
+        "  #{@dim}Saved to settings.json — survives updates. Applies from the next turn " <>
+          "(this session) or new session; the static prompt is process-wide cached and " <>
+          "rebuilds lazily on next read.#{@reset}"
+      )
+    else
+      IO.puts(
+        "  #{@dim}/lean-prompt on|off sets lean_system_prompt. lean_prompt has no CLI toggle " <>
+          "yet — set {\"lean_prompt\": false} in ~/.osa/settings.json to restore the long " <>
+          "rule templates.#{@reset}"
+      )
+    end
   end
 
   # ── /models — local model manager ─────────────────────────────────────────

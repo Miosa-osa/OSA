@@ -90,14 +90,18 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
     # uses a DASH (`anthropic/claude-haiku-4.5`, not `-4-5`), so anything built
     # by concatenating "anthropic/" onto an Anthropic API id is unsafe for a
     # dotted version. Verified against the live GET /api/v1/models catalog
-    # (2026-08-01); the ids below are all present in it.
+    # (2026-08-01; opus-5.5/gpt-6-sol/gpt-6-luna re-verified live 2026-09-23);
+    # the ids below are all present in it.
     openrouter: %{
       default_url: "https://openrouter.ai/api/v1",
       default_model: "anthropic/claude-opus-5",
       available_models: [
         "anthropic/claude-opus-5",
+        "anthropic/claude-opus-5.5",
         "anthropic/claude-sonnet-5",
         "anthropic/claude-haiku-4.5",
+        "openai/gpt-6-sol",
+        "openai/gpt-6-luna",
         "openai/gpt-5.6-sol",
         "google/gemini-3.6-flash",
         "deepseek/deepseek-v4-pro"

@@ -434,6 +434,10 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       _ ->
         Process.put({flag_key, session_id}, true)
         emit_phase(phase, session_id)
+
+        if System.get_env("OSA_TTFT_TRACE") == "1" do
+          Logger.info("[ttft] first #{phase} delta session=#{session_id}")
+        end
     end
   end
 
@@ -663,6 +667,10 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     # start instead of after its heuristic grace window.
     reset_phase_flags(session_id)
     emit_phase(:waiting_for_model, session_id)
+
+    if System.get_env("OSA_TTFT_TRACE") == "1" do
+      Logger.info("[ttft] request issued (waiting_for_model) session=#{session_id}")
+    end
 
     caller = self()
 

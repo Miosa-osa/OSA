@@ -50,6 +50,10 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "lean",
         "Lean view — print the model's words, not its tool calls",
     ),
+    (
+        "lean-prompt",
+        "Show/toggle the lean system-prompt template (backend, persists)",
+    ),
     ("theme", "Switch the color theme"),
     ("keybindings", "Show the keybinding map + config file"),
     ("config", "Open the settings editor"),
@@ -1224,6 +1228,29 @@ mod tests {
         assert!(
             entry.unwrap().1.contains("off by default"),
             "the /ask-user description must state the default"
+        );
+    }
+
+    #[test]
+    fn model_and_models_are_different_commands() {
+        let model = BUILTIN_SLASH_COMMANDS
+            .iter()
+            .find(|(name, _)| *name == "model")
+            .expect("`model` missing from BUILTIN_SLASH_COMMANDS");
+        let models = BUILTIN_SLASH_COMMANDS
+            .iter()
+            .find(|(name, _)| *name == "models")
+            .expect("`models` missing from BUILTIN_SLASH_COMMANDS");
+
+        assert_eq!(model.1, "Choose a provider, then one of its models");
+        assert_eq!(models.1, "Pick a model from the current provider");
+        assert_ne!(
+            model.1, models.1,
+            "/model and /models must not share a description"
+        );
+        assert!(
+            !models.1.to_ascii_lowercase().contains("local"),
+            "/models must not advertise the local-only catalog"
         );
     }
 }

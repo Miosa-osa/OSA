@@ -890,47 +890,152 @@ defmodule OptimalSystemAgent.Agent.Context do
 
   defp gather_dynamic_blocks(state) do
     [
-      {bootstrap_block(), 0, "bootstrap"},
-      {personality_block(), 0, "personality"},
-      {task_brief_block(state), 0, "task_brief"},
-      {active_skills_block(state), 0, "active_skills"},
-      {tool_process_block(state), 1, "tool_process"},
+      {"bootstrap", 0, fn -> bootstrap_block() end},
+      {"personality", 0, fn -> personality_block() end},
+      {"task_brief", 0, fn -> task_brief_block(state) end},
+      {"active_skills", 0, fn -> active_skills_block(state) end},
+      {"tool_process", 1, fn -> tool_process_block(state) end},
       # Priority 0: tiny and load-bearing. It carries the session id, the channel
       # and the resolved model identity — the same resolver /health and the TUI
       # status bar read, so the bar and the prompt can never disagree. At ~57
       # tokens it must never lose a budget race to a longer advisory block.
-      {runtime_block(state), 0, "runtime"},
-      {environment_block(state), 1, "environment"},
+      {"runtime", 0, fn -> runtime_block(state) end},
+      {"environment", 1, fn -> environment_block(state) end},
       # Git working-tree state changes as the agent edits files, so it is
       # deliberately NOT part of the diffed world state — it would append a new
       # world-state payload on almost every turn. It stays a small per-turn block.
-      {git_state_block(state), 1, "git_state"},
-      {commands_block(state), 2, "commands"},
-      {project_context_block(state), 1, "project_context"},
-      {project_instructions_block(state), 1, "project_instructions"},
+      {"git_state", 1, fn -> git_state_block(state) end},
+      {"commands", 2, fn -> commands_block(state) end},
+      {"project_context", 1, fn -> project_context_block(state) end},
+      {"project_instructions", 1, fn -> project_instructions_block(state) end},
       # Priority 0: the active operating mode outranks general guidance. Plan mode
       # changes what the turn is allowed to DO, so it must never lose the budget
       # race to a longer advisory block.
-      {plan_mode_block(state), 0, "plan_mode"},
-      {memory_block_relevant(state), 1, "memory"},
-      {memory_recall_block(state), 1, "memory_recall"},
-      {episodic_block(state), 1, "episodic"},
-      {task_state_block(state), 1, "task_state"},
-      {workflow_block(state), 1, "workflow"},
+      {"plan_mode", 0, fn -> plan_mode_block(state) end},
+      {"memory", 1, fn -> memory_block_relevant(state) end},
+      {"memory_recall", 1, fn -> memory_recall_block(state) end},
+      {"episodic", 1, fn -> episodic_block(state) end},
+      {"task_state", 1, fn -> task_state_block(state) end},
+      {"workflow", 1, fn -> workflow_block(state) end},
       # Priority 0: this compact catalog is the only way the model can know a
       # relevant workflow exists before acting. Full SKILL.md bodies remain
       # on-demand through skill_view, so pinning the index does not pin bodies.
-      {skills_block(state), 0, "skills"},
-      {learned_skills_block(state), 2, "learned_skills"},
-      {scratchpad_block(state), 1, "scratchpad"},
-      {agent_roles_block(state), 2, "agent_roles"},
+      {"skills", 0, fn -> skills_block(state) end},
+      {"learned_skills", 2, fn -> learned_skills_block(state) end},
+      {"scratchpad", 1, fn -> scratchpad_block(state) end},
+      {"agent_roles", 2, fn -> agent_roles_block(state) end},
       # Security context: injected only when a security task is active.
       # Priority 0 so it never loses the budget race to advisory blocks.
-      {security_posture_block(state), 0, "security_posture"},
-      {sandbox_environment_block(state), 0, "sandbox_environment"},
-      {OptimalSystemAgent.Agent.DefenseContext.block(state), 0, "cyber_defense"}
+      {"security_posture", 0, fn -> security_posture_block(state) end},
+      {"sandbox_environment", 0, fn -> sandbox_environment_block(state) end},
+      {"cyber_defense", 0, fn -> OptimalSystemAgent.Agent.DefenseContext.block(state) end}
     ]
-    |> Enum.reject(fn {content, _, _} -> is_nil(content) or content == "" end)
+    |> run_blocks_concurrently(Map.get(state, :session_id))
+    |> Enum.reject(fn {_label, _priority, content} -> is_nil(content) or content == "" end)
+    |> Enum.map(fn {label, priority, content} -> {content, priority, label} end)
+  end
+
+  # Perf (ttft-perf-281): the ~20 dynamic blocks above are mutually
+  # independent pure reads (each closes only over the immutable `state` and
+  # its own I/O — git ETS cache, Ecto queries, file reads) with no
+  # cross-block ordering requirement, but were run strictly sequentially, so
+  # their wall-clock costs SUMMED on the critical path in front of every LLM
+  # request. MEASURED (glm-5.2:cloud, cold turn): environment 132ms + skills
+  # 110ms + memory 95ms + project_context 45ms + commands 9ms + 11 smaller
+  # blocks summed to 431ms of a 466ms `Context.build`. Running them
+  # concurrently collapses that sum to roughly the SLOWEST block instead.
+  #
+  # `Task.Supervisor.async_stream_nolink/4` (`ordered: true`, the default)
+  # preserves list order, so `Enum.zip` below can recover each result's
+  # `{label, priority}` even though the block itself never carries them
+  # through the closure. A block that times out or crashes degrades to `nil`
+  # content — exactly what the sequential path already did for a block that
+  # raised (every block already wraps its own body in `rescue`/`catch`) —
+  # rather than taking the whole turn down with it; this is strictly SAFER
+  # than the sequential form, which had no per-block bound at all and let one
+  # wedged block (e.g. a hung `git` subprocess) stall context assembly
+  # forever.
+  #
+  # Falls back to plain sequential execution when no `TaskSupervisor` is
+  # running (bare unit tests, `Context.build/1` called outside the OTP app) —
+  # same degrade-not-crash rule `TurnPipeline.bounded_compaction/2` uses for
+  # the identical reason.
+  @block_timeout_ms 10_000
+
+  defp run_blocks_concurrently(specs, session_id) do
+    # Two blocks below (`environment_block/1` + `git_state_block/1`, and
+    # `project_instructions_block/1`) lazily create their own `:named_table,
+    # :public` ETS caches on first use. `:named_table, :public` only controls
+    # who may READ/WRITE the table — its LIFETIME is still tied to whichever
+    # process CREATED it, and Erlang auto-deletes an ETS table the instant its
+    # owner process exits. Left lazy, the owner would be whichever spawned
+    # block Task happened to create it first — a Task that exits the moment
+    # its block returns, so the table (and every TTL/dedup cache it holds) is
+    # gone before the NEXT turn's blocks run: the git-info cache's 30s TTL
+    # never survives a single turn boundary (permanent misses, `git`
+    # re-shelling out every turn instead of every 30s) and the nested
+    # AGENTS.md claims table forgets what it already injected (a correctness
+    # regression, not just a perf one — nested instructions would re-inject
+    # every turn instead of once). Creating both here, in the caller (the
+    # session's long-lived Loop process), BEFORE any block Task is spawned
+    # gives them a stable owner again, restoring the original behaviour.
+    ensure_git_cache_table()
+    ensure_claims_table()
+
+    OptimalSystemAgent.TaskSupervisor
+    |> Task.Supervisor.async_stream_nolink(
+      specs,
+      fn {label, priority, fun} ->
+        # Each block runs in its own freshly-spawned Task process, which starts
+        # with an EMPTY process dictionary. `Workspace.Cwd.get/0` and
+        # `Settings.current_session/0` (used transitively by several blocks —
+        # project_context, commands, skills) both fall back to
+        # `Process.get(:osa_session_id)` when no per-process cwd override is
+        # set, to look the session's declared working_dir up in the
+        # process-INDEPENDENT `:osa_session_workspace` ETS table that
+        # `TurnPipeline.apply_overrides/2` already populated for this turn (see
+        # `Cwd`'s moduledoc, resolution order mechanism 2 — the same one every
+        # spawned tool-execution Task already relies on). Without this line
+        # every block would silently resolve against the DAEMON's launch
+        # directory instead of THIS session's, in a multi-session daemon.
+        if is_binary(session_id) and session_id != "" do
+          Process.put(:osa_session_id, session_id)
+        end
+
+        {label, priority, time_block(label, fun)}
+      end,
+      ordered: true,
+      max_concurrency: max(System.schedulers_online(), 4),
+      timeout: @block_timeout_ms,
+      on_timeout: :kill_task
+    )
+    |> Enum.zip(specs)
+    |> Enum.map(fn
+      {{:ok, {label, priority, content}}, _spec} -> {label, priority, content}
+      {{:exit, _reason}, {label, priority, _fun}} -> {label, priority, nil}
+    end)
+  rescue
+    _ ->
+      Enum.map(specs, fn {label, priority, fun} -> {label, priority, time_block(label, fun)} end)
+  catch
+    :exit, _ ->
+      Enum.map(specs, fn {label, priority, fun} -> {label, priority, time_block(label, fun)} end)
+  end
+
+  # TEMP measurement instrumentation (OSA_TTFT_TRACE=1) — per-block timing
+  # inside `gather_dynamic_blocks/1`. Costs one monotonic_time call pair per
+  # block when unset (~negligible); the env-gated Logger.info only fires when
+  # tracing is explicitly requested.
+  defp time_block(label, fun) do
+    if System.get_env("OSA_TTFT_TRACE") == "1" do
+      t0 = System.monotonic_time(:millisecond)
+      result = fun.()
+      ms = System.monotonic_time(:millisecond) - t0
+      if ms >= 1, do: Logger.info("[ttft]   block #{label} took #{ms}ms")
+      result
+    else
+      fun.()
+    end
   end
 
   # Slash-command catalog. The 40+ CLI commands live in Channels.CLI.Commands

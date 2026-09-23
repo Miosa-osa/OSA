@@ -50,6 +50,8 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
   # `codex -m <name>` still reaches older ids that the picker has dropped.
   @models [
     "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
@@ -84,6 +86,18 @@ defmodule OptimalSystemAgent.Providers.OpenAICodex do
   # These are Codex transport limits, not public API model-card limits.
   @context_windows %{
     "gpt-6-astra" => 872_000,
+    # gpt-6-sol / gpt-6-luna have no independently confirmed Codex transport
+    # figure yet — OpenAI's "confirmed in Codex" statement names availability,
+    # not this client's advertised max_context_window. Every full-size model
+    # this table carries (astra and the whole 5.6 family) shares the same
+    # 872_000 despite having DIFFERENT max_output ceilings, which is why it
+    # reads as a Codex CLI 0.153.3 transport-wide cap for this size class
+    # rather than a per-model figure — see `codex_context_override_test.exs`
+    # and `astra_support_test.exs`, which pin exactly that across all four
+    # rows. Carried forward on that basis; re-verify against a signed-in
+    # Codex CLI session the next time this table is checked.
+    "gpt-6-sol" => 872_000,
+    "gpt-6-luna" => 872_000,
     "gpt-5.6-sol" => 872_000,
     "gpt-5.6-terra" => 872_000,
     "gpt-5.6-luna" => 872_000,

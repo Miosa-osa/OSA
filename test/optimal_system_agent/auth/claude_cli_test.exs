@@ -896,6 +896,10 @@ defmodule OptimalSystemAgent.Auth.ClaudeCliTest do
 
       assert ClaudeCli.default_model() in ClaudeCli.available_models()
     end
+
+    test "a subscriber can pick Opus 5.5 by its full name" do
+      assert "claude-opus-5-5" in ClaudeCli.available_models()
+    end
   end
 
   # ── helpers ───────────────────────────────────────────────────────────

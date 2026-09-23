@@ -7,6 +7,21 @@ defmodule OptimalSystemAgent.Providers.OllamaTest do
 
   describe "resolve_request_url/3" do
     test "routes a cloud tag through the signed local daemon when it is available there" do
+      prev = Application.get_env(:optimal_system_agent, :ollama_api_key)
+      prev_sys = System.get_env("OLLAMA_API_KEY")
+      Application.delete_env(:optimal_system_agent, :ollama_api_key)
+      System.delete_env("OLLAMA_API_KEY")
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:optimal_system_agent, :ollama_api_key, prev),
+          else: Application.delete_env(:optimal_system_agent, :ollama_api_key)
+
+        if prev_sys,
+          do: System.put_env("OLLAMA_API_KEY", prev_sys),
+          else: System.delete_env("OLLAMA_API_KEY")
+      end)
+
       assert Ollama.resolve_request_url(
                "https://ollama.com",
                "glm-5.2:cloud",
@@ -50,6 +65,30 @@ defmodule OptimalSystemAgent.Providers.OllamaTest do
                "glm-5.2:cloud",
                ["glm-5.2:cloud"]
              ) == "http://ollama.internal:11434"
+    end
+
+    test "keeps keyed cloud tags on ollama.com even if local /api/show would 200" do
+      prev = Application.get_env(:optimal_system_agent, :ollama_api_key)
+      Application.put_env(:optimal_system_agent, :ollama_api_key, "test-ollama-cloud-key")
+
+      on_exit(fn ->
+        if prev,
+          do: Application.put_env(:optimal_system_agent, :ollama_api_key, prev),
+          else: Application.delete_env(:optimal_system_agent, :ollama_api_key)
+      end)
+
+      assert Ollama.resolve_request_url(
+               "https://ollama.com",
+               "deepseek-v4.1-flash:cloud",
+               ["deepseek-v4.1-flash:cloud"]
+             ) == "https://ollama.com"
+
+      # Local GGUFs still go to the daemon when a cloud pick left OLLAMA_URL hosted.
+      assert Ollama.resolve_request_url(
+               "https://ollama.com",
+               "llama3.2:3b",
+               ["llama3.2:3b"]
+             ) == "http://localhost:11434"
     end
   end
 

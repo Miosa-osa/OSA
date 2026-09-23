@@ -173,38 +173,59 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   # was sent to ollama.com and failed.
   @spec resolve_request_url(String.t(), String.t() | nil, [String.t()]) :: String.t()
   def resolve_request_url(configured_url, model, local_model_names) do
-    if String.starts_with?(configured_url, "https://") and model in local_model_names do
-      @local_url
-    else
-      configured_url
+    cond do
+      not String.starts_with?(configured_url, "https://") ->
+        configured_url
+
+      # A keyed Cloud request must stay on ollama.com. Local /api/show returns
+      # 200 for hosted tags the daemon *knows about*, then /api/chat on
+      # localhost 401s — that is the "I picked a cloud model and it Unauthorized"
+      # loop. Account/keyless Cloud still uses the signed daemon below.
+      keyed_cloud_tag?(model) ->
+        configured_url
+
+      model in local_model_names ->
+        @local_url
+
+      true ->
+        configured_url
     end
+  end
+
+  defp keyed_cloud_tag?(model) do
+    OptimalSystemAgent.Providers.OllamaCloud.cloud_tag?(model) and
+      match?(key when is_binary(key) and key != "", resolved_api_key())
   end
 
   defp request_url(configured_url, model) do
     if String.starts_with?(configured_url, "https://") and is_binary(model) do
-      local_url = Application.get_env(:optimal_system_agent, :ollama_local_url, @local_url)
+      if keyed_cloud_tag?(model) do
+        configured_url
+      else
+        local_url = Application.get_env(:optimal_system_agent, :ollama_local_url, @local_url)
 
-      # Hosted tags are not guaranteed to appear in /api/tags even when the
-      # signed daemon can serve them. /api/show is Ollama's authoritative
-      # per-model capability check and does not start a generation.
-      local_model_names =
-        case Req.post("#{local_url}/api/show",
-               json: %{model: model},
-               receive_timeout: 750,
-               retry: false
-             ) do
-          {:ok, %{status: 200}} -> [model]
-          _ -> []
+        # Hosted tags are not guaranteed to appear in /api/tags even when the
+        # signed daemon can serve them. /api/show is Ollama's authoritative
+        # per-model capability check and does not start a generation.
+        local_model_names =
+          case Req.post("#{local_url}/api/show",
+                 json: %{model: model},
+                 receive_timeout: 750,
+                 retry: false
+               ) do
+            {:ok, %{status: 200}} -> [model]
+            _ -> []
+          end
+
+        case resolve_request_url(configured_url, model, local_model_names) do
+          @local_url ->
+            Logger.info("[Ollama] Routing #{model} through the local daemon (it serves it)")
+
+            local_url
+
+          url ->
+            url
         end
-
-      case resolve_request_url(configured_url, model, local_model_names) do
-        @local_url ->
-          Logger.info("[Ollama] Routing #{model} through the local daemon (it serves it)")
-
-          local_url
-
-        url ->
-          url
       end
     else
       configured_url
@@ -309,7 +330,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       tools = Keyword.get(opts, :tools, [])
       body_map = build_cloud_body(model, messages, opts, tools)
       body = Jason.encode!(body_map)
-      api_key = Application.get_env(:optimal_system_agent, :ollama_api_key, "")
+      api_key = resolved_api_key() || ""
 
       tool_count = length(Map.get(body_map, :tools, []))
 
@@ -1682,12 +1703,32 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   # Returns `[headers: [{"authorization", "Bearer <key>"}]]` when
   # OLLAMA_API_KEY is set (Ollama Cloud), empty list otherwise.
   defp auth_headers do
-    case Application.get_env(:optimal_system_agent, :ollama_api_key) do
+    case resolved_api_key() do
       key when is_binary(key) and key != "" ->
         [headers: [{"authorization", "Bearer #{key}"}]]
 
       _ ->
         []
+    end
+  end
+
+  # Application env is a boot-time snapshot. A key written to ~/.osa/.env
+  # afterward (TUI /provider picker, `osa setup`, a hand edit) never reaches
+  # it, so cloud chat/list hit ollama.com with no Bearer and 401 forever —
+  # ErrorCatalog then says /login, which reopens the picker. Same live-env
+  # fallback OpenAICompatProvider already uses.
+  @doc false
+  @spec resolved_api_key() :: String.t() | nil
+  def resolved_api_key do
+    case Application.get_env(:optimal_system_agent, :ollama_api_key) do
+      key when is_binary(key) and key != "" ->
+        String.trim(key)
+
+      _ ->
+        case OptimalSystemAgent.Onboarding.live_env("OLLAMA_API_KEY") do
+          key when is_binary(key) and key != "" -> String.trim(key)
+          _ -> nil
+        end
     end
   end
 end

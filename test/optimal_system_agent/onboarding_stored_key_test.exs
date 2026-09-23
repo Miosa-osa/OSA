@@ -127,4 +127,25 @@ defmodule OptimalSystemAgent.OnboardingStoredKeyTest do
       refute @provider in detected_ids()
     end
   end
+
+  describe "Ollama Cloud with a pasted key is connected, not needs_sign_in" do
+    test "decorate_for_ui reports connected when OLLAMA_API_KEY is live" do
+      prev = System.get_env("OLLAMA_API_KEY")
+      System.put_env("OLLAMA_API_KEY", "ollama-cloud-live-key")
+
+      on_exit(fn ->
+        if prev,
+          do: System.put_env("OLLAMA_API_KEY", prev),
+          else: System.delete_env("OLLAMA_API_KEY")
+      end)
+
+      entry = Enum.find(Onboarding.providers_list(), &(&1.id == "ollama_cloud"))
+      decorated = Onboarding.decorate_for_ui(entry)
+
+      assert decorated.auth.state == "connected",
+             "a saved OLLAMA_API_KEY must make Ollama Cloud connected so " <>
+               "/models opens the cloud catalog instead of local GGUFs. got: " <>
+               inspect(decorated.auth)
+    end
+  end
 end

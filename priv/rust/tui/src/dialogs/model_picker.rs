@@ -497,6 +497,11 @@ impl ModelPicker {
         })
     }
 
+    fn cloud_model(model: &str) -> bool {
+        let m = model.to_ascii_lowercase();
+        m.contains(":cloud") || m.ends_with("-cloud")
+    }
+
     fn runtime_provider(id: &str) -> String {
         match id {
             "ollama_cloud" | "ollama_local" | "ollama" => "ollama",
@@ -551,7 +556,10 @@ impl ModelPicker {
                 "connected" | "connected_unverified" => return true,
                 // Sign-in required and not done — or done and lapsed. Either
                 // way the answer is the sign-in screen, never a model list.
-                "needs_sign_in" | "expired" => return false,
+                // Dual-mode rows (Ollama Cloud) also offer a pasted key:
+                // "needs_sign_in" must not hide a key that is already saved.
+                "needs_sign_in" if !auth.can_paste_key => return false,
+                "expired" => return false,
                 // "needs_key" and "unknown" fall through to key detection
                 // below, which is the pre-`auth` behaviour and still correct
                 // for the 27 key-only providers.
@@ -749,6 +757,21 @@ impl ModelPicker {
             .collect();
 
         candidates.sort_by_key(|&i| !self.is_ready(&self.providers[i]));
+
+        // Header runtime id is "ollama" for BOTH Cloud and Local. If the
+        // active model is a hosted tag, Cloud is the catalog they asked for —
+        // a reachable local daemon must not steal /models onto GGUFs.
+        if Self::cloud_model(&self.current_model) {
+            if let Some(i) = candidates
+                .iter()
+                .copied()
+                .find(|&i| self.providers[i].id == "ollama_cloud")
+            {
+                if self.is_ready(&self.providers[i]) {
+                    return self.activate_provider(i);
+                }
+            }
+        }
 
         let idx = *candidates.first()?;
         if !self.is_ready(&self.providers[idx].clone()) {
@@ -3585,6 +3608,28 @@ mod models_jump_tests {
 
         assert!(picker.jump_to_current_provider_models().is_some());
         assert_eq!(picker.mode, PickerMode::LoadingModels);
+    }
+
+    #[test]
+    fn a_cloud_model_jumps_to_ollama_cloud_not_the_local_daemon() {
+        // Both catalog ids map to runtime "ollama". A reachable daemon used
+        // to make Local win /models even while the header said glm-5.2:cloud.
+        let mut picker = ModelPicker::new_provider_first(
+            vec![
+                dynamic_provider("ollama_local", "Ollama Local"),
+                keyed_provider("ollama_cloud", "Ollama Cloud"),
+            ],
+            Some(ollama_reachable()),
+            "ollama".to_string(),
+            "glm-5.2:cloud".to_string(),
+        );
+
+        let action = picker.jump_to_current_provider_models();
+
+        assert!(
+            matches!(action, Some(ModelPickerAction::LoadProviderModels { ref provider, .. }) if provider == "ollama_cloud"),
+            "expected Ollama Cloud, got {action:?}"
+        );
     }
 
     #[test]

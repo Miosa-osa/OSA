@@ -187,4 +187,76 @@ defmodule OptimalSystemAgent.Providers.LiveKeyResolutionTest do
       assert Registry.resolved_default_provider() == :miosa
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # Ollama Cloud: chat/list must re-read OLLAMA_API_KEY live, and the
+  # configured-check must not look for OLLAMA_CLOUD_API_KEY
+  # ---------------------------------------------------------------------------
+
+  describe "Ollama Cloud live api-key fallback" do
+    setup do
+      prev_app = Application.get_env(:optimal_system_agent, :ollama_api_key)
+      prev_sys = System.get_env("OLLAMA_API_KEY")
+      prev_wrong = System.get_env("OLLAMA_CLOUD_API_KEY")
+
+      Application.delete_env(:optimal_system_agent, :ollama_api_key)
+      System.delete_env("OLLAMA_API_KEY")
+      System.delete_env("OLLAMA_CLOUD_API_KEY")
+
+      on_exit(fn ->
+        if prev_app,
+          do: Application.put_env(:optimal_system_agent, :ollama_api_key, prev_app),
+          else: Application.delete_env(:optimal_system_agent, :ollama_api_key)
+
+        if prev_sys,
+          do: System.put_env("OLLAMA_API_KEY", prev_sys),
+          else: System.delete_env("OLLAMA_API_KEY")
+
+        if prev_wrong,
+          do: System.put_env("OLLAMA_CLOUD_API_KEY", prev_wrong),
+          else: System.delete_env("OLLAMA_CLOUD_API_KEY")
+      end)
+
+      :ok
+    end
+
+    test "resolves a key set ONLY via System.put_env (not Application config)" do
+      alias OptimalSystemAgent.Providers.Ollama
+
+      refute Ollama.resolved_api_key()
+
+      System.put_env("OLLAMA_API_KEY", "ollama-live-only-test-key")
+      assert Ollama.resolved_api_key() == "ollama-live-only-test-key"
+    end
+
+    test "Application config still wins when both are present" do
+      alias OptimalSystemAgent.Providers.Ollama
+
+      System.put_env("OLLAMA_API_KEY", "sk-live-ollama")
+      Application.put_env(:optimal_system_agent, :ollama_api_key, "sk-app-ollama")
+
+      assert Ollama.resolved_api_key() == "sk-app-ollama"
+    end
+
+    test "provider_configured?(:ollama_cloud) sees OLLAMA_API_KEY, not OLLAMA_CLOUD_API_KEY" do
+      alias OptimalSystemAgent.Providers.Ollama
+
+      prev_url = Application.get_env(:optimal_system_agent, :ollama_url)
+      # A local daemon on :11434 must not make this look configured.
+      Application.put_env(:optimal_system_agent, :ollama_url, "http://127.0.0.1:1")
+
+      on_exit(fn ->
+        if prev_url,
+          do: Application.put_env(:optimal_system_agent, :ollama_url, prev_url),
+          else: Application.delete_env(:optimal_system_agent, :ollama_url)
+      end)
+
+      System.put_env("OLLAMA_CLOUD_API_KEY", "wrong-var-must-not-count")
+      refute Ollama.resolved_api_key()
+      refute Registry.provider_configured?(:ollama_cloud)
+
+      System.put_env("OLLAMA_API_KEY", "real-ollama-cloud-key")
+      assert Registry.provider_configured?(:ollama_cloud)
+    end
+  end
 end

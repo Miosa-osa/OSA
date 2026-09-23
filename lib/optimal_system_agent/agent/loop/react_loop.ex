@@ -643,7 +643,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         nil
       end
 
+    # TEMP measurement instrumentation (OSA_TTFT_TRACE=1) — pre-LLM breakdown.
+    # No-op / near-zero cost when unset.
+    ctx_t0 = System.monotonic_time(:millisecond)
     context = cached_context(state)
+    ctx_ms = System.monotonic_time(:millisecond) - ctx_t0
+
+    if System.get_env("OSA_TTFT_TRACE") == "1" do
+      Logger.info("[ttft] Context.build took #{ctx_ms}ms (iteration #{state.iteration})")
+    end
+
     Logger.debug("[loop] context built, #{length(context.messages)} messages")
     context = FastPath.inject_context(context, FastPath.await_prefetch(fast_prefetch_task))
 

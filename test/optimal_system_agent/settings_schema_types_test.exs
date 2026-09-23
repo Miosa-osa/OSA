@@ -39,4 +39,16 @@ defmodule OptimalSystemAgent.SettingsSchemaTypesTest do
   test "unknown keys stay open-world (not flagged)" do
     assert Schema.validate(%{"someFutureKey" => 123}) == []
   end
+
+  test "lean_prompt and lean_system_prompt are known boolean keys" do
+    assert Schema.validate(%{"lean_prompt" => true, "lean_system_prompt" => false}) == []
+
+    assert [%{key: "lean_prompt", severity: :error, tip: tip}] =
+             Schema.validate(%{"lean_prompt" => "yes"})
+
+    assert tip =~ "true or false"
+
+    assert [%{key: "lean_system_prompt", severity: :error}] =
+             Schema.validate(%{"lean_system_prompt" => 1})
+  end
 end

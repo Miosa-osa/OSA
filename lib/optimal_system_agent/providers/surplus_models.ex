@@ -8,14 +8,18 @@ defmodule OptimalSystemAgent.Providers.SurplusModels do
   catalog so users can still select any currently available model.
   """
 
-  # Verified against Surplus' live catalog on 2026-09-07. Keep this list
-  # deliberately small and frontier-only. It is not a dump of every model
-  # Surplus sells; the live picker still exposes those on demand.
+  # Verified against Surplus' live catalog on 2026-09-07 (claude-opus-5.5,
+  # gpt-6-sol and gpt-6-luna re-verified live on the same catalog 2026-09-23,
+  # the day of their release — all three are already listed there under
+  # exactly these ids). Keep this list deliberately small and frontier-only.
+  # It is not a dump of every model Surplus sells; the live picker still
+  # exposes those on demand.
   @featured [
     {"claude-fable-5.1", "Claude Fable 5.1"},
     # Claude 5 family — frontier priority. Surplus relists these under Anthropic's
     # own ids; the capability-keyed cache gate ("claude" substring) and the
     # dotted→dashed context-window resolver handle them with no per-id wiring.
+    {"claude-opus-5.5", "Claude Opus 5.5"},
     {"claude-opus-5", "Claude Opus 5"},
     {"claude-opus-5-fast", "Claude Opus 5 Fast"},
     {"claude-sonnet-5", "Claude Sonnet 5"},
@@ -23,6 +27,8 @@ defmodule OptimalSystemAgent.Providers.SurplusModels do
     {"glm-5.3-flash", "GLM 5.3 Flash"},
     {"muse-spark-1.3-contributor", "Meta: Muse Spark 1.3 Contributor"},
     {"gpt-6-astra", "GPT-6 Astra"},
+    {"gpt-6-sol", "GPT-6 Sol"},
+    {"gpt-6-luna", "GPT-6 Luna"},
     {"gemini-3.8-flash", "Gemini 3.8 Flash"},
     {"kimi-k3", "Kimi K3"},
     {"kimi-k3-fast-api", "Kimi K3 Fast"},
@@ -89,6 +95,9 @@ defmodule OptimalSystemAgent.Providers.SurplusModels do
     "claude-fable-5" => {5.75, 28.75},
     "claude-opus-5" => {0.092, 0.46},
     "claude-opus-5-fast" => {3.00, 15.00},
+    # Measured from the live catalog 2026-09-23, its release day: no reseller
+    # markup at all — billed at exactly Anthropic's own $4.00/$20.00.
+    "claude-opus-5.5" => {4.00, 20.00},
     "claude-sonnet-5" => {0.50, 2.49},
     # Measured from the live catalog 2026-09-09: prompt $0.30/M,
     # completion $1.20/M, cache-read $0.006/M — 50x cheaper than a fresh
@@ -96,6 +105,11 @@ defmodule OptimalSystemAgent.Providers.SurplusModels do
     "deepseek-v4.1-flash" => {0.30, 1.20},
     # gpt-5.6-luna: 1.05M ctx at budget rates, cache-read $0.02/M.
     "gpt-5.6-luna" => {0.20, 1.20},
+    # gpt-6-sol / gpt-6-luna: measured from the live catalog 2026-09-23, their
+    # release day — both billed at exactly OpenAI's own published rate, no
+    # reseller markup.
+    "gpt-6-sol" => {2.00, 10.00},
+    "gpt-6-luna" => {0.10, 0.50},
     # minimax-m3 supersedes the already-featured m2.
     "minimax-m3" => {0.30, 1.20},
     # xiaomi-mimo-v2-5: cheapest 1M window in the catalog, and its

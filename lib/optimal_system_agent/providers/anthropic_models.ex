@@ -63,7 +63,10 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
      at $0.00 and logs, which is honest; a guessed price is not. If the vendor
      publishes a date on which the rate changes, add the post-change rate to
      `pricing_schedule/0` instead of picking one of the two — see there.
-  4. `mix compile` + `mix test test/providers`. Nothing else to touch.
+  4. Only if the published cache-READ rate is NOT exactly 10% of `:pricing`'s
+     input rate, add `:cache_read` (USD per 1M) — see `cache_read_rate/1`.
+     Every current model except Opus 5.5 follows the 10% ratio and omits it.
+  5. `mix compile` + `mix test test/providers`. Nothing else to touch.
 
   Sources: https://platform.claude.com/docs/en/about-claude/models/overview and
   https://platform.claude.com/docs/en/pricing (checked 2026-08-01).
@@ -71,6 +74,7 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
 
   @typedoc "A single Anthropic model offering."
   @type model :: %{
+          optional(:cache_read) => number(),
           id: String.t(),
           name: String.t(),
           ctx: pos_integer(),
@@ -88,6 +92,42 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
 
   # Order is the picker's display order: flagship first, legacy last.
   @models [
+    %{
+      id: "claude-opus-5-5",
+      name: "Claude Opus 5.5",
+      ctx: 1_000_000,
+      max_output: 128_000,
+      thinking: :adaptive,
+      effort: :full,
+      prefill: false,
+      vision: true,
+      tools: true,
+      pricing: {4.00, 20.00},
+      # Anthropic's own default `output_config.effort` for this model is
+      # `medium` (Opus 5 defaulted `high`) — irrelevant to what OSA sends,
+      # because `Anthropic.build_output_config/2` already puts an explicit
+      # wire value on every request regardless of the model's own default; see
+      # that function's doc. Recorded here only as the fact that changed.
+      #
+      # `thinking` CANNOT be disabled on this model — `{type: "disabled"}` and
+      # a `budget_tokens` object both 400 at every effort level — which is
+      # exactly what `:adaptive` already guarantees OSA never sends (see
+      # `Anthropic.maybe_add_thinking/2`: only a `:budget` model ever emits
+      # `budget_tokens`, and `Anthropic.normalize_thinking/2` downgrades any
+      # stray `enabled` config to `adaptive` for every `:adaptive` model, this
+      # one included). Same rule gives `:prefill` its `false` below.
+      #
+      # Cache READ is $0.20/1M against a $4.00 input rate — 0.05x, not
+      # Anthropic's usual 0.1x ratio (Opus 5 reads cache at $0.50/1M, exactly
+      # 0.1x of $5.00). `Agent.Pricing`'s flat multiplier fallback would
+      # therefore over-bill every Opus 5.5 cache read by 2x; `cache_read/1`
+      # below and `Agent.Pricing.@cache_read_modules` correct it the same way
+      # xAI's and Z.ai's published cache columns do.
+      cache_read: 0.20,
+      recommended: false,
+      legacy: false,
+      note: "1M ctx — newest Opus, cheaper than Opus 5. Thinking cannot be disabled; no prefill."
+    },
     %{
       id: "claude-opus-5",
       name: "Claude Opus 5",
@@ -350,14 +390,30 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
       nil ->
         down = String.downcase(id)
 
+        # A gateway spells a version with a DOT where this catalogue (and
+        # Anthropic's own API) spells it with a DASH —
+        # `anthropic/claude-opus-5.5` is OpenRouter's id for `claude-opus-5-5`.
+        # Tried as an EXACT match before any prefix scan, because Opus 5.5
+        # made the prefix scan itself unsafe for its own bare id: `claude-
+        # opus-5` (Opus 5's real, shorter id) is a literal string prefix of
+        # `claude-opus-5.5`, so the scan below would resolve the newer model
+        # to its predecessor's price, context window and every other fact —
+        # the exact `claude-opus-5` defect this catalogue exists to prevent,
+        # reproduced one version later by a sibling id instead of a stale
+        # family table. Mirrors `Agent.Pricing.dotted_version_to_dashed/1` and
+        # `Providers.Registry.dotted_version_to_dashed/1`, the same fix at the
+        # other two call sites that resolve an Anthropic id.
+        dashed = dotted_version_to_dashed(down)
+        exact_dashed = if dashed != down, do: model(dashed)
+
         prefix_match =
           @models
           |> Enum.filter(&String.starts_with?(down, &1.id))
           |> Enum.max_by(&String.length(&1.id), fn -> nil end)
 
-        # Alias last: a real id, and the dated-suffix match above, must always
-        # win over the alias table.
-        prefix_match || alias_match(down)
+        # Alias last: a real id, the dated-suffix match, and the dotted
+        # rewrite above must always win over the alias table.
+        exact_dashed || prefix_match || alias_match(down)
 
       found ->
         found
@@ -365,6 +421,8 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
   end
 
   def resolve(_), do: nil
+
+  defp dotted_version_to_dashed(key), do: String.replace(key, ~r/(\d)\.(\d)/, "\\1-\\2")
 
   defp alias_match(down) do
     case Map.fetch(@cli_aliases, down) do
@@ -395,6 +453,28 @@ defmodule OptimalSystemAgent.Providers.AnthropicModels do
     @models
     |> Enum.filter(& &1.pricing)
     |> Map.new(&{&1.id, &1.pricing})
+  end
+
+  @doc """
+  The published cache-READ rate for a model, in USD per 1M tokens — ONLY when
+  it deviates from Anthropic's usual `input_rate * 0.1` ratio.
+
+  Every current Claude model reads cache at exactly 10% of its input rate
+  except Opus 5.5, which prices it at 5% ($0.20 on a $4.00 input rate).
+  Returns `nil` for every other model, and `nil` is the correct answer for
+  them: `Agent.Pricing.cache_read_rate/2` falls back to its flat multiplier
+  only when this returns nothing, and that multiplier already reproduces
+  their real rate exactly. Consulted by `Agent.Pricing.@cache_read_modules`
+  the same way `XAIModels.cache_read_rate/1` and `ZaiModels.cache_read_rate/1`
+  are — those catalogs exist because no single multiplier can be right for
+  every vendor; this is the same fact inside one vendor's own catalog.
+  """
+  @spec cache_read_rate(String.t() | nil) :: number() | nil
+  def cache_read_rate(id) do
+    case resolve(id) do
+      nil -> nil
+      m -> Map.get(m, :cache_read)
+    end
   end
 
   # ── Dated rate changes ───────────────────────────────────────────────────

@@ -26,8 +26,23 @@ defmodule OptimalSystemAgent.Providers.AddedModelCompletenessTest do
   """
   use ExUnit.Case, async: true
 
+  alias OptimalSystemAgent.Agent.Loop.LLMClient
   alias OptimalSystemAgent.Agent.Pricing
-  alias OptimalSystemAgent.Providers.{GoogleModels, ModelLimits, XAIModels, ZaiModels}
+
+  alias OptimalSystemAgent.Providers.{
+    Anthropic,
+    AnthropicModels,
+    GoogleModels,
+    ModelLimits,
+    OpenAICodex,
+    OpenAICompat,
+    OpenAICompatProvider,
+    OpenAIModels,
+    Registry,
+    SurplusModels,
+    XAIModels,
+    ZaiModels
+  }
 
   describe "Grok 4.6" do
     test "every published fact resolves, under both the bare and gateway id" do
@@ -239,6 +254,196 @@ defmodule OptimalSystemAgent.Providers.AddedModelCompletenessTest do
       # catalog edit. 3.7 Flash is offerable but not yet the default.
       assert GoogleModels.default_model() == "gemini-3.6-flash"
       assert Enum.count(GoogleModels.models(), & &1.recommended) == 1
+    end
+  end
+
+  describe "Claude Opus 5.5 — released 2026-09-22" do
+    test "every published fact resolves, under the native id and the OpenRouter dotted spelling" do
+      # `Pricing` strips a gateway's `vendor/` prefix before it ever asks the
+      # catalogue (`lookup_keys/1`), so both spellings price correctly here.
+      # `AnthropicModels` itself is never handed a vendor-prefixed string in
+      # production — Registry strips that before consulting the catalogue —
+      # so its own facts are asserted on the bare id only, same as every
+      # other `describe` block in this file.
+      for id <- ["claude-opus-5-5", "anthropic/claude-opus-5.5"] do
+        assert Pricing.rates(id) == {4.00, 20.00},
+               "#{id}: Anthropic publishes $4.00/$20.00 per 1M"
+
+        assert Pricing.confidence(id) == :exact,
+               "#{id}: priced by GUESS. A model in the catalog must never reach the " <>
+                 "@families substring fallback — that is the claude-opus-5 defect."
+      end
+
+      assert AnthropicModels.context_window("claude-opus-5-5") == 1_000_000
+      assert AnthropicModels.max_output("claude-opus-5-5") == 128_000
+      assert AnthropicModels.capability("claude-opus-5-5", :vision)
+      assert AnthropicModels.capability("claude-opus-5-5", :tools)
+
+      # The dotted OpenRouter spelling resolves to the SAME model, not to its
+      # shorter sibling `claude-opus-5` — `claude-opus-5` is a literal string
+      # prefix of `claude-opus-5.5`, which is exactly the shape that used to
+      # mis-resolve before `AnthropicModels.resolve/1` learned to try the
+      # dot→dash rewrite as an exact match first.
+      assert AnthropicModels.resolve("claude-opus-5.5").id == "claude-opus-5-5"
+
+      assert Registry.provider_for_model("claude-opus-5-5") == :anthropic
+    end
+
+    test "cache reads bill at the published 5% rate, not the generic 10% multiplier" do
+      # Opus 5.5 reads cache at $0.20/1M against a $4.00 input rate — 0.05x.
+      # Every other current Claude model is 0.1x (Opus 5 reads at $0.50/1M on
+      # its $5.00 input rate); the generic multiplier would double-bill a
+      # 5.5 cache read to $0.40/1M.
+      assert Pricing.cache_read_rate("claude-opus-5-5") == {0.20, :published}
+      assert Pricing.cache_read_rate("claude-opus-5") == {0.50, :multiplier}
+    end
+
+    test "thinking cannot be disabled — every path that builds one lands on adaptive" do
+      assert AnthropicModels.thinking_mode("claude-opus-5-5") == :adaptive
+
+      # `LLMClient.thinking_decision/1` is what a live turn actually calls.
+      assert LLMClient.thinking_decision(%{provider: :anthropic, model: "claude-opus-5-5"}) ==
+               {%{type: "adaptive"}, :adaptive}
+
+      # Belt-and-braces: a stray `{type: "enabled", budget_tokens: N}` — the
+      # exact shape that is a hard 400 on this model at every effort level —
+      # is coerced to adaptive rather than forwarded as-is.
+      assert Anthropic.normalize_thinking(
+               %{type: "enabled", budget_tokens: 4096},
+               "claude-opus-5-5"
+             ) == %{type: "adaptive"}
+
+      # And the body-builder only ever emits `budget_tokens` for a `:budget`
+      # config — never for the `:adaptive` shape this model always produces
+      # (which carries `display: "summarized"`, never a token count).
+      assert Anthropic.maybe_add_thinking(%{}, %{type: "adaptive"}) ==
+               %{thinking: %{type: "adaptive", display: "summarized"}}
+
+      refute AnthropicModels.supports_prefill?("claude-opus-5-5"),
+             "Opus 5.5 rejects a trailing assistant message with a 400 — same as Opus 5"
+    end
+
+    test "effort is always sent explicitly, at the full 5-level ladder" do
+      # Anthropic's own default moved to `medium` on this model (Opus 5
+      # defaulted `high`) — irrelevant to OSA's wire behaviour, because
+      # `Anthropic.build_output_config/2` puts an explicit value on every
+      # request rather than omitting the field and trusting the model's own
+      # default either way.
+      assert AnthropicModels.effort_levels("claude-opus-5-5") == ~w(low medium high xhigh max)
+
+      for {level, wire} <- [
+            {:fast, "low"},
+            {:medium, "medium"},
+            {:high, "high"},
+            {:xhigh, "xhigh"},
+            {:ultra, "max"}
+          ] do
+        assert Anthropic.build_output_config("claude-opus-5-5", effort: level) == %{effort: wire}
+      end
+    end
+
+    test "the 1M window is native — the 4.6-generation beta header is never sent for it" do
+      # `needs_1m_beta?/1` is a POSITIVE allowlist scoped to `sonnet-4-6` /
+      # `opus-4-6`; a new model id is safely excluded by default rather than
+      # swept in by a broad heuristic.
+      assert Anthropic.supports_1m?("claude-opus-5-5")
+      refute Anthropic.needs_1m_beta?("claude-opus-5-5")
+    end
+
+    test "the opus alias and every existing default are unmoved" do
+      assert AnthropicModels.cli_aliases()["opus"] == "claude-opus-5",
+             "the bare Claude Code CLI alias stays pinned to Opus 5 — repointing it to the " <>
+               "newest Opus is a separate, deliberate decision this change does not make"
+
+      assert AnthropicModels.default_model() == "claude-opus-5"
+
+      refute Enum.find(AnthropicModels.models(), &(&1.id == "claude-opus-5-5")).recommended,
+             "a second :recommended entry would break the one-recommended-per-provider invariant"
+
+      assert Enum.count(AnthropicModels.models(), & &1.recommended) == 1
+    end
+
+    test "reaches OpenRouter and Surplus, at their own published rates" do
+      assert "anthropic/claude-opus-5.5" in OpenAICompatProvider.available_models(:openrouter)
+
+      # Surplus relists Claude ids with a DOT (`claude-opus-4.8`, not the
+      # Anthropic API's `-4-8`); this row follows the same spelling.
+      assert "claude-opus-5.5" in SurplusModels.ids()
+      assert Pricing.rates("surplus/claude-opus-5.5") == {4.00, 20.00}
+      assert Pricing.confidence("surplus/claude-opus-5.5") == :exact
+    end
+  end
+
+  describe "GPT-6 Sol and GPT-6 Luna — released 2026-09-22" do
+    test "every published fact resolves, under the native id and OpenRouter" do
+      for {id, rates} <- [
+            {"gpt-6-sol", {2.00, 10.00}},
+            {"openai/gpt-6-sol", {2.00, 10.00}},
+            {"gpt-6-luna", {0.10, 0.50}},
+            {"openai/gpt-6-luna", {0.10, 0.50}}
+          ] do
+        assert Pricing.rates(id) == rates, "#{id}: OpenAI publishes #{inspect(rates)} per 1M"
+        assert Pricing.confidence(id) == :exact, "#{id}: priced by GUESS"
+
+        bare = id |> String.split("/") |> List.last()
+        assert OpenAIModels.context_window(bare) == 1_050_000
+        assert OpenAIModels.max_output(bare) == 128_000
+        assert OpenAIModels.capability(bare, :vision)
+        assert OpenAIModels.capability(bare, :tools)
+      end
+
+      assert Registry.provider_for_model("gpt-6-sol") == :openai
+      assert Registry.provider_for_model("gpt-6-luna") == :openai
+    end
+
+    test "cache reads match the generic 10% multiplier — no vendor override needed" do
+      # Unlike Opus 5.5, both bill cache reads at exactly 10% of input
+      # ($0.20 on $2.00, $0.01 on $0.10), so OpenAIModels carries no
+      # `cache_read_rate/1` override and the flat multiplier is already right.
+      assert {sol_rate, :multiplier} = Pricing.cache_read_rate("gpt-6-sol")
+      assert_in_delta sol_rate, 0.20, 0.000_001
+
+      assert {luna_rate, :multiplier} = Pricing.cache_read_rate("gpt-6-luna")
+      assert_in_delta luna_rate, 0.01, 0.000_001
+    end
+
+    test "both are recognised as reasoning models via the catalog, not the name heuristic" do
+      assert OpenAIModels.reasoning?("gpt-6-sol")
+      assert OpenAIModels.reasoning?("gpt-6-luna")
+    end
+
+    test "adding them did not move the OpenAI default" do
+      assert OpenAIModels.default_model() == "gpt-5.6-terra"
+      assert Enum.count(OpenAIModels.picker_models(), & &1.recommended) == 1
+    end
+
+    test "reach ChatGPT Codex, at the same transport window as the rest of this size class" do
+      assert "gpt-6-sol" in OpenAICodex.available_models()
+      assert "gpt-6-luna" in OpenAICodex.available_models()
+
+      for model <- ["gpt-6-sol", "gpt-6-luna"] do
+        assert Registry.effective_context_window(model, :openai_codex) == 872_000
+        assert Registry.effective_context_window(model, :openai) == 1_050_000
+      end
+
+      # Unlike Astra, Sol/Luna stay on chat completions — same transport as
+      # gpt-5.6-sol/gpt-5.6-luna.
+      assert OpenAICompatProvider.transport(:openai, "gpt-6-sol") == OpenAICompat
+      assert OpenAICompatProvider.transport(:openai, "gpt-6-luna") == OpenAICompat
+    end
+
+    test "reach the OpenAI direct API and OpenRouter available-models lists" do
+      assert "gpt-6-sol" in OpenAICompatProvider.available_models(:openai)
+      assert "gpt-6-luna" in OpenAICompatProvider.available_models(:openai)
+      assert "openai/gpt-6-sol" in OpenAICompatProvider.available_models(:openrouter)
+      assert "openai/gpt-6-luna" in OpenAICompatProvider.available_models(:openrouter)
+    end
+
+    test "reach Surplus, priced at the vendor's own rate with no reseller markup" do
+      assert "gpt-6-sol" in SurplusModels.ids()
+      assert "gpt-6-luna" in SurplusModels.ids()
+      assert Pricing.rates("surplus/gpt-6-sol") == {2.00, 10.00}
+      assert Pricing.rates("surplus/gpt-6-luna") == {0.10, 0.50}
     end
   end
 

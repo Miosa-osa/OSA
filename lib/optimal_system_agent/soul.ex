@@ -322,9 +322,20 @@ defmodule OptimalSystemAgent.Soul do
     base
   end
 
+  # Folds in the two lean flags alongside the live tool names. Both flags
+  # change what `build_base/1` renders (`load_system_template/0` picks
+  # SYSTEM.md vs SYSTEM_LEAN.md, `rules_content/0` skips unfilled bundled
+  # rules) but neither is read by `build_base/1` through anything that would
+  # otherwise show up in a cache-key mismatch: they are settings/app-env, not
+  # registry state. Without this, flipping `/lean-prompt` mid-session (or
+  # editing settings.json) would sit inert until something ELSE invalidated
+  # the cache (a tool registering, `Soul.reload/0`) — the static base is
+  # process-wide in `:persistent_term`, so a stale fingerprint means every
+  # session on this node keeps serving the prompt that was cached before the
+  # toggle, not just the session that changed it.
   defp tools_fingerprint(variant) do
     names = registry_tool_names()
-    :erlang.phash2({variant, names})
+    :erlang.phash2({variant, names, lean_prompt?(), lean_system_prompt?()})
   end
 
   defp registry_tool_names do
@@ -416,6 +427,21 @@ defmodule OptimalSystemAgent.Soul do
 
       config :optimal_system_agent, :lean_system_prompt, true
 
+  or, so it survives an OSA update (a release regenerates the compiled
+  `sys.config`, which silently reverts an app-env edit), the user-settings
+  cascade:
+
+      {"lean_system_prompt": true}   # ~/.osa/settings.json
+
+  ## Resolution order (first present wins)
+
+    1. `~/.osa/settings.json` (and the rest of the trusted settings cascade)
+       key `"lean_system_prompt"` — see `OptimalSystemAgent.Settings.get_trusted/2`
+    2. `config :optimal_system_agent, :lean_system_prompt`
+    3. `false` — the default
+
+  Set/read from the CLI with `/lean-prompt`.
+
   This is deliberately SEPARATE from `lean_prompt?/0`: that flag governs skipping
   unfilled bundled rule templates (a prompt-cleanliness concern) and keeps its
   own default, so choosing the full template never drags in empty rule files.
@@ -423,7 +449,13 @@ defmodule OptimalSystemAgent.Soul do
   """
   @spec lean_system_prompt?() :: boolean()
   def lean_system_prompt? do
-    Application.get_env(:optimal_system_agent, :lean_system_prompt, false) == true
+    case settings_get("lean_system_prompt") do
+      value when is_boolean(value) ->
+        value
+
+      _ ->
+        Application.get_env(:optimal_system_agent, :lean_system_prompt, false) == true
+    end
   end
 
   @doc """
@@ -434,8 +466,10 @@ defmodule OptimalSystemAgent.Soul do
 
       config :optimal_system_agent, :lean_prompt, false
 
-  to restore the long template and the unfilled bundled rule files, without a
-  code change or a deploy.
+  or `{"lean_prompt": false}` in `~/.osa/settings.json` (checked first — see
+  `lean_system_prompt?/0`'s resolution order, which this mirrors) to restore
+  the long template and the unfilled bundled rule files, without a code
+  change or a deploy, and in a way that survives the next OSA update.
 
   ## What the lean template drops, and why it is safe
 
@@ -468,7 +502,24 @@ defmodule OptimalSystemAgent.Soul do
   """
   @spec lean_prompt?() :: boolean()
   def lean_prompt? do
-    Application.get_env(:optimal_system_agent, :lean_prompt, true) == true
+    case settings_get("lean_prompt") do
+      value when is_boolean(value) ->
+        value
+
+      _ ->
+        Application.get_env(:optimal_system_agent, :lean_prompt, true) == true
+    end
+  end
+
+  # Settings reads must never take prompt assembly down (missing ETS at early
+  # boot, unreadable file, etc.) — fall through to app env on any trouble.
+  # Same helper shape as `MCP.Discovery.settings_get/1`, deliberately not
+  # duplicated as a second JSON reader: both go through the one settings
+  # cascade (`OptimalSystemAgent.Settings`).
+  defp settings_get(key) do
+    OptimalSystemAgent.Settings.get_trusted(key)
+  rescue
+    _ -> nil
   end
 
   @doc false
