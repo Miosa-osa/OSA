@@ -401,8 +401,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
 
   # `:unsafe` is kept verbatim for the per-call barrier case so existing
   # telemetry consumers keep matching; a PATH collision between two otherwise
-  # parallel-safe calls is the new `:conflict`.
+  # parallel-safe calls is the new `:conflict` — and so is an unscoped
+  # `:read_any` read (a provably-read-only `shell_execute`/`file_glob`/
+  # `code_symbols`) landing behind a concurrent WRITE, the same reason a
+  # `:scoped` collision gets, not "unsafe" (it was never the unsafe call).
   defp serialization_reason(%ConflictScope{mode: :scoped}), do: :conflict
+  defp serialization_reason(%ConflictScope{mode: :read_any}), do: :conflict
   defp serialization_reason(_), do: :unsafe
 
   defp safe_call?(tc, %UseContext{} = ctx) do

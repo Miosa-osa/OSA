@@ -197,6 +197,10 @@ defmodule OptimalSystemAgent.Agent.Loop.StreamingToolExecutor do
       case scope do
         %ConflictScope{mode: :barrier} -> :unsafe
         %ConflictScope{mode: :scoped} -> :conflict
+        # An unscoped-but-read-only call (`shell_execute`/`file_glob`/
+        # `code_symbols`) only ever waits here because a concurrent WRITE is
+        # in flight — same reason a `:scoped` collision gets.
+        %ConflictScope{mode: :read_any} -> :conflict
         # A parallel-safe call that still had to wait did so behind a barrier.
         _ -> :barrier
       end

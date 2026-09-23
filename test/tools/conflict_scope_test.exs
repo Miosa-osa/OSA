@@ -219,6 +219,69 @@ defmodule OptimalSystemAgent.Tools.ConflictScopeTest do
     end
   end
 
+  describe "read_any — unscoped-but-provably-read-only calls" do
+    # A read-only `shell_execute` (or `file_glob` / `code_symbols`) names no
+    # specific path, so it cannot be `:scoped` — but it is not "touches
+    # nothing comparable" either, so `:parallel` overclaims and hides a torn
+    # read against a concurrent write. `:read_any` is the honest middle.
+    defp read_any(cmd), do: ConflictScope.for_call("shell_execute", %{"command" => cmd}, true)
+
+    test "a read-only shell_execute call resolves to :read_any" do
+      assert read_any("grep foo file.txt").mode == :read_any
+    end
+
+    test "conflicts with a write to ANY path (it names none of its own)", %{dir: dir} do
+      p = Path.join(dir, "f.txt")
+      grep = read_any("grep foo " <> p)
+
+      assert ConflictScope.conflict?(grep, edit(p))
+      assert ConflictScope.conflict?(edit(p), grep)
+      # Even a write to an unrelated path — read_any cannot prove it does NOT
+      # touch it, so it fails closed against every write in the batch.
+      assert ConflictScope.conflict?(grep, edit(Path.join(dir, "unrelated.txt")))
+    end
+
+    test "conflicts with a barrier, like everything else", %{dir: dir} do
+      barrier = ConflictScope.for_call("git", %{}, false)
+      assert ConflictScope.conflict?(read_any("grep x " <> Path.join(dir, "f.txt")), barrier)
+      assert ConflictScope.conflict?(barrier, read_any("grep x " <> Path.join(dir, "f.txt")))
+    end
+
+    test "does NOT conflict with a plain read of the same file", %{dir: dir} do
+      p = Path.join(dir, "f.txt")
+      refute ConflictScope.conflict?(read_any("grep x " <> p), read(p))
+      refute ConflictScope.conflict?(read(p), read_any("grep x " <> p))
+    end
+
+    test "does NOT conflict with another read_any call" do
+      refute ConflictScope.conflict?(read_any("grep a f.txt"), read_any("rg b g.txt"))
+    end
+
+    test "does NOT conflict with a plain :parallel call" do
+      p = ConflictScope.for_call("web_search", %{"query" => "x"}, true)
+      refute ConflictScope.conflict?(read_any("ls"), p)
+      refute ConflictScope.conflict?(p, read_any("ls"))
+    end
+
+    test "file_glob and code_symbols get the same treatment", %{dir: dir} do
+      p = Path.join(dir, "f.ex")
+      glob = ConflictScope.for_call("file_glob", %{"pattern" => "**/*.ex"}, true)
+      symbols = ConflictScope.for_call("code_symbols", %{"query" => "foo"}, true)
+
+      assert glob.mode == :read_any
+      assert symbols.mode == :read_any
+      assert ConflictScope.conflict?(glob, edit(p))
+      assert ConflictScope.conflict?(symbols, edit(p))
+      refute ConflictScope.conflict?(glob, symbols)
+      refute ConflictScope.conflict?(glob, read(p))
+    end
+
+    test "a NOT-read-only shell_execute call is still a plain barrier, unaffected" do
+      unsafe = ConflictScope.for_call("shell_execute", %{"command" => "rm -rf x"}, false)
+      assert unsafe.mode == :barrier
+    end
+  end
+
   describe "kill switch" do
     test "disabling it reverts every call to the per-call answer", %{dir: dir} do
       prior = Application.get_env(:optimal_system_agent, :cross_call_conflict_detection)

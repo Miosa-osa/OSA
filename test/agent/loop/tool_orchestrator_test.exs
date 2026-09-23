@@ -49,6 +49,43 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestratorTest do
     end
   end
 
+  # A "file" backed by an Agent, plus started/finished events like
+  # `EventExecutor` — so a test can prove BOTH the scheduling order AND that a
+  # read call actually observed the pre- or post-write value, not just that
+  # events landed in the right sequence.
+  defmodule ContentEventExecutor do
+    @moduledoc false
+
+    def execute_tool_call(%{name: "file_edit"} = tc, state) do
+      pid = Map.fetch!(state, :test_pid)
+      ref = Map.fetch!(state, :event_ref)
+      store = Map.fetch!(state, :content_store)
+      new_value = Map.fetch!(tc, :new_value)
+
+      send(pid, {:tool_event, ref, :started, tc.id, self()})
+      Process.sleep(get_in(state, [:delays, tc.id]) || 0)
+      Agent.update(store, fn _ -> new_value end)
+      send(pid, {:tool_event, ref, :finished, tc.id, self()})
+
+      tool_msg = %{role: "tool", tool_call_id: tc.id, name: tc.name, content: "edited"}
+      {tool_msg, "edited"}
+    end
+
+    def execute_tool_call(tc, state) do
+      pid = Map.fetch!(state, :test_pid)
+      ref = Map.fetch!(state, :event_ref)
+      store = Map.fetch!(state, :content_store)
+
+      send(pid, {:tool_event, ref, :started, tc.id, self()})
+      Process.sleep(get_in(state, [:delays, tc.id]) || 0)
+      seen = Agent.get(store, & &1)
+      send(pid, {:tool_event, ref, :finished, tc.id, self()})
+
+      tool_msg = %{role: "tool", tool_call_id: tc.id, name: tc.name, content: seen}
+      {tool_msg, seen}
+    end
+  end
+
   setup do
     builtin_tools = :persistent_term.get({Registry, :builtin_tools}, %{})
     supervisor = start_supervised!(Task.Supervisor)
@@ -290,6 +327,240 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestratorTest do
         assert tool_msg.content == "event:#{tc.id}"
         assert result_str == "event:#{tc.id}"
       end)
+    end
+  end
+
+  # ── shell_execute concurrency classification (real tool, WS-parallel) ──
+  #
+  # Uses the REAL `shell_execute` builtin (already registered via app boot —
+  # see the `setup` merge above) so the orchestrator's batching decision comes
+  # from `ShellExecute.ReadOnly.provably_read_only?/1`, not a test double.
+  # Only EXECUTION is stubbed (`EventExecutor`), so this proves the actual
+  # classifier drives actual concurrent dispatch, not just that a hand-written
+  # test tool can be batched.
+  describe "shell_execute concurrency (real tool)" do
+    test "two provably-read-only shell commands overlap in wall time, while a " <>
+           "write command in the same batch stays a serial barrier",
+         %{state: base_state, supervisor: supervisor} do
+      ref = make_ref()
+
+      state =
+        Map.merge(base_state, %{
+          test_pid: self(),
+          event_ref: ref,
+          delays: %{"r1" => 150, "r2" => 150}
+        })
+
+      tcs = [
+        %{id: "r1", name: "shell_execute", arguments: %{"command" => "cat file1.txt | grep foo"}},
+        %{id: "r2", name: "shell_execute", arguments: %{"command" => "git log -3"}},
+        %{id: "w1", name: "shell_execute", arguments: %{"command" => "rm -rf build"}}
+      ]
+
+      {elapsed_us, results} =
+        :timer.tc(fn ->
+          ToolOrchestrator.dispatch(tcs, state, executor: EventExecutor, supervisor: supervisor)
+        end)
+
+      events = collect_tool_events(ref, 6)
+
+      # r1 and r2 genuinely overlapped in wall time: r2 started before r1
+      # (150ms) finished.
+      assert event_index(events, :started, "r2") < event_index(events, :finished, "r1")
+
+      # w1 is NOT provably read-only (`rm`), so it is a barrier: it starts
+      # only once BOTH read-only calls have finished.
+      assert event_index(events, :finished, "r1") < event_index(events, :started, "w1")
+      assert event_index(events, :finished, "r2") < event_index(events, :started, "w1")
+
+      # Wall-clock corroboration: two OVERLAPPED 150ms reads plus a ~0ms write
+      # is far under the ~300ms a fully serial dispatch of the same three
+      # calls would take. Generous bound to avoid CI flakiness.
+      assert elapsed_us < 280_000,
+             "expected overlapped dispatch well under 280ms, got #{div(elapsed_us, 1000)}ms"
+
+      # Result ordering is unaffected by the parallel/serial split.
+      assert Enum.map(results, fn {tc, _r} -> tc.id end) == ["r1", "r2", "w1"]
+    end
+
+    test "a write command classifies as a barrier even mid-batch, in original position",
+         %{state: base_state, supervisor: supervisor} do
+      ref = make_ref()
+
+      state =
+        Map.merge(base_state, %{
+          test_pid: self(),
+          event_ref: ref,
+          delays: %{"r1" => 0, "r2" => 0, "r3" => 0}
+        })
+
+      tcs = [
+        %{id: "r1", name: "shell_execute", arguments: %{"command" => "ls -la"}},
+        %{id: "w1", name: "shell_execute", arguments: %{"command" => "sed -i s/a/b/ f.txt"}},
+        %{id: "r2", name: "shell_execute", arguments: %{"command" => "wc -l file.txt"}},
+        %{id: "r3", name: "shell_execute", arguments: %{"command" => "stat file.txt"}}
+      ]
+
+      ToolOrchestrator.dispatch(tcs, state, executor: EventExecutor, supervisor: supervisor)
+
+      events = collect_tool_events(ref, 8)
+
+      # r1 (before the barrier) drains before w1 starts...
+      assert event_index(events, :finished, "r1") < event_index(events, :started, "w1")
+      # ...and w1 finishes before either trailing read-only call starts.
+      assert event_index(events, :finished, "w1") < event_index(events, :started, "r2")
+      assert event_index(events, :finished, "w1") < event_index(events, :started, "r3")
+    end
+  end
+
+  # ── ConflictScope :read_any — a read-only shell_execute must not race a
+  #    concurrent write to the file it reads (edit-then-verify is the
+  #    model's most common batching pattern) ─────────────────────────────
+  describe "shell_execute vs a real file writer (ConflictScope :read_any)" do
+    setup do
+      {:ok, store} = start_supervised({Agent, fn -> "before" end})
+      %{store: store, path: Path.join(System.tmp_dir!(), "osa_read_any_test.txt")}
+    end
+
+    test "[file_edit X, grep X] — the read observes the edit", %{
+      state: base_state,
+      supervisor: supervisor,
+      store: store,
+      path: path
+    } do
+      ref = make_ref()
+
+      state =
+        Map.merge(base_state, %{
+          test_pid: self(),
+          event_ref: ref,
+          content_store: store,
+          delays: %{"edit" => 100, "grep" => 0}
+        })
+
+      tcs = [
+        %{
+          id: "edit",
+          name: "file_edit",
+          new_value: "after",
+          arguments: %{"path" => path, "old_string" => "before", "new_string" => "after"}
+        },
+        %{id: "grep", name: "shell_execute", arguments: %{"command" => "grep foo " <> path}}
+      ]
+
+      results =
+        ToolOrchestrator.dispatch(tcs, state,
+          executor: ContentEventExecutor,
+          supervisor: supervisor
+        )
+
+      events = collect_tool_events(ref, 4)
+
+      # The edit is a genuine barrier ahead of the read: it finishes before
+      # the read starts...
+      assert event_index(events, :finished, "edit") < event_index(events, :started, "grep")
+
+      # ...and the read's own OBSERVED CONTENT proves it, not just timing.
+      {_tc, {_msg, seen}} = Enum.find(results, fn {tc, _} -> tc.id == "grep" end)
+      assert seen == "after"
+    end
+
+    test "[grep X, file_edit X] — the read observes pre-edit content and the write waits", %{
+      state: base_state,
+      supervisor: supervisor,
+      store: store,
+      path: path
+    } do
+      ref = make_ref()
+
+      state =
+        Map.merge(base_state, %{
+          test_pid: self(),
+          event_ref: ref,
+          content_store: store,
+          delays: %{"grep" => 100, "edit" => 0}
+        })
+
+      tcs = [
+        %{id: "grep", name: "shell_execute", arguments: %{"command" => "grep foo " <> path}},
+        %{
+          id: "edit",
+          name: "file_edit",
+          new_value: "after",
+          arguments: %{"path" => path, "old_string" => "before", "new_string" => "after"}
+        }
+      ]
+
+      results =
+        ToolOrchestrator.dispatch(tcs, state,
+          executor: ContentEventExecutor,
+          supervisor: supervisor
+        )
+
+      events = collect_tool_events(ref, 4)
+
+      # The write waits for the read ahead of it to finish...
+      assert event_index(events, :finished, "grep") < event_index(events, :started, "edit")
+
+      # ...and the read's observed content proves it ran BEFORE the edit.
+      {_tc, {_msg, seen}} = Enum.find(results, fn {tc, _} -> tc.id == "grep" end)
+      assert seen == "before"
+    end
+
+    test "two read-only shell_execute calls plus a file_read still overlap", %{
+      state: base_state,
+      supervisor: supervisor,
+      store: store,
+      path: path
+    } do
+      ref = make_ref()
+
+      state =
+        Map.merge(base_state, %{
+          test_pid: self(),
+          event_ref: ref,
+          content_store: store,
+          delays: %{"grep1" => 150, "grep2" => 150, "fread" => 150}
+        })
+
+      tcs = [
+        %{id: "grep1", name: "shell_execute", arguments: %{"command" => "grep foo " <> path}},
+        %{id: "grep2", name: "shell_execute", arguments: %{"command" => "rg bar " <> path}},
+        %{id: "fread", name: "file_read", arguments: %{"path" => path}}
+      ]
+
+      {elapsed_us, _results} =
+        :timer.tc(fn ->
+          ToolOrchestrator.dispatch(tcs, state,
+            executor: ContentEventExecutor,
+            supervisor: supervisor
+          )
+        end)
+
+      events = collect_tool_events(ref, 6)
+
+      # All three started before any of them finished — genuine 3-way overlap,
+      # not just pairwise.
+      last_start =
+        Enum.max([
+          event_index(events, :started, "grep1"),
+          event_index(events, :started, "grep2"),
+          event_index(events, :started, "fread")
+        ])
+
+      first_finish =
+        Enum.min([
+          event_index(events, :finished, "grep1"),
+          event_index(events, :finished, "grep2"),
+          event_index(events, :finished, "fread")
+        ])
+
+      assert last_start < first_finish
+
+      # Wall time corroborates: three OVERLAPPED 150ms reads is far under the
+      # ~450ms three serial reads would take.
+      assert elapsed_us < 300_000,
+             "expected overlapped reads well under 300ms, got #{div(elapsed_us, 1000)}ms"
     end
   end
 
