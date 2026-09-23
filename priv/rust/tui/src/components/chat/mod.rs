@@ -140,6 +140,17 @@ pub struct Chat {
     /// user's line through that one function. Anchoring it there means a new
     /// submit path cannot be added that forgets to arm it.
     turn_output_mark: u64,
+    /// Item 2 — messages the user typed mid-turn that are waiting for the model
+    /// to start on them. Rendered in the conversation, at the bottom of the
+    /// live region just ABOVE the spinner, each marked "queued" so a mid-turn
+    /// keystroke is visibly in the transcript flow (not only a dim row over the
+    /// composer). The moment the model starts on one — `send_queued_now` folds
+    /// it in, or `maybe_dequeue_message` submits it — the app clears it from
+    /// here and echoes it as an ordinary user message, so it converts from
+    /// "queued" to a normal turn opener in place. Kept OUT of `scrollback`
+    /// deliberately: scrollback is frozen into the terminal's history and could
+    /// never be un-marked.
+    queued: Vec<String>,
 }
 
 impl Chat {
@@ -171,6 +182,86 @@ impl Chat {
             hidden_count: 0,
             emitted: 0,
             turn_output_mark: 0,
+            queued: Vec::new(),
+        }
+    }
+
+    // ── Queued messages shown in the conversation (item 2) ─────────────
+
+    /// Set the messages queued mid-turn, rendered as "queued" rows at the
+    /// bottom of the live region (just above the spinner). Empty hides them.
+    pub fn set_queued(&mut self, items: Vec<String>) {
+        self.queued = items;
+    }
+
+    /// Whether any queued messages are awaiting the model.
+    pub fn has_queued(&self) -> bool {
+        !self.queued.is_empty()
+    }
+
+    /// Rows the queued block occupies at `width`: a one-row "Queued" header plus
+    /// one row per message (each clipped to a single row), capped at 4 messages
+    /// with a "+N more" overflow row. 0 when nothing is queued. The count is
+    /// width-independent (each item is one clipped row), but the signature
+    /// matches the other measurement helpers.
+    pub fn queued_height(&self, _width: u16) -> u16 {
+        match self.queued.len() {
+            0 => 0,
+            n if n <= 4 => 1 + n as u16,
+            _ => 1 + 5,
+        }
+    }
+
+    /// Render the queued block into `area` (top-anchored within it). Each row is
+    /// dim, prefixed with the same ⧖ glyph the composer's queued rows use, and
+    /// the header names how many are waiting.
+    fn draw_queued(&self, frame: &mut Frame, area: Rect) {
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::Paragraph;
+        if area.height == 0 || self.queued.is_empty() {
+            return;
+        }
+        let theme = crate::style::theme();
+        let max_items = 4usize;
+        let shown = self.queued.len().min(max_items);
+
+        let header = if self.queued.len() == 1 {
+            "1 message queued \u{2014} waiting for this turn to reach it".to_string()
+        } else {
+            format!(
+                "{} messages queued \u{2014} waiting for this turn to reach them",
+                self.queued.len()
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(header, theme.hint()))),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
+
+        for (i, item) in self.queued.iter().take(shown).enumerate() {
+            let one_line = item.replace('\n', " ");
+            let spans = vec![
+                Span::styled("\u{29d6} ", theme.hint()),
+                Span::styled(one_line, theme.recede()),
+            ];
+            let y = area.y + 1 + i as u16;
+            if y < area.y + area.height {
+                frame.render_widget(
+                    Paragraph::new(Line::from(spans)),
+                    Rect::new(area.x, y, area.width, 1),
+                );
+            }
+        }
+
+        if self.queued.len() > max_items {
+            let more = format!("  +{} more queued", self.queued.len() - max_items);
+            let y = area.y + 1 + shown as u16;
+            if y < area.y + area.height {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(more, theme.hint())),
+                    Rect::new(area.x, y, area.width, 1),
+                );
+            }
         }
     }
 
@@ -717,7 +808,15 @@ impl Chat {
     /// inline live region grows to fit the reply as it streams in place without
     /// re-parsing the whole buffer for the measurement pass.
     pub fn streaming_height(&self, width: u16) -> u16 {
-        self.ensure_stream_cache(width).unwrap_or(0)
+        // The queued block (item 2) shares the live region with the streaming
+        // reply, so it is reserved HERE — the one measurement the band arbiter
+        // reads for the stream band. Adding it here (rather than a new band)
+        // keeps the whole feature inside the chat component: the arbiter already
+        // grows the band to whatever this returns and shrinks it back, with the
+        // shrink damped, when the queued messages are delivered.
+        self.ensure_stream_cache(width)
+            .unwrap_or(0)
+            .saturating_add(self.queued_height(width))
     }
 
     pub fn clear(&mut self) {
@@ -802,6 +901,29 @@ impl Chat {
     /// the preview by one — `ensure_stream_cache` counts it unconditionally.
     pub fn draw_live(&self, frame: &mut Frame, area: Rect, header: bool) {
         if area.height == 0 || area.width == 0 {
+            return;
+        }
+        // Item 2 — carve the queued block off the BOTTOM of the live region so
+        // it sits directly above the spinner, with the streaming reply above it.
+        // Reserved by `streaming_height`, so this only takes rows the band
+        // already grew to include.
+        let area = if self.has_queued() {
+            let qh = self.queued_height(area.width).min(area.height);
+            let stream_area = Rect {
+                height: area.height.saturating_sub(qh),
+                ..area
+            };
+            let queued_area = Rect {
+                y: area.y + area.height.saturating_sub(qh),
+                height: qh,
+                ..area
+            };
+            self.draw_queued(frame, queued_area);
+            stream_area
+        } else {
+            area
+        };
+        if area.height == 0 {
             return;
         }
         if self.ensure_stream_cache(area.width).is_some() {
@@ -1504,6 +1626,87 @@ mod lean_view_tests {
             names,
             vec!["before".to_string()],
             "a cell queued before the toggle was retroactively removed"
+        );
+    }
+}
+
+#[cfg(test)]
+mod queued_conversation {
+    //! Item 2 — queued messages render in the conversation, above the spinner,
+    //! marked as queued, until the model starts on them (at which point the app
+    //! echoes them as ordinary user messages via `add_user_message` /
+    //! `add_midturn_user_message`).
+    use super::*;
+
+    fn render(chat: &Chat, width: u16, height: u16) -> Vec<String> {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            let area = ratatui::layout::Rect::new(0, 0, width, height);
+            // `header=true` mirrors a fresh turn; the queued block is drawn
+            // regardless of the streaming preview above it.
+            chat.draw_live(f, area, true);
+        })
+        .expect("draw");
+        let buf = term.backend().buffer().clone();
+        (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn queued_messages_show_in_the_conversation_marked_as_queued() {
+        let mut chat = Chat::new();
+        chat.set_queued(vec![
+            "check the god files".into(),
+            "then run the tests".into(),
+        ]);
+
+        // The band reserves rows for them.
+        assert!(chat.has_queued());
+        assert!(chat.queued_height(80) >= 3, "header + 2 message rows");
+
+        let screen = render(&chat, 80, 12).join("\n");
+        assert!(
+            screen.contains("check the god files"),
+            "the first queued message must be visible in the conversation: {screen:?}"
+        );
+        assert!(
+            screen.contains("then run the tests"),
+            "the second queued message must be visible too: {screen:?}"
+        );
+        assert!(
+            screen.to_lowercase().contains("queued"),
+            "the block must mark the messages as queued: {screen:?}"
+        );
+    }
+
+    #[test]
+    fn clearing_the_queue_removes_the_conversation_block() {
+        let mut chat = Chat::new();
+        chat.set_queued(vec!["pending".into()]);
+        assert!(chat.has_queued());
+        assert!(chat.queued_height(80) > 0);
+
+        // The model started on them: the app clears the queued display and
+        // echoes them as ordinary user messages.
+        chat.set_queued(Vec::new());
+        assert!(!chat.has_queued());
+        assert_eq!(chat.queued_height(80), 0);
+    }
+
+    #[test]
+    fn queued_block_reserves_its_own_rows_in_the_stream_band() {
+        // The queued rows are counted in `streaming_height`, which is what the
+        // band arbiter reads — so they are reserved, not painted over the reply.
+        let mut chat = Chat::new();
+        let base = chat.streaming_height(80);
+        chat.set_queued(vec!["a".into(), "b".into()]);
+        let with_queue = chat.streaming_height(80);
+        assert_eq!(
+            with_queue,
+            base + chat.queued_height(80),
+            "queued rows must be added to the reserved stream-band height"
         );
     }
 }

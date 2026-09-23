@@ -980,6 +980,21 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
           flush_stream_messages()
           {:cancelled, %{content: partial_text(session_id)}}
 
+        {:llm_stream_send_now} ->
+          # Send-now: the user sent a message mid-generation. Kill the stream
+          # like an interrupt and keep the partial text — but the turn is NOT
+          # cancelled. `handle_result({:send_now, _})` commits the partial and
+          # continues, so the very next iteration folds in the queued steer.
+          Logger.info(
+            "[stream] Send-now — pausing in-flight stream for session:#{session_id} to read a new message"
+          )
+
+          Process.unlink(watchdog)
+          Process.exit(watchdog, :normal)
+          Task.shutdown(stream_task, :brutal_kill)
+          flush_stream_messages()
+          {:send_now, %{content: partial_text(session_id)}}
+
         {:llm_idle_timeout, elapsed_ms} ->
           # Watchdog detected idle connection — kill the stream.
           #
@@ -1052,6 +1067,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     # so it can never leak into the Loop process mailbox as an unexpected info.
     receive do
       {:llm_stream_cancelled} -> :ok
+      {:llm_stream_send_now} -> :ok
     after
       0 -> :ok
     end
@@ -1096,9 +1112,16 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         ArgumentError -> false
       end
 
+    # Send-now: the user sent a message that must be read now. Cut the stream
+    # like an interrupt — the partial text is preserved and committed — so the
+    # model is not left finishing a plan the user just redirected. Unlike a
+    # cancel this does NOT end the turn: the next iteration folds in the steer.
+    send_now? = OptimalSystemAgent.Agent.Loop.SendNow.yield?(session_id)
+
     cond do
       not Process.alive?(stream_task.pid) -> :ok
       cancelled? -> send(owner, {:llm_stream_cancelled})
+      send_now? -> send(owner, {:llm_stream_send_now})
       true -> cancel_watch_loop(session_id, stream_task, owner)
     end
   end

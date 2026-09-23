@@ -257,6 +257,24 @@ defmodule OptimalSystemAgent.Agent.RunStore do
   end
 
   @doc """
+  Re-mark a running foreground run as a background one.
+
+  Used by send-now (`Agent.Loop.SendNow`): when the user's new message moves a
+  foreground `delegate` out of the parent's turn, the run is from then on a
+  detached run in every sense the rest of the system checks — an ordinary
+  interrupt (`Loop.cancel/2`) skips it, exactly as it skips a run that was
+  launched with `background: true`. A no-op for unknown or finished runs.
+  """
+  @spec mark_background(String.t()) :: :ok
+  def mark_background(agent_id) when is_binary(agent_id) do
+    update(agent_id, fn run ->
+      if Map.get(run, :status) == :running, do: Map.put(run, :background, true), else: run
+    end)
+
+    :ok
+  end
+
+  @doc """
   The honest answer to "is this agent alive?".
 
   Every liveness question in the product was previously answered from a STORED

@@ -834,6 +834,38 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
     end
   end
 
+  # ── POST /sessions/:id/send-now ────────────────────────────────────
+  #
+  # Send-now (Claude Code 2.1.268/2.1.275 parity): deliver the user's queued
+  # message(s) into the RUNNING turn AND interrupt its current step so they are
+  # read now, not after the current tools finish. Still-running tools move to
+  # the background (their results arrive later as notifications) rather than
+  # being cancelled. Body: { "messages": ["...", ...] } or { "text": "..." }.
+  post "/:id/send-now" do
+    session_id = conn.params["id"]
+
+    texts =
+      case conn.body_params do
+        %{"messages" => list} when is_list(list) -> Enum.filter(list, &is_binary/1)
+        %{"text" => t} when is_binary(t) -> [t]
+        %{"message" => t} when is_binary(t) -> [t]
+        _ -> []
+      end
+      |> Enum.reject(&(String.trim(&1) == ""))
+
+    cond do
+      texts == [] ->
+        json_error(conn, 400, "invalid_request", "messages is required")
+
+      not SessionManager.live_session?(session_id) ->
+        json_error(conn, 404, "session_not_found", "Session #{session_id} not found")
+
+      true ->
+        :ok = SessionManager.send_now(session_id, texts)
+        json(conn, 202, %{status: "sent_now", session_id: session_id, count: length(texts)})
+    end
+  end
+
   # ── POST /sessions/:id/survey/answer ──────────────────────────────
 
   post "/:id/survey/answer" do

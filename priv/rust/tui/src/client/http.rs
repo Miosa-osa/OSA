@@ -874,6 +874,21 @@ impl ApiClient {
         Ok(())
     }
 
+    /// POST /api/v1/sessions/:id/send-now — deliver every queued message into
+    /// the RUNNING turn AND interrupt its current step so they are read now.
+    /// Still-running tools move to the background (their results arrive later as
+    /// notifications) rather than being cancelled. One request for all messages
+    /// so the backend queues them in order atomically.
+    pub async fn send_now(&self, id: &str, messages: &[String]) -> Result<()> {
+        let _ = self
+            .post(
+                &format!("/api/v1/sessions/{}/send-now", id),
+                &serde_json::json!({ "messages": messages }),
+            )
+            .await?;
+        Ok(())
+    }
+
     // -- Survey --
 
     /// POST /api/v1/sessions/:id/survey/answer

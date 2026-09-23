@@ -36,6 +36,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
   """
 
   alias OptimalSystemAgent.Agent.Cancellation
+  alias OptimalSystemAgent.Agent.Loop.SendNow
   alias OptimalSystemAgent.Agent.Loop.ToolError
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
   alias OptimalSystemAgent.Tools.ConflictScope
@@ -114,6 +115,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
       end)
 
     _ = maybe_record_step_snapshot(ordered, state)
+    SendNow.forget(Map.get(state, :session_id), tool_calls)
     ordered
   end
 
@@ -444,57 +446,72 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
     tool_calls
     |> Enum.chunk_every(max_conc)
     |> Enum.flat_map(fn chunk ->
-      if cancelled?(sid) do
-        Enum.map(chunk, fn tc -> {tc, interrupted_result(tc)} end)
-      else
-        # Carry the session's cwd ACROSS the process boundary.
-        #
-        # `Workspace.Cwd.get/0` reads the process dictionary, and a process
-        # dictionary does not propagate to a spawned Task. Every tool runs in
-        # one of these Tasks, so `shell_execute` — which defaults to
-        # `Cwd.get/0` — fell through to `original_cwd()`, the directory the
-        # BACKEND booted in, rather than the session's working_dir.
-        #
-        # Observed in a SWE-bench Pro run: `pwd` returned the backend's boot
-        # directory, so `git log` read OSA's own history instead of the task
-        # repo's. It only showed in 4 of 12 instances because a command that
-        # passes an explicit `cwd`, or that starts with its own `cd`, never
-        # consults the default and is unaffected.
-        #
-        # Read on the CALLER (which has the override) and re-publish inside the
-        # Task. Captured per batch rather than per call because it cannot change
-        # mid-batch — `apply_overrides/2` publishes it once at turn start.
-        caller_cwd = OptimalSystemAgent.Workspace.Cwd.get()
+      cond do
+        cancelled?(sid) ->
+          Enum.map(chunk, fn tc -> {tc, interrupted_result(tc)} end)
 
-        # Carry the SESSION IDENTITY across the same boundary, for the same
-        # reason. `Settings.current_session/0` reads `:osa_session_id` from the
-        # process dictionary; without this every tool Task resolved `:global`,
-        # so the session settings layer — which is where `/add-dir`'s
-        # `permissions.additionalDirectories` are stored — was invisible to the
-        # permission check that runs inside the Task. `/add-dir` therefore could
-        # not widen scope for the tool it was granted for.
-        tasks =
-          Enum.map(chunk, fn tc ->
-            {tc,
-             Task.Supervisor.async_nolink(supervisor, fn ->
-               OptimalSystemAgent.Workspace.Cwd.put_process_override(caller_cwd)
-               if is_binary(sid) and sid != "", do: Process.put(:osa_session_id, sid)
-               executor.execute_tool_call(tc, state)
-             end)}
-          end)
+        # Send-now landed before this chunk started: the user's message is
+        # read first, and these calls are not started behind its back. The
+        # model sees why and can re-issue whatever still applies.
+        SendNow.yield?(sid) ->
+          Enum.map(chunk, fn tc -> {tc, not_started_result(tc)} end)
 
-        deadline =
-          case timeout do
-            # No ceiling. A generic wrapper cannot know whether it is timing a
-            # 200 ms file read or a three-agent dispatch that legitimately runs
-            # for hours, so any single number it picks is wrong for one of them.
-            :infinity -> :infinity
-            ms -> System.monotonic_time(:millisecond) + ms
-          end
-
-        collect_tasks(tasks, [], sid, deadline, new_progress())
+        true ->
+          run_chunk(chunk, state, supervisor, executor, timeout, sid)
       end
     end)
+  end
+
+  defp run_chunk(chunk, state, supervisor, executor, timeout, sid) do
+    # Carry the session's cwd ACROSS the process boundary.
+    #
+    # `Workspace.Cwd.get/0` reads the process dictionary, and a process
+    # dictionary does not propagate to a spawned Task. Every tool runs in
+    # one of these Tasks, so `shell_execute` — which defaults to
+    # `Cwd.get/0` — fell through to `original_cwd()`, the directory the
+    # BACKEND booted in, rather than the session's working_dir.
+    #
+    # Observed in a SWE-bench Pro run: `pwd` returned the backend's boot
+    # directory, so `git log` read OSA's own history instead of the task
+    # repo's. It only showed in 4 of 12 instances because a command that
+    # passes an explicit `cwd`, or that starts with its own `cd`, never
+    # consults the default and is unaffected.
+    #
+    # Read on the CALLER (which has the override) and re-publish inside the
+    # Task. Captured per batch rather than per call because it cannot change
+    # mid-batch — `apply_overrides/2` publishes it once at turn start.
+    caller_cwd = OptimalSystemAgent.Workspace.Cwd.get()
+
+    # Carry the SESSION IDENTITY across the same boundary, for the same
+    # reason. `Settings.current_session/0` reads `:osa_session_id` from the
+    # process dictionary; without this every tool Task resolved `:global`,
+    # so the session settings layer — which is where `/add-dir`'s
+    # `permissions.additionalDirectories` are stored — was invisible to the
+    # permission check that runs inside the Task. `/add-dir` therefore could
+    # not widen scope for the tool it was granted for.
+    tasks =
+      Enum.map(chunk, fn tc ->
+        {tc,
+         Task.Supervisor.async_nolink(supervisor, fn ->
+           OptimalSystemAgent.Workspace.Cwd.put_process_override(caller_cwd)
+           if is_binary(sid) and sid != "", do: Process.put(:osa_session_id, sid)
+           result = executor.execute_tool_call(tc, state)
+           # Claim the result for the turn — or, if send-now already moved
+           # this call to the background, deliver it as a notification.
+           SendNow.task_finished(sid, tc, result)
+         end)}
+      end)
+
+    deadline =
+      case timeout do
+        # No ceiling. A generic wrapper cannot know whether it is timing a
+        # 200 ms file read or a three-agent dispatch that legitimately runs
+        # for hours, so any single number it picks is wrong for one of them.
+        :infinity -> :infinity
+        ms -> System.monotonic_time(:millisecond) + ms
+      end
+
+    collect_tasks(tasks, [], sid, deadline, new_progress())
   end
 
   # Serial barriers now also run inside a supervised task (one at a time) so an
@@ -563,6 +580,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
           end)
 
         Enum.reverse(done) ++ timed_out
+
+      # Send-now: the user sent a message that must be read NOW, not after
+      # the slowest tool in this batch. Nothing is killed — every call still
+      # running moves to the background and reports back as a notification.
+      SendNow.yield?(sid) ->
+        Enum.reverse(done) ++ SendNow.background_pending(pending, sid)
 
       true ->
         # Per-tool targeted cancel: a cancel aimed at ONE tool_call_id drops
@@ -704,6 +727,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestrator do
   # clear header instead of throwing the work away (Codex io_drain parity).
   defp interrupted_result(tc, partial) when is_binary(partial) do
     content = "Error: Interrupted by user (interrupted - partial output below)\n\n" <> partial
+    {%{role: "tool", tool_call_id: tc.id, name: tc.name, content: content}, content}
+  end
+
+  # A call that send-now kept from starting. Not an error in the tool — the
+  # user redirected the turn before it ran.
+  defp not_started_result(tc) do
+    content =
+      "Not run: the user sent a new message before this call started. " <>
+        "Read it first, then re-issue this call only if it still applies."
+
     {%{role: "tool", tool_call_id: tc.id, name: tc.name, content: content}, content}
   end
 

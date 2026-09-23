@@ -180,7 +180,7 @@ impl App {
                 // queue is empty, which after a clear would resurrect a prompt
                 // from the conversation the user just discarded.
                 self.message_queue.clear();
-                self.input.set_queued_items(Vec::new());
+                self.refresh_queue_display();
                 self.last_submitted_prompt = None;
                 // Per-turn accumulators. A clear that leaves these behind lets a
                 // half-streamed reply from the old context finish rendering into

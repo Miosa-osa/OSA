@@ -252,6 +252,13 @@ defmodule OptimalSystemAgent.Application do
     # (same concurrency rationale as :osa_cancel_flags). See Loop.Steer.
     :ets.new(:osa_steer_queue, [:named_table, :public, :ordered_set])
 
+    # Send-now (Agent.Loop.SendNow): {{:flag, session_id}, ts} raises a yield
+    # request for a running turn; {{:tool, session_id, tool_call_id}, claim}
+    # arbitrates, exactly once, whether a backgrounded tool's result goes back
+    # to the turn or out as a task notification. Public for the same reason as
+    # :osa_steer_queue — the HTTP process writes while the loop is mid-turn.
+    :ets.new(:osa_send_now, [:named_table, :public, :set])
+
     # WS6 — background task-notification queue. Rows {{session_id, seq}, map}
     # (ordered_set, FIFO drain). Drained beside the steer queue by a BUSY
     # ReactLoop, or by Loop.poke/1 as a synthetic turn when idle. Public for
