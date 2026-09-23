@@ -443,6 +443,11 @@ fn restore_terminal() -> Result<()> {
     // shell never inherits a terminal that keeps emitting CSI I / CSI O.
     let _ = execute!(stdout, DisableFocusChange);
     let _ = execute!(stdout, DisableBracketedPaste);
+    // Never hand the shell a hidden cursor. Ratatui's `Terminal` re-shows it
+    // on drop, but the panic hook runs before any unwinding (and a panic on
+    // another thread never drops the `Terminal` at all), so do it here, in the
+    // one function every exit path goes through.
+    let _ = execute!(stdout, crossterm::cursor::Show);
     disable_raw_mode()?;
     // Land the shell prompt below the inline viewport instead of over it.
     let _ = write!(stdout, "\r\n");
