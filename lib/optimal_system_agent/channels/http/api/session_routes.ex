@@ -1093,7 +1093,12 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
                   session_id: session_id,
                   provider: to_string(info.provider),
                   model: info.model,
-                  context_window: info.context_window
+                  context_window: info.context_window,
+                  thinking_can_disable:
+                    OptimalSystemAgent.Providers.ReasoningCapability.can_disable?(
+                      info.provider,
+                      info.model
+                    )
                 }
                 |> put_present(
                   "old_provider",
@@ -1136,7 +1141,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
                 session_id: session_id,
                 provider: provider,
                 model: model,
-                context_window: ctx
+                context_window: ctx,
+                thinking_can_disable:
+                  OptimalSystemAgent.Providers.ReasoningCapability.can_disable?(provider, model)
               })
 
             conn |> put_resp_content_type("application/json") |> send_resp(200, resp)

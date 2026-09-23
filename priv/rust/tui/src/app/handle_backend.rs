@@ -1490,6 +1490,9 @@ impl App {
                     if let Some(effort) = resp.effort.clone() {
                         self.status.set_effort(Some(effort));
                     }
+                    // A switch changes what "thinking off" can mean; absent on an
+                    // older backend ⇒ the control stays offered.
+                    self.thinking_can_disable = resp.thinking_can_disable.unwrap_or(true);
                     self.check_health();
                     let toast = model_switch_toast(&resp);
                     let level = if resp.compacted.unwrap_or(false) {

@@ -77,15 +77,42 @@ const LEVELS: [(ReasoningLevel, &str, &str); 6] = [
 
 pub struct ReasoningSelector {
     current: ReasoningLevel,
+    /// Index into `rows()`, not into `LEVELS`.
     cursor: usize,
+    /// `false` for a model that reasons regardless — the "Off" row is then
+    /// not offered at all (App::thinking_can_disable, from the backend catalog).
+    allow_off: bool,
 }
 
 impl ReasoningSelector {
     pub fn new(current: ReasoningLevel) -> Self {
-        Self {
-            cursor: current.index(),
+        Self::with_off(current, true)
+    }
+
+    /// A selector that offers "Off" only when the model can stop reasoning.
+    /// A `current` of `Off` on an always-on model seeds the cursor on the
+    /// first row that exists.
+    pub fn with_off(current: ReasoningLevel, allow_off: bool) -> Self {
+        let mut sel = Self {
             current,
-        }
+            cursor: 0,
+            allow_off,
+        };
+        sel.cursor = sel
+            .rows()
+            .iter()
+            .position(|(level, _, _)| *level == current)
+            .unwrap_or(0);
+        sel
+    }
+
+    /// The rows this selector offers, in display order.
+    fn rows(&self) -> Vec<(ReasoningLevel, &'static str, &'static str)> {
+        LEVELS
+            .iter()
+            .copied()
+            .filter(|(level, _, _)| self.allow_off || *level != ReasoningLevel::Off)
+            .collect()
     }
 
     // ── Key handling ─────────────────────────────────────────────────────────
@@ -100,15 +127,17 @@ impl ReasoningSelector {
 
         match key.code {
             KeyCode::Esc => Some(ReasoningAction::Cancel),
-            KeyCode::Enter => Some(ReasoningAction::Select(ReasoningLevel::from_index(
-                self.cursor,
-            ))),
+            KeyCode::Enter => self
+                .rows()
+                .get(self.cursor)
+                .map(|(level, _, _)| ReasoningAction::Select(*level)),
             KeyCode::Up | KeyCode::Char('k') => {
-                self.cursor = self.cursor.checked_sub(1).unwrap_or(LEVELS.len() - 1);
+                let n = self.rows().len();
+                self.cursor = self.cursor.checked_sub(1).unwrap_or(n - 1);
                 None
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.cursor = (self.cursor + 1) % LEVELS.len();
+                self.cursor = (self.cursor + 1) % self.rows().len();
                 None
             }
             _ => None,
@@ -165,7 +194,7 @@ impl ReasoningSelector {
         cy += 1;
 
         // Level rows
-        for (i, (level, label, desc)) in LEVELS.iter().enumerate() {
+        for (i, (level, label, desc)) in self.rows().iter().enumerate() {
             if cy >= inner.y + inner.height.saturating_sub(1) {
                 break;
             }
@@ -324,6 +353,59 @@ mod tests {
             Some(ReasoningAction::Cancel) => {}
             other => panic!("expected Cancel, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_always_on_model_is_never_offered_off() {
+        let mut sel = ReasoningSelector::with_off(ReasoningLevel::Off, false);
+        // Seeded on the first row that exists (Fast), not on a hidden Off.
+        match sel.handle_key(key(KeyCode::Enter)) {
+            Some(ReasoningAction::Select(got)) => assert_eq!(got, ReasoningLevel::Fast),
+            other => panic!("expected Select(Fast), got {other:?}"),
+        }
+        // Walking the whole ring in either direction never lands on Off.
+        for code in [KeyCode::Down, KeyCode::Up] {
+            let mut sel = ReasoningSelector::with_off(ReasoningLevel::Medium, false);
+            for _ in 0..12 {
+                sel.handle_key(key(code));
+                match sel.handle_key(key(KeyCode::Enter)) {
+                    Some(ReasoningAction::Select(got)) => {
+                        assert_ne!(got, ReasoningLevel::Off, "{code:?} reached Off")
+                    }
+                    other => panic!("expected a selection, got {other:?}"),
+                }
+            }
+        }
+        // And the drawn dialog has no Off row.
+        let sel = ReasoningSelector::with_off(ReasoningLevel::Medium, false);
+        let backend = ratatui::backend::TestBackend::new(60, 16);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| sel.draw(f, f.area())).unwrap();
+        let text: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(!text.contains("No extended thinking"), "{text}");
+        assert!(text.contains("Fast"), "{text}");
+    }
+
+    #[test]
+    fn a_model_that_can_stop_reasoning_still_offers_off() {
+        let sel = ReasoningSelector::with_off(ReasoningLevel::Off, true);
+        let backend = ratatui::backend::TestBackend::new(60, 16);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| sel.draw(f, f.area())).unwrap();
+        let text: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("No extended thinking"), "{text}");
     }
 
     #[test]

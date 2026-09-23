@@ -190,6 +190,11 @@ defmodule OptimalSystemAgent.Channels.HTTP do
         context_window: context_window,
         effort: effort,
         reasoning: reasoning,
+        thinking_can_disable:
+          OptimalSystemAgent.Providers.ReasoningCapability.can_disable?(
+            provider_atom,
+            model_name
+          ),
         # TUI presentation config from ~/.osa/config.toml [tui] (theme/verbosity).
         # This is the backend config surface the TUI reads at startup; the getters
         # fall back to the documented defaults ("dark" / "normal") when unset.
