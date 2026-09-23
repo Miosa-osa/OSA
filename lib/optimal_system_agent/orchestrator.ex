@@ -3135,10 +3135,11 @@ defmodule OptimalSystemAgent.Orchestrator do
   # Public only as a deterministic test seam (`@doc false`); not a stable API.
   @doc false
   def completion_summary(source) do
+    # First sentence of the first prose paragraph, clamped — a multi-paragraph
+    # reply must never stand in for the one-line summary. See `OneLineSummary`.
     source
     |> summary_source_text()
-    |> first_meaningful_line()
-    |> String.slice(0, @summary_max)
+    |> OptimalSystemAgent.Agent.OneLineSummary.from_text(@summary_max)
   rescue
     _ -> ""
   catch
@@ -3151,17 +3152,6 @@ defmodule OptimalSystemAgent.Orchestrator do
   defp summary_source_text(%{summary: s}) when is_binary(s), do: s
   defp summary_source_text(s) when is_binary(s), do: s
   defp summary_source_text(other), do: inspect(other)
-
-  # First non-blank line with interior runs of whitespace (including embedded
-  # newlines) collapsed to single spaces, so the panel always gets ONE clean line.
-  defp first_meaningful_line(text) do
-    text
-    |> String.split(~r/\r?\n/)
-    |> Enum.map(&String.trim/1)
-    |> Enum.find("", &(&1 != ""))
-    |> then(&Regex.replace(~r/\s+/, &1, " "))
-    |> String.trim()
-  end
 
   # Repo-relative paths a subagent modified inside its worktree.
   #

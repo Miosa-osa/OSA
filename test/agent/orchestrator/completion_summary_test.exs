@@ -58,6 +58,43 @@ defmodule OptimalSystemAgent.Agent.Orchestrator.CompletionSummaryTest do
       assert String.length(out) <= @summary_max
     end
 
+    test "a multi-paragraph reply cannot become the summary: first sentence only" do
+      reply = """
+      I refactored the parser into three modules and added regression tests. The old
+      single-file version had grown past 2,000 lines, which made every change risky.
+
+      ## Details
+
+      - `lexer.ex` now owns tokenisation.
+      - `parser.ex` builds the AST.
+      """
+
+      assert Orchestrator.completion_summary(%{summary: reply}) ==
+               "I refactored the parser into three modules and added regression tests."
+    end
+
+    test "one very long first line is clamped with an ellipsis, not cut mid-word silently" do
+      long = "Scanned " <> String.duplicate("module and ", 40) <> "found nothing"
+      out = Orchestrator.completion_summary(long)
+      assert String.length(out) <= @summary_max
+      assert String.ends_with?(out, "…")
+    end
+
+    test "markdown decoration does not stand in for the summary" do
+      assert Orchestrator.completion_summary(
+               "## Summary\n\nAll 12 tests pass. Nothing else changed."
+             ) ==
+               "All 12 tests pass."
+
+      assert Orchestrator.completion_summary("- Fixed the flaky test. Also bumped deps.") ==
+               "Fixed the flaky test."
+    end
+
+    test "abbreviations and version numbers do not end the sentence early" do
+      assert Orchestrator.completion_summary("Upgraded to v1.2.3 e.g. the new API. Done.") ==
+               "Upgraded to v1.2.3 e.g. the new API."
+    end
+
     test "is best-effort: pathological input never raises, yields a binary" do
       # Interior whitespace-only + control chars must not blow up the emit.
       assert Orchestrator.completion_summary("\t\t   \n   \n") == ""
