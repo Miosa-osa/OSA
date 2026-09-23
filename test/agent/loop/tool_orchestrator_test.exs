@@ -293,6 +293,89 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOrchestratorTest do
     end
   end
 
+  # ── shell_execute concurrency classification (real tool, WS-parallel) ──
+  #
+  # Uses the REAL `shell_execute` builtin (already registered via app boot —
+  # see the `setup` merge above) so the orchestrator's batching decision comes
+  # from `ShellExecute.ReadOnly.provably_read_only?/1`, not a test double.
+  # Only EXECUTION is stubbed (`EventExecutor`), so this proves the actual
+  # classifier drives actual concurrent dispatch, not just that a hand-written
+  # test tool can be batched.
+  describe "shell_execute concurrency (real tool)" do
+    test "two provably-read-only shell commands overlap in wall time, while a " <>
+           "write command in the same batch stays a serial barrier",
+         %{state: base_state, supervisor: supervisor} do
+      ref = make_ref()
+
+      state =
+        Map.merge(base_state, %{
+          test_pid: self(),
+          event_ref: ref,
+          delays: %{"r1" => 150, "r2" => 150}
+        })
+
+      tcs = [
+        %{id: "r1", name: "shell_execute", arguments: %{"command" => "cat file1.txt | grep foo"}},
+        %{id: "r2", name: "shell_execute", arguments: %{"command" => "git log -3"}},
+        %{id: "w1", name: "shell_execute", arguments: %{"command" => "rm -rf build"}}
+      ]
+
+      {elapsed_us, results} =
+        :timer.tc(fn ->
+          ToolOrchestrator.dispatch(tcs, state, executor: EventExecutor, supervisor: supervisor)
+        end)
+
+      events = collect_tool_events(ref, 6)
+
+      # r1 and r2 genuinely overlapped in wall time: r2 started before r1
+      # (150ms) finished.
+      assert event_index(events, :started, "r2") < event_index(events, :finished, "r1")
+
+      # w1 is NOT provably read-only (`rm`), so it is a barrier: it starts
+      # only once BOTH read-only calls have finished.
+      assert event_index(events, :finished, "r1") < event_index(events, :started, "w1")
+      assert event_index(events, :finished, "r2") < event_index(events, :started, "w1")
+
+      # Wall-clock corroboration: two OVERLAPPED 150ms reads plus a ~0ms write
+      # is far under the ~300ms a fully serial dispatch of the same three
+      # calls would take. Generous bound to avoid CI flakiness.
+      assert elapsed_us < 280_000,
+             "expected overlapped dispatch well under 280ms, got #{div(elapsed_us, 1000)}ms"
+
+      # Result ordering is unaffected by the parallel/serial split.
+      assert Enum.map(results, fn {tc, _r} -> tc.id end) == ["r1", "r2", "w1"]
+    end
+
+    test "a write command classifies as a barrier even mid-batch, in original position",
+         %{state: base_state, supervisor: supervisor} do
+      ref = make_ref()
+
+      state =
+        Map.merge(base_state, %{
+          test_pid: self(),
+          event_ref: ref,
+          delays: %{"r1" => 0, "r2" => 0, "r3" => 0}
+        })
+
+      tcs = [
+        %{id: "r1", name: "shell_execute", arguments: %{"command" => "ls -la"}},
+        %{id: "w1", name: "shell_execute", arguments: %{"command" => "sed -i s/a/b/ f.txt"}},
+        %{id: "r2", name: "shell_execute", arguments: %{"command" => "wc -l file.txt"}},
+        %{id: "r3", name: "shell_execute", arguments: %{"command" => "stat file.txt"}}
+      ]
+
+      ToolOrchestrator.dispatch(tcs, state, executor: EventExecutor, supervisor: supervisor)
+
+      events = collect_tool_events(ref, 8)
+
+      # r1 (before the barrier) drains before w1 starts...
+      assert event_index(events, :finished, "r1") < event_index(events, :started, "w1")
+      # ...and w1 finishes before either trailing read-only call starts.
+      assert event_index(events, :finished, "w1") < event_index(events, :started, "r2")
+      assert event_index(events, :finished, "w1") < event_index(events, :started, "r3")
+    end
+  end
+
   defp collect_tool_events(ref, count) do
     Enum.map(1..count, fn _ ->
       receive do

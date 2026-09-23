@@ -18,12 +18,14 @@ defmodule OptimalSystemAgent.Permissions.AutoClassifier do
 
   ## Two-stage decision (mirrors grok's fast-path → LLM ladder)
 
-    1. **FAST-PATH (no LLM, zero latency).** For shell commands, reuse the P0
-       structured `ShellExecute.Parser` to split the command into segments and
-       prove that *every* segment is a read-only / obviously-safe command with no
-       write redirect, no command substitution, and no filesystem-mutating head.
-       If proven safe → `:allow`. This handles the common `ls`/`cat`/`grep`/`git
-       status` case with no model call.
+    1. **FAST-PATH (no LLM, zero latency).** For shell commands, defer to
+       `ShellExecute.ReadOnly.provably_read_only?/1` — the SAME read-only
+       classifier `Agent.Loop.ToolOrchestrator` consults to decide whether a
+       `shell_execute` call may run concurrently with others. One classifier,
+       two consumers: a shell command proven safe to auto-allow here is, by
+       construction, also safe to run in parallel there. If proven safe →
+       `:allow`. This handles the common `ls`/`cat`/`grep`/`git status` case
+       with no model call.
 
     2. **LLM CLASSIFIER (only when the fast-path is inconclusive).** Ask a cheap
        model (temperature 0, tiny max_tokens, strict JSON verdict) whether the
@@ -66,33 +68,10 @@ defmodule OptimalSystemAgent.Permissions.AutoClassifier do
 
   require Logger
 
-  alias OptimalSystemAgent.Agent.Safety.CommandVariants
   alias OptimalSystemAgent.Agent.Safety.DangerousCommands
   alias OptimalSystemAgent.Agent.Safety.UntrustedContent
   alias OptimalSystemAgent.Providers.Registry, as: Providers
-  alias OptimalSystemAgent.Tools.Builtins.ShellExecute.Parser
-
-  # Command heads whose invocation is read-only regardless of arguments (no
-  # filesystem/system mutation). Conservative by design — anything not listed
-  # is treated as inconclusive (never auto-allowed by the fast-path).
-  @read_only_heads ~w(
-    ls pwd cat head tail wc echo printf grep egrep fgrep rg fd
-    which type file stat tree basename dirname realpath readlink strings
-    date whoami hostname uname nproc printenv true false test
-    sort uniq tr cut column comm diff cmp od xxd hexdump nl fold
-    df du ps free uptime id groups env
-  )
-
-  # `git` subcommands that only read repository state.
-  @git_read_only ~w(
-    status diff log show blame ls-files rev-parse describe merge-base
-    show-ref reflog shortlog cat-file for-each-ref whatchanged ls-tree
-    rev-list name-rev symbolic-ref var count-objects
-  )
-
-  # `find` primaries that mutate/execute — their presence disqualifies the
-  # fast-path (mirrors grok's find_is_read_only).
-  @find_mutating ~w(-delete -exec -execdir -ok -okdir -fprint -fprint0 -fprintf -fls)
+  alias OptimalSystemAgent.Tools.Builtins.ShellExecute.ReadOnly
 
   @type verdict :: :allow | :ask
 
@@ -170,93 +149,15 @@ defmodule OptimalSystemAgent.Permissions.AutoClassifier do
     end
   end
 
+  # Delegates entirely to `ShellExecute.ReadOnly` — see the module doc for why
+  # this must be the ONE place the read-only rule is written down. That
+  # module already fails closed on size bounds, command substitution,
+  # backgrounding, and per-segment classification, and never raises.
   defp shell_fast_path(command) when is_binary(command) and command != "" do
-    cond do
-      # The de-obfuscation pass has size and fan-out bounds. When it could not
-      # derive the COMPLETE variant set, "no dangerous variant matched" is not
-      # evidence of safety — it is evidence we stopped looking. A bound on a
-      # safety analysis has to fail closed, so an incompletely-analysed command
-      # is never auto-approved; it goes to the operator.
-      not CommandVariants.fully_analyzed?(command) ->
-        :inconclusive
-
-      # Command substitution / parameter expansion could hide an arbitrary write
-      # behind a read-looking head — never fast-allow.
-      String.contains?(command, "$(") or String.contains?(command, "`") or
-          String.contains?(command, "${") ->
-        :inconclusive
-
-      true ->
-        segments = Parser.segments(command)
-
-        cond do
-          segments == [] -> :inconclusive
-          write_redirect?(segments) -> :inconclusive
-          Enum.all?(segments, &segment_read_only?/1) -> :allow
-          true -> :inconclusive
-        end
-    end
-  rescue
-    e ->
-      Logger.warning(
-        "[auto_classifier] shell_fast_path failed, deferring to ask: #{Exception.message(e)}"
-      )
-
-      :inconclusive
-  catch
-    _, _ -> :inconclusive
+    if ReadOnly.provably_read_only?(command), do: :allow, else: :inconclusive
   end
 
   defp shell_fast_path(_), do: :inconclusive
-
-  # Any `>` / `>>` redirect writes a path — disqualify the whole command.
-  defp write_redirect?(segments) do
-    Enum.any?(segments, fn tokens ->
-      Enum.any?(tokens, fn
-        {:redir, op} -> op in [">", ">>"]
-        _ -> false
-      end)
-    end)
-  end
-
-  defp segment_read_only?(tokens) do
-    words = for {:word, w} <- tokens, do: unquote_word(w)
-
-    case words do
-      [] ->
-        false
-
-      [head_raw | rest] ->
-        head = head_raw |> String.replace(~r/^\\+/, "") |> Path.basename()
-        head_read_only?(head, rest)
-    end
-  end
-
-  defp head_read_only?("git", args), do: git_read_only?(args)
-  defp head_read_only?("find", args), do: not Enum.any?(args, &(&1 in @find_mutating))
-
-  defp head_read_only?("fdfind", args),
-    do: not Enum.any?(args, &(&1 in ["-x", "--exec", "-X", "--exec-batch"]))
-
-  # `sed -i` / `sed --in-place` edits files in place — not read-only.
-  defp head_read_only?("sed", args) do
-    not Enum.any?(args, fn a -> a == "-i" or String.starts_with?(a, "-i") or a == "--in-place" end)
-  end
-
-  defp head_read_only?("awk", args) do
-    # awk can write via its program text; only allow when nothing looks like a
-    # redirect/print-to-file directive. Conservative: any arg mentioning '>' defers.
-    not Enum.any?(args, &String.contains?(&1, ">"))
-  end
-
-  defp head_read_only?(head, _args), do: head in @read_only_heads
-
-  defp git_read_only?(args) do
-    case Enum.find(args, fn a -> not String.starts_with?(a, "-") end) do
-      nil -> false
-      sub -> sub in @git_read_only
-    end
-  end
 
   # ── Stage 2: LLM classifier (only when fast-path is inconclusive) ──────
 
@@ -554,10 +455,6 @@ defmodule OptimalSystemAgent.Permissions.AutoClassifier do
     do: Map.get(args, "command") || Map.get(args, "code")
 
   defp command_of(_), do: nil
-
-  # Strip a single matching pair of outer quotes (delegates to the Parser's
-  # unquote for consistency).
-  defp unquote_word(w), do: Parser.unquote_token(w)
 
   defp normalize(:allow), do: :allow
   defp normalize(true), do: :allow
