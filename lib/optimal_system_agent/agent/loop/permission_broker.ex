@@ -36,6 +36,16 @@ defmodule OptimalSystemAgent.Agent.Loop.PermissionBroker do
   @poll_interval_ms 150
   @default_timeout_ms 300_000
 
+  @doc """
+  How long `await/3` waits for a decision when no `:timeout` is given.
+
+  Carried on every `permission_required` event as `timeout_ms`, so the TUI can
+  count the prompt down instead of leaving the user to guess how long OSA will
+  wait on them.
+  """
+  @spec default_timeout_ms() :: pos_integer()
+  def default_timeout_ms, do: @default_timeout_ms
+
   @type decision :: %{
           decision:
             :allow_once | :allow_session | :allow_always | :deny | :deny_always | :clarify,

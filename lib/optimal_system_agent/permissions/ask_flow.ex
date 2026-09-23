@@ -244,7 +244,8 @@ defmodule OptimalSystemAgent.Permissions.AskFlow do
       new_content: nil,
       warning: nil,
       reason: reason,
-      suggestions: suggestions(tool_name, args)
+      suggestions: suggestions(tool_name, args),
+      timeout_ms: PermissionBroker.default_timeout_ms()
     }
 
     Phoenix.PubSub.broadcast(

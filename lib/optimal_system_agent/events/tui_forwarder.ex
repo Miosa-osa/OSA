@@ -55,6 +55,7 @@ defmodule OptimalSystemAgent.Events.TuiForwarder do
     session_title
     model_switched
     phase_changed
+    tool_call_stalled
   )a
 
   def start_link(_opts \\ []) do
