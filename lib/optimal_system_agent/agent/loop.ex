@@ -2159,6 +2159,21 @@ defmodule OptimalSystemAgent.Agent.Loop do
               # Same turn, same reasoning as handle_call({:process, _}) — see
               # `during_turn/1`: this callback blocks in LLMClient exactly like a real
               # turn does, so exit trapping must be off for its duration.
+              #
+              # This poke path is the ONE re-entry into ReactLoop.run/1 that does
+              # not go through TurnPipeline.run/3, which is where
+              # `clear_message_caches/0` normally runs (step 5 of the gate
+              # pipeline). Without it here, `ReactLoop.cached_context/1` sees the
+              # SAME `{plan_mode, session_id, memory_version, channel}` cache key
+              # as the last real turn and returns that turn's frozen system
+              # message verbatim — so a background-task synthetic turn silently
+              # served a prompt built before whatever changed since (a
+              # `/lean-prompt` or `~/.osa/settings.json` edit, world state, git
+              # info, memory) for as long as poke, not a fresh external message,
+              # kept driving the session. `clear_message_caches/0` is exactly what
+              # a real turn does at this point; a synthetic turn deserves the same
+              # guarantee.
+              TurnPipeline.clear_message_caches()
               {:reply, _reply, final_state} = during_turn(fn -> run_and_reply(next_state) end)
               {:noreply, final_state}
 

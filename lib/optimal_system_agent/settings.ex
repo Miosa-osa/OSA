@@ -376,33 +376,68 @@ defmodule OptimalSystemAgent.Settings do
   needs no workspace trust — the safe path is the default one, not the one that
   requires remembering a flag.
 
+  ## The home-directory collision
+
+  When the resolved cwd IS the user's home directory (a session launched from
+  `~`, or `Workspace.Cwd.get/0` falling through to it), `<cwd>/.osa/settings.json`
+  and `~/.osa/settings.json` are the SAME file on disk — the "project" layer and
+  the "user" layer are two reads of one path. Gating that read behind
+  `project_trusted?/0` would print "this workspace has not been trusted yet"
+  about the operator's own machine-authored settings file, which is simply
+  false: nothing here was cloned. `Workspace.ProjectResource.machine_authored?/1`
+  is the one already-correct answer to "is this path actually the user's own,
+  or something a checked-out repository supplied" — every other project-scoped
+  loader (skills, agents, MCP config) already routes through it via `admit/3`.
+  `trusted_layer/1` predates that module (it is the FIRST hand-rolled gate
+  `ProjectResource`'s own moduledoc credits as the reason the shared boundary
+  was built) and was never migrated to consult it, so it kept classifying by
+  layer NAME ("project" = gated) instead of by where the file actually lives —
+  the exact drift `ProjectResource` exists to prevent.
+
   Every security-relevant read of the cascade goes through here (and
   `get_trusted/2` / `merged_trusted/0`) rather than `layer/1`.
   """
   @spec trusted_layer(atom()) :: map()
   def trusted_layer(source) when source in [:project, :local] do
-    if project_trusted?() do
-      layer(source)
-    else
-      case layer(source) do
-        empty when empty == %{} ->
-          %{}
+    cond do
+      machine_authored_layer?(source) ->
+        layer(source)
 
-        # An unparseable workspace file is withheld like any other, but its
-        # MARKER still propagates: `merged_trusted/0` must keep failing CLOSED
-        # (permission_mode pinned to "ask") rather than reading a file it
-        # cannot parse as "no restrictions" merely because the workspace is
-        # untrusted. Withholding is not the same as absence.
-        %{@unparseable_key => _} = marker ->
-          Map.take(marker, [@unparseable_key])
+      project_trusted?() ->
+        layer(source)
 
-        _ ->
-          warn_workspace_withheld(source)
-      end
+      true ->
+        case layer(source) do
+          empty when empty == %{} ->
+            %{}
+
+          # An unparseable workspace file is withheld like any other, but its
+          # MARKER still propagates: `merged_trusted/0` must keep failing CLOSED
+          # (permission_mode pinned to "ask") rather than reading a file it
+          # cannot parse as "no restrictions" merely because the workspace is
+          # untrusted. Withholding is not the same as absence.
+          %{@unparseable_key => _} = marker ->
+            Map.take(marker, [@unparseable_key])
+
+          _ ->
+            warn_workspace_withheld(source)
+        end
     end
   end
 
   def trusted_layer(source), do: layer(source)
+
+  # True when the :project/:local file for the CURRENT cwd resolves to a path
+  # under one of the operator's own config directories (`~/.osa`, …) rather
+  # than under a checked-out repository — the home-directory collision
+  # described above. Fails closed: an unresolvable path is never treated as
+  # machine-authored.
+  defp machine_authored_layer?(source) do
+    path = if source == :local, do: local_settings_path(), else: project_settings_path()
+    OptimalSystemAgent.Workspace.ProjectResource.machine_authored?(path)
+  rescue
+    _ -> false
+  end
 
   @doc """
   `merged/0` with the project layer gated behind workspace trust.
