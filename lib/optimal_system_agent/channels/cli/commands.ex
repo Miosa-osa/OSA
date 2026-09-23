@@ -40,8 +40,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "model" => {"Choose a provider, then one of its models", :cmd_model},
     "system" =>
       {"Inject into or replace the system prompt for the current model (persists)", :cmd_system},
-    "models" =>
-      {"Pick a model from the current provider", :cmd_models},
+    "models" => {"Pick a model from the current provider", :cmd_models},
     "uncensored" =>
       {"Hop the current model to its unfiltered twin (off to return)", :cmd_uncensored},
     "jailbreak" =>
