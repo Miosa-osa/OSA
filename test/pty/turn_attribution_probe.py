@@ -118,7 +118,10 @@ def run(base_url: str, binary: str | None = None) -> tuple[dict[str, str], list[
             s = visible(term)
             screens["1 model wait"] = s
             expect("model", s, rf"[Ww]aiting for {MODEL}", "model wait is not labelled with the model")
-            expect("model", s, rf"{MODEL}\s*·\s*[2-9]s", "model wait has no live timer")
+            # The first wait is the whole turn so far: the turn timer counts it,
+            # once. (A later wait gets its own round clock — see 3b.)
+            expect("model", s, r"\([2-9]s · esc to interrupt", "model wait has no live timer")
+            expect_not("model", s, rf"{MODEL}\s*·\s*\d+s", "first model wait prints its clock twice")
 
             # --- 1b. long streamed reasoning ----------------------------
             # Ollama Cloud streams reasoning as small `thinking_delta` chunks.
@@ -226,6 +229,8 @@ def run(base_url: str, binary: str | None = None) -> tuple[dict[str, str], list[
             s = visible(term)
             screens["3b answered"] = s
             expect_not("approval", s, r"Waiting for you\b", "approval banner survived the answer")
+            # A wait after a tool round has its own clock, distinct from the turn's.
+            expect("model", s, rf"Waiting for {MODEL} · \d+s", "post-tool model wait has no round clock")
             # The finished cell says whose time its duration was.
             expect("approval", s, r"Edit.*waiting for your approval", "finished edit does not attribute its approval wait")
 
@@ -253,6 +258,8 @@ def run(base_url: str, binary: str | None = None) -> tuple[dict[str, str], list[
             screens["3d approval expired"] = s
             expect_not("expiry", s, r"Waiting for you\b", "expired approval is still on screen")
             expect("expiry", s, r"approval timed out", "expiry was not said on screen")
+            expect("expiry", s, r"Bash\(rm -rf build\) · not run", "expired call's row does not say it will not run")
+            expect_not("expiry", s, r"Bash\(rm -rf build\) · running", "expired call still shown as running")
             # The backend's own answer to the timeout: the call ends blocked.
             tool_end("shell_execute", "x1", "rm -rf build", 2_100)
             term.pump(0.5)
@@ -284,6 +291,16 @@ def run(base_url: str, binary: str | None = None) -> tuple[dict[str, str], list[
     # Per state: the composer's key-hint divider and the status bar. (The
     # prompt row itself reads `◈ ❯` while a turn runs, which the idle-anchored
     # `composer` marker deliberately does not match.)
+    # One place per fact. The finished-thought duration lives on the thinking
+    # box's summary row; a model-wait round clock must never just repeat the
+    # turn timer next to it.
+    for label, s in screens.items():
+        n = len(re.findall(r"[Tt]hought for \d", s))
+        if n > 1:
+            problems.append(f"[dup] {label}: 'thought for' shown {n} times")
+        for m in re.finditer(r"Waiting for \S+ · (\S+) \((\S+) ·", s):
+            if m.group(1) == m.group(2):
+                problems.append(f"[dup] {label}: model wait and turn timer both read {m.group(1)}")
     for label, s in screens.items():
         for name in ("composer_hints", "status"):
             n = sum(1 for ln in s.split("\n") if SINGLETON_BANDS[name].search(ln))
