@@ -1217,12 +1217,19 @@ defmodule OptimalSystemAgent.Providers.SilentCapabilityLossTest do
       # sees a response, so it has no usage to attribute and no scope to attach
       # it to. The provider module downstream of it is the one that must observe.
       #
-      #   cache_attribution.ex — the attributor itself.
-      #   prompt_cache.ex      — restructures the message list; the transport
-      #                          that sends it (openai_compat.ex) observes.
-      #   registry.ex          — decides whether marked blocks survive to the
-      #                          wire; same reasoning.
-      exempt = ~w(cache_attribution.ex prompt_cache.ex registry.ex)
+      #   cache_attribution.ex   — the attributor itself.
+      #   prompt_cache.ex        — restructures the message list; the transport
+      #                            that sends it (openai_compat.ex) observes.
+      #   registry.ex            — decides whether marked blocks survive to the
+      #                            wire; same reasoning.
+      #   history_sanitizer.ex   — repairs transcript corruption before every
+      #                            request; mentions `cache_control` only to
+      #                            READ an existing marker (never merge a plain
+      #                            text block across one — see its moduledoc),
+      #                            never to place one. It runs before any
+      #                            provider-specific cache placement and never
+      #                            sees a response either.
+      exempt = ~w(cache_attribution.ex prompt_cache.ex registry.ex history_sanitizer.ex)
 
       lib = Path.join(File.cwd!(), "lib/optimal_system_agent/providers")
 

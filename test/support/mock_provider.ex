@@ -40,20 +40,46 @@ defmodule OptimalSystemAgent.Test.MockProvider do
   timeout/cancel robustness tests) without a real network dependency.
   """
   @impl true
-  def chat(_messages, opts) do
+  def chat(messages, opts) do
     maybe_sleep()
     bump_round_trips()
     record_opts(opts)
 
-    result =
-      case forced_final_text() do
-        nil -> chat_scripted()
-        text -> {:ok, %{content: text, tool_calls: []}}
-      end
+    case forced_error(messages) do
+      nil ->
+        result =
+          case forced_final_text() do
+            nil -> chat_scripted()
+            text -> {:ok, %{content: text, tool_calls: []}}
+          end
 
-    case with_forced_usage(result) do
-      {:ok, resp} -> {:ok, with_forced_stop_reason(resp)}
-      other -> other
+        case with_forced_usage(result) do
+          {:ok, resp} -> {:ok, with_forced_stop_reason(resp)}
+          other -> other
+        end
+
+      reason ->
+        {:error, reason}
+    end
+  end
+
+  # Force `chat/2`/`chat_stream/3` to fail instead of answering. Opt-in via
+  # `:mock_provider_error`, set to either:
+  #
+  #   * a fixed reason (string or `{:http_error, status, msg}` etc.) — every
+  #     call fails identically, or
+  #   * a 1-arity function receiving the exact `messages` the call was about
+  #     to send — returns the reason to fail with, or `nil` to let this call
+  #     through and answer normally. Lets a test simulate a condition that
+  #     depends on what OSA actually sent (e.g. "fail until the oversized
+  #     message has been trimmed") without a live provider.
+  #
+  # Unset (the default) keeps every existing test's behavior unchanged.
+  defp forced_error(messages) do
+    case Application.get_env(:optimal_system_agent, :mock_provider_error) do
+      nil -> nil
+      fun when is_function(fun, 1) -> fun.(messages)
+      reason -> reason
     end
   end
 
@@ -191,7 +217,7 @@ defmodule OptimalSystemAgent.Test.MockProvider do
   invokes `{:done, result}` so the Loop's process-dictionary capture works.
   """
   @impl true
-  def chat_stream(_messages, callback, opts) do
+  def chat_stream(messages, callback, opts) do
     maybe_sleep()
     bump_round_trips()
     # Recorded here as well as in `chat/2`: the agent loop takes the STREAMING
@@ -200,23 +226,29 @@ defmodule OptimalSystemAgent.Test.MockProvider do
     record_opts(opts)
     run_after_call_once()
 
-    case forced_final_text() do
+    case forced_error(messages) do
       nil ->
-        chat_stream_scripted(callback)
+        case forced_final_text() do
+          nil ->
+            chat_stream_scripted(callback)
 
-      text ->
-        # `""` means "finish the turn with NO final text" — the silent-child
-        # case the delegation result-recovery path exists for.
-        if text != "", do: callback.({:text_delta, text})
+          text ->
+            # `""` means "finish the turn with NO final text" — the
+            # silent-child case the delegation result-recovery path exists for.
+            if text != "", do: callback.({:text_delta, text})
 
-        result =
-          %{content: text, tool_calls: []}
-          |> with_forced_tool_calls()
-          |> with_forced_stop_reason()
-          |> with_forced_stream_incomplete()
+            result =
+              %{content: text, tool_calls: []}
+              |> with_forced_tool_calls()
+              |> with_forced_stop_reason()
+              |> with_forced_stream_incomplete()
 
-        callback.({:done, result})
-        :ok
+            callback.({:done, result})
+            :ok
+        end
+
+      reason ->
+        {:error, reason}
     end
   end
 

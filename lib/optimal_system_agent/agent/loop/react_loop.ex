@@ -2190,20 +2190,50 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       run(state)
     else
       if context_overflow?(reason_str) do
-        Logger.error("Context overflow after 3 recovery attempts (iteration #{state.iteration})")
+        # Last resort, one shot only: `collapse/2` and full compaction above
+        # have both already failed 3 times, which only happens when the
+        # overflow survives everything that can be dropped or summarized —
+        # i.e. the single latest user message is, on its own, too large.
+        # Guarded by `latest_message_trimmed` so a turn can never attempt this
+        # twice (a repaired message that STILL overflows has a different
+        # problem, and re-trimming an already-trimmed excerpt would eat the
+        # excerpt itself).
+        trimmed =
+          if state.latest_message_trimmed do
+            :error
+          else
+            ContextCollapse.trim_oversized_latest_message(
+              state.messages,
+              OptimalSystemAgent.Agent.Loop.ContextWindow.resolve(state),
+              state.session_id
+            )
+          end
 
-        Observability.emit(
-          :system_event,
-          %{event: :error, kind: :context_overflow, iteration: state.iteration},
-          state,
-          source: "agent.react_loop"
-        )
+        case trimmed do
+          {:ok, trimmed_messages} ->
+            state
+            |> Map.put(:messages, trimmed_messages)
+            |> Map.put(:latest_message_trimmed, true)
+            |> run()
 
-        TerminalSource.halt(
-          "I've exceeded the context window. Try breaking your request into smaller parts.",
-          state,
-          :error
-        )
+          :error ->
+            Logger.error(
+              "Context overflow after 3 recovery attempts (iteration #{state.iteration})"
+            )
+
+            Observability.emit(
+              :system_event,
+              %{event: :error, kind: :context_overflow, iteration: state.iteration},
+              state,
+              source: "agent.react_loop"
+            )
+
+            TerminalSource.halt(
+              "I've exceeded the context window. Try breaking your request into smaller parts.",
+              state,
+              :error
+            )
+        end
       else
         idle_attempt = Map.get(state, :idle_timeout_retries, 0) + 1
 
@@ -3292,69 +3322,21 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # that owns it, not appended at the end: Anthropic requires the `tool_result`
   # blocks to be in the message directly following their `tool_use`, so a tail
   # append would trade one invalid transcript for another.
+  #
+  # Delegates the scan/insert to `Providers.HistorySanitizer` (shared with the
+  # pre-flight/one-shot-repair call sites — same orphan definition, same
+  # insert-immediately-after placement) and supplies this call site's own
+  # placeholder wording, distinct from the sanitizer's generic default and
+  # from `Loop.init/1`'s crash-restore wording.
   defp fill_orphaned_tool_results(messages) do
-    answered = answered_tool_ids(messages)
+    {messages, filled_any?} =
+      OptimalSystemAgent.Providers.HistorySanitizer.fill_missing_tool_results(
+        messages,
+        "Interrupted by user"
+      )
 
-    {reversed, filled_any?} =
-      Enum.reduce(messages, {[], false}, fn msg, {acc, filled?} ->
-        case orphaned_tool_call_ids(msg, answered) do
-          [] ->
-            {[msg | acc], filled?}
-
-          ids ->
-            results =
-              Enum.map(ids, fn id ->
-                %{role: "tool", tool_call_id: id, content: "Interrupted by user"}
-              end)
-
-            # `acc` is reversed, so the results must be pushed in reverse order
-            # to land after `msg` in the restored list.
-            {Enum.reverse(results) ++ [msg | acc], true}
-        end
-      end)
-
-    messages = Enum.reverse(reversed)
     {messages, filled_any? or trailing_interrupted_tool?(messages)}
   end
-
-  # Ids of every tool call in `msg` that no `tool` message answers. Tolerates
-  # both atom- and string-keyed messages (checkpoint restore decodes to strings)
-  # and tool calls missing an id (nothing to answer — skipped).
-  defp orphaned_tool_call_ids(msg, answered) do
-    case msg_role(msg) do
-      "assistant" ->
-        msg
-        |> tool_calls_of()
-        |> Enum.map(&tool_call_id/1)
-        |> Enum.reject(&(is_nil(&1) or MapSet.member?(answered, &1)))
-        |> Enum.uniq()
-
-      _ ->
-        []
-    end
-  end
-
-  defp answered_tool_ids(messages) do
-    for msg <- messages,
-        msg_role(msg) == "tool",
-        id = Map.get(msg, :tool_call_id) || Map.get(msg, "tool_call_id"),
-        not is_nil(id),
-        into: MapSet.new(),
-        do: id
-  end
-
-  defp msg_role(msg) when is_map(msg), do: Map.get(msg, :role) || Map.get(msg, "role")
-  defp msg_role(_), do: nil
-
-  defp tool_calls_of(msg) do
-    case Map.get(msg, :tool_calls) || Map.get(msg, "tool_calls") do
-      list when is_list(list) -> list
-      _ -> []
-    end
-  end
-
-  defp tool_call_id(tc) when is_map(tc), do: Map.get(tc, :id) || Map.get(tc, "id")
-  defp tool_call_id(_), do: nil
 
   # True when the tool batch itself was killed (ToolOrchestrator appended
   # "Error: Interrupted by user" results) — the marker should then say

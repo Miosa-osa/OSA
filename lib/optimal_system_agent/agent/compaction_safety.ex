@@ -43,6 +43,7 @@ defmodule OptimalSystemAgent.Agent.CompactionSafety do
   alias OptimalSystemAgent.Shell.BackgroundManager
   alias OptimalSystemAgent.Agent.RunStore
   alias OptimalSystemAgent.Agent.Tasks
+  alias OptimalSystemAgent.Utils.Text
 
   # Model-facing poll/cancel tool names for running sub-agents. Sourced from the
   # tool constants so a rename cannot silently point the model at a dead name.
@@ -164,17 +165,28 @@ defmodule OptimalSystemAgent.Agent.CompactionSafety do
 
   Sections, in order (empty sections omitted):
 
-    * `## Running Background Tasks` — live `Shell.BackgroundManager` commands
-    * `## TODO List`               — actionable `Agent.Tasks` items
-    * `## Running Subagents`        — `Agent.RunStore` runs still `:running`
+    * `## Running Background Tasks`  — live `Shell.BackgroundManager` commands
+    * `## TODO List`                 — actionable `Agent.Tasks` items
+    * `## Running Subagents`         — `Agent.RunStore` runs still `:running`
+    * `## Finished Subagents...`     — runs that already FINISHED but whose
+      report never appears in `kept_messages` (see `section_running_subagents/2`)
+
+  `kept_messages` is the message list that will actually remain in context
+  after compaction (the caller's `final_messages`/`recent` slice, BEFORE this
+  reminder is appended) — it is how the finished-but-unread section tells
+  "already delivered" apart from "about to disappear". Defaults to `[]`,
+  which degrades to "every finished run is unread" — always correct, just
+  possibly redundant, so existing callers that have not been updated to pass
+  it still get a safe (if noisier) reminder rather than silently losing this
+  section.
   """
-  @spec active_agent_reminder(String.t() | nil) :: String.t() | nil
-  def active_agent_reminder(session_id) do
+  @spec active_agent_reminder(String.t() | nil, [map()]) :: String.t() | nil
+  def active_agent_reminder(session_id, kept_messages \\ []) do
     sections =
       [
         section_background_tasks(session_id),
         section_todo_list(session_id),
-        section_running_subagents(session_id)
+        section_running_subagents(session_id, kept_messages)
       ]
       |> Enum.reject(&is_nil/1)
 
@@ -186,13 +198,13 @@ defmodule OptimalSystemAgent.Agent.CompactionSafety do
   end
 
   @doc """
-  Same as `active_agent_reminder/1` but wrapped as a `role: "system"` message
+  Same as `active_agent_reminder/2` but wrapped as a `role: "system"` message
   map ready to append to the compacted message list. Returns `nil` when there is
   nothing active to remind about.
   """
-  @spec build_reminder_message(String.t() | nil) :: map() | nil
-  def build_reminder_message(session_id) do
-    case active_agent_reminder(session_id) do
+  @spec build_reminder_message(String.t() | nil, [map()]) :: map() | nil
+  def build_reminder_message(session_id, kept_messages \\ []) do
+    case active_agent_reminder(session_id, kept_messages) do
       nil -> nil
       body -> %{role: "system", content: body}
     end
@@ -290,27 +302,28 @@ defmodule OptimalSystemAgent.Agent.CompactionSafety do
 
   defp section_todo_list(_), do: nil
 
-  defp section_running_subagents(session_id) do
-    runs =
-      try do
-        RunStore.list(status: :running)
-      rescue
-        _ -> []
-      catch
-        _, _ -> []
-      end
+  # Cap on the "finished, report unread" list — a long-lived session can
+  # accumulate far more terminal `RunStore` rows than are worth restating in
+  # one reminder; the newest ones are what the model is most likely to still
+  # need.
+  @max_finished_unread 10
 
-    runs = if is_list(runs), do: runs, else: []
+  defp section_running_subagents(session_id, kept_messages) do
+    [
+      section_still_running(session_id),
+      section_finished_unread(session_id, kept_messages)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> case do
+      [] -> nil
+      blocks -> Enum.join(blocks, "\n\n")
+    end
+  end
 
+  defp section_still_running(session_id) do
     runs =
-      if is_binary(session_id) do
-        Enum.filter(runs, fn r ->
-          parent = Map.get(r, :parent_session_id)
-          is_nil(parent) or parent == session_id
-        end)
-      else
-        runs
-      end
+      safe_run_list(status: :running)
+      |> filter_by_parent(session_id)
 
     case runs do
       [] ->
@@ -326,6 +339,112 @@ defmodule OptimalSystemAgent.Agent.CompactionSafety do
           Enum.join(lines, "\n")
     end
   end
+
+  # Subagents that already reached a TERMINAL status but whose report is not
+  # in `kept_messages` — the slice that survives THIS compaction. Compaction
+  # drops or summarizes everything else; a finished run's report that never
+  # made it into that surviving slice is about to become invisible, exactly
+  # like the still-running case above, except the model has no way to learn
+  # it needs to look — there is no `:running` row telling it to poll.
+  #
+  # "Unread" is approximated by absence: no message in `kept_messages`
+  # mentions the run's `agent_id` anywhere (content or tool_calls). Ids are
+  # unique per-run tokens, so a false positive (something else coincidentally
+  # containing the id) is not a realistic concern; a false negative (the
+  # report was read but happened to also be dropped from `kept_messages` for
+  # unrelated reasons) only costs a redundant reminder line, never a lost one.
+  defp section_finished_unread(session_id, kept_messages) do
+    runs =
+      [:completed, :failed, :cancelled]
+      |> Enum.flat_map(&safe_run_list(status: &1))
+      |> filter_by_parent(session_id)
+      |> Enum.reject(&agent_id_mentioned?(Map.get(&1, :agent_id), kept_messages))
+      |> Enum.sort_by(fn r -> completed_at_unix(Map.get(r, :completed_at)) end, :desc)
+      |> Enum.take(@max_finished_unread)
+
+    case runs do
+      [] ->
+        nil
+
+      list ->
+        lines = Enum.map(list, &format_finished_subagent_line/1)
+
+        "## Finished Subagents (report not yet retrieved)\n" <>
+          "These subagents FINISHED, but their report has not appeared anywhere in your " <>
+          "current context — it will be lost once this compaction completes unless you " <>
+          "retrieve it now. Use `#{@poll_tool}` with the subagent_id to fetch the result, or " <>
+          "read the transcript file directly.\n" <> Enum.join(lines, "\n")
+    end
+  end
+
+  defp safe_run_list(opts) do
+    result =
+      try do
+        RunStore.list(opts)
+      rescue
+        _ -> []
+      catch
+        _, _ -> []
+      end
+
+    if is_list(result), do: result, else: []
+  end
+
+  defp filter_by_parent(runs, session_id) when is_binary(session_id) do
+    Enum.filter(runs, fn r ->
+      parent = Map.get(r, :parent_session_id)
+      is_nil(parent) or parent == session_id
+    end)
+  end
+
+  defp filter_by_parent(runs, _session_id), do: runs
+
+  defp agent_id_mentioned?(agent_id, kept_messages)
+       when is_binary(agent_id) and agent_id != "" and is_list(kept_messages) do
+    Enum.any?(kept_messages, fn msg ->
+      content = Map.get(msg, :content) || Map.get(msg, "content")
+      tool_calls = Map.get(msg, :tool_calls) || Map.get(msg, "tool_calls")
+
+      String.contains?(safe_to_string(Text.content_text(content)), agent_id) or
+        String.contains?(safe_to_string(tool_calls), agent_id)
+    end)
+  end
+
+  defp agent_id_mentioned?(_agent_id, _kept_messages), do: false
+
+  defp completed_at_unix(%DateTime{} = dt), do: DateTime.to_unix(dt, :millisecond)
+  defp completed_at_unix(_), do: 0
+
+  defp format_finished_subagent_line(run) do
+    id = Map.get(run, :agent_id, "?")
+    role = safe_to_string(Map.get(run, :role, ""))
+    status = Map.get(run, :status, :completed)
+    summary = run |> Map.get(:result) |> finished_summary()
+    transcript = Map.get(run, :transcript_path)
+
+    head = "subagent_id: `#{id}`"
+    head = if role == "", do: head, else: head <> ", type: `#{role}`"
+    head = head <> ", status: #{status}"
+    head = if summary == "", do: head, else: head <> ", summary: \"#{summary}\""
+
+    location =
+      if is_binary(transcript) and transcript != "" do
+        " (result file: #{transcript})"
+      else
+        ""
+      end
+
+    "- #{head}#{location}"
+  end
+
+  defp finished_summary(result) when is_map(result) do
+    result
+    |> Map.get(:summary)
+    |> safe_to_string()
+    |> one_line(160)
+  end
+
+  defp finished_summary(_result), do: ""
 
   defp format_subagent_line(run) do
     id = Map.get(run, :agent_id, "?")

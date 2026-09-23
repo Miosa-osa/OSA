@@ -200,6 +200,124 @@ defmodule OptimalSystemAgent.Agent.CompactionSafetyTest do
   end
 
   # ---------------------------------------------------------------------------
+  # 1b. Finished-but-unread subagent reports (audit item 4)
+  # ---------------------------------------------------------------------------
+  #
+  # `section_running_subagents/1` only ever listed `status: :running` rows.
+  # A subagent that FINISHES between the model's last check and a compaction
+  # was invisible: no `:running` row to prompt a poll, and its report — if it
+  # never made it into the kept post-compaction tail — silently vanished.
+
+  describe "active_agent_reminder/2 — finished subagents whose report hasn't been read" do
+    test "a finished run not mentioned anywhere in kept_messages is listed with its poll handle and result file" do
+      session = unique_session()
+      agent_id = "sub-" <> rand()
+
+      :ok =
+        RunStore.start_run(%{
+          agent_id: agent_id,
+          parent_session_id: session,
+          role: "researcher",
+          task: "audit the auth module"
+        })
+
+      :ok =
+        RunStore.complete(agent_id, %{
+          status: :completed,
+          summary: "Found 3 issues in the auth module."
+        })
+
+      # Nothing in the kept tail mentions this agent at all — its report was
+      # never read.
+      kept_messages = [%{role: "user", content: "keep going with the rest of the plan"}]
+
+      out = CS.active_agent_reminder(session, kept_messages)
+
+      assert is_binary(out)
+      assert out =~ "## Finished Subagents"
+      assert out =~ "subagent_id: `#{agent_id}`"
+      assert out =~ "status: completed"
+      assert out =~ "Found 3 issues in the auth module."
+      # The result file (transcript) and the poll handle (task_resume) must
+      # both be present so the model can actually retrieve it.
+      assert out =~ "task_resume"
+      assert out =~ ".md"
+    end
+
+    test "a finished run already referenced in kept_messages is NOT re-listed (already delivered)" do
+      session = unique_session()
+      agent_id = "sub-" <> rand()
+
+      :ok =
+        RunStore.start_run(%{agent_id: agent_id, parent_session_id: session, role: "worker"})
+
+      :ok = RunStore.complete(agent_id, %{status: :completed, summary: "done"})
+
+      kept_messages = [
+        %{
+          role: "assistant",
+          content: "",
+          tool_calls: [%{id: "poll1", name: "task_resume", arguments: %{"agent_id" => agent_id}}]
+        },
+        %{role: "tool", tool_call_id: "poll1", content: "Agent #{agent_id} completed: done"}
+      ]
+
+      # The reminder may still be nil / have no finished-subagents section —
+      # either way it must not re-announce a report the model already has.
+      case CS.active_agent_reminder(session, kept_messages) do
+        nil -> :ok
+        out -> refute out =~ "## Finished Subagents"
+      end
+    end
+
+    test "a STILL-RUNNING subagent is never listed in the finished section" do
+      session = unique_session()
+      agent_id = "sub-" <> rand()
+
+      :ok =
+        RunStore.start_run(%{agent_id: agent_id, parent_session_id: session, role: "worker"})
+
+      out = CS.active_agent_reminder(session, [])
+      assert out =~ "## Running Subagents"
+      refute out =~ "## Finished Subagents"
+
+      RunStore.complete(agent_id, %{status: :completed})
+    end
+
+    test "a failed or cancelled run is listed too, not only :completed" do
+      session = unique_session()
+      failed_id = "sub-" <> rand()
+      cancelled_id = "sub-" <> rand()
+
+      :ok = RunStore.start_run(%{agent_id: failed_id, parent_session_id: session, role: "worker"})
+      :ok = RunStore.complete(failed_id, %{status: :failed, summary: "hit a rate limit"})
+
+      :ok =
+        RunStore.start_run(%{agent_id: cancelled_id, parent_session_id: session, role: "worker"})
+
+      :ok = RunStore.complete(cancelled_id, %{status: :cancelled, summary: "superseded"})
+
+      out = CS.active_agent_reminder(session, [])
+      assert out =~ "subagent_id: `#{failed_id}`"
+      assert out =~ "status: failed"
+      assert out =~ "subagent_id: `#{cancelled_id}`"
+      assert out =~ "status: cancelled"
+    end
+
+    test "defaults to [] (every finished run reads as unread) when a caller doesn't pass kept_messages" do
+      session = unique_session()
+      agent_id = "sub-" <> rand()
+
+      :ok = RunStore.start_run(%{agent_id: agent_id, parent_session_id: session, role: "worker"})
+      :ok = RunStore.complete(agent_id, %{status: :completed, summary: "ok"})
+
+      # Arity-1 call — the pre-item-4 call sites' shape — must still work and
+      # must still surface the finished run (safe-if-redundant default).
+      assert CS.active_agent_reminder(session) =~ "## Finished Subagents"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # 3. Degenerate-summary retry (sampler.rs)
   # ---------------------------------------------------------------------------
 
