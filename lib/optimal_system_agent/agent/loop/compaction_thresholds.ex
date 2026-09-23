@@ -92,34 +92,34 @@ defmodule OptimalSystemAgent.Agent.Loop.CompactionThresholds do
   # unreachable, with cumulative input quadratic in turn count. A share of the
   # window bounds that the same way a constant does, because the share is < 1.
   #
-  #   window     flat 200k    share 1.0 (default)   compact_at
-  #   128,000    128,000      128,000               95,000   (unchanged)
-  #   200,000    200,000      200,000               167,000  (unchanged)
-  #   500,000    200,000      500,000               167,000 -> 467,000
-  #   1,000,000  200,000      1,000,000             167,000 -> 967,000
+  #   window     flat 200k (default)   share 1.0 (opt-in)   compact_at
+  #   128,000    128,000               128,000              95,000   (unchanged)
+  #   200,000    200,000               200,000              167,000  (unchanged)
+  #   500,000    200,000               500,000              167,000 (opt-in: 425,000)
+  #   1,000,000  200,000               1,000,000            167,000 (opt-in: 850,000)
   #
-  # The default share is 1.0: a model's whole window is live. That is the
-  # operator's call and they made it explicitly — someone who selects a 500k
-  # model is paying for 500k, and a harness that silently uses 40% of it is
-  # deciding how much of their purchase to use on their behalf.
+  # The DEFAULT is the flat 200k ceiling again (v1.0.201). A share of 1.0
+  # (whole window live) was tried and reverted on measured latency, not just
+  # cost: on `glm-5.2:cloud` (Ollama Cloud, 1M window) a live session reached
+  # 350-390k input tokens and provider time-to-first-byte grew from ~1-2s at
+  # ~23k tokens to 4.4-13.9s at ~300k. Prefill time is paid on EVERY turn, so
+  # an uncompacted large window makes every reply slow long before it makes
+  # the context full. On top of that, cumulative session input is quadratic in
+  # turn count, (967/167)^2 ~= 33x against a 167k trigger.
   #
-  # The cost this reopens is real and worth stating rather than burying: input
-  # is re-sent every turn, so cumulative session cost is quadratic in turn
-  # count, and compaction is the only brake on that term. Against a harness
-  # compacting near 167k, a 1M window that compacts at 967k accumulates roughly
-  # (967/167)^2 ~= 33x. `OSA_CONTEXT_CEILING_SHARE` reinstates the brake
-  # proportionally (0.5 gives 500k -> 250k, 1M -> 500k) and
-  # `OSA_CONTEXT_CEILING` pins an absolute value, for an operator who wants the
-  # older behaviour back.
-  @context_ceiling_share 1.0
-
+  # An operator who wants more of a big window live opts in explicitly:
+  # `OSA_CONTEXT_CEILING_SHARE` (0.5 gives 1M -> 500k, 1.0 the whole window)
+  # or `OSA_CONTEXT_CEILING` for an absolute value.
   defp model_ceiling(context_window) do
     case Application.get_env(:optimal_system_agent, :compaction_context_ceiling) do
       n when is_integer(n) and n > 0 ->
         n
 
       _ ->
-        max(@context_ceiling, trunc(context_window * ceiling_share()))
+        case ceiling_share() do
+          nil -> @context_ceiling
+          share -> max(@context_ceiling, trunc(context_window * share))
+        end
     end
   end
 
@@ -136,10 +136,11 @@ defmodule OptimalSystemAgent.Agent.Loop.CompactionThresholds do
     end
   end
 
+  # nil when unset: the flat `@context_ceiling` applies.
   defp ceiling_share do
     case Application.get_env(:optimal_system_agent, :compaction_context_ceiling_share) do
       f when is_float(f) and f > 0.0 and f <= 1.0 -> f
-      _ -> @context_ceiling_share
+      _ -> nil
     end
   end
 

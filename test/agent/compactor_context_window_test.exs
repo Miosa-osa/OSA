@@ -92,16 +92,29 @@ defmodule OptimalSystemAgent.Agent.CompactorContextWindowTest do
       # Pins the ladder itself, so a change to the ceiling rule shows up here as
       # an explicit diff rather than as six mysterious failures above.
       #
-      # The ceiling used to be a flat 200,000 for every model, which gave a 1M
-      # model and a 500k model the same live window and compacted both at
-      # 167,000 — 16.7% of what the operator was paying for on the 1M model.
-      # It is now the model's own window, with auto-compact at a SHARE of it
-      # (0.85), so the headroom scales instead of staying a fixed 33k that is
-      # 26% of a 128k model and 3.3% of a 1M one.
-      assert CompactionThresholds.operative_window(@million) == @million
-      assert CompactionThresholds.warn_at(@million) == 830_000
-      assert CompactionThresholds.compact_at(@million) == 850_000
-      assert CompactionThresholds.block_at(@million) == 977_000
+      # Default (v1.0.201): the live window is capped at a flat 200,000, so a 1M
+      # model compacts at 167,000. The whole-window default (share 1.0, compact
+      # at 850,000) was reverted after measuring Ollama Cloud time-to-first-byte
+      # at 4.4-13.9s for ~300k-token requests versus ~1-2s near 23k. The
+      # whole window stays one opt-in away (`OSA_CONTEXT_CEILING_SHARE=1.0`).
+      assert CompactionThresholds.operative_window(@million) == 200_000
+      assert CompactionThresholds.warn_at(@million) == 147_000
+      assert CompactionThresholds.compact_at(@million) == 167_000
+      assert CompactionThresholds.block_at(@million) == 177_000
+
+      prev = Application.get_env(:optimal_system_agent, :compaction_context_ceiling_share)
+      Application.put_env(:optimal_system_agent, :compaction_context_ceiling_share, 1.0)
+
+      try do
+        assert CompactionThresholds.operative_window(@million) == @million
+        assert CompactionThresholds.warn_at(@million) == 830_000
+        assert CompactionThresholds.compact_at(@million) == 850_000
+        assert CompactionThresholds.block_at(@million) == 977_000
+      after
+        if prev,
+          do: Application.put_env(:optimal_system_agent, :compaction_context_ceiling_share, prev),
+          else: Application.delete_env(:optimal_system_agent, :compaction_context_ceiling_share)
+      end
 
       # The ordering the whole ladder depends on still holds by construction.
       assert CompactionThresholds.warn_at(@million) <
