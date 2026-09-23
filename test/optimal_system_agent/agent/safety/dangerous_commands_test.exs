@@ -52,7 +52,27 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommandsTest do
           {"command substitution mid-wrapper", "bash -c \"rm -" <> "rf \\\"$(pwd)\\\"\""},
           {"near-root glob: /etc/*", "rm -" <> "rf " <> "/etc/*"},
           {"near-root glob: $HOME/*", "rm -" <> "rf " <> "\"$HOME\"/*"},
-          {"near-root glob: ${HOME}/*", "rm -" <> "rf " <> "${HOME}/*"}
+          {"near-root glob: ${HOME}/*", "rm -" <> "rf " <> "${HOME}/*"},
+          # Bare/positional variable expansion — the blocking gap: `$DIR/`
+          # with DIR unset or empty IS `rm -rf /`, and none of these matched
+          # anything before (only `$(...)`/`${...}` were covered).
+          {"bare variable + trailing slash", "rm -" <> "rf " <> "$DIR/"},
+          {"bare variable, double-quoted", "rm -" <> "rf " <> "\"$DIR\""},
+          {"bare variable, unquoted", "rm -" <> "rf " <> "$TARGET"},
+          {"quoted variable + glob suffix", "rm -" <> "rf " <> "\"$BUILD_DIR\"/*"},
+          {"positional parameter $1", "rm -" <> "rf " <> "$1"},
+          {"positional parameter $@ (quoted)", "rm -" <> "rf " <> "\"$@\""},
+          # `rm -r` alone (no `-f`) still deletes everything it can reach
+          # non-interactively — force is not required to reach this class.
+          {"recursive without force, bare variable", "rm -r " <> "$DIR"},
+          {"recursive without force, quoted variable", "rm -r " <> "\"$DIR\"/"},
+          # Flag-spelling variants combined with a bare variable target.
+          {"rm -fr spelling", "rm -fr " <> "$DIR"},
+          {"rm -Rf spelling", "rm -Rf " <> "$DIR"},
+          {"--recursive --force spelling", "rm --recursive --force " <> "$DIR"},
+          # `find` with a destructive primary on a variable target.
+          {"find -delete on a variable", "find " <> "\"$DIR\" -delete"},
+          {"find -exec rm on a variable", "find " <> "$DIR -type f -exec rm {} \\;"}
         ] do
       test "classifies as :confirm_required (never silently allowed or hard-blocked): #{label}" do
         assert {:blocked, _, :confirm_required} = DC.check_command_classified(unquote(cmd))
@@ -70,13 +90,30 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommandsTest do
       assert {:blocked, _, :catastrophic} = DC.check_command_classified(cmd)
     end
 
+    test "the bare $HOME/$PWD/$OLDPWD literal-whole-argument class stays :catastrophic" do
+      # Exempted from the confirm_required downgrade: `check_variant/1` checks
+      # every :catastrophic clause (rm_rf_broad_root?/1 among them) before the
+      # new confirm_required one, so a bare $HOME/$PWD/$OLDPWD target — which
+      # ALSO matches the new bare-variable pattern — still reports catastrophic.
+      for cmd <- [
+            "rm -" <> "rf " <> "$HOME",
+            "rm -" <> "rf " <> "$PWD",
+            "rm -" <> "rf " <> "$OLDPWD"
+          ] do
+        assert {:blocked, _, :catastrophic} = DC.check_command_classified(cmd)
+      end
+    end
+
     test "negatives: ordinary scoped deletes are untouched by the new class" do
       for cmd <- [
             "rm -" <> "rf build",
             "rm -" <> "rf ./tmp/x",
             "rm -" <> "rf ./build",
             "rm -" <> "rf node_modules",
-            "rm -" <> "rf /home/x/project/tmp/cache"
+            "rm -" <> "rf node_modules dist",
+            "rm -" <> "rf /home/x/project/tmp/cache",
+            "rm -r " <> "./tmp/x",
+            "rm build/output.o"
           ] do
         assert DC.check_command_classified(cmd) == :ok, "unexpectedly flagged: #{cmd}"
       end
@@ -90,9 +127,20 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommandsTest do
       assert DC.check_command_classified(cmd) == :ok
     end
 
+    test "negatives: an unrelated bare variable elsewhere in the line is not enough" do
+      cmd = "echo $UNRELATED && rm -" <> "rf ./build"
+      assert DC.check_command_classified(cmd) == :ok
+    end
+
     test "negatives: reading a variable is not a delete at all" do
       assert DC.check_command_classified("echo $(pwd)") == :ok
       assert DC.check_command_classified("echo \"${HOME}\"") == :ok
+      assert DC.check_command_classified("echo $DIR") == :ok
+    end
+
+    test "negatives: find without a destructive primary is not enough" do
+      assert DC.check_command_classified("find " <> "$DIR -name '*.log'") == :ok
+      assert DC.check_command_classified("find " <> "$DIR -print") == :ok
     end
   end
 

@@ -91,10 +91,16 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
   allowed or hard-blocked):
 
     * `rm -rf "$(pwd)"`, `` rm -rf `git rev-parse --show-toplevel` ``,
-      `rm -rf "${SOME_VAR}"` — a recursive-force delete whose target is a
-      command substitution or brace parameter expansion.
-    * `rm -rf /etc/*`, `rm -rf "$HOME"/*` — a recursive-force delete whose
-      target is a glob anchored at, or one segment below, a filesystem root.
+      `rm -rf "${SOME_VAR}"` — a recursive delete whose target is a command
+      substitution or brace parameter expansion.
+    * `rm -rf $DIR/`, `rm -rf "$DIR"`, `rm -rf $TARGET`, `rm -r "$BUILD_DIR"`
+      — a recursive delete whose target is a bare or positional shell
+      variable. `$DIR/` with `DIR` unset or empty IS `rm -rf /`; force (`-f`)
+      is not required to reach this class.
+    * `rm -rf /etc/*`, `rm -rf "$HOME"/*` — a recursive delete whose target
+      is a glob anchored at, or one segment below, a filesystem root.
+    * `find "$DIR" -delete`, `find . -name "$PAT" -exec rm {} \;` — the same
+      class via `find`'s own destructive primaries.
 
   `:overridable` (blocked everywhere except overdrive/bypass):
 
@@ -171,13 +177,33 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
   # `ToolExecutor.approve_tool_call/2` turns that into an interactive prompt
   # in EVERY permission mode, overdrive included.
 
-  # Command substitution / backtick / brace-expansion anywhere after an `rm`
-  # invocation: the delete target depends on a value only known once the
-  # shell has already evaluated something else. Bounded to start a shell word
-  # (after whitespace, a quote, or the start of the remaining text) so a
-  # `$`/backtick embedded mid-token (not a real expansion) is not what this
-  # matches.
-  @rm_dynamic_target ~r/\brm\b[^\n]*(?:^|[\s"'])(?:\$\(|`|\$\{)/i
+  # A shell expansion whose VALUE is unknown without running the shell:
+  # command substitution (`$(...)`), backtick substitution, brace parameter
+  # expansion (`${NAME}`), a bare NAMED variable (`$DIR`, `$BUILD_DIR`), or a
+  # positional/special parameter (`$1`, `$@`, `$*`, `$#`, `$?`, `$$`, `$!`,
+  # `$-`). `$DIR/` with `DIR` unset or empty is literally `rm -rf /` — the
+  # single most important case of this whole class — and it matched NOTHING
+  # here before: only `$(...)`/backtick/`${...}` were covered, so `rm -rf
+  # $DIR/`, `rm -rf "$DIR"`, `rm -rf $TARGET` all read as :ok and ran
+  # unprompted under overdrive. Bounded to the start of a shell word (after
+  # whitespace, a quote, or the start of the remaining text) so a `$`
+  # embedded mid-token (not a real expansion) is not what this matches.
+  #
+  # The bare-`$HOME`/`$PWD`/`$OLDPWD` literal-whole-argument case is NOT
+  # excluded from this alternation on purpose: `check_variant/1`'s cond checks
+  # every `:catastrophic` clause (including `rm_rf_broad_root?/1`, which DOES
+  # match that exact case) before this one, so it still reports
+  # `:catastrophic`, never downgraded to `:confirm_required` by also matching
+  # here — see the ORDER IS LOAD-BEARING note on `check_variant/1`.
+  @dynamic_expansion_source "(?:^|[\\s\"'])(?:\\$\\(|`|\\$\\{|\\$[A-Za-z_][A-Za-z0-9_]*|\\$[0-9@*#?$!-])"
+  @dynamic_expansion Regex.compile!(@dynamic_expansion_source)
+
+  # Command substitution / backtick / brace-expansion / bare or positional
+  # variable anywhere after an `rm` invocation: the delete target depends on
+  # a value only known once the shell has already evaluated something else.
+  # Built from `@dynamic_expansion_source` (not a second, hand-copied
+  # alternation) so the two can never drift apart.
+  @rm_dynamic_target Regex.compile!("\\brm\\b[^\\n]*" <> @dynamic_expansion_source, "i")
 
   # A delete target that is a glob anchored at, or one path segment below, a
   # filesystem root — `/etc/*`, `$HOME/*`, `${HOME}/*`, `$PWD/*` — not already
@@ -185,6 +211,13 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
   # glob suffix). Bounded the same way broad_root_target is: the glob must be
   # a complete argument, not a prefix of a deeper path.
   @rm_near_root_glob ~r/(?:^|\s)(?:\/(?:etc|usr|bin|sbin|boot|dev|lib|lib64|proc|root|run|sys|var|opt|home|Users|System|Library)\/\*|\$\{?HOME\}?\/\*|\$\{?PWD\}?\/\*|\$\{?OLDPWD\}?\/\*)(?=[\s;&|)]|$)/i
+
+  # `find … -delete` / `find … -exec rm …` whose command line ALSO carries a
+  # dynamic expansion — same reasoning, via find's own destructive primaries
+  # instead of rm's. Independent, order-insensitive parts, like the rm checks:
+  # the destructive primary and the expansion may appear on either side of it
+  # (`find "$DIR" -delete`, `find . -name "$PAT" -delete`).
+  @find_destructive_primary ~r/\bfind\b[^\n]*(?:-delete\b|-exec\s+\\?rm\b)/i
 
   # ── force push to protected branch ──────────────────────────────────
   @force_push_flag ~r/\bgit\s+push\b[^\n]*(?:--force\b(?!-with-lease)|--force-with-lease\b|(?:^|\s)-\w*f\w*\b|\s\+[\w\/.-]+)/i
@@ -442,17 +475,24 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
 
       # ── :confirm_required — cannot be proven safe OR unsafe; always ask ─
       #
-      # A recursive force delete whose target is a command substitution,
-      # backtick, brace expansion, or a glob at/near a filesystem root. Unlike
-      # every other clause here this is not a verdict about the command — it
-      # is an admission that the breaker cannot render one statically, so the
-      # decision goes to the operator instead of being guessed in either
-      # direction. See the moduledoc's `## The three classes`.
+      # A recursive delete whose target is a command substitution, backtick,
+      # brace expansion, a bare/positional variable, or a glob at/near a
+      # filesystem root. Unlike every other clause here this is not a verdict
+      # about the command — it is an admission that the breaker cannot render
+      # one statically, so the decision goes to the operator instead of being
+      # guessed in either direction. See the moduledoc's `## The three classes`.
       rm_rf_unresolvable_target?(command) ->
         {:blocked,
-         "recursive force-delete whose target cannot be resolved without running the shell " <>
+         "recursive delete whose target cannot be resolved without running the shell " <>
            "(a command substitution, variable expansion, or a glob at/near a filesystem root)",
          :confirm_required}
+
+      # Same reasoning, via `find`'s own destructive primaries (`-delete`,
+      # `-exec rm`) instead of `rm -rf` directly.
+      find_delete_unresolvable_target?(command) ->
+        {:blocked,
+         "find with a destructive primary (-delete / -exec rm) whose target cannot be " <>
+           "resolved without running the shell", :confirm_required}
 
       # ── :overridable — recoverable, waived only under overdrive/bypass ─
       #
@@ -559,14 +599,24 @@ defmodule OptimalSystemAgent.Agent.Safety.DangerousCommands do
       Regex.match?(@broad_root_target, command)
   end
 
-  # rm + recursive + force + a target the breaker cannot statically resolve
-  # (command substitution/backtick/brace-expansion, or a glob at/near a
-  # filesystem root). See `:confirm_required` in the moduledoc.
+  # rm, RECURSIVE (force NOT required — `rm -r` alone still deletes everything
+  # it can reach non-interactively, and it is `-r` that makes the blast radius
+  # a whole tree instead of one file), targeting something the breaker cannot
+  # statically resolve (command substitution/backtick/brace-expansion/bare or
+  # positional variable, or a glob at/near a filesystem root). See
+  # `:confirm_required` in the moduledoc.
   defp rm_rf_unresolvable_target?(command) do
     Regex.match?(@rm_invocation, command) and
       Regex.match?(@rm_recursive_flag, command) and
-      Regex.match?(@rm_force_flag, command) and
       (Regex.match?(@rm_dynamic_target, command) or Regex.match?(@rm_near_root_glob, command))
+  end
+
+  # find with a destructive primary (-delete / -exec rm) and a dynamic
+  # expansion anywhere on the line — independent, order-insensitive, exactly
+  # like the rm check above.
+  defp find_delete_unresolvable_target?(command) do
+    Regex.match?(@find_destructive_primary, command) and
+      Regex.match?(@dynamic_expansion, command)
   end
 
   defp force_push_protected?(command) do
