@@ -91,6 +91,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop.GoalTracker
+  alias OptimalSystemAgent.Agent.Loop.SpotCheckAuditor
   alias OptimalSystemAgent.Agent.Loop.VerificationEvidence
   alias OptimalSystemAgent.Agent.PermissionMode
   alias OptimalSystemAgent.Agent.ProgressLedger
@@ -289,11 +290,20 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   def stalled?(_), do: false
 
   # ---------------------------------------------------------------------------
-  # Single entry point recommended for the loop
+  # Direct panel entry point (superseded by `maybe_gate/1` for the loop wiring)
   # ---------------------------------------------------------------------------
 
   @doc """
-  Run one goal-verification round and decide whether the turn may finish.
+  Run one FULL skeptic-panel round, unconditionally, and decide whether the
+  turn may finish.
+
+  This always spawns the panel — it does NOT try the cheap spot-check tier
+  first. The loop's real entry point is `maybe_gate/1` (-> `run_gate/1`),
+  which tries `SpotCheckAuditor`'s sampled checks before ever reaching here;
+  `check/1` remains as the "give me the panel's own verdict, unconditionally"
+  primitive for callers that want exactly that (e.g. a caller already holding
+  a triage `:candidate_complete` verdict it wants re-adjudicated by the panel
+  directly).
 
   Returns:
 
@@ -523,7 +533,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
 
       {:candidate_complete, _} ->
         if Map.get(state, :goal_verifier_runs, 0) < max_runs() do
-          {result, verified} = verify(probe)
+          {result, verified} = spot_check_then_verify(probe)
 
           case GoalTracker.advance_if_current(
                  sid,
@@ -576,7 +586,7 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
       {:candidate_complete, _meta} ->
         state = clear_blocker(state)
         sid = Map.get(state, :session_id)
-        {result, state} = verify(state)
+        {result, state} = spot_check_then_verify(state)
         # Session-wide tool-call count as the work marker: if it moved since
         # the last verification, work landed and this round is not a stall,
         # however familiar the remaining gaps look.
@@ -1132,6 +1142,64 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   end
 
   # ---------------------------------------------------------------------------
+  # Tier 1.5 — the cheap spot-check, tried before the panel is ever spawned
+  # ---------------------------------------------------------------------------
+  #
+  # `run_gate/1` used to go straight from triage's `:candidate_complete` to
+  # `verify/1` — the full N-skeptic panel, unconditionally, every time triage
+  # judged the work looked done. `SpotCheckAuditor` is the sporadic, cheap tier
+  # that now sits between them: given the diff, the acceptance criteria, and
+  # the agent's own evidence ledger, it checks a sampled subset of the claims
+  # DIRECTLY (ledger coverage, file existence, a diff/disk cross-read, at most
+  # one bounded command rerun) with zero LLM calls. Only a contradicted sample
+  # or a risk the sample size cannot fairly represent (a large untested
+  # change, a security-sensitive path) escalates to the real panel — at which
+  # point behavior is BYTE-FOR-BYTE what it was before this tier existed.
+  @spot_check_max_samples 3
+
+  defp spot_check_then_verify(state) do
+    session_id = Map.get(state, :session_id)
+    goal = resolve_goal(state)
+    diff = capture_diff(state)
+    criteria = founding_contract(session_id, goal)
+
+    case SpotCheckAuditor.spot_check(session_id,
+           diff: diff,
+           criteria: criteria,
+           max_samples: @spot_check_max_samples
+         ) do
+      {:pass, report} ->
+        Logger.info(
+          "[goal-verifier] spot check PASS session=#{inspect(session_id)} " <>
+            "(#{length(report.checked)} claim(s) checked, risk=#{report.risk}) — " <>
+            "skipping the skeptic panel"
+        )
+
+        runs = Map.get(state, :goal_verifier_runs, 0)
+
+        result = %Result{
+          verdict: :complete,
+          reason:
+            "spot check: #{length(report.checked)} claim(s) confirmed directly, none contradicted",
+          refuted_count: 0,
+          total: max(length(report.checked), 1),
+          gaps: [],
+          verification_available: true
+        }
+
+        {result, Map.put(state, :goal_verifier_runs, runs + 1)}
+
+      {:fail, reason, report} ->
+        Logger.info(
+          "[goal-verifier] spot check ESCALATED session=#{inspect(session_id)} " <>
+            "risk=#{report.risk} reason=#{inspect(reason)} — running the full skeptic panel"
+        )
+
+        verify(state)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Panel run
   # ---------------------------------------------------------------------------
 
@@ -1571,7 +1639,13 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
       "of the files it names; do not re-run these checks yourself or re-explore the wider tree."
   end
 
-  defp founding_contract(session_id, goal) do
+  # Public (but undocumented — this is an internal seam, not API) so
+  # `SpotCheckAuditor`'s caller here can pass the SAME acceptance-criteria text
+  # to the cheap tier that the panel itself receives, rather than the cheap
+  # tier re-deriving (or worse, skipping) it.
+  @doc false
+  @spec founding_contract(String.t() | nil, String.t()) :: String.t()
+  def founding_contract(session_id, goal) do
     with true <- is_binary(session_id) and session_id != "",
          {:ok, brief} <- OptimalSystemAgent.Agent.TaskBrief.load(session_id),
          founding <- text(Map.get(brief, :goal)),
@@ -2290,7 +2364,13 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   # the durable, agent-maintained statement of what the session is trying to
   # accomplish. Falls back to the first user message when no ledger goal has
   # been set yet.
-  defp resolve_goal(state) do
+  #
+  # Public (undocumented — internal seam) so `run_gate/1`'s spot-check tier
+  # can resolve the SAME goal text the panel would see, without a second,
+  # possibly-diverging implementation.
+  @doc false
+  @spec resolve_goal(map()) :: String.t()
+  def resolve_goal(state) do
     ledger_goal(state) || first_user_message(state) ||
       "(no explicit goal captured for this session)"
   end
@@ -2337,7 +2417,13 @@ defmodule OptimalSystemAgent.Agent.Loop.GoalVerifier do
   # Working-tree diff vs. HEAD (staged + unstaged), truncated to the byte cap.
   # `git diff HEAD` degrades gracefully (falls back to `git diff`) for a repo
   # with no commits yet.
-  defp capture_diff(state) do
+  #
+  # Public (undocumented — internal seam), for the same reason as
+  # `resolve_goal/1`: the spot-check tier in `run_gate/1` needs the identical
+  # diff the panel would otherwise be spawned with.
+  @doc false
+  @spec capture_diff(map()) :: String.t()
+  def capture_diff(state) do
     cwd = Map.get(state, :working_dir) || File.cwd!()
 
     diff =
