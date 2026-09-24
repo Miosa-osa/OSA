@@ -592,6 +592,17 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                 iteration: u32,
                 #[serde(default)]
                 max_iterations: Option<u32>,
+                // Per-step model routing (StepRouter): present only when
+                // routing actually fired for this request. `model` on the
+                // wire is the session's own model — deliberately NOT read
+                // here, so an unrouted request stays byte-identical to
+                // before these fields existed.
+                #[serde(default)]
+                routed_model: Option<String>,
+                #[serde(default)]
+                routed_provider: Option<String>,
+                #[serde(default)]
+                routing_reason: Option<String>,
             }
             let ev: Ev = match serde_json::from_slice(data) {
                 Ok(e) => e,
@@ -600,6 +611,9 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             Some(BackendEvent::LlmRequest {
                 iteration: ev.iteration,
                 max_iterations: ev.max_iterations,
+                routed_model: ev.routed_model,
+                routed_provider: ev.routed_provider,
+                routing_reason: ev.routing_reason,
             })
         }
 
@@ -2327,6 +2341,107 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
             }
         }
 
+        // Advisor consult (Agent.Loop.Advisor) resolved and answered — never
+        // silent: the model+cost line always names which advisor actually
+        // ran, whether it was explicitly configured or auto-resolved.
+        "advisor_consulted" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                provider: String,
+                #[serde(default)]
+                model: String,
+                #[serde(default)]
+                cost_usd: f64,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("advisor_consulted", e)),
+            };
+            if ev.model.is_empty() {
+                None
+            } else {
+                Some(BackendEvent::SystemNotice {
+                    message: format!(
+                        "advisor consulted: {}:{} (${:.4})",
+                        ev.provider, ev.model, ev.cost_usd
+                    ),
+                    level: "info".to_string(),
+                })
+            }
+        }
+
+        // A fast-routed step's answer was discarded and re-asked of the
+        // strong model — either because it tried to deliver the turn's
+        // final answer (never allowed) or because the fast model itself
+        // failed. Per-step routing must never silently swap the delivered
+        // answer's model without saying so.
+        "fast_final_answer_reroute" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                reroute_reason: String,
+                #[serde(default)]
+                fast_provider: String,
+                #[serde(default)]
+                fast_model: String,
+                #[serde(default)]
+                strong_provider: String,
+                #[serde(default)]
+                strong_model: String,
+                #[serde(default)]
+                cost_usd: f64,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("fast_final_answer_reroute", e)),
+            };
+            if ev.fast_model.is_empty() || ev.strong_model.is_empty() {
+                None
+            } else {
+                let why = match ev.reroute_reason.as_str() {
+                    "fast_model_error" => "it failed",
+                    _ => "it tried to deliver the final answer",
+                };
+                Some(BackendEvent::SystemNotice {
+                    message: format!(
+                        "{}:{} was routed but {} — re-answered by {}:{} (+${:.4})",
+                        ev.fast_provider,
+                        ev.fast_model,
+                        why,
+                        ev.strong_provider,
+                        ev.strong_model,
+                        ev.cost_usd
+                    ),
+                    level: "warning".to_string(),
+                })
+            }
+        }
+
+        // Explicit per-model fallback (FallbackChain `:model_fallback`) fired
+        // — the requested model was unavailable and a configured fallback
+        // model answered instead. The backend already built a full sentence;
+        // forward it verbatim, same shape as `overdrive_resumed` above.
+        "model_fallback_used" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                message: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("model_fallback_used", e)),
+            };
+            if ev.message.trim().is_empty() {
+                None
+            } else {
+                Some(BackendEvent::SystemNotice {
+                    message: ev.message,
+                    level: "warning".to_string(),
+                })
+            }
+        }
+
         // Internal bookkeeping events have no user-facing state to update.
         // They are still known protocol members and must not be reported as
         // parser failures.
@@ -2398,6 +2513,102 @@ mod tests {
         match parse_sse_event("system_event", frame) {
             Some(BackendEvent::SystemNotice { message, level }) => {
                 assert_eq!(message, "full auto restored");
+                assert_eq!(level, "warning");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn llm_request_carries_the_routed_model_when_step_routing_fired() {
+        let frame = br#"{"type":"llm_request","iteration":3,"max_iterations":100,"model":"claude-sonnet-5","routed_provider":"anthropic","routed_model":"claude-haiku-4-5","routing_reason":"mechanical_tool_mix"}"#;
+        match parse_sse_event("llm_request", frame) {
+            Some(BackendEvent::LlmRequest {
+                iteration,
+                routed_provider,
+                routed_model,
+                routing_reason,
+                ..
+            }) => {
+                assert_eq!(iteration, 3);
+                assert_eq!(routed_provider.as_deref(), Some("anthropic"));
+                assert_eq!(routed_model.as_deref(), Some("claude-haiku-4-5"));
+                assert_eq!(routing_reason.as_deref(), Some("mechanical_tool_mix"));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn llm_request_without_routing_fields_still_parses_an_older_backend_frame() {
+        // Byte-identical to the frame shape before per-step routing existed —
+        // an older backend, or routing genuinely never firing, must not fail
+        // to parse or silently invent a routed model.
+        let frame = br#"{"type":"llm_request","iteration":0,"max_iterations":100}"#;
+        match parse_sse_event("llm_request", frame) {
+            Some(BackendEvent::LlmRequest {
+                iteration,
+                routed_model,
+                ..
+            }) => {
+                assert_eq!(iteration, 0);
+                assert!(routed_model.is_none());
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn advisor_consult_is_a_visible_notice_naming_the_model_and_cost() {
+        let frame = br#"{"type":"system_event","event":"advisor_consulted","provider":"claude_cli","model":"claude-opus-5-5","cost_usd":0.0114}"#;
+        match parse_sse_event("system_event", frame) {
+            Some(BackendEvent::SystemNotice { message, level }) => {
+                assert!(
+                    message.contains("claude_cli:claude-opus-5-5"),
+                    "{}",
+                    message
+                );
+                assert!(message.contains("0.0114"), "{}", message);
+                assert_eq!(level, "info");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fast_final_answer_reroute_is_a_visible_warning_naming_both_models() {
+        let frame = br#"{"type":"system_event","event":"fast_final_answer_reroute","reroute_reason":"final_answer","fast_provider":"anthropic","fast_model":"claude-haiku-4-5","strong_provider":"anthropic","strong_model":"claude-sonnet-5","cost_usd":0.01}"#;
+        match parse_sse_event("system_event", frame) {
+            Some(BackendEvent::SystemNotice { message, level }) => {
+                assert!(message.contains("claude-haiku-4-5"), "{}", message);
+                assert!(message.contains("claude-sonnet-5"), "{}", message);
+                assert!(message.contains("final answer"), "{}", message);
+                assert_eq!(level, "warning");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fast_model_error_reroute_names_the_failure_not_the_final_answer_wording() {
+        let frame = br#"{"type":"system_event","event":"fast_final_answer_reroute","reroute_reason":"fast_model_error","fast_provider":"anthropic","fast_model":"claude-haiku-4-5","strong_provider":"anthropic","strong_model":"claude-sonnet-5","cost_usd":0.01}"#;
+        match parse_sse_event("system_event", frame) {
+            Some(BackendEvent::SystemNotice { message, .. }) => {
+                assert!(message.contains("it failed"), "{}", message);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn model_fallback_used_forwards_the_backends_message_as_a_warning() {
+        let frame = br#"{"type":"system_event","event":"model_fallback_used","message":"[fallback] anthropic:model-a unavailable, answered by anthropic:model-b"}"#;
+        match parse_sse_event("system_event", frame) {
+            Some(BackendEvent::SystemNotice { message, level }) => {
+                assert_eq!(
+                    message,
+                    "[fallback] anthropic:model-a unavailable, answered by anthropic:model-b"
+                );
                 assert_eq!(level, "warning");
             }
             other => panic!("unexpected: {:?}", other),

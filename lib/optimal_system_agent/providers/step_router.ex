@@ -73,6 +73,7 @@ defmodule OptimalSystemAgent.Providers.StepRouter do
 
   require Logger
 
+  alias OptimalSystemAgent.Events.Bus
   alias OptimalSystemAgent.Providers.ModelLimits
   alias OptimalSystemAgent.Settings
 
@@ -134,6 +135,7 @@ defmodule OptimalSystemAgent.Providers.StepRouter do
     provider = Map.get(state, :provider)
     model = Map.get(state, :model)
     fast_model = fast_model_for(provider, state)
+    fast_unavailable? = fast_model != nil and unavailable?(provider, fast_model)
     tools = previous_tool_names(state)
 
     cond do
@@ -157,6 +159,15 @@ defmodule OptimalSystemAgent.Providers.StepRouter do
           model,
           :no_fast_pairing,
           "no fast model configured for #{inspect(provider)}"
+        )
+
+      fast_unavailable? ->
+        keep(
+          provider,
+          model,
+          :fast_model_unavailable,
+          "#{fast_model} was found unavailable for #{provider} (bad credentials/model) " <>
+            "earlier this run — staying on the strong model until restarted"
         )
 
       not tool_capable?(provider, fast_model, state) ->
@@ -264,6 +275,95 @@ defmodule OptimalSystemAgent.Providers.StepRouter do
   end
 
   defp lookup(_, _), do: nil
+
+  # ── Fast-model availability ───────────────────────────────────────────────
+  #
+  # `decide/1` never makes a network call to find out whether a pairing's
+  # fast model actually works for THIS user's credentials/plan — that would
+  # add a round-trip to every routing decision, for a fact the daemon has
+  # already learned the hard way the first time a real call to it failed
+  # (`ReactLoop`'s fast-error reroute reports it here via `mark_unavailable/3`
+  # right after redoing that one step on the strong model). Once marked, the
+  # pairing is skipped for the rest of THIS run — no more wasted attempts, no
+  # more redo latency on every mechanical step — until a restart lets it be
+  # tried again (a lifted rate limit, a fixed key, a newly-released model).
+
+  @unavailable_table :osa_step_router_unavailable
+
+  @doc "Has `model` on `provider` already been found unusable this run?"
+  @spec unavailable?(atom(), String.t()) :: boolean()
+  def unavailable?(provider, model) do
+    :ets.member(unavailable_table(), {provider, model})
+  rescue
+    ArgumentError -> false
+  end
+
+  @doc """
+  Mark `provider`:`model` unavailable for the rest of this run and log why —
+  ONCE per pairing per VM (`Logger.warning` + a `:system_event` the TUI can
+  render, exactly like `FallbackChain.warn_once/2`).
+
+  Called from `ReactLoop`'s fast-model error reroute — NEVER from `decide/1`
+  itself, which only ever READS this table.
+  """
+  @spec mark_unavailable(atom(), String.t(), term()) :: :ok
+  def mark_unavailable(provider, model, reason) do
+    :ets.insert(unavailable_table(), {{provider, model}, true})
+
+    pt_key = {__MODULE__, :warned_unavailable, {provider, model}}
+
+    if :persistent_term.get(pt_key, false) == false do
+      :persistent_term.put(pt_key, true)
+
+      message =
+        "[route] #{provider}:#{model} is unavailable (#{inspect(reason)}) — per-step " <>
+          "routing will keep this step on the strong model for the rest of this run"
+
+      Logger.warning(message)
+
+      try do
+        Bus.emit(:system_event, %{
+          event: :fast_model_marked_unavailable,
+          provider: to_string(provider),
+          model: model,
+          reason: inspect(reason),
+          message: message
+        })
+      rescue
+        _ -> :ok
+      catch
+        _, _ -> :ok
+      end
+    end
+
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp unavailable_table do
+    case :ets.whereis(@unavailable_table) do
+      :undefined ->
+        try do
+          :ets.new(@unavailable_table, [:named_table, :public, :set])
+        rescue
+          ArgumentError -> @unavailable_table
+        end
+
+      _ref ->
+        @unavailable_table
+    end
+  end
+
+  @doc false
+  @spec clear_unavailable(atom(), String.t()) :: :ok
+  def clear_unavailable(provider, model) do
+    :ets.delete(unavailable_table(), {provider, model})
+    :persistent_term.erase({__MODULE__, :warned_unavailable, {provider, model}})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
 
   # ── Classification ───────────────────────────────────────────────────────
 

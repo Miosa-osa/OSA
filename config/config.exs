@@ -233,6 +233,25 @@ config :optimal_system_agent,
   otel_enabled: false,
   otel_adapter: OptimalSystemAgent.Observability.OTel.Noop,
 
+  # ---------------------------------------------------------------------------
+  # Per-step model routing (Providers.StepRouter) and the advisor consult
+  # (Agent.Loop.Advisor) — ON by operator decision. Both degrade gracefully
+  # when there is nothing usable to route/consult to (see each module's
+  # moduledoc): a fast pairing that turns out to be unavailable for the
+  # user's credentials silently keeps the step on the strong model and logs
+  # why once (`StepRouter.mark_unavailable/3`); an advisor with no explicit
+  # `advisor_provider`/`advisor_model` auto-resolves from whatever Anthropic/
+  # OpenAI credential is reachable, falling back to the session's own model
+  # at high effort rather than ever erroring `:advisor_not_configured`.
+  #
+  # `config/test.exs` turns both OFF — the existing suite (and any new test
+  # that does not opt in explicitly) must not exercise real routing/advisor
+  # behavior, and `resolve_pair/1`'s auto-detection reads REAL machine
+  # credentials it has no business touching from a test run.
+  step_routing_enabled: true,
+  advisor_enabled: true,
+  advisor_auto_enabled: true,
+
   # Proactive monitor interval (milliseconds)
   proactive_interval: 30 * 60 * 1000,
 

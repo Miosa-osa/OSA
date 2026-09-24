@@ -125,6 +125,19 @@ config :optimal_system_agent, mcp_discovery_enabled: false
 # pointed at a harmless stub opener.
 config :optimal_system_agent, browser_open_enabled: false
 
+# Per-step model routing and the advisor consult default ON in real use
+# (config/config.exs) but OFF here: the suite must exercise the (many)
+# existing tests that were written before either feature existed without
+# either one silently firing, and `Advisor.resolve_pair/1`'s auto-detection
+# in particular reads REAL on-disk credentials
+# (`Auth.SubscriptionStore`/`OSA_HOME`) that a test run has no business
+# touching. Tests FOR these features turn them on explicitly and (where the
+# auto-resolution path is exercised) redirect `OSA_HOME` to an isolated temp
+# dir — see `test/agent/loop/advisor_resolution_test.exs`.
+config :optimal_system_agent, step_routing_enabled: false
+config :optimal_system_agent, advisor_enabled: false
+config :optimal_system_agent, advisor_auto_enabled: false
+
 config :optimal_system_agent, knowledge_backend: MiosaKnowledge.Backend.ETS
 config :optimal_system_agent, compactor_llm_enabled: false
 # Use a different HTTP port in tests to avoid conflicts

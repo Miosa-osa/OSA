@@ -10,8 +10,27 @@ defmodule OptimalSystemAgent.Agent.Loop.AdvisorTest do
       advisor_auto_enabled: Application.fetch_env(:optimal_system_agent, :advisor_auto_enabled),
       advisor_provider: Application.fetch_env(:optimal_system_agent, :advisor_provider),
       advisor_model: Application.fetch_env(:optimal_system_agent, :advisor_model),
-      advisor_cost_cap_usd: Application.fetch_env(:optimal_system_agent, :advisor_cost_cap_usd)
+      advisor_cost_cap_usd: Application.fetch_env(:optimal_system_agent, :advisor_cost_cap_usd),
+      anthropic_api_key: Application.fetch_env(:optimal_system_agent, :anthropic_api_key),
+      openai_api_key: Application.fetch_env(:optimal_system_agent, :openai_api_key)
     }
+
+    prev_osa_home = System.get_env("OSA_HOME")
+
+    # `resolve_pair/1`'s auto-detection tiers read REAL credentials —
+    # `provider_configured?(:claude_cli)`/`:openai_codex` via
+    # `Auth.SubscriptionStore.connected?/1`, which reads `~/.osa/subscriptions
+    # .json` under `OSA_HOME` (NOT the `:config_dir` app env `Settings`
+    # uses — a different knob). Left pointed at the operator's real
+    # `~/.osa`, a machine with an actual Claude/Codex sign-in makes these
+    # "unconfigured" tests silently place a REAL, BILLED call instead of
+    # exercising the deterministic path they're named for. Isolate it, same
+    # pattern `registry_test.exs`'s account-sign-in tests already use.
+    tmp_home =
+      Path.join(System.tmp_dir!(), "osa-advisor-test-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(tmp_home)
+    System.put_env("OSA_HOME", tmp_home)
 
     Application.put_env(:optimal_system_agent, :advisor_provider, :mock)
     # A real, priced model id (Anthropic's rate card) so cost-cap tests exercise
@@ -23,6 +42,10 @@ defmodule OptimalSystemAgent.Agent.Loop.AdvisorTest do
     Application.put_env(:optimal_system_agent, :advisor_enabled, true)
     Application.put_env(:optimal_system_agent, :advisor_auto_enabled, true)
     Application.delete_env(:optimal_system_agent, :advisor_cost_cap_usd)
+    # No live env-var key either — `live_cloud_key_present?/1` reads
+    # `System.get_env` directly regardless of `OSA_HOME`.
+    Application.delete_env(:optimal_system_agent, :anthropic_api_key)
+    Application.delete_env(:optimal_system_agent, :openai_api_key)
 
     MockProvider.reset()
     MockProvider.reset_final_texts()
@@ -37,6 +60,12 @@ defmodule OptimalSystemAgent.Agent.Loop.AdvisorTest do
           :error -> Application.delete_env(:optimal_system_agent, key)
         end
       end
+
+      if prev_osa_home,
+        do: System.put_env("OSA_HOME", prev_osa_home),
+        else: System.delete_env("OSA_HOME")
+
+      File.rm_rf(tmp_home)
 
       Application.delete_env(:optimal_system_agent, :mock_provider_final_text)
       Application.delete_env(:optimal_system_agent, :mock_provider_error)

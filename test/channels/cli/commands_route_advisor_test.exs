@@ -31,6 +31,9 @@ defmodule OptimalSystemAgent.Channels.CLI.CommandsRouteAdvisorTest do
     prev_advisor_enabled = Application.get_env(:optimal_system_agent, :advisor_enabled)
     prev_advisor_provider = Application.get_env(:optimal_system_agent, :advisor_provider)
     prev_advisor_model = Application.get_env(:optimal_system_agent, :advisor_model)
+    prev_anthropic_key = Application.get_env(:optimal_system_agent, :anthropic_api_key)
+    prev_openai_key = Application.get_env(:optimal_system_agent, :openai_api_key)
+    prev_osa_home = System.get_env("OSA_HOME")
 
     home =
       Path.join(System.tmp_dir!(), "osa-route-advisor-cmd-#{System.unique_integer([:positive])}")
@@ -38,10 +41,25 @@ defmodule OptimalSystemAgent.Channels.CLI.CommandsRouteAdvisorTest do
     File.mkdir_p!(home)
     Application.put_env(:optimal_system_agent, :config_dir, home)
     Application.put_env(:optimal_system_agent, :default_provider, :anthropic)
+    Application.delete_env(:optimal_system_agent, :anthropic_api_key)
+    Application.delete_env(:optimal_system_agent, :openai_api_key)
     Settings.reset_cache()
+
+    # `/advisor status`'s auto-resolution reads REAL credentials
+    # (`Auth.SubscriptionStore` under `OSA_HOME`) — isolate it from the
+    # operator's own `~/.osa`, same reasoning as `advisor_test.exs`'s setup.
+    osa_home_tmp =
+      Path.join(
+        System.tmp_dir!(),
+        "osa-route-advisor-cmd-home-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(osa_home_tmp)
+    System.put_env("OSA_HOME", osa_home_tmp)
 
     on_exit(fn ->
       File.rm_rf(home)
+      File.rm_rf(osa_home_tmp)
       restore(:config_dir, prev_config_dir)
       restore(:default_provider, prev_default_provider)
       restore(:step_routing_enabled, prev_step_routing_enabled)
@@ -49,6 +67,13 @@ defmodule OptimalSystemAgent.Channels.CLI.CommandsRouteAdvisorTest do
       restore(:advisor_enabled, prev_advisor_enabled)
       restore(:advisor_provider, prev_advisor_provider)
       restore(:advisor_model, prev_advisor_model)
+      restore(:anthropic_api_key, prev_anthropic_key)
+      restore(:openai_api_key, prev_openai_key)
+
+      if prev_osa_home,
+        do: System.put_env("OSA_HOME", prev_osa_home),
+        else: System.delete_env("OSA_HOME")
+
       Settings.reset_cache()
     end)
 
@@ -135,7 +160,10 @@ defmodule OptimalSystemAgent.Channels.CLI.CommandsRouteAdvisorTest do
       output = capture_io(fn -> assert @sid = Commands.dispatch("advisor", @sid) end)
 
       assert output =~ "Advisor consult"
-      assert output =~ "not configured"
+      assert output =~ "not explicitly configured"
+      # No credential reachable (OSA_HOME isolated) and no live session model
+      # (no real Loop for @sid) — resolve_pair/1 genuinely has nothing.
+      assert output =~ "none — no credential"
       refute File.exists?(Path.join(home, "settings.json"))
     end
 

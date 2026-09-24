@@ -5,16 +5,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.AdvisorConsult do
   design: cost cap, framing as advice-not-instructions, and the automatic
   trigger path this tool does NOT go through).
 
-  Only `session_id` — read from the calling process's `:osa_session_id`
-  (the same convention `Settings.current_session/0` and `UseSkill` rely on,
-  published into the process dictionary by the loop's turn pipeline) — is
-  needed: the working model supplies its own situational summary via the
-  `context` argument, so this tool never needs to re-derive one from the full
-  message history.
+  `session_id` is read from the calling process's `:osa_session_id` (the
+  same convention `Settings.current_session/0` and `UseSkill` rely on,
+  published into the process dictionary by the loop's turn pipeline); the
+  working model supplies its own situational summary via the `context`
+  argument, so this tool never needs to re-derive one from the full message
+  history. The session's live `provider`/`model` are also resolved (best
+  effort, via `Agent.Loop.get_state/1`) so `Advisor.resolve_pair/1`'s
+  tier-3 fallback (the session's own strong model, at high effort) has
+  something to fall back TO when no advisor is explicitly configured.
   """
 
   @behaviour MiosaTools.Behaviour
 
+  alias OptimalSystemAgent.Agent.Loop
   alias OptimalSystemAgent.Agent.Loop.Advisor
 
   @impl true
@@ -60,7 +64,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.AdvisorConsult do
   @impl true
   def execute(%{"question" => question} = args) when is_binary(question) and question != "" do
     session_id = Process.get(:osa_session_id)
-    call_state = %{session_id: session_id}
+    call_state = Map.merge(%{session_id: session_id}, session_provider_model(session_id))
     opts = if ctx = args["context"], do: [context: ctx], else: []
 
     case Advisor.consult(call_state, question, opts) do
@@ -74,8 +78,9 @@ defmodule OptimalSystemAgent.Tools.Builtins.AdvisorConsult do
 
       {:error, :advisor_not_configured} ->
         {:error,
-         "No advisor model is configured. Set :advisor_provider and :advisor_model " <>
-           "(application config or Settings) to enable this tool."}
+         "No advisor could be resolved — neither an explicit :advisor_provider/" <>
+           ":advisor_model, an auto-detected Anthropic/OpenAI credential, nor this " <>
+           "session's own provider/model was available."}
 
       {:error, :cost_cap_reached} ->
         {:error,
@@ -88,4 +93,17 @@ defmodule OptimalSystemAgent.Tools.Builtins.AdvisorConsult do
   end
 
   def execute(_args), do: {:error, "advisor_consult requires a non-empty \"question\" argument"}
+
+  # Best-effort — a missing/dead session (a headless one-shot call with no
+  # live Loop) just means `resolve_pair/1`'s tier-3 fallback has nothing to
+  # fall back to, which is exactly the (rare, honestly-reported) case that
+  # error path above describes.
+  defp session_provider_model(session_id) do
+    case Loop.get_state(session_id) do
+      {:ok, state} -> %{provider: state[:provider], model: state[:model]}
+      _ -> %{}
+    end
+  rescue
+    _ -> %{}
+  end
 end

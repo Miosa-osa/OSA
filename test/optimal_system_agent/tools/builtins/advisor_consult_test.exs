@@ -7,12 +7,29 @@ defmodule OptimalSystemAgent.Tools.Builtins.AdvisorConsultTest do
     prev = %{
       advisor_enabled: Application.fetch_env(:optimal_system_agent, :advisor_enabled),
       advisor_provider: Application.fetch_env(:optimal_system_agent, :advisor_provider),
-      advisor_model: Application.fetch_env(:optimal_system_agent, :advisor_model)
+      advisor_model: Application.fetch_env(:optimal_system_agent, :advisor_model),
+      anthropic_api_key: Application.fetch_env(:optimal_system_agent, :anthropic_api_key),
+      openai_api_key: Application.fetch_env(:optimal_system_agent, :openai_api_key)
     }
+
+    prev_osa_home = System.get_env("OSA_HOME")
+
+    # Isolate `Advisor.resolve_pair/1`'s auto-detection from the operator's
+    # REAL credentials (`Auth.SubscriptionStore` reads `OSA_HOME`) — see
+    # `advisor_test.exs`'s setup for the full reasoning; a machine with a
+    # real Claude/Codex sign-in would otherwise make the "unconfigured"
+    # tests below place a real, billed call instead of testing anything.
+    tmp_home =
+      Path.join(System.tmp_dir!(), "osa-advisor-tool-test-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(tmp_home)
+    System.put_env("OSA_HOME", tmp_home)
 
     Application.put_env(:optimal_system_agent, :advisor_enabled, true)
     Application.put_env(:optimal_system_agent, :advisor_provider, :mock)
     Application.put_env(:optimal_system_agent, :advisor_model, "claude-haiku-4-5")
+    Application.delete_env(:optimal_system_agent, :anthropic_api_key)
+    Application.delete_env(:optimal_system_agent, :openai_api_key)
     Application.delete_env(:optimal_system_agent, :mock_provider_final_text)
     Application.delete_env(:optimal_system_agent, :mock_provider_error)
 
@@ -25,6 +42,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.AdvisorConsultTest do
           :error -> Application.delete_env(:optimal_system_agent, key)
         end
       end
+
+      if prev_osa_home,
+        do: System.put_env("OSA_HOME", prev_osa_home),
+        else: System.delete_env("OSA_HOME")
+
+      File.rm_rf(tmp_home)
 
       Application.delete_env(:optimal_system_agent, :mock_provider_final_text)
       Application.delete_env(:optimal_system_agent, :mock_provider_error)
@@ -62,7 +85,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.AdvisorConsultTest do
     Application.delete_env(:optimal_system_agent, :advisor_model)
 
     assert {:error, message} = AdvisorConsult.execute(%{"question" => "q"})
-    assert message =~ "No advisor model is configured"
+    assert message =~ "No advisor could be resolved"
   end
 
   test "surfaces a clear error when disabled" do

@@ -904,6 +904,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # cost this correction costs.
     {result, state} = maybe_reroute_fast_final_answer(routing, result, state, context)
 
+    # A fast-routed call that flat-out FAILED (bad credentials, an
+    # unavailable/retired model for this account, …) must not surface as a
+    # user-visible error on a step that only exists to save money — re-ask
+    # the strong model instead. See `maybe_reroute_fast_error/4`.
+    {result, state} = maybe_reroute_fast_error(routing, result, state, context)
+
     # A stream that ended without its provider's own terminal marker (P2 audit
     # gap A) is handled FIRST and can short-circuit the rest of this pipeline
     # (a fresh retry or a marked-incomplete delivery) — see
@@ -947,60 +953,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           "must produce the final answer, not the fast one)"
       )
 
-      redo_start = System.monotonic_time(:millisecond)
-      redo_requested_at = DateTime.utc_now()
+      {redo_result, state, redo_duration_ms, redo_usage, redo_cost_usd} =
+        redo_on_strong_model(state, context)
 
-      redo_result =
-        with_turn_effort(state, fn ->
-          thinking_opts = LLMClient.thinking_config(state)
-          tools_for_call = ToolFilter.filter(state.tools, state)
-
-          llm_opts = [
-            tools: tools_for_call,
-            temperature: LLMClient.temperature(),
-            max_tokens: max_response_tokens(),
-            thinking_disabled: Process.get(:osa_disable_thinking, false)
-          ]
-
-          llm_opts =
-            if thinking_opts, do: Keyword.put(llm_opts, :thinking, thinking_opts), else: llm_opts
-
-          # SAME messages the fast model just saw (`context.messages`, not
-          # rebuilt) — the point is that the strong model's own prefix cache
-          # still applies to this re-ask.
-          LLMClient.llm_chat_stream(state, context.messages, llm_opts)
-        end)
-
-      redo_duration_ms = System.monotonic_time(:millisecond) - redo_start
-
-      redo_usage =
-        case redo_result do
-          {:ok, redo_resp} -> Map.get(redo_resp, :usage, %{})
-          _ -> %{}
-        end
-
-      redo_billing_opts =
-        case redo_result do
-          {:ok, redo_resp} ->
-            [
-              provider_cost_usd: Map.get(redo_resp, :provider_cost_usd),
-              provider_quota: Map.get(redo_resp, :provider_quota),
-              requested_at: redo_requested_at
-            ]
-
-          _ ->
-            [requested_at: redo_requested_at]
-        end
-
-      # Billed for real — the strong re-ask is a genuine second round-trip,
-      # not just a log line. `absorb_side_spend/1` mirrors the primary call's
-      # handling of a request billed on the wire before it errored.
-      state = Accounting.record(state, redo_usage, redo_billing_opts)
-      state = Accounting.absorb_side_spend(state)
-
-      redo_cost_usd = OptimalSystemAgent.Agent.Pricing.cost(state.model, redo_usage)
-
-      emit_fast_final_answer_reroute(state, routing, redo_duration_ms, redo_usage, redo_cost_usd)
+      emit_fast_reroute(
+        state,
+        routing,
+        :final_answer,
+        redo_duration_ms,
+        redo_usage,
+        redo_cost_usd
+      )
 
       {redo_result, state}
     else
@@ -1023,9 +986,129 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       is_binary(content) and String.trim(content) != ""
   end
 
-  defp emit_fast_final_answer_reroute(state, routing, duration_ms, usage, cost_usd) do
+  # ── Fast-routed model unavailable (bad credentials/model, plan gap, …) ────
+  #
+  # By the time `result` reaches here, `LLMClient.llm_chat_stream`'s OWN
+  # same-provider retry/backoff (`Resilience.with_retry` inside
+  # `Registry.stream_with_fallback/5`) has already exhausted itself on the
+  # fast model — this is not a transient blip the caller has not tried to
+  # ride out. Redo the step on the strong model so the operator sees an
+  # answer, not an error, on a step that was only routed to save money in the
+  # first place. A NON-retryable reason (auth, model-not-found, the same
+  # categories `FallbackChain.retryable_error?/1` already treats as config
+  # errors rather than provider hiccups) additionally marks the pairing
+  # unavailable — see `StepRouter.mark_unavailable/3` — so routing stops
+  # spending a wasted attempt (plus this redo's latency) on it every
+  # mechanical step for the rest of the run. A genuinely transient reason is
+  # NOT marked: the pairing is worth trying again next time.
+  defp maybe_reroute_fast_error(
+         %{route: :fast} = routing,
+         {:error, reason} = result,
+         state,
+         context
+       ) do
+    unless OptimalSystemAgent.Providers.FallbackChain.retryable_error?(reason) do
+      OptimalSystemAgent.Providers.StepRouter.mark_unavailable(
+        routing.provider,
+        routing.model,
+        reason
+      )
+    end
+
+    Logger.info(
+      "[route] #{routing.provider}:#{routing.model} failed (#{inspect(reason)}) — " <>
+        "re-asking #{state.provider}:#{state.model} on the strong model for this step"
+    )
+
+    {redo_result, state, redo_duration_ms, redo_usage, redo_cost_usd} =
+      redo_on_strong_model(state, context)
+
+    emit_fast_reroute(
+      state,
+      routing,
+      :fast_model_error,
+      redo_duration_ms,
+      redo_usage,
+      redo_cost_usd
+    )
+
+    {redo_result, state}
+  rescue
+    e ->
+      Logger.warning(
+        "[route] fast-error reroute itself crashed: #{Exception.message(e)} — surfacing the " <>
+          "original error instead of masking it with a second failure"
+      )
+
+      {result, state}
+  end
+
+  defp maybe_reroute_fast_error(_routing, result, state, _context), do: {result, state}
+
+  # Shared by both reroutes above: re-ask the SAME messages of `state`'s
+  # CURRENT provider/model (the strong pair — `restore_route` already ran
+  # before either reroute is checked) and bill the extra round-trip for real.
+  defp redo_on_strong_model(state, context) do
+    redo_start = System.monotonic_time(:millisecond)
+    redo_requested_at = DateTime.utc_now()
+
+    redo_result =
+      with_turn_effort(state, fn ->
+        thinking_opts = LLMClient.thinking_config(state)
+        tools_for_call = ToolFilter.filter(state.tools, state)
+
+        llm_opts = [
+          tools: tools_for_call,
+          temperature: LLMClient.temperature(),
+          max_tokens: max_response_tokens(),
+          thinking_disabled: Process.get(:osa_disable_thinking, false)
+        ]
+
+        llm_opts =
+          if thinking_opts, do: Keyword.put(llm_opts, :thinking, thinking_opts), else: llm_opts
+
+        # SAME messages the fast model just saw (`context.messages`, not
+        # rebuilt) — the point is that the strong model's own prefix cache
+        # still applies to this re-ask.
+        LLMClient.llm_chat_stream(state, context.messages, llm_opts)
+      end)
+
+    redo_duration_ms = System.monotonic_time(:millisecond) - redo_start
+
+    redo_usage =
+      case redo_result do
+        {:ok, redo_resp} -> Map.get(redo_resp, :usage, %{})
+        _ -> %{}
+      end
+
+    redo_billing_opts =
+      case redo_result do
+        {:ok, redo_resp} ->
+          [
+            provider_cost_usd: Map.get(redo_resp, :provider_cost_usd),
+            provider_quota: Map.get(redo_resp, :provider_quota),
+            requested_at: redo_requested_at
+          ]
+
+        _ ->
+          [requested_at: redo_requested_at]
+      end
+
+    # Billed for real — the strong re-ask is a genuine second round-trip, not
+    # just a log line. `absorb_side_spend/1` mirrors the primary call's
+    # handling of a request billed on the wire before it errored.
+    state = Accounting.record(state, redo_usage, redo_billing_opts)
+    state = Accounting.absorb_side_spend(state)
+
+    redo_cost_usd = OptimalSystemAgent.Agent.Pricing.cost(state.model, redo_usage)
+
+    {redo_result, state, redo_duration_ms, redo_usage, redo_cost_usd}
+  end
+
+  defp emit_fast_reroute(state, routing, reroute_reason, duration_ms, usage, cost_usd) do
     payload = %{
       event: :fast_final_answer_reroute,
+      reroute_reason: reroute_reason,
       session_id: state.session_id,
       iteration: state.iteration,
       fast_provider: to_string(routing.provider),

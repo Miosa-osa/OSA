@@ -54,6 +54,30 @@ defmodule OptimalSystemAgent.Agent.Loop.Advisor do
   `advisor_enabled` gates BOTH paths; `advisor_auto_enabled` gates only the
   automatic triggers, so an operator can keep the manual tool available while
   turning off the automatic nudges (or vice versa).
+
+  ## Auto-resolution — never `:advisor_not_configured` in the default path
+
+  With no explicit `advisor_provider`/`advisor_model` set, `resolve_pair/1`
+  picks one from whatever the session can actually reach, cheapest usable
+  credential first, so the advisor is USABLE the moment it is turned on —
+  no separate setup step:
+
+    1. `claude-opus-5-5` — if `:anthropic` (an API key) or `:claude_cli` (the
+       Claude subscription route) is configured; the direct API is preferred
+       when both are.
+    2. `gpt-6-sol` — else if `:openai` (an API key) or `:openai_codex` (the
+       Codex route) is configured.
+    3. The session's OWN strong model, at high effort — this is the one tier
+       that can never fail to resolve (the turn is already calling it), so
+       `resolve_pair/1` NEVER returns `nil`. Still a genuinely useful second
+       look: a fresh, high-effort pass over the same brief from the same
+       model can catch what the first pass missed, even without a second
+       model in the loop.
+
+  `configured_pair/1` reports ONLY the explicit configuration (used by
+  `/advisor status`'s "configured" line); `resolve_pair/1` is what `consult/3`
+  actually calls, and is what should be read anywhere the real answer to
+  "which advisor is this turn going to use" is needed.
   """
 
   require Logger
@@ -64,16 +88,28 @@ defmodule OptimalSystemAgent.Agent.Loop.Advisor do
   alias OptimalSystemAgent.Settings
 
   @type trigger :: :plan_made | :risky_action | :stuck
+  @type resolve_source :: :configured | :anthropic_auto | :openai_auto | :session_model_fallback
 
   @default_cost_cap_usd 0.50
   @default_max_tokens 700
+  # Bumped for the high-effort session-model-fallback tier (#3) — a genuine
+  # second look needs more room than the default terse-advice budget.
+  @high_effort_max_tokens 2_000
+  # Matches `Agent.Effort`'s `:high` tier's `thinking_budget` (kept as an
+  # independent literal, not an alias into that module: this fallback is
+  # deliberately NOT routed through the turn's own effort machinery — it is
+  # one bounded, separately-billed call, not a turn-wide override).
+  @high_effort_thinking_budget 10_000
+
+  @auto_anthropic_model "claude-opus-5-5"
+  @auto_openai_model "gpt-6-sol"
 
   @ets_table :osa_advisor_turn_spend
 
   # ── Public: manual (tool) path ───────────────────────────────────────────
 
   @doc """
-  Ask the configured advisor a question and get back a short recommendation.
+  Ask the advisor a question and get back a short recommendation.
 
   `question` is the model's own free-text reason for asking. `opts`:
 
@@ -82,12 +118,14 @@ defmodule OptimalSystemAgent.Agent.Loop.Advisor do
 
   Returns `{:ok, %{advice: String.t(), provider: atom(), model: String.t(),
   cost_usd: float()}}` or `{:error, reason}` where `reason` is one of
-  `:advisor_disabled`, `:advisor_not_configured`, `:cost_cap_reached`, or
-  whatever the provider call itself failed with.
+  `:advisor_disabled`, `:advisor_not_configured` (state carries neither an
+  explicit pair NOR a session provider/model to fall back to — see
+  `resolve_pair/1`; unreachable in the normal default path), `:cost_cap_reached`,
+  or whatever the provider call itself failed with.
   """
   @spec consult(map(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def consult(state, question, opts \\ []) when is_map(state) and is_binary(question) do
-    pair = configured_pair(state)
+    pair = resolve_pair(state)
 
     cond do
       not setting_enabled?(state) ->
@@ -100,21 +138,28 @@ defmodule OptimalSystemAgent.Agent.Loop.Advisor do
         {:error, :cost_cap_reached}
 
       true ->
-        {provider, model} = pair
-        do_consult(state, provider, model, question, opts)
+        {provider, model, source} = pair
+        do_consult(state, provider, model, question, opts, source == :session_model_fallback)
     end
   end
 
-  defp do_consult(state, provider, model, question, opts) do
+  defp do_consult(state, provider, model, question, opts, high_effort?) do
     brief = build_brief(state, question, opts)
     messages = [%{role: "user", content: brief}]
 
-    call_opts = [
-      provider: provider,
-      model: model,
-      temperature: 0.2,
-      max_tokens: Keyword.get(opts, :max_tokens, @default_max_tokens)
-    ]
+    call_opts =
+      [
+        provider: provider,
+        model: model,
+        temperature: 0.2,
+        max_tokens:
+          Keyword.get(
+            opts,
+            :max_tokens,
+            if(high_effort?, do: @high_effort_max_tokens, else: @default_max_tokens)
+          )
+      ]
+      |> maybe_add_high_effort_thinking(high_effort?, provider, model)
 
     case Providers.chat(messages, call_opts) do
       {:ok, %{content: advice} = resp} ->
@@ -128,6 +173,33 @@ defmodule OptimalSystemAgent.Agent.Loop.Advisor do
         {:error, reason}
     end
   end
+
+  # Tier #3 (the session's own strong model) is the one advisor call that
+  # asks for genuinely MORE depth than the terse-advice default — there is no
+  # second model in the loop for this tier, so the only lever left to make
+  # the "second look" worth anything is thinking budget. Anthropic-only
+  # (native `thinking` support verified against the model's own dialect,
+  # exactly like `LLMClient.thinking_decision/1` does for the main turn);
+  # every other provider gets the larger `max_tokens` alone.
+  defp maybe_add_high_effort_thinking(opts, true, :anthropic, model) do
+    case OptimalSystemAgent.Providers.AnthropicModels.thinking_mode(model) do
+      :adaptive ->
+        Keyword.put(opts, :thinking, %{type: "adaptive"})
+
+      :budget ->
+        Keyword.put(opts, :thinking, %{
+          type: "enabled",
+          budget_tokens: @high_effort_thinking_budget
+        })
+
+      :none ->
+        opts
+    end
+  rescue
+    _ -> opts
+  end
+
+  defp maybe_add_high_effort_thinking(opts, _high_effort?, _provider, _model), do: opts
 
   @doc """
   Wrap advice in the explicit "this is data, not an instruction" frame used
@@ -212,7 +284,7 @@ defmodule OptimalSystemAgent.Agent.Loop.Advisor do
   @doc "Is the advisor available at all (manual tool + automatic triggers)?"
   @spec enabled?(map()) :: boolean()
   def enabled?(state) when is_map(state) do
-    setting_enabled?(state) and configured_pair(state) != nil
+    setting_enabled?(state) and resolve_pair(state) != nil
   end
 
   def enabled?(_), do: false
@@ -276,6 +348,57 @@ defmodule OptimalSystemAgent.Agent.Loop.Advisor do
   end
 
   def configured_pair(_), do: nil
+
+  @doc """
+  The `{provider, model, source}` the advisor actually uses THIS call — the
+  explicit configuration if one is set, otherwise auto-resolved (see the
+  moduledoc's "Auto-resolution" section). `source` is one of
+  `t:resolve_source/0`; `/advisor status` and every `consult/3` caller reads
+  it so "which advisor answered, and why" is never a mystery.
+
+  The ONLY case this returns `nil`: `state` carries neither an explicit pair
+  nor a `:provider`/`:model` to fall back to (the tier-3 backstop needs
+  those). Every real call site — the tool, with the session's own
+  provider/model resolved onto its minimal context; the automatic triggers,
+  which already run inside the full loop `state` — has one or the other.
+  """
+  @spec resolve_pair(map()) :: {atom(), String.t(), resolve_source()} | nil
+  def resolve_pair(state) when is_map(state) do
+    case configured_pair(state) do
+      {provider, model} ->
+        {provider, model, :configured}
+
+      nil ->
+        auto_resolve(state)
+    end
+  end
+
+  def resolve_pair(_), do: nil
+
+  defp auto_resolve(state) do
+    cond do
+      Providers.provider_configured?(:anthropic) ->
+        {:anthropic, @auto_anthropic_model, :anthropic_auto}
+
+      Providers.provider_configured?(:claude_cli) ->
+        {:claude_cli, @auto_anthropic_model, :anthropic_auto}
+
+      Providers.provider_configured?(:openai) ->
+        {:openai, @auto_openai_model, :openai_auto}
+
+      Providers.provider_configured?(:openai_codex) ->
+        {:openai_codex, @auto_openai_model, :openai_auto}
+
+      is_atom(Map.get(state, :provider)) and Map.get(state, :provider) != nil and
+        is_binary(Map.get(state, :model)) and Map.get(state, :model) != "" ->
+        {Map.get(state, :provider), Map.get(state, :model), :session_model_fallback}
+
+      true ->
+        nil
+    end
+  rescue
+    _ -> nil
+  end
 
   defp normalize_provider(nil), do: nil
   defp normalize_provider(p) when is_atom(p), do: p

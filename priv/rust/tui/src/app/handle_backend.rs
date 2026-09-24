@@ -854,9 +854,32 @@ impl App {
             BackendEvent::LlmRequest {
                 iteration,
                 max_iterations,
+                routed_model,
+                routed_provider,
+                routing_reason,
             } => {
                 self.activity.set_iteration(iteration as u32);
                 self.activity.set_max_iterations(max_iterations);
+                // Per-step model routing (StepRouter): name the model THIS
+                // step is actually going to — the activity row's "Waiting
+                // for <model>" must never claim the session's own model when
+                // a cheaper one is answering instead, or the routing feature
+                // is invisible/silent exactly where the operator would
+                // notice a wrong answer first. Falls back to the session's
+                // own model when the field is absent (routing off, or an
+                // older backend that predates it).
+                let step_model = routed_model
+                    .clone()
+                    .filter(|m| !m.is_empty())
+                    .unwrap_or_else(|| self.header.model_name().to_string());
+                self.activity.set_model_name(&step_model);
+                if let (Some(provider), Some(model), Some(reason)) =
+                    (&routed_provider, &routed_model, &routing_reason)
+                {
+                    if reason != "turn_start" && reason != "disabled" {
+                        debug!("step routed: {}:{} ({})", provider, model, reason);
+                    }
+                }
                 // A request just went out: until a token or a tool comes back,
                 // this time is the MODEL's, and the row says so.
                 self.activity.note_model_request();

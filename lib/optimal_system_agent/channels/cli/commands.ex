@@ -996,29 +996,69 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
         Application.get_env(:optimal_system_agent, :advisor_enabled, true)
       ) == true
 
-    pair = Advisor.configured_pair(%{session_id: session_id})
-    cap = Advisor.cost_cap_usd(%{session_id: session_id})
+    call_state = %{
+      session_id: session_id,
+      provider: session_provider(session_id),
+      model: session_model(session_id)
+    }
+
+    configured_pair = Advisor.configured_pair(call_state)
+    resolved = Advisor.resolve_pair(call_state)
+    cap = Advisor.cost_cap_usd(call_state)
 
     IO.puts("  #{@bold}Advisor consult#{@reset}")
     IO.puts("")
 
     state = if enabled?, do: "#{@green}on#{@reset}", else: "#{@dim}off#{@reset}"
-    IO.puts("  advisor    #{state}  #{@dim}(default on; unusable until a model is set)#{@reset}")
+    IO.puts("  advisor    #{state}  #{@dim}(default on)#{@reset}")
 
-    configured =
-      case pair do
+    configured_line =
+      case configured_pair do
         {provider, model} -> "#{provider}:#{model}"
-        nil -> "#{@dim}not configured#{@reset}"
+        nil -> "#{@dim}not explicitly configured#{@reset}"
       end
 
-    IO.puts("  model      #{configured}")
+    IO.puts("  configured #{configured_line}")
+
+    # "Which advisor was resolved and why" — never :advisor_not_configured in
+    # the default path (see `Advisor.resolve_pair/1`'s moduledoc): this line
+    # is what actually answers a `/advisor_consult` call right now, not just
+    # what the operator explicitly typed.
+    resolved_line =
+      case resolved do
+        {provider, model, source} ->
+          "#{provider}:#{model}  #{@dim}(#{resolve_source_label(source)})#{@reset}"
+
+        nil ->
+          "#{@yellow}none — no credential and no session model to fall back to#{@reset}"
+      end
+
+    IO.puts("  resolved   #{resolved_line}")
     IO.puts("  cost cap   $#{cap} #{@dim}per turn#{@reset}")
     IO.puts("")
 
     IO.puts(
       "  #{@dim}/advisor on|off toggles the advisor; /advisor model <id> pairs a model " <>
-        "with this session's current provider. Both persist to settings.json.#{@reset}"
+        "with this session's current provider. Both persist to settings.json. With no " <>
+        "explicit model, the advisor auto-resolves from a reachable Anthropic/OpenAI " <>
+        "credential, falling back to this session's own model at high effort.#{@reset}"
     )
+  end
+
+  defp resolve_source_label(:configured), do: "explicitly configured"
+  defp resolve_source_label(:anthropic_auto), do: "auto — Anthropic credential detected"
+  defp resolve_source_label(:openai_auto), do: "auto — OpenAI credential detected"
+
+  defp resolve_source_label(:session_model_fallback),
+    do: "auto — no advisor credential found, using this session's own model at high effort"
+
+  # The session's own live model, mirroring `session_provider/1` — used to
+  # resolve `Advisor.resolve_pair/1`'s tier-3 fallback for `/advisor status`.
+  defp session_model(session_id) do
+    case Loop.get_state(session_id) do
+      {:ok, state} -> state[:model]
+      _ -> nil
+    end
   end
 
   # ── /models — local model manager ─────────────────────────────────────────
