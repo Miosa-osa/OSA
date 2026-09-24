@@ -274,6 +274,41 @@ fn hooks_label(ok: u32, failed: u32) -> Option<String> {
 /// collapsed them to a few hundred tokens or they are shipping full schemas.
 /// Appended rather than replacing the base chip, so `"N MCP"` is always a
 /// prefix — existing callers matching on that substring are unaffected.
+/// Prompt-cache watchdog readout for the row-0 status chip. Mirrors the wire
+/// shape of `Providers.CacheAttribution.status/1` — see `BackendEvent::LlmResponse`.
+#[derive(Debug, Clone, Default)]
+pub struct CacheStatus {
+    pub read_tokens: u64,
+    pub creation_tokens: u64,
+    pub hit_rate: Option<f64>,
+    pub last_break: Option<String>,
+    pub break_token_cost: u64,
+    pub break_above_threshold: bool,
+    pub cold_run: u64,
+}
+
+/// Prompt-cache chip text: `"cache 92%"`, or `"cache 92% \u{26a0} <cause>"`
+/// once a break has been attributed AND its cost cleared the operator's
+/// threshold (`above_threshold`). `None` before the first request of the
+/// session — there is no rate to show yet, and a `"cache 0%"` chip on a cold
+/// start would read as a defect rather than as "not measured yet".
+///
+/// The warning half is deliberately gated on `above_threshold`, not on the
+/// mere presence of a break: `CacheAttribution` attributes EVERY drop, most
+/// of which are a few tokens of request-param noise — escalating all of them
+/// to a `⚠` on the status line would make the chip cry wolf on every turn and
+/// train the user to stop looking at it.
+fn cache_label(status: Option<&CacheStatus>) -> Option<String> {
+    let status = status?;
+    let rate = status.hit_rate?;
+    let pct = (rate * 100.0).round() as i64;
+
+    match (&status.last_break, status.break_above_threshold) {
+        (Some(cause), true) => Some(format!("cache {}% \u{26a0} {}", pct, cause)),
+        _ => Some(format!("cache {}%", pct)),
+    }
+}
+
 fn mcp_label(count: usize, estimated_tokens: u64) -> Option<String> {
     if count == 0 {
         return None;
@@ -531,6 +566,11 @@ pub struct StatusBar {
     /// shows only the server count, either because there is truly nothing to
     /// report yet or a pre-cost-visibility backend never sent the field.
     mcp_tokens: u64,
+    /// Prompt-cache watchdog readout (`Providers.CacheAttribution.status/1`,
+    /// carried on every `LlmResponse`). `None` until the first response of
+    /// the session — the chip is omitted rather than showing a misleading
+    /// 0% before any request has actually gone out.
+    cache_status: Option<CacheStatus>,
     /// U-B5 — live swarm-intelligence status ("swarm · round N"), driven by the
     /// SwarmIntelligence* events. None ⇒ no swarm running ⇒ chip omitted.
     swarm_label: Option<String>,
@@ -607,6 +647,7 @@ impl StatusBar {
             context_warn_at: 0,
             mcp_count: 0,
             mcp_tokens: 0,
+            cache_status: None,
             swarm_label: None,
             hooks_ok: 0,
             hooks_failed: 0,
@@ -729,6 +770,13 @@ impl StatusBar {
     /// falls back to the bare count).
     pub fn set_mcp_tokens(&mut self, tokens: u64) {
         self.mcp_tokens = tokens;
+    }
+
+    /// Prompt-cache watchdog readout, feeding the row-0 cache chip. Replaces
+    /// the previous status wholesale — each `LlmResponse` carries the FULL
+    /// current picture for the session, not a delta.
+    pub fn set_cache_status(&mut self, status: CacheStatus) {
+        self.cache_status = Some(status);
     }
 
     /// Record one finished hook invocation. `outcome` is the backend's own
@@ -1589,6 +1637,30 @@ impl Component for StatusBar {
             );
         }
 
+        // Prompt-cache chip (`cache 92%`, or `cache 92% ⚠ <cause>` above the
+        // break-cost threshold). Omitted until the first response of the
+        // session. Warning-toned only in the escalated case — see
+        // `cache_label`'s doc for why a bare break does not turn it red.
+        if let Some(cache) = cache_label(self.cache_status.as_ref()) {
+            let escalated = self
+                .cache_status
+                .as_ref()
+                .is_some_and(|s| s.break_above_threshold);
+            let style = if escalated {
+                Style::default().fg(theme.colors.warning)
+            } else {
+                theme.faint()
+            };
+            push_segment_if_fits(
+                &mut spans,
+                vec![
+                    Span::styled(" \u{2502} ", theme.status_sep()),
+                    Span::styled(cache, style),
+                ],
+                row0.width,
+            );
+        }
+
         // Hook chip (`hooks 54 ok, 19 failed`). Omitted until a hook has run.
         // Coloured by the failure count rather than by category: quiet while
         // everything passes, error-toned the moment one did not, because that is
@@ -2154,6 +2226,94 @@ mod status_bar_tests {
         // No known cost yet (old backend, or genuinely zero) → bare count,
         // matching pre-cost-visibility rendering exactly.
         assert_eq!(mcp_label(12, 0).unwrap(), "12 MCP");
+    }
+
+    #[test]
+    fn cache_label_omitted_before_any_response() {
+        // Nothing observed yet — no chip, not a misleading "cache 0%".
+        assert_eq!(cache_label(None), None);
+    }
+
+    #[test]
+    fn cache_label_omitted_when_hit_rate_is_unknown() {
+        let status = CacheStatus {
+            hit_rate: None,
+            ..Default::default()
+        };
+        assert_eq!(cache_label(Some(&status)), None);
+    }
+
+    #[test]
+    fn cache_label_shows_a_rounded_percentage_with_no_break() {
+        let status = CacheStatus {
+            hit_rate: Some(0.923),
+            ..Default::default()
+        };
+        assert_eq!(cache_label(Some(&status)).unwrap(), "cache 92%");
+    }
+
+    #[test]
+    fn cache_label_names_the_cause_only_when_above_threshold() {
+        // A break was attributed, but it is small — the chip stays quiet
+        // about the cause so it does not cry wolf on every minor drop.
+        let quiet = CacheStatus {
+            hit_rate: Some(0.5),
+            last_break: Some("request params changed (max_tokens/thinking/effort)".into()),
+            break_above_threshold: false,
+            ..Default::default()
+        };
+        assert_eq!(cache_label(Some(&quiet)).unwrap(), "cache 50%");
+
+        // A break that cleared the operator's cost threshold escalates: the
+        // cause is named and the caller renders it in the warning color.
+        let escalated = CacheStatus {
+            hit_rate: Some(0.5),
+            last_break: Some("tools changed (+1/-0 tools: +web_fetch)".into()),
+            break_above_threshold: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            cache_label(Some(&escalated)).unwrap(),
+            "cache 50% \u{26a0} tools changed (+1/-0 tools: +web_fetch)"
+        );
+    }
+
+    #[test]
+    fn cache_label_rounds_rather_than_truncates() {
+        let status = CacheStatus {
+            hit_rate: Some(0.995),
+            ..Default::default()
+        };
+        assert_eq!(cache_label(Some(&status)).unwrap(), "cache 100%");
+
+        let status = CacheStatus {
+            hit_rate: Some(0.0),
+            ..Default::default()
+        };
+        assert_eq!(cache_label(Some(&status)).unwrap(), "cache 0%");
+    }
+
+    #[test]
+    fn cache_chip_renders_on_the_status_bar_once_set() {
+        let mut sb = StatusBar::new();
+        sb.set_width(160);
+        sb.set_cache_status(CacheStatus {
+            hit_rate: Some(0.87),
+            ..Default::default()
+        });
+
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut term = Terminal::new(TestBackend::new(160, 2)).unwrap();
+        term.draw(|f| sb.draw(f, f.area())).unwrap();
+        let rendered: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(rendered.contains("cache 87%"), "rendered: {rendered}");
     }
 
     #[test]

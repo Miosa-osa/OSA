@@ -867,6 +867,13 @@ impl App {
                 duration_ms,
                 input_tokens,
                 output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                cache_hit_rate,
+                cache_last_break,
+                cache_break_token_cost,
+                cache_break_above_threshold,
+                cache_cold_run,
             } => {
                 self.status
                     .set_stats(input_tokens, output_tokens, duration_ms);
@@ -879,6 +886,16 @@ impl App {
                 // streaming path). Derive it from the real request size here.
                 self.status.note_input_tokens(input_tokens);
                 self.sidebar.set_context(self.status.context_ratio());
+                self.status
+                    .set_cache_status(crate::components::status_bar::CacheStatus {
+                        read_tokens: cache_read_tokens,
+                        creation_tokens: cache_creation_tokens,
+                        hit_rate: cache_hit_rate,
+                        last_break: cache_last_break,
+                        break_token_cost: cache_break_token_cost,
+                        break_above_threshold: cache_break_above_threshold,
+                        cold_run: cache_cold_run,
+                    });
             }
             BackendEvent::SignalClassified { signal } => {
                 self.status.set_signal(signal);

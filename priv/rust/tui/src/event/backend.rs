@@ -135,6 +135,18 @@ pub enum BackendEvent {
         duration_ms: u64,
         input_tokens: u64,
         output_tokens: u64,
+        /// Prompt-cache read/write slices of `input_tokens`, when the route
+        /// reports them (0 on a route/provider that never does).
+        cache_read_tokens: u64,
+        cache_creation_tokens: u64,
+        /// Compact prompt-cache status for this session, from
+        /// `Providers.CacheAttribution.status/1` — `None` fields mean "no
+        /// requests observed yet" / "no break ever attributed", not zero.
+        cache_hit_rate: Option<f64>,
+        cache_last_break: Option<String>,
+        cache_break_token_cost: u64,
+        cache_break_above_threshold: bool,
+        cache_cold_run: u64,
     },
 
     // === Signal ===
