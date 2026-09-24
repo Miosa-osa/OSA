@@ -15,22 +15,41 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
   ## Lifecycle events covered
 
     * `:session_start`  — announce a new session (audit trail)
-    * `:session_end`    — clean up per-session ETS state
+    * `:session_end`    — clean up per-session ETS state, flush buffered pain
+                          events into durable lessons (double-loop learning)
     * `:pre_tool_use`   — spend guard, security check, MCP cache, read-nudge
     * `:post_tool_use`  — file tracking, MCP cache fill, cost, telemetry,
-                          learning, episodic memory, vault checkpoint
+                          learning, episodic memory, vault checkpoint, pain
+                          observation (repeated calls, slow searches)
     * `:post_tool_use_failure` — record tool failures for learning
-    * `:pre_compact` / `:post_compact` — observe context compaction
-    * `:user_prompt_submit` — (extension point; user hooks attach here)
+    * `:pre_compact` / `:post_compact` — observe context compaction; flush
+                          buffered pain events into durable lessons on
+                          `:post_compact` (double-loop learning)
+    * `:user_prompt_submit` — pain observation (user corrections); also the
+                          extension point user hooks attach to
     * `:subagent_start` / `:subagent_stop` — (extension point)
     * `:post_response`  — save transcript, auto-save session, skill capture
 
   Each handler follows the return protocol documented in `Dispatch`.
+
+  ## Double-loop learning (pain -> lesson)
+
+  `pain_observer_tool/1` and `pain_observer_prompt/1` are pure OBSERVERS —
+  they inspect the same hook payloads `learning_observer/1` and
+  `episodic_recorder/1` already see and call
+  `OptimalSystemAgent.Learning.PainSink.record/4` on a detected pattern, but
+  they never rewrite or block anything, so they carry none of those two
+  handlers' control-flow risk. `pain_lesson_flush/1` and
+  `pain_lesson_flush_on_compact/1` drain that session's buffer into durable
+  memory via `OptimalSystemAgent.Learning.DoubleLoop.flush/2` at the two
+  points a session's friction is worth consolidating: it is ending, or its
+  history is about to be rewritten by compaction.
   """
 
   require Logger
 
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Learning.{DoubleLoop, PainSink}
 
   @metrics_table :osa_hooks_metrics
 
@@ -60,6 +79,13 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
         event: :session_end,
         priority: 80,
         handler: &memory_consolidate/1,
+        opts: []
+      },
+      %{
+        name: "pain_lesson_flush",
+        event: :session_end,
+        priority: 82,
+        handler: &pain_lesson_flush/1,
         opts: []
       },
 
@@ -143,6 +169,13 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
         handler: &learning_observer/1,
         opts: []
       },
+      %{
+        name: "pain_observer_tool",
+        event: :post_tool_use,
+        priority: 97,
+        handler: &pain_observer_tool/1,
+        opts: []
+      },
 
       # ── post_tool_use_failure ──────────────────────────────────────
       %{
@@ -150,6 +183,15 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
         event: :post_tool_use_failure,
         priority: 95,
         handler: &learning_observer/1,
+        opts: []
+      },
+
+      # ── user_prompt_submit ───────────────────────────────────────────
+      %{
+        name: "pain_observer_prompt",
+        event: :user_prompt_submit,
+        priority: 96,
+        handler: &pain_observer_prompt/1,
         opts: []
       },
 
@@ -166,6 +208,13 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
         event: :post_compact,
         priority: 50,
         handler: &compact_observer/1,
+        opts: []
+      },
+      %{
+        name: "pain_lesson_flush_on_compact",
+        event: :post_compact,
+        priority: 60,
+        handler: &pain_lesson_flush_on_compact/1,
         opts: []
       },
 
@@ -519,6 +568,118 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
 
   def episodic_recorder(payload), do: {:ok, payload}
 
+  # ── Pain observer (double-loop learning input) ─────────────────────
+  #
+  # Detects, from ONLY the fields this hook payload carries (`tool_name`,
+  # `result`, `duration_ms`, `session_id` — no `:arguments`; those are
+  # `pre_tool_use`-only, see `security_check/1`), two of the friction
+  # patterns `Learning.DoubleLoop` turns into lessons:
+  #
+  #   * the same tool producing the SAME result `@pain_repeat_threshold`
+  #     times in a row — `:reverification_loop` when the tool looks like a
+  #     test/verify command, `:repeated_probe` otherwise. Empty results are
+  #     exempted (an empty result carries no information to compare, the
+  #     same exemption `DoomLoop.IdenticalCall` documents and measured).
+  #   * a search-shaped tool that took unusually long — `:slow_search`, a
+  #     proxy for "walked into a build/dependency directory": this hook has
+  #     no visibility into the actual command text to confirm that directly.
+  #
+  # A pure observer — unlike `learning_observer/1` beside it, it never
+  # rewrites or blocks.
+  @pain_repeat_table :osa_pain_last_call
+  @pain_repeat_threshold 3
+  @pain_verify_tool_names ~w(shell_execute)
+  @pain_slow_search_tools ~w(file_grep file_glob shell_execute)
+  @pain_slow_search_threshold_ms 8_000
+
+  def pain_observer_tool(
+        %{tool_name: tool_name, result: result, session_id: session_id} = payload
+      )
+      when is_binary(session_id) and is_binary(result) and result != "" do
+    ensure_pain_repeat_table()
+    result_hash = :erlang.phash2(result)
+
+    count =
+      case :ets.lookup(@pain_repeat_table, session_id) do
+        [{^session_id, ^tool_name, ^result_hash, n}] -> n + 1
+        _ -> 1
+      end
+
+    :ets.insert(@pain_repeat_table, {session_id, tool_name, result_hash, count})
+
+    if count == @pain_repeat_threshold do
+      kind =
+        if tool_name in @pain_verify_tool_names,
+          do: :reverification_loop,
+          else: :repeated_probe
+
+      PainSink.record(session_id, kind, "#{tool_name} repeated #{count}x with the same result")
+    end
+
+    maybe_flag_slow_search(payload)
+
+    {:ok, payload}
+  rescue
+    e ->
+      Logger.warning("[hooks] pain_observer_tool failed: #{Exception.message(e)}")
+      {:ok, payload}
+  end
+
+  def pain_observer_tool(payload) do
+    maybe_flag_slow_search(payload)
+    {:ok, payload}
+  rescue
+    _ -> {:ok, payload}
+  end
+
+  defp maybe_flag_slow_search(%{tool_name: tool_name, duration_ms: ms, session_id: sid})
+       when is_integer(ms) and is_binary(sid) and ms > @pain_slow_search_threshold_ms and
+              tool_name in @pain_slow_search_tools do
+    PainSink.record(sid, :slow_search, "#{tool_name} took #{ms}ms")
+  end
+
+  defp maybe_flag_slow_search(_payload), do: :ok
+
+  defp ensure_pain_repeat_table do
+    case :ets.whereis(@pain_repeat_table) do
+      :undefined -> :ets.new(@pain_repeat_table, [:named_table, :set, :public])
+      _ -> @pain_repeat_table
+    end
+  rescue
+    ArgumentError -> @pain_repeat_table
+  end
+
+  # `:user_prompt_submit` companion — flags a user message that reads as a
+  # correction ("that's wrong", "you should have", "stop doing that", ...).
+  # `detail` is a FIXED label, never the user's raw message: this is a
+  # second, independent guarantee on top of `PainEvent.sanitize/1`'s "never
+  # store secrets or file contents verbatim" — the message text is never
+  # even passed to `PainSink.record/4` in the first place.
+  @correction_patterns [
+    ~r/\bthat'?s\s+(not\s+right|wrong)\b/i,
+    ~r/\bno[,.]?\s+that'?s\s+(not|wrong)\b/i,
+    ~r/\byou\s+should\s+have\b/i,
+    ~r/\bstop\s+doing\s+that\b/i,
+    ~r/\bdon'?t\s+do\s+that\b/i,
+    ~r/\bthat\s+is\s+not\s+what\s+i\s+(asked|meant|said)\b/i,
+    ~r/\bnot\s+what\s+i\s+(asked|meant|said)\b/i
+  ]
+
+  def pain_observer_prompt(%{message: message, session_id: session_id} = payload)
+      when is_binary(message) and is_binary(session_id) do
+    if Enum.any?(@correction_patterns, &Regex.match?(&1, message)) do
+      PainSink.record(session_id, :user_correction, "user correction phrasing detected")
+    end
+
+    {:ok, payload}
+  rescue
+    e ->
+      Logger.warning("[hooks] pain_observer_prompt failed: #{Exception.message(e)}")
+      {:ok, payload}
+  end
+
+  def pain_observer_prompt(payload), do: {:ok, payload}
+
   # Durable episodic recorder — on each completed assistant turn, persist a
   # distilled task attempt (task + heuristic outcome + Reflexion-style
   # reflection) into the long-term EpisodicStore tier via the memory
@@ -616,6 +777,19 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
 
   def memory_consolidate(payload), do: {:ok, payload}
 
+  # Double-loop learning (session end) — drain this session's buffered pain
+  # events (`Learning.PainSink`) into durable lessons (`Learning.DoubleLoop`).
+  # Best-effort: `DoubleLoop.flush/2` already rescues internally; this is
+  # belt-and-braces so a learning hiccup can never block session shutdown.
+  def pain_lesson_flush(%{session_id: sid} = payload) when is_binary(sid) do
+    DoubleLoop.flush(sid)
+    {:ok, payload}
+  rescue
+    _ -> {:ok, payload}
+  end
+
+  def pain_lesson_flush(payload), do: {:ok, payload}
+
   # ── Compaction observer ────────────────────────────────────────────
 
   # Emit a telemetry event around context compaction (pre and post).
@@ -635,6 +809,21 @@ defmodule OptimalSystemAgent.Agent.Hooks.Handlers do
   rescue
     _ -> {:ok, payload}
   end
+
+  # Double-loop learning (compaction) — a session's history is about to be
+  # rewritten, so consolidate its buffered pain events into lessons NOW
+  # rather than only at session end (a long-running/background session may
+  # never cleanly reach `:session_end`). Requires `payload.session_id`,
+  # which `Compactor` and `ProactiveCompaction` both now attach to their
+  # `:post_compact` emission alongside it.
+  def pain_lesson_flush_on_compact(%{session_id: sid} = payload) when is_binary(sid) do
+    DoubleLoop.flush(sid)
+    {:ok, payload}
+  rescue
+    _ -> {:ok, payload}
+  end
+
+  def pain_lesson_flush_on_compact(payload), do: {:ok, payload}
 
   # ── MCP schema cache ───────────────────────────────────────────────
 

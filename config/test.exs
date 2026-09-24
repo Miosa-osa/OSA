@@ -62,6 +62,19 @@ config :optimal_system_agent, OptimalSystemAgent.Store.Repo,
 # exercised and tests remain fast, repeatable, and provider-independent.
 config :optimal_system_agent, classifier_llm_enabled: false
 
+# Output-contract injection and S/N enforcement default ON in prod
+# (config/config.exs) but stay OFF here: many existing tests elsewhere
+# assert an exact `MessageHandler.build_messages/2,4` shape or an exact
+# LLM-mock response string, and this keeps that a stable, deterministic
+# baseline. The dedicated suites for both
+# (test/agent/loop/message_handler_test.exs,
+# test/optimal_system_agent/agent/loop_signal_quality_test.exs) flip them on
+# explicitly per-test via `Application.put_env/3` and restore this default on
+# `on_exit`.
+config :optimal_system_agent,
+  output_contract_enabled: false,
+  signal_quality_enforcement_enabled: false
+
 # Disable the settings file watcher in tests — the suite changes cwd per test,
 # so the watcher would see every project-path change as an external edit and
 # fire spurious settings_changed events / cache resets. The watcher's own test

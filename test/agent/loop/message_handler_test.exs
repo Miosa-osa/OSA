@@ -120,4 +120,68 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandlerTest do
     assert debugging_directive?(first)
     refute debugging_directive?(second)
   end
+
+  # --- output contract directive (Signal Theory, outbound) ------------------
+
+  defp output_contract_directive?(messages) do
+    Enum.any?(messages, fn
+      %{role: "system", content: c} when is_binary(c) -> c =~ "Output contract"
+      _ -> false
+    end)
+  end
+
+  describe "output contract directive" do
+    setup do
+      original = Application.get_env(:optimal_system_agent, :output_contract_enabled)
+
+      on_exit(fn ->
+        if is_nil(original) do
+          Application.delete_env(:optimal_system_agent, :output_contract_enabled)
+        else
+          Application.put_env(:optimal_system_agent, :output_contract_enabled, original)
+        end
+      end)
+
+      :ok
+    end
+
+    test "off (config/test.exs default), so a plain message gets no extra directive" do
+      Application.put_env(:optimal_system_agent, :output_contract_enabled, false)
+
+      messages =
+        MessageHandler.build_messages("please run the tests now", %{
+          turn_count: 0,
+          permission_tier: :full
+        })
+
+      assert [%{role: "user", content: "please run the tests now"}] = messages
+      refute output_contract_directive?(messages)
+    end
+
+    test "on (the config/config.exs production default) injects the directive immediately before the user message" do
+      Application.put_env(:optimal_system_agent, :output_contract_enabled, true)
+
+      messages =
+        MessageHandler.build_messages("please run the tests now", %{
+          turn_count: 0,
+          permission_tier: :full
+        })
+
+      assert [%{role: "system", content: directive}, %{role: "user"}] = messages
+      assert directive =~ "Output contract"
+    end
+
+    test "on: a :direct-genre message ('please ...') gets a numbered-actions contract" do
+      Application.put_env(:optimal_system_agent, :output_contract_enabled, true)
+
+      messages =
+        MessageHandler.build_messages("please run the tests now", %{
+          turn_count: 0,
+          permission_tier: :full
+        })
+
+      assert [%{role: "system", content: directive}, %{role: "user"}] = messages
+      assert directive =~ "action" or directive =~ "step"
+    end
+  end
 end

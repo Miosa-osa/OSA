@@ -480,6 +480,33 @@ config :optimal_system_agent,
   # or this app env. See Verify.PostEdit.format_enabled?/0.
   post_edit_format: false
 
+# Signal Theory applied to OSA's OWN answers (outbound, mirroring the
+# existing inbound `Agent.Loop.GenreRouter`). ON by default for real use:
+#
+#   * `output_contract_enabled` — `Agent.Loop.MessageHandler` injects a tiny,
+#     genre-classified per-turn directive (`Signal.OutputContract`) telling
+#     the model how to shape THIS answer (numbered actions, answer-first,
+#     recommendation+tradeoffs, ...). Classification is the existing fast,
+#     deterministic, no-LLM-call path, so this adds no round-trip and — being
+#     a per-turn DYNAMIC message, never part of a `Soul` static-base template
+#     — has zero effect on the static prompt size `StaticBaseSizeTest` pins.
+#   * `signal_quality_enforcement_enabled` — `Agent.Loop`'s `run_and_reply/1`
+#     runs the finished answer through `Signal.SnScorer.enforce/2` before
+#     display: TRIMS only sentences that are ENTIRELY a fixed filler phrase
+#     or an exact immediate repeat (never a sentence containing a backtick,
+#     a digit, a `/`, or a shell/VCS command word — see
+#     `Signal.SnScorer.trim/1`'s `protected_sentence?/1`), and FLAGS (logs,
+#     no rewrite) anything that still scores low. Heuristic only, no LLM call.
+#
+# Both are `false` in `config/test.exs` — the existing suite has many call
+# sites elsewhere that assert an exact `build_messages/2,4` message shape or
+# an exact LLM-mock response string, and this repo's test env keeps every
+# such deterministic-path assertion stable (same convention as
+# `classifier_llm_enabled: false` in `config/test.exs`).
+config :optimal_system_agent,
+  output_contract_enabled: true,
+  signal_quality_enforcement_enabled: true
+
 # Auto-mode safety Guardian. In :auto permission tier, the classifier blocks
 # dangerous tool calls and the Guardian pauses unattended execution after
 # `pause_after_blocks` blocked actions. `untrusted_host_allowlist` names the

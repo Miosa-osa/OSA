@@ -20,6 +20,7 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
   alias OptimalSystemAgent.Agent.Reminders
   alias OptimalSystemAgent.Agent.Safety.PathPolicy
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Signal.OutputContract
 
   @doc """
   Build the final message list to append for this turn.
@@ -419,7 +420,38 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
     |> maybe_add_explore_directive(message)
     |> maybe_add_delegation_directive(message, state)
     |> maybe_add_progress_ledger_directive(state)
+    |> maybe_add_output_contract_directive(message)
     |> Enum.reverse()
+  end
+
+  # Signal Theory applied OUTBOUND (companion to `Agent.Loop.GenreRouter`,
+  # which applies it INBOUND): tell the model how to SHAPE this turn's answer
+  # based on the message's classified genre (`Signal.OutputContract`) —
+  # numbered actions for :direct, answer-first for :inform, a recommendation
+  # plus tradeoffs for :decide, and so on. Classification is the existing
+  # fast, deterministic, no-LLM-call path, so this adds no round-trip.
+  #
+  # ON by default for real use (`config/config.exs`,
+  # `output_contract_enabled: true`) — the operator wants this genre
+  # contract in effect. It is OFF only in `config/test.exs`: every OTHER
+  # directive above is conditional on message CONTENT, so it stays silent
+  # for the large majority of existing test fixtures, but genre
+  # classification is unconditional (every message has SOME genre) — turning
+  # this on unconditionally in the test env would inject a directive into
+  # EVERY turn and break the many existing tests elsewhere in this suite
+  # that assert an exact `build_messages/2,4` shape for a plain message.
+  # See `MessageHandlerTest`'s "output contract directive" describe block
+  # for the dedicated coverage of both states.
+  defp maybe_add_output_contract_directive(acc, message) do
+    if output_contract_enabled?() do
+      [%{role: "system", content: OutputContract.directive_for(message)} | acc]
+    else
+      acc
+    end
+  end
+
+  defp output_contract_enabled? do
+    Application.get_env(:optimal_system_agent, :output_contract_enabled, false) == true
   end
 
   # The cross-tier memory recall block used to be injected here, as a
