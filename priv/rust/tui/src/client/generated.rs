@@ -33,6 +33,12 @@ pub struct HealthResponse {
     /// Examples: `on:catalog:high`, `off:model_unsupported`, `on:config`.
     #[serde(default)]
     pub reasoning: Option<String>,
+    /// `false` when the current model reasons no matter what (Claude Opus 5.5, the
+    /// GLM tags on Ollama Cloud) — the TUI then does not offer "thinking off".
+    /// From the provider catalogs (`Providers.ReasoningCapability`); absent on older
+    /// backends, which the TUI treats as `true`.
+    #[serde(default)]
+    pub thinking_can_disable: Option<bool>,
     /// Spend/limit snapshot from the backend Budget. `null` when Budget is
     /// unavailable; individual limits are `null` when uncapped.
     #[serde(default)]

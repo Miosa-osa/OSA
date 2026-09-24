@@ -778,7 +778,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       # them across the compaction boundary.
       restored =
         if last_step in [:summarize_warm, :compress_cold, :emergency_truncate] do
-          case CompactionSafety.build_reminder_message(session_id) do
+          case CompactionSafety.build_reminder_message(session_id, final_messages) do
             nil -> restored
             reminder_msg -> restored ++ [reminder_msg]
           end

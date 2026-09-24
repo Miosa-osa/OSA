@@ -10,6 +10,8 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
   alias OptimalSystemAgent.Providers.Registry, as: Providers
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Providers.ErrorCatalog
+  alias OptimalSystemAgent.Providers.HistorySanitizer
   alias OptimalSystemAgent.Providers.Resilience
   alias OptimalSystemAgent.Agent.Trajectory
   alias OptimalSystemAgent.Utils.Mojibake
@@ -456,6 +458,11 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
       "[llm] chat — #{length(messages)} messages (sanitized): #{inspect(sanitize_for_log(messages))}"
     )
 
+    # Repair corrupted history BEFORE it goes out — dropped orphan tool
+    # results, filled orphan tool_use, pruned/merged empty text blocks. See
+    # `Providers.HistorySanitizer` moduledoc. A no-op on clean history.
+    {messages, _repaired?} = HistorySanitizer.sanitize(messages)
+
     # A non-streaming round-trip carries an id too, so the terminal
     # `agent_response` always names the segment it finalizes. Continues the open
     # segment; mints only when none is open or one was just ended by a tool run.
@@ -483,6 +490,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
     result = Providers.chat(messages, opts)
     result = maybe_retry_without_service_tier(result, messages, opts, &Providers.chat/2)
+    result = maybe_repair_history_and_retry(result, messages, opts, &Providers.chat/2)
 
     result
     |> surface_sync_reasoning(Map.get(state, :session_id, "session"))
@@ -521,6 +529,41 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   end
 
   defp maybe_retry_without_service_tier(result, _messages, _opts, _request), do: result
+
+  # One-shot repair-and-retry (see `Providers.HistorySanitizer` moduledoc):
+  # `llm_chat/3` / `llm_chat_stream/3` already sanitize BEFORE sending, so a
+  # request-shape 400 reaching here means either a corruption pattern the
+  # pre-flight pass does not (yet) recognise, or one introduced between the
+  # pre-flight pass and this response. Re-run the sanitizer; retry exactly
+  # once, and ONLY when it actually changed something — an unchanged result
+  # means this module cannot help, and retrying an identical body would just
+  # reproduce the identical 400 forever.
+  @repairable_categories [:tool_use_mismatch, :request_shape]
+
+  defp maybe_repair_history_and_retry({:error, reason} = error, messages, opts, request)
+       when is_function(request, 2) do
+    if ErrorCatalog.classify(reason) in @repairable_categories do
+      case HistorySanitizer.sanitize(messages) do
+        {^messages, _} ->
+          error
+
+        {repaired, true} ->
+          Logger.warning(
+            "[llm] history repaired after a #{inspect(ErrorCatalog.classify(reason))} — " <>
+              "retrying once with the repaired history"
+          )
+
+          request.(repaired, opts)
+
+        _ ->
+          error
+      end
+    else
+      error
+    end
+  end
+
+  defp maybe_repair_history_and_retry(result, _messages, _opts, _request), do: result
 
   @doc false
   def tier_rejection?(reason) do
@@ -620,6 +663,10 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         messages,
         opts
       ) do
+    # Repair corrupted history BEFORE it goes out — see `llm_chat/3` and the
+    # `Providers.HistorySanitizer` moduledoc. A no-op on clean history.
+    {messages, _repaired?} = HistorySanitizer.sanitize(messages)
+
     Logger.debug(
       "[llm] stream — #{length(messages)} messages (sanitized): #{inspect(sanitize_for_log(messages))} session=#{session_id}"
     )
@@ -872,6 +919,17 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
             Providers.chat_stream(retry_messages, callback, retry_opts)
           end)
 
+        # One-shot repair-and-retry (see `Providers.HistorySanitizer`
+        # moduledoc). `:tool_use_mismatch` / `:request_shape` are fatal at
+        # `RetryClassifier`/`FallbackChain` — nothing below would ever retry
+        # this on its own — and reusing the SAME live `callback` here is safe
+        # because these categories are fatal at the FIRST attempt, before a
+        # single byte streams to the user.
+        result =
+          maybe_repair_history_and_retry(result, messages, opts, fn retry_messages, retry_opts ->
+            Providers.chat_stream(retry_messages, callback, retry_opts)
+          end)
+
         case result do
           :ok ->
             # Callback-based streaming providers report the response through
@@ -980,6 +1038,21 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
           flush_stream_messages()
           {:cancelled, %{content: partial_text(session_id)}}
 
+        {:llm_stream_send_now} ->
+          # Send-now: the user sent a message mid-generation. Kill the stream
+          # like an interrupt and keep the partial text — but the turn is NOT
+          # cancelled. `handle_result({:send_now, _})` commits the partial and
+          # continues, so the very next iteration folds in the queued steer.
+          Logger.info(
+            "[stream] Send-now — pausing in-flight stream for session:#{session_id} to read a new message"
+          )
+
+          Process.unlink(watchdog)
+          Process.exit(watchdog, :normal)
+          Task.shutdown(stream_task, :brutal_kill)
+          flush_stream_messages()
+          {:send_now, %{content: partial_text(session_id)}}
+
         {:llm_idle_timeout, elapsed_ms} ->
           # Watchdog detected idle connection — kill the stream.
           #
@@ -1052,6 +1125,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     # so it can never leak into the Loop process mailbox as an unexpected info.
     receive do
       {:llm_stream_cancelled} -> :ok
+      {:llm_stream_send_now} -> :ok
     after
       0 -> :ok
     end
@@ -1096,9 +1170,16 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         ArgumentError -> false
       end
 
+    # Send-now: the user sent a message that must be read now. Cut the stream
+    # like an interrupt — the partial text is preserved and committed — so the
+    # model is not left finishing a plan the user just redirected. Unlike a
+    # cancel this does NOT end the turn: the next iteration folds in the steer.
+    send_now? = OptimalSystemAgent.Agent.Loop.SendNow.yield?(session_id)
+
     cond do
       not Process.alive?(stream_task.pid) -> :ok
       cancelled? -> send(owner, {:llm_stream_cancelled})
+      send_now? -> send(owner, {:llm_stream_send_now})
       true -> cancel_watch_loop(session_id, stream_task, owner)
     end
   end

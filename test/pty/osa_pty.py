@@ -65,9 +65,12 @@ except ImportError:  # pragma: no cover - environment guard
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BIN = REPO_ROOT / "priv" / "rust" / "tui" / "target" / "release" / "osagent"
 
-# DSR — Device Status Report, cursor position. Ratatui's inline viewport issues
-# this on every rebuild; answering it from the emulator's real cursor is the
-# whole point of the harness.
+# DSR — Device Status Report, cursor position. Ratatui's inline viewport asks
+# this whenever it is built without being told the row; answering it from the
+# emulator's real cursor is the whole point of the harness. (OSA now primes
+# every rebuild and never lets `autoresize` ask, so after the startup probe a
+# healthy session emits none — see
+# `test_a_resize_never_asks_the_terminal_where_the_cursor_is`.)
 _DSR = re.compile(rb"\x1b\[6n")
 
 # How long to let the TUI reach a quiet state before asserting. The resize
@@ -168,6 +171,11 @@ class PtySession:
         # screen is the primary evidence; this is for the defects the renderer
         # cannot show (see `emitted_since`).
         self.raw = bytearray()
+        # Whether `pump` answers `ESC[6n`. A real terminal behind a busy
+        # multiplexer or SSH link can drop or delay the reply; turning this
+        # off makes every cursor query the TUI issues a guaranteed timeout,
+        # which is how a test proves a code path never issues one.
+        self.answer_dsr = True
         self.pid: int | None = None
         self.fd: int | None = None
 
@@ -299,7 +307,7 @@ class PtySession:
             # Answer every cursor query from the EMULATOR's cursor, which is
             # what a real terminal does and what the in-process backend cannot
             # get wrong. 1-based, row then column.
-            for _ in _DSR.findall(chunk):
+            for _ in _DSR.findall(chunk) if self.answer_dsr else ():
                 y = self.screen.cursor.y + 1
                 x = self.screen.cursor.x + 1
                 self.write(b"\x1b[%d;%dR" % (y, x))

@@ -435,4 +435,124 @@ defmodule OptimalSystemAgent.Providers.AnthropicTest do
       assert result.usage.output_tokens == 8
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # accumulate_stream_events/1 — P2 audit gap A: `event: message_stop` is
+  # Anthropic's own confirmation the response is finished. `collect_stream/3`'s
+  # `done?` (Req's connection-level signal that the HTTP body ended) used to be
+  # treated as identical to it — a dropped connection was indistinguishable
+  # from the model finishing on its own.
+  # ---------------------------------------------------------------------------
+
+  describe "accumulate_stream_events/1 — stream_incomplete (no message_stop)" do
+    test "content produced but the event stream never reaches message_stop is flagged" do
+      events = [
+        %{"type" => "content_block_start", "content_block" => %{"type" => "text"}},
+        %{
+          "type" => "content_block_delta",
+          "delta" => %{"type" => "text_delta", "text" => "Partial answer, cut off"}
+        }
+        # No content_block_stop, no message_stop — the connection just ended.
+      ]
+
+      result = Anthropic.accumulate_stream_events(events)
+
+      assert result.content == "Partial answer, cut off"
+      assert result.stream_incomplete == true
+    end
+
+    test "a normal turn that DOES reach message_stop is NOT flagged incomplete" do
+      events = [
+        %{"type" => "content_block_start", "content_block" => %{"type" => "text"}},
+        %{
+          "type" => "content_block_delta",
+          "delta" => %{"type" => "text_delta", "text" => "All done."}
+        },
+        %{"type" => "content_block_stop"},
+        %{"type" => "message_delta", "delta" => %{"stop_reason" => "end_turn"}},
+        %{"type" => "message_stop"}
+      ]
+
+      result = Anthropic.accumulate_stream_events(events)
+
+      assert result.content == "All done."
+      refute result.stream_incomplete
+    end
+
+    test "a tool call that finished parsing but no message_stop arrived is still flagged" do
+      events = [
+        %{
+          "type" => "content_block_start",
+          "content_block" => %{"type" => "tool_use", "id" => "tc_1", "name" => "file_read"}
+        },
+        %{
+          "type" => "content_block_delta",
+          "delta" => %{"type" => "input_json_delta", "partial_json" => "{\"path\":\"/tmp/x\"}"}
+        },
+        %{"type" => "content_block_stop"}
+        # No message_stop.
+      ]
+
+      result = Anthropic.accumulate_stream_events(events)
+
+      assert [%{id: "tc_1", name: "file_read"}] = result.tool_calls
+      assert result.stream_incomplete == true
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # accumulate_stream_events/1 — P2 audit gap B: a `tool_use` block delivered
+  # twice (a malformed reconnect, a re-sent event) must not both execute —
+  # `ToolOrchestrator.uniquify_ids/1` used to rename the repeat so both ran.
+  # ---------------------------------------------------------------------------
+
+  describe "accumulate_stream_events/1 — duplicate tool_use dedup" do
+    defp tool_use_events(id, name, json) do
+      [
+        %{
+          "type" => "content_block_start",
+          "content_block" => %{"type" => "tool_use", "id" => id, "name" => name}
+        },
+        %{
+          "type" => "content_block_delta",
+          "delta" => %{"type" => "input_json_delta", "partial_json" => json}
+        },
+        %{"type" => "content_block_stop"}
+      ]
+    end
+
+    test "an EXACT duplicate tool_use block (same id, name, arguments) is dropped" do
+      events =
+        tool_use_events("tc_1", "file_read", "{\"path\":\"/tmp/x\"}") ++
+          tool_use_events("tc_1", "file_read", "{\"path\":\"/tmp/x\"}")
+
+      result = Anthropic.accumulate_stream_events(events)
+
+      assert [%{id: "tc_1", name: "file_read", arguments: %{"path" => "/tmp/x"}}] =
+               result.tool_calls
+    end
+
+    test "a same-id block with DIFFERENT arguments is kept (genuine conflict)" do
+      events =
+        tool_use_events("tc_1", "file_read", "{\"path\":\"/tmp/x\"}") ++
+          tool_use_events("tc_1", "file_read", "{\"path\":\"/tmp/y\"}")
+
+      result = Anthropic.accumulate_stream_events(events)
+
+      # Both survive — ToolOrchestrator.uniquify_ids/1 (react_loop.ex) is the
+      # place a genuine id conflict gets repaired, not this layer.
+      assert length(result.tool_calls) == 2
+    end
+
+    test "two DIFFERENT tool calls are both kept" do
+      events =
+        tool_use_events("tc_1", "file_read", "{}") ++
+          tool_use_events("tc_2", "file_write", "{}")
+
+      result = Anthropic.accumulate_stream_events(events)
+
+      ids = Enum.map(result.tool_calls, & &1.id)
+      assert Enum.sort(ids) == ["tc_1", "tc_2"]
+    end
+  end
 end

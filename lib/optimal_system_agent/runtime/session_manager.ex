@@ -248,6 +248,16 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
   @spec steer(session_id(), String.t()) :: :ok
   def steer(session_id, text), do: Loop.steer(session_id, text)
 
+  @doc """
+  Send-now: deliver `texts` into the live turn AND interrupt its current step
+  so they are read immediately (still-running tools move to the background
+  rather than being cancelled). See `Agent.Loop.SendNow.request/2`.
+  """
+  @spec send_now(session_id(), [String.t()]) :: :ok
+  def send_now(session_id, texts) when is_list(texts) do
+    OptimalSystemAgent.Agent.Loop.SendNow.request(session_id, texts)
+  end
+
   @doc "Stop a live loop process and forget runtime tracking."
   @spec stop_session(session_id()) :: :ok | {:error, :not_found} | {:error, term()}
   def stop_session(session_id) do

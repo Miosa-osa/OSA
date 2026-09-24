@@ -162,6 +162,57 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalogTest do
     end
   end
 
+  describe "a refused model shows the SERVER's sentence, never raw JSON or request ids" do
+    test "Anthropic 404 body: the error.message is shown and request_id dropped" do
+      reason =
+        ~s(Anthropic returned 404: {"type":"error","error":{"type":"not_found_error","message":"model: claude-nope"},"request_id":"req_011CXyZabc123"})
+
+      msg = Catalog.user_message(reason)
+      assert msg =~ "model: claude-nope"
+      assert msg =~ "Anthropic"
+      assert msg =~ "/model"
+      refute msg =~ "req_011"
+      refute msg =~ "{"
+    end
+
+    test "OpenAI 404 body" do
+      reason =
+        ~s(HTTP 404: {"error":{"message":"The model `gpt-9` does not exist or you do not have access to it.","type":"invalid_request_error","code":"model_not_found"}})
+
+      msg = Catalog.user_message(reason)
+      assert msg =~ "The model `gpt-9` does not exist or you do not have access to it."
+      refute msg =~ "invalid_request_error"
+    end
+
+    test "Ollama bare error string" do
+      msg =
+        Catalog.user_message(
+          ~S(Ollama returned 404: {"error":"model \"llama9\" not found, try pulling it first"})
+        )
+
+      assert msg =~ ~s(model "llama9" not found, try pulling it first)
+      refute msg =~ "{"
+    end
+
+    test "unknown errors carry the sentence, not the JSON envelope" do
+      msg =
+        Catalog.user_message(
+          ~s(HTTP 418: {"error":{"message":"This model is not available on your plan.","code":418},"user_id":"user_2x"} request id: req_abcdef123)
+        )
+
+      assert msg =~ "This model is not available on your plan."
+      refute msg =~ "user_2x"
+      refute msg =~ "req_abcdef123"
+    end
+
+    test "server_message/1 strips request ids from prose" do
+      assert Catalog.server_message("Model refused (request id: req_abc123XYZ).") ==
+               "Model refused."
+
+      assert Catalog.server_message("plain text") == "plain text"
+    end
+  end
+
   describe "empty-response classification (flaky-provider retry)" do
     test "the SSE empty-stream recovery strings classify as :empty_response" do
       assert Catalog.classify("SSE recovery: stream completed without a result") ==
@@ -204,6 +255,52 @@ defmodule OptimalSystemAgent.Providers.ErrorCatalogTest do
       assert msg =~ "API Error"
       assert msg =~ "incomplete tool call"
       assert msg =~ "/model"
+    end
+  end
+
+  describe "self-heal gap: request-shape corruption `HistorySanitizer` repairs (audit item 1)" do
+    test "an orphan tool_use with no result still classifies as :tool_use_mismatch" do
+      reason =
+        "Anthropic returned 400: the following tool_use ids were found without tool_result " <>
+          "blocks immediately after: toolu_01."
+
+      assert Catalog.classify(reason) == :tool_use_mismatch
+    end
+
+    test "the OTHER direction — a tool_result with no matching tool_use — ALSO classifies as :tool_use_mismatch" do
+      reason =
+        "Anthropic returned 400: unexpected `tool_use_id` found in `tool_result` blocks: " <>
+          "toolu_ghost. Each `tool_result` block must have a corresponding `tool_use` block " <>
+          "in the previous message."
+
+      assert Catalog.classify(reason) == :tool_use_mismatch
+    end
+
+    test "the alternate 'no such tool_use' phrasing also classifies as :tool_use_mismatch" do
+      reason = "no such tool_use block was found for tool_result toolu_ghost"
+      assert Catalog.classify(reason) == :tool_use_mismatch
+    end
+
+    test "an empty text content block classifies as :request_shape, not :unknown" do
+      reason = "Anthropic returned 400: text content blocks must be non-empty"
+      assert Catalog.classify(reason) == :request_shape
+    end
+
+    test "the generic 'all messages must have non-empty content' 400 also classifies as :request_shape" do
+      reason = "Anthropic returned 400: all messages must have non-empty content"
+      assert Catalog.classify(reason) == :request_shape
+    end
+
+    test ":tool_use_mismatch is direction-agnostic in its user-facing message and mentions the repair attempt" do
+      msg = Catalog.user_message("ids were found without a corresponding tool_use")
+      assert msg =~ "a tool call and its result don't match"
+      assert msg =~ "already tried to repair"
+    end
+
+    test "both repairable categories remain OSA-harness faults, not provider faults" do
+      assert Catalog.fault_owner("ids were found without a matching tool_result") == :osa
+      assert Catalog.fault_owner("unexpected `tool_use_id` found") == :osa
+      assert Catalog.fault_owner("text content blocks must be non-empty") == :osa
     end
   end
 end

@@ -1366,7 +1366,7 @@ impl Agents {
                 entry.tokens_used = t;
             }
             entry.finished_at = Some(std::time::Instant::now());
-            entry.result_summary = summary.filter(|s| !s.trim().is_empty());
+            entry.result_summary = summary.as_deref().and_then(one_line_summary);
         }
     }
 
@@ -1396,7 +1396,7 @@ impl Agents {
                 entry.tokens_used = t;
             }
             entry.finished_at = Some(std::time::Instant::now());
-            entry.result_summary = summary.filter(|s| !s.trim().is_empty());
+            entry.result_summary = summary.as_deref().and_then(one_line_summary);
         }
     }
 
@@ -1421,7 +1421,7 @@ impl Agents {
                 entry.tokens_used = t;
             }
             entry.finished_at = Some(std::time::Instant::now());
-            entry.result_summary = summary.filter(|s| !s.trim().is_empty());
+            entry.result_summary = summary.as_deref().and_then(one_line_summary);
         }
     }
 
@@ -1549,7 +1549,7 @@ impl Agents {
             };
             entry.current_action = status.to_string();
             entry.finished_at = Some(std::time::Instant::now());
-            entry.result_summary = summary.filter(|s| !s.trim().is_empty());
+            entry.result_summary = summary.as_deref().and_then(one_line_summary);
         }
     }
 
@@ -1660,6 +1660,66 @@ impl Component for Agents {
     }
 }
 
+/// Longest `⎿ <summary>` line the roster renders — the backend's own clamp
+/// (`Orchestrator.completion_summary/1`, 140).
+const SUMMARY_MAX_CHARS: usize = 140;
+
+/// The one-line result summary under a finished agent, from whatever the
+/// backend sent: first prose line (headings and fences skipped, list/quote
+/// markers stripped), its first sentence, clamped with an ellipsis. The
+/// backend already sends this shape; this keeps a multi-paragraph reply from an
+/// older backend (or any other producer) from ever standing in for it.
+pub(crate) fn one_line_summary(raw: &str) -> Option<String> {
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("```"))
+        .map(|l| {
+            let l = l.trim_start_matches('>').trim_start();
+            for marker in ["- ", "* ", "+ "] {
+                if let Some(rest) = l.strip_prefix(marker) {
+                    return rest.trim().to_string();
+                }
+            }
+            l.to_string()
+        })
+        .find(|l| !l.is_empty())?;
+    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let sentence = first_sentence(&line);
+    let clamped = if sentence.chars().count() > SUMMARY_MAX_CHARS {
+        let cut: String = sentence.chars().take(SUMMARY_MAX_CHARS - 1).collect();
+        let cut = match cut.rfind(' ') {
+            Some(i) if i > cut.len() / 2 => cut[..i].to_string(),
+            _ => cut,
+        };
+        format!("{}\u{2026}", cut.trim_end_matches([',', ';', ':']))
+    } else {
+        sentence.to_string()
+    };
+    Some(clamped)
+}
+
+/// Up to and including the first `.`/`!`/`?` that is followed by a space and
+/// an uppercase letter, digit or opening quote — so "e.g. the" and "v1.2.3"
+/// do not end it.
+fn first_sentence(line: &str) -> &str {
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    for (i, &(pos, c)) in chars.iter().enumerate() {
+        if matches!(c, '.' | '!' | '?') {
+            if let (Some(&(_, sp)), Some(&(_, next))) = (chars.get(i + 1), chars.get(i + 2)) {
+                if sp == ' '
+                    && (next.is_uppercase()
+                        || next.is_ascii_digit()
+                        || matches!(next, '"' | '\'' | '(' | '['))
+                {
+                    return &line[..pos + c.len_utf8()];
+                }
+            }
+        }
+    }
+    line
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1679,6 +1739,35 @@ mod tests {
     }
 
     // ── 1/2d: what a task_wait/join is blocked on ───────────────────────────
+
+    #[test]
+    fn a_multi_paragraph_reply_never_becomes_the_summary_line() {
+        let reply = "## Summary\n\nI refactored the parser into three modules. The old file \
+                     was too big.\n\n- lexer.ex owns tokens\n- parser.ex owns the AST\n";
+        let mut a = Agents::new();
+        a.agent_started("worker-1", "researcher", "", "scan modules", None, None);
+        a.agent_completed("worker-1", Some(3), Some(1200), Some(reply.to_string()));
+        let entry = a.entries.iter().find(|e| e.name == "worker-1").unwrap();
+        assert_eq!(
+            entry.result_summary.as_deref(),
+            Some("I refactored the parser into three modules.")
+        );
+        // Still exactly one summary row.
+        assert_eq!(Agents::entry_rows(entry), 3);
+    }
+
+    #[test]
+    fn a_long_single_line_is_clamped_with_an_ellipsis() {
+        let long = format!("Scanned {}found nothing", "module and ".repeat(40));
+        let s = one_line_summary(&long).unwrap();
+        assert!(s.chars().count() <= SUMMARY_MAX_CHARS, "{s}");
+        assert!(s.ends_with('\u{2026}'), "{s}");
+        assert_eq!(
+            one_line_summary("Upgraded to v1.2.3 e.g. the new API. Done.").as_deref(),
+            Some("Upgraded to v1.2.3 e.g. the new API.")
+        );
+        assert_eq!(one_line_summary("  \n\n "), None);
+    }
 
     #[test]
     fn join_wait_label_names_the_live_child_and_its_activity() {

@@ -1142,7 +1142,7 @@ impl App {
                 // `purge_scrollback` ends with the cursor homed at (0, 0), so
                 // the rebuilt region's top is known and no DSR — and therefore
                 // no reader teardown — is needed. See `rebuild_inline`.
-                chrome.clear_and_rebuild(&mut terminal, desired_inline_h)?;
+                chrome.clear_and_rebuild(&mut terminal, desired_inline_h, size)?;
                 shrink_streak = 0;
             } else if terminal_resized && !want_full && !chrome.is_full() {
                 // Source-backed resize replay, adapted from OpenAI Codex's
@@ -1169,7 +1169,7 @@ impl App {
                 // `replay_scrollback` painted a second copy below it, a
                 // deterministic doubled-chrome fossil on every real resize while
                 // inline (reproduced by `test/pty/test_resize.py::test_small_viewport`).
-                chrome.clear_and_rebuild(&mut terminal, desired_inline_h)?;
+                chrome.clear_and_rebuild(&mut terminal, desired_inline_h, size)?;
                 shrink_streak = 0;
                 replay_scrollback(
                     &mut terminal,
@@ -2970,7 +2970,7 @@ pub(super) fn switch_to_inline(
     // caps the unhealthy case at the retry ladder's own bound.
     if let Some(top) = placed {
         if let Ok(t) = Terminal::with_options(
-            InlineBackend::primed_at(std::io::stdout(), top),
+            InlineBackend::primed_at(std::io::stdout(), top, size.as_size()),
             TerminalOptions {
                 viewport: Viewport::Inline(inline_h),
             },
@@ -3017,7 +3017,7 @@ pub(super) fn switch_to_inline(
     let mut last_err = None;
     for attempt in 0..6u64 {
         match Terminal::with_options(
-            InlineBackend::new(std::io::stdout()),
+            InlineBackend::inline(std::io::stdout(), size.as_size()),
             TerminalOptions {
                 viewport: Viewport::Inline(inline_h),
             },
@@ -3095,19 +3095,25 @@ pub(super) fn switch_to_inline(
 /// wait). Nothing on the inline path passes `None` today; it exists so a
 /// future caller without a placed cursor is still correct rather than lying.
 ///
+/// `size` is the frame's one size. The rebuilt backend answers it for its
+/// whole life instead of re-reading the terminal, so ratatui's `autoresize`
+/// can never re-anchor this viewport through a DSR query mid-draw — see
+/// `InlineBackend`'s module docs, "The other query".
+///
 /// The caller should still `terminal.clear()` / erase beforehand so no stale
 /// rows of the old-sized region remain.
 pub(super) fn rebuild_inline(
     terminal: &mut Term,
     inline_h: u16,
     known_top: Option<u16>,
+    size: FrameSize,
 ) -> Result<()> {
     if let Some(top) = known_top {
         // No cursor query happens at all, so there is nothing to drop and
         // nothing to retry: the only way this fails is a genuine write error on
         // stdout, which the degrade path below handles identically.
         if let Ok(t) = Terminal::with_options(
-            InlineBackend::primed_at(std::io::stdout(), top),
+            InlineBackend::primed_at(std::io::stdout(), top, size.as_size()),
             TerminalOptions {
                 viewport: Viewport::Inline(inline_h),
             },
@@ -3146,7 +3152,7 @@ pub(super) fn rebuild_inline(
     let mut last_err = None;
     for attempt in 0..6u64 {
         match Terminal::with_options(
-            InlineBackend::new(std::io::stdout()),
+            InlineBackend::inline(std::io::stdout(), size.as_size()),
             TerminalOptions {
                 viewport: Viewport::Inline(inline_h),
             },

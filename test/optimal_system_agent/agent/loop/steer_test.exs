@@ -64,24 +64,36 @@ defmodule OptimalSystemAgent.Agent.Loop.SteerTest do
       assert Steer.drain(sid) == []
     end
 
-    test "to_messages/1 renders each steer as a labelled system directive" do
+    test "to_messages/1 delivers the steer as the user's own words in a user turn" do
       [msg] = Steer.to_messages(["do X instead"])
 
-      assert msg.role == "system"
-      assert msg.content =~ "User steer"
+      # Delivered as a user turn, identified internally by
+      # the `steer: true` metadata — NOT by any string in the prompt text.
+      assert msg.role == "user"
+      assert msg.steer == true
+
+      # The user's verbatim text is present, with only the minimal neutral
+      # marker prepended.
       assert msg.content =~ "do X instead"
+      assert msg.content =~ Steer.marker()
     end
 
-    test "to_messages/1 framing forbids deferring the steer to the end of the turn" do
-      # A model with momentum used to finish its whole plan and only acknowledge
-      # the steer at the end. The framing must name and forbid that failure so the
-      # steer is acted on mid-flight, not treated as a closing note.
+    test "to_messages/1 framing is minimal — no imperatives, no plan-dropping" do
+      # The operator's report: the old ~80-word imperative framing ("URGENT",
+      # "Do NOT finish your existing plan first", "change course immediately")
+      # confused the model. The marker must now carry NONE of it — only that the
+      # message arrived while the model was working.
       [msg] = Steer.to_messages(["switch to the billing bug"])
 
       content = String.downcase(msg.content)
-      assert content =~ "before your very next action"
-      assert content =~ "do not finish"
-      assert content =~ "change course"
+      refute content =~ "urgent"
+      refute content =~ "do not finish"
+      refute content =~ "change course"
+      refute content =~ "before your very next action"
+      refute content =~ "user steer"
+
+      # What remains is exactly the marker plus the user's text and nothing more.
+      assert msg.content == "#{Steer.marker()}\n\nswitch to the billing bug"
     end
   end
 
@@ -94,7 +106,7 @@ defmodule OptimalSystemAgent.Agent.Loop.SteerTest do
       # step boundary: drain the queue and turn it into system messages.
       messages = sid |> Steer.drain() |> Steer.to_messages()
 
-      assert [%{role: "system", content: content}] = messages
+      assert [%{role: "user", content: content, steer: true}] = messages
       assert content =~ "focus on the auth module"
     end
   end

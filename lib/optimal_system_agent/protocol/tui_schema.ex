@@ -87,6 +87,11 @@ defmodule OptimalSystemAgent.Protocol.TUISchema do
             doc:
               "Provider-normalized effective reasoning state, including the rule that selected it.\nExamples: `on:catalog:high`, `off:model_unsupported`, `on:config`."
           ),
+          f("thinking_can_disable", {:option, :bool},
+            default: true,
+            doc:
+              "`false` when the current model reasons no matter what (Claude Opus 5.5, the\nGLM tags on Ollama Cloud) — the TUI then does not offer \"thinking off\".\nFrom the provider catalogs (`Providers.ReasoningCapability`); absent on older\nbackends, which the TUI treats as `true`."
+          ),
           f("billing", {:option, {:struct, "HealthBilling"}},
             default: true,
             doc:

@@ -72,6 +72,15 @@ impl FrameSize {
     pub(crate) fn from_resize_event(cols: u16, rows: u16) -> Self {
         Self::new(cols, rows)
     }
+
+    /// As ratatui's `Size` — what an inline backend is built for, so the
+    /// viewport's buffers are exactly as wide as this frame's layout.
+    pub(crate) fn as_size(self) -> ratatui::layout::Size {
+        ratatui::layout::Size {
+            width: self.cols,
+            height: self.rows,
+        }
+    }
 }
 
 /// Ask the terminal how big it is. **The only `crossterm::terminal::size()` call

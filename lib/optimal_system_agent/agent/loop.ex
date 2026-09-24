@@ -80,6 +80,16 @@ defmodule OptimalSystemAgent.Agent.Loop do
     messages: [],
     iteration: 0,
     overflow_retries: 0,
+    # ONE shared per-turn budget spent by EVERY failure-recovery path in
+    # `ReactLoop` — a truncated generation (with or without tool calls), a
+    # stream that ended without its provider's terminal marker, and a
+    # REASK/terminal invalid-tool-argument result from `ToolArgValidator`.
+    # Each of those used to own an independent counter (or, for the
+    # truncated-tool-calls path, none at all), so a turn that alternated
+    # between different failure kinds could recover-and-fail indefinitely with
+    # nothing watching the total (P2 audit gap C). Reset each user turn in
+    # `TurnPipeline.reset_per_turn_fields/1`. See `ReactLoop.spend_recovery/2`.
+    recovery_attempts: 0,
     recent_failure_signatures: [],
     total_tool_calls: 0,
     # Doom-loop detection counters — explicit state (formerly process-dict).
@@ -130,6 +140,9 @@ defmodule OptimalSystemAgent.Agent.Loop do
     current_input: nil,
     started_at: nil,
     last_input_tokens: 0,
+    # `length(messages)` when `last_input_tokens` was reported — the baseline
+    # `Telemetry.context_occupancy/1` counts later messages from.
+    last_input_message_count: nil,
     # Per-turn correlation id (a prompt.id-style field) minted by
     # `Observability.new_turn_id/0` at turn start. Threaded into the CloudEvent
     # envelope of every lifecycle event so the per-session event stream is a
@@ -185,7 +198,14 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # Speed/cost priority for this session (:immediate | :standard | :loose),
     # inherited from the delegating task's config. Read by LLMClient to select a
     # provider service_tier (OpenAI flex/priority) for cheaper long-horizon work.
-    priority: :standard
+    priority: :standard,
+    # One-shot guard for `ReactLoop`'s last-resort overflow recovery: the
+    # LATEST user message trimmed to a head+tail excerpt (full text on disk,
+    # readable via file_read) after `Loop.ContextCollapse.collapse/2` and a
+    # full compaction pass both fail to shrink the turn below budget. Set the
+    # first time that trim is attempted so a turn can never retry it twice —
+    # see `Loop.ContextCollapse.trim_oversized_latest_message/3`.
+    latest_message_trimmed: false
   ]
 
   @cancel_table :osa_cancel_flags
@@ -1288,6 +1308,24 @@ defmodule OptimalSystemAgent.Agent.Loop do
           checkpoint_msgs -> checkpoint_msgs
         end
 
+    # A crash mid tool-call leaves a `tool_use` in the restored transcript
+    # with no `tool_result` at all — `DurableLog` gives at-least-once
+    # replay for a step it actually RECORDED, but a call that was in flight
+    # when the process died was never recorded either way. Fill each with a
+    # placeholder that says the outcome is UNKNOWN (not "interrupted, safe to
+    # retry" — the call may have already completed and mutated real state),
+    # so the model checks current state before deciding whether to repeat it.
+    # A no-op on a clean restore (fresh session, or resumed after a turn that
+    # ended cleanly, when the checkpoint is empty).
+    {messages, _repaired?} =
+      OptimalSystemAgent.Providers.HistorySanitizer.fill_missing_tool_results(
+        messages,
+        "[System: this tool call was interrupted by a process restart. Its outcome is " <>
+          "UNKNOWN — it may or may not have completed before the crash. Check current state " <>
+          "(re-read the file, re-list the directory, re-run a read-only check, etc.) before " <>
+          "deciding whether to repeat it.]"
+      )
+
     resumed? = restored != %{} or messages != []
 
     iteration = Map.get(restored, :iteration, 0)
@@ -1746,6 +1784,16 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   def handle_call(:context_budget, _from, state) do
     budget = OptimalSystemAgent.Agent.Context.token_budget(state)
+
+    # `/context`'s total is the SAME number the status-bar meter shows: once a
+    # provider has reported a request size, that report plus what was appended
+    # after it (`Telemetry.context_occupancy/1`), not a second, independent
+    # estimate of the whole history. The breakdown rows stay estimates.
+    budget =
+      if Map.get(state, :last_input_tokens, 0) > 0,
+        do: Map.put(budget, :occupied_tokens, used_context_tokens(state)),
+        else: budget
+
     {:reply, {:ok, budget}, state}
   end
 
@@ -2003,11 +2051,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   defp republish_context(state, true) do
     state =
-      Map.put(
-        state,
+      state
+      |> Map.put(
         :last_input_tokens,
         OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
       )
+      |> Map.put(:last_input_message_count, length(state.messages))
 
     Telemetry.emit_context_pressure(state)
     state
@@ -2898,7 +2947,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   # never counted, not a miscount on either side of it.
   defp used_context_tokens(state) do
     case Map.get(state, :last_input_tokens, 0) do
-      n when is_integer(n) and n > 0 -> n
+      n when is_integer(n) and n > 0 -> Telemetry.context_occupancy(state)
       _ -> pre_response_context_estimate(state)
     end
   end

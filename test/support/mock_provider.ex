@@ -40,20 +40,46 @@ defmodule OptimalSystemAgent.Test.MockProvider do
   timeout/cancel robustness tests) without a real network dependency.
   """
   @impl true
-  def chat(_messages, opts) do
+  def chat(messages, opts) do
     maybe_sleep()
     bump_round_trips()
     record_opts(opts)
 
-    result =
-      case forced_final_text() do
-        nil -> chat_scripted()
-        text -> {:ok, %{content: text, tool_calls: []}}
-      end
+    case forced_error(messages) do
+      nil ->
+        result =
+          case forced_final_text() do
+            nil -> chat_scripted()
+            text -> {:ok, %{content: text, tool_calls: []}}
+          end
 
-    case with_forced_usage(result) do
-      {:ok, resp} -> {:ok, with_forced_stop_reason(resp)}
-      other -> other
+        case with_forced_usage(result) do
+          {:ok, resp} -> {:ok, with_forced_stop_reason(resp)}
+          other -> other
+        end
+
+      reason ->
+        {:error, reason}
+    end
+  end
+
+  # Force `chat/2`/`chat_stream/3` to fail instead of answering. Opt-in via
+  # `:mock_provider_error`, set to either:
+  #
+  #   * a fixed reason (string or `{:http_error, status, msg}` etc.) — every
+  #     call fails identically, or
+  #   * a 1-arity function receiving the exact `messages` the call was about
+  #     to send — returns the reason to fail with, or `nil` to let this call
+  #     through and answer normally. Lets a test simulate a condition that
+  #     depends on what OSA actually sent (e.g. "fail until the oversized
+  #     message has been trimmed") without a live provider.
+  #
+  # Unset (the default) keeps every existing test's behavior unchanged.
+  defp forced_error(messages) do
+    case Application.get_env(:optimal_system_agent, :mock_provider_error) do
+      nil -> nil
+      fun when is_function(fun, 1) -> fun.(messages)
+      reason -> reason
     end
   end
 
@@ -70,6 +96,14 @@ defmodule OptimalSystemAgent.Test.MockProvider do
 
   defp with_forced_usage(other), do: other
 
+  # Same opt-in usage on the STREAMING path the agent loop actually takes.
+  defp stream_usage(result) do
+    case with_forced_usage({:ok, result}) do
+      {:ok, r} -> r
+      _ -> result
+    end
+  end
+
   # Real providers report a terminal stop/finish reason; this mock did not, so
   # nothing could test the harness's truncation handling end to end — the exact
   # gap that let a generation cut off at the output ceiling be delivered as a
@@ -82,6 +116,85 @@ defmodule OptimalSystemAgent.Test.MockProvider do
       r when is_binary(r) and r != "" -> Map.put(resp, :stop_reason, r)
       _ -> resp
     end
+  end
+
+  # Real streaming providers now flag `:stream_incomplete` when their
+  # connection closed without seeing the protocol's own terminal marker (P2
+  # audit gap A) — this mock never had a marker concept, so nothing could
+  # drive `ReactLoop`'s handling of it end to end.
+  #
+  # Two opt-ins, for the two shapes a test needs:
+  #
+  #   * `:mock_provider_stream_incomplete` (Application env, boolean) — EVERY
+  #     call is flagged, for as long as it is set. Use for "the stream never
+  #     recovers" (budget-exhaustion) scenarios.
+  #   * `force_stream_incomplete_for/1` (ETS counter, cross-process) — only
+  #     the next N calls are flagged, then calls go back to normal. Use for
+  #     "cut off once, then a clean reply" scenarios — `:mock_provider_after_
+  #     call_once` cannot do this: it fires at the TOP of the call it is read
+  #     from, so arming it before the first call fires DURING that same call,
+  #     not after it.
+  @spec with_forced_stream_incomplete(map()) :: map()
+  def with_forced_stream_incomplete(resp) when is_map(resp) do
+    cond do
+      Application.get_env(:optimal_system_agent, :mock_provider_stream_incomplete) == true ->
+        Map.put(resp, :stream_incomplete, true)
+
+      consume_stream_incomplete_counter?() ->
+        Map.put(resp, :stream_incomplete, true)
+
+      true ->
+        resp
+    end
+  end
+
+  # Opt-in via `:mock_provider_tool_calls` (Application env, a list of tool
+  # call maps) — used to reproduce the truncated-tool-calls recovery path
+  # (P2 audit gap C), which needs a response that carries BOTH tool calls AND
+  # a truncation `stop_reason`, something the default scripted path cannot
+  # express. `nil`/unset leaves `:tool_calls` at whatever the caller already
+  # set (normally `[]`), so every existing test is unaffected.
+  @spec with_forced_tool_calls(map()) :: map()
+  defp with_forced_tool_calls(resp) when is_map(resp) do
+    case Application.get_env(:optimal_system_agent, :mock_provider_tool_calls) do
+      calls when is_list(calls) and calls != [] -> Map.put(resp, :tool_calls, calls)
+      _ -> resp
+    end
+  end
+
+  @doc """
+  Flag exactly the next `n` streaming calls (across any process) as
+  `stream_incomplete: true`; calls after that are unaffected. Call in test
+  setup. See `with_forced_stream_incomplete/1`.
+  """
+  @spec force_stream_incomplete_for(non_neg_integer()) :: :ok
+  def force_stream_incomplete_for(n) when is_integer(n) and n >= 0 do
+    :ets.insert(counter_table(), {:stream_incomplete_remaining, n})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  @doc "Clear the `force_stream_incomplete_for/1` counter (call in test setup)."
+  @spec reset_stream_incomplete() :: :ok
+  def reset_stream_incomplete do
+    :ets.delete(counter_table(), :stream_incomplete_remaining)
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp consume_stream_incomplete_counter? do
+    case :ets.lookup(counter_table(), :stream_incomplete_remaining) do
+      [{:stream_incomplete_remaining, n}] when n > 0 ->
+        :ets.update_counter(counter_table(), :stream_incomplete_remaining, {2, -1})
+        true
+
+      _ ->
+        false
+    end
+  rescue
+    ArgumentError -> false
   end
 
   defp chat_scripted do
@@ -112,7 +225,7 @@ defmodule OptimalSystemAgent.Test.MockProvider do
   invokes `{:done, result}` so the Loop's process-dictionary capture works.
   """
   @impl true
-  def chat_stream(_messages, callback, opts) do
+  def chat_stream(messages, callback, opts) do
     maybe_sleep()
     bump_round_trips()
     # Recorded here as well as in `chat/2`: the agent loop takes the STREAMING
@@ -121,16 +234,29 @@ defmodule OptimalSystemAgent.Test.MockProvider do
     record_opts(opts)
     run_after_call_once()
 
-    case forced_final_text() do
+    case forced_error(messages) do
       nil ->
-        chat_stream_scripted(callback)
+        case forced_final_text() do
+          nil ->
+            chat_stream_scripted(callback)
 
-      text ->
-        # `""` means "finish the turn with NO final text" — the silent-child
-        # case the delegation result-recovery path exists for.
-        if text != "", do: callback.({:text_delta, text})
-        callback.({:done, with_forced_stop_reason(%{content: text, tool_calls: []})})
-        :ok
+          text ->
+            # `""` means "finish the turn with NO final text" — the
+            # silent-child case the delegation result-recovery path exists for.
+            if text != "", do: callback.({:text_delta, text})
+
+            result =
+              %{content: text, tool_calls: []}
+              |> with_forced_tool_calls()
+              |> with_forced_stop_reason()
+              |> with_forced_stream_incomplete()
+
+            callback.({:done, result})
+            :ok
+        end
+
+      reason ->
+        {:error, reason}
     end
   end
 
@@ -150,7 +276,7 @@ defmodule OptimalSystemAgent.Test.MockProvider do
           ]
         }
 
-        callback.({:done, result})
+        callback.({:done, stream_usage(result)})
         :ok
 
       _ ->
@@ -158,7 +284,7 @@ defmodule OptimalSystemAgent.Test.MockProvider do
         text = "Mock final answer from OSA."
         callback.({:text_delta, text})
         result = %{content: text, tool_calls: []}
-        callback.({:done, result})
+        callback.({:done, stream_usage(result)})
         :ok
     end
   end
@@ -279,11 +405,61 @@ defmodule OptimalSystemAgent.Test.MockProvider do
   # so existing tests are untouched. Read from application env rather than the
   # process dictionary because the Loop invokes the provider from short-lived
   # task processes that do not inherit the test process's dictionary.
+  #
+  # `queue_final_texts/1` (below), when non-empty, takes priority — it is what
+  # a test reaches for when DIFFERENT calls need DIFFERENT text (e.g. "call 1
+  # is cut off with nothing, call 2 is a normal answer"), which a single
+  # static `:mock_provider_final_text` cannot express.
   defp forced_final_text do
-    case Application.get_env(:optimal_system_agent, :mock_provider_final_text) do
-      text when is_binary(text) -> text
-      _ -> nil
+    case next_queued_final_text() do
+      text when is_binary(text) ->
+        text
+
+      nil ->
+        case Application.get_env(:optimal_system_agent, :mock_provider_final_text) do
+          text when is_binary(text) -> text
+          _ -> nil
+        end
     end
+  end
+
+  @doc """
+  Queue a sequence of final-text responses, one per `chat_stream/3` call (ETS-
+  backed, so it works across the Task process each call runs in). The LAST
+  entry repeats forever once the rest are consumed. Takes priority over
+  `:mock_provider_final_text` while entries remain queued.
+  """
+  @spec queue_final_texts([String.t()]) :: :ok
+  def queue_final_texts(texts) when is_list(texts) and texts != [] do
+    :ets.insert(counter_table(), {:final_text_queue, texts})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  @doc "Clear any queued final texts (call in test setup)."
+  @spec reset_final_texts() :: :ok
+  def reset_final_texts do
+    :ets.delete(counter_table(), :final_text_queue)
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp next_queued_final_text do
+    case :ets.lookup(counter_table(), :final_text_queue) do
+      [{:final_text_queue, [text]}] ->
+        text
+
+      [{:final_text_queue, [text | rest]}] ->
+        :ets.insert(counter_table(), {:final_text_queue, rest})
+        text
+
+      _ ->
+        nil
+    end
+  rescue
+    ArgumentError -> nil
   end
 
   defp maybe_sleep do

@@ -173,8 +173,13 @@ impl InlineChrome {
     /// chrome left to reclaim) — calling `relocate` here would erase a second
     /// time for no reason and, worse, would compute its erase span from a
     /// `self.top` that the purge has already invalidated.
-    pub(crate) fn rebuild_at_top0(&mut self, terminal: &mut Term, height: u16) -> Result<()> {
-        rebuild_inline(terminal, height, Some(0))?;
+    pub(crate) fn rebuild_at_top0(
+        &mut self,
+        terminal: &mut Term,
+        height: u16,
+        size: FrameSize,
+    ) -> Result<()> {
+        rebuild_inline(terminal, height, Some(0), size)?;
         self.height = height;
         self.top = terminal.get_frame().area().top();
         Ok(())
@@ -184,9 +189,14 @@ impl InlineChrome {
     /// whole effect on the chrome. A thin wrapper so `App::run` never calls
     /// `purge_scrollback` directly (the ordering — purge before rebuild — is
     /// exactly the kind of step a call site could otherwise get backwards).
-    pub(crate) fn clear_and_rebuild(&mut self, terminal: &mut Term, height: u16) -> Result<()> {
+    pub(crate) fn clear_and_rebuild(
+        &mut self,
+        terminal: &mut Term,
+        height: u16,
+        size: FrameSize,
+    ) -> Result<()> {
         purge_scrollback()?;
-        self.rebuild_at_top0(terminal, height)
+        self.rebuild_at_top0(terminal, height, size)
     }
 
     /// Relocate the inline viewport to `new_height`, staying inline.
@@ -281,7 +291,7 @@ impl InlineChrome {
         // round trip was the frozen-composer defect.
         let placed_top = new_top.min(max_row);
         execute!(std::io::stdout(), MoveTo(0, placed_top))?;
-        rebuild_inline(terminal, new_height, Some(placed_top))?;
+        rebuild_inline(terminal, new_height, Some(placed_top), size)?;
 
         self.height = new_height;
         self.top = terminal.get_frame().area().top();

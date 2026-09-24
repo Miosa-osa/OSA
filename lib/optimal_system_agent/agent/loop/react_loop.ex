@@ -33,6 +33,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   alias OptimalSystemAgent.Agent.Loop.ToolError
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
   alias OptimalSystemAgent.Agent.Loop.ToolFilter
+  alias OptimalSystemAgent.Agent.Loop.ToolArgValidator
   alias OptimalSystemAgent.Agent.Loop.ToolOrchestrator
   alias OptimalSystemAgent.Agent.Loop.DoomLoop
   alias OptimalSystemAgent.Agent.Loop.DoomLoop.Resample
@@ -546,6 +547,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # just one-shot context) so the directive is visible for the rest of the turn.
     state = inject_pending_steer(state)
 
+    # Send-now (item 1): this drain is exactly the boundary a send-now was
+    # racing to reach. The queued steer is now folded in, so lower the yield
+    # flag — the tool collectors and stream watcher stop treating this turn as
+    # one to interrupt.
+    OptimalSystemAgent.Agent.Loop.SendNow.clear(state.session_id)
+
     # WS6: drain background task-notifications at the same step boundary — a
     # BUSY turn sees background completions here; an IDLE loop is handled by
     # Loop.poke/1 instead. The drain is destructive → exactly-once either way.
@@ -840,13 +847,23 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
     Logger.info("[loop] LLM call completed in #{duration_ms}ms (#{input_tokens} input tokens)")
 
-    # Canonicalize the provider's stop reason BEFORE dispatch — see
-    # `canonicalize_stop_reason/2`. Every truncation clause below matches on
-    # OSA's canonical `"max_tokens"`, and without this only Anthropic ever
-    # reached them.
-    {result, state} = canonicalize_stop_reason(result, state, usage)
+    # A stream that ended without its provider's own terminal marker (P2 audit
+    # gap A) is handled FIRST and can short-circuit the rest of this pipeline
+    # (a fresh retry or a marked-incomplete delivery) — see
+    # `canonicalize_stream_incomplete/2`.
+    case canonicalize_stream_incomplete(result, state) do
+      {:continue, result, state} ->
+        # Canonicalize the provider's stop reason BEFORE dispatch — see
+        # `canonicalize_stop_reason/2`. Every truncation clause below matches on
+        # OSA's canonical `"max_tokens"`, and without this only Anthropic ever
+        # reached them.
+        {result, state} = canonicalize_stop_reason(result, state, usage)
 
-    handle_result(result, state, context)
+        handle_result(result, state, context)
+
+      {:halted, outcome} ->
+        outcome
+    end
   end
 
   # ── Truncation ingest ─────────────────────────────────────────────────────
@@ -945,6 +962,184 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
   defp canonicalize_stop_reason(result, state, _usage), do: {result, state}
 
+  # ── Gap A: a stream that ended without its provider's terminal marker ─────
+  #
+  # `providers/ollama.ex`, `providers/openai_compat.ex` and
+  # `providers/anthropic.ex` each now flag `:stream_incomplete` on the `:done`
+  # result when their connection closed cleanly (no HTTP/transport error)
+  # WITHOUT ever seeing the protocol's own confirmation the response was
+  # finished — Ollama's `done: true`, OpenAI-compatible's `data: [DONE]`,
+  # Anthropic's `message_stop`. Before that, all three finalized identically
+  # to a clean stop: a dropped connection, a proxy timeout or a truncating
+  # gateway was indistinguishable from the model finishing on its own, and the
+  # fragment was delivered as the answer.
+  #
+  # Recovery mirrors the one-way-door rule the rest of the loop already lives
+  # by (`Resilience.output_observed?/0`, `mark_output_observed/0`): if NOTHING
+  # reached the user yet — no visible text, no reasoning, no tool call — the
+  # request is retried once, fresh, because there is nothing to duplicate.
+  # Once anything has been shown, a blind retry would re-run the request
+  # against a transcript the user already partly saw (and could re-execute a
+  # tool that already ran), so the answer is instead delivered MARKED as cut
+  # short — the same delivery contract `deliver_truncated_incomplete/2` uses
+  # for a token-ceiling truncation, a different cause.
+  #
+  # A response that also carries tool calls is a third case: those calls
+  # finished streaming and parsed as complete, well-formed JSON before the
+  # connection died (a mid-argument cutoff never produces one), so they are
+  # trustworthy and are NOT discarded — dropping them here would be the same
+  # data-loss defect the truncated-tool-call guard below exists to prevent.
+  # They are let through to the normal tool-call path unless the shared
+  # recovery budget is already spent.
+  #
+  # Every branch spends the shared per-turn recovery budget
+  # (`spend_recovery/2`, P2 audit gap C) — this is one more way a turn can
+  # fail to converge, and it must count against the same ceiling as every
+  # other failure-recovery path.
+  defp canonicalize_stream_incomplete({:ok, resp}, state) when is_map(resp) do
+    if Map.get(resp, :stream_incomplete, false) do
+      content = Map.get(resp, :content) || ""
+      tool_calls = Map.get(resp, :tool_calls) || []
+      reasoning = Map.get(resp, :reasoning) || ""
+      thinking_blocks = Map.get(resp, :thinking_blocks) || []
+
+      nothing_shown? =
+        String.trim(to_string(content)) == "" and tool_calls == [] and
+          String.trim(to_string(reasoning)) == "" and thinking_blocks == []
+
+      Logger.warning(
+        "[loop] Stream ended WITHOUT its provider's terminal marker (no done:true / " <>
+          "[DONE] / message_stop) — treating as CUT OFF, not a clean finish " <>
+          "(iteration #{state.iteration}, session #{state.session_id}, " <>
+          "nothing_shown=#{nothing_shown?}, tool_calls=#{length(tool_calls)})"
+      )
+
+      Bus.emit(:system_event, %{
+        event: :response_truncated,
+        session_id: state.session_id,
+        reason: :stream_incomplete,
+        nothing_shown: nothing_shown?,
+        tool_calls: length(tool_calls),
+        iteration: state.iteration
+      })
+
+      case spend_recovery(state, "a stream that ended without its terminal marker") do
+        {:exhausted, state} ->
+          {:halted, deliver_stream_cut_short(resp, state)}
+
+        {:ok, state} ->
+          cond do
+            nothing_shown? ->
+              Logger.info(
+                "[loop] Stream-incomplete retry — nothing reached the user yet, reissuing " <>
+                  "the request fresh (session #{state.session_id})"
+              )
+
+              {:halted, run(state)}
+
+            tool_calls != [] ->
+              {:continue, {:ok, resp}, state}
+
+            true ->
+              {:halted, deliver_stream_cut_short(resp, state)}
+          end
+      end
+    else
+      {:continue, {:ok, resp}, state}
+    end
+  end
+
+  defp canonicalize_stream_incomplete(result, state), do: {:continue, result, state}
+
+  # Deliver a stream-cut-short response MARKED as incomplete, exactly like
+  # `deliver_truncated_incomplete/2` does for a token-ceiling truncation — the
+  # partial text already reached the user (or the recovery budget ran out), so
+  # it is preserved, not discarded, with the cut-off noted for both the reader
+  # and the model's own next turn.
+  defp deliver_stream_cut_short(resp, state) do
+    content = Map.get(resp, :content) || ""
+
+    Logger.error(
+      "[loop] Stream cut off without a terminal marker — delivering it MARKED as " <>
+        "incomplete rather than as a finished answer (session: #{state.session_id})"
+    )
+
+    marked =
+      if String.trim(content) == "" do
+        "[INCOMPLETE: the connection to the model ended before it confirmed the response " <>
+          "was finished, and no answer had reached you yet. Please retry the request.]"
+      else
+        String.trim_trailing(content) <>
+          "\n\n[INCOMPLETE: the connection to the model ended before it confirmed this " <>
+          "response was finished. Treat it as a fragment, not a completed answer.]"
+      end
+
+    finish_turn(marked, state)
+  end
+
+  # ── Gap C: one shared per-turn recovery budget ─────────────────────────────
+  #
+  # Every failure-recovery path in this module used to own its own counter, or
+  # none: `overflow_retries` bounds a token-ceiling truncation at 2,
+  # `ToolArgValidator`'s reask cap bounds ONE tool's malformed arguments at 2
+  # and resets to zero the moment that tool validates cleanly once, the idle-
+  # timeout retry is bounded at 2 — and the truncated-tool-calls path (below)
+  # carried NO counter at all, recursing straight into `run/1` and never
+  # touching `continue_after_tools/4`, where the doom-loop detectors
+  # (`DoomLoop.check/3`) actually run. A model that alternates between two
+  # DIFFERENT malformed tool calls, or between a truncation and an invalid
+  # call, could recover-and-fail indefinitely: each individual counter resets
+  # on its own success and none of them see the others.
+  #
+  # `recovery_attempts` is ONE counter, spent by EVERY recovery path: a
+  # truncation with or without tool calls, a cut-off stream (see
+  # `canonicalize_stream_incomplete/2` above), and a REASK/terminal tool-
+  # argument error surfacing out of `ToolArgValidator` (counted in
+  # `continue_after_tools/4`, where every tool result already passes through).
+  # Reset once per user turn in `TurnPipeline.reset_per_turn_fields/1` — never
+  # mid-turn, so an attempt spent recovering from one failure kind is never
+  # "given back" by succeeding at something unrelated.
+  @max_recovery_attempts 6
+
+  @spec spend_recovery(map(), String.t()) :: {:ok, map()} | {:exhausted, map()}
+  defp spend_recovery(state, kind) do
+    used = Map.get(state, :recovery_attempts, 0)
+
+    if used >= @max_recovery_attempts do
+      Logger.warning(
+        "[loop] Per-turn recovery budget EXHAUSTED (#{used}/#{@max_recovery_attempts}, " <>
+          "attempting to recover from: #{kind}) — ending the turn instead of another " <>
+          "recovery attempt (session #{state.session_id})"
+      )
+
+      {:exhausted, state}
+    else
+      {:ok, Map.put(state, :recovery_attempts, used + 1)}
+    end
+  end
+
+  # Generic "the shared recovery budget ran out" halt — used where there is no
+  # single fragment of partial content worth preserving verbatim (unlike
+  # `deliver_stream_cut_short/2` / `deliver_truncated_incomplete/2`, which
+  # mark and keep the model's partial text).
+  defp halt_recovery_exhausted(state, reason_text) do
+    Bus.emit(:system_event, %{
+      event: :recovery_budget_exhausted,
+      session_id: state.session_id,
+      reason: reason_text,
+      recovery_attempts: Map.get(state, :recovery_attempts, 0),
+      iteration: state.iteration
+    })
+
+    TerminalSource.halt(
+      "Stopped: hit the per-turn recovery limit (#{@max_recovery_attempts} attempts) while " <>
+        "trying to recover from #{reason_text}. Repeated attempts were not converging, so " <>
+        "this turn is ending instead of continuing to retry.",
+      state,
+      :control
+    )
+  end
+
   # Max tokens recovery — response was truncated, bump limit and retry.
   #
   # GUARD (finding-1 data-loss fix): only handle the no-tool-call truncation
@@ -965,92 +1160,20 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # thinking and produced no answer rarely converges on a second doubling, so
     # hand it straight to the incomplete-delivery path instead of paying for
     # another max-length round. Content-ful truncation still gets both retries.
-    if String.trim(to_string(content)) == "" and state.overflow_retries >= 1 do
-      deliver_truncated_incomplete(resp, state)
-    else
-      current_max = max_response_tokens()
-      # Clamp so recovery NEVER shrinks the budget below what the model just had
-      # (the default max_response_tokens is now 32_768; a hardcoded 16_384 ceiling
-      # would HALVE it and make truncation loop). Grow-only, doubling up to 64_000.
-      bumped = max(current_max, min(current_max * 2, 64_000))
+    cond do
+      String.trim(to_string(content)) == "" and state.overflow_retries >= 1 ->
+        deliver_truncated_incomplete(resp, state)
 
-      Logger.info(
-        "[loop] Response truncated (stop_reason=max_tokens), bumping max_tokens #{current_max} → #{bumped}"
-      )
-
-      # Typed observability event (item 7) so the truncate-and-continue path is
-      # visible instead of a silent re-call.
-      Bus.emit(:system_event, %{
-        event: :response_truncated,
-        session_id: state.session_id,
-        reason: :max_tokens_bump,
-        old_max_tokens: current_max,
-        new_max_tokens: bumped,
-        iteration: state.iteration
-      })
-
-      # Inject the continuation directive. Two shapes: a partial answer gets
-      # replayed so the model resumes from it; an EMPTY generation (a reasoning
-      # model that spent the whole budget thinking and produced no content) has
-      # nothing to resume — replaying an empty assistant message would also break
-      # role-alternation on stricter providers — so it gets only a budget-raise
-      # directive telling it to answer within the larger ceiling and keep its
-      # internal reasoning brief.
-      # A reasoning-only exhaustion: the model spent the WHOLE ceiling
-      # thinking and emitted nothing to deliver. Named here because the
-      # recovery below branches on it twice.
-      reasoning_only? = String.trim(to_string(content)) == ""
-
-      injected =
-        if reasoning_only? do
-          [
-            %{
-              role: "system",
-              content:
-                "[Your previous attempt reached the output-token limit while reasoning and " <>
-                  "produced no answer. The output budget has been raised to #{bumped} and " <>
-                  "extended thinking has been TURNED OFF for this attempt. Answer directly, " <>
-                  "without a reasoning preamble.]"
-            }
-          ]
-        else
-          [
-            %{role: "assistant", content: content},
-            %{
-              role: "system",
-              content:
-                "[Your previous response was truncated due to length. Continue from where you left off.]"
-            }
-          ]
+      true ->
+        # Shared per-turn recovery budget (P2 audit gap C): this clause's own
+        # `overflow_retries < 2` guard bounds THIS failure kind alone. A turn
+        # that also spent recovery attempts on OTHER kinds this turn (a
+        # cut-off stream, an invalid tool call) can still be at its shared
+        # ceiling even though `overflow_retries` has room left.
+        case spend_recovery(state, "a response truncated at the output ceiling") do
+          {:exhausted, state} -> deliver_truncated_incomplete(resp, state)
+          {:ok, state} -> handle_max_tokens_continuation(resp, state, content)
         end
-
-      state = %{
-        state
-        | messages: state.messages ++ injected,
-          overflow_retries: state.overflow_retries + 1,
-          iteration: state.iteration + 1
-      }
-
-      # Store bumped max_tokens for this session
-      Process.put(:osa_bumped_max_tokens, bumped)
-
-      # A reasoning-only exhaustion is NOT recovered by a bigger ceiling alone,
-      # and the old directive asked the model to "keep internal reasoning
-      # brief" - a polite request against a model that had just spent 64,000
-      # tokens thinking. MEASURED 2026-09-10 on a live 21-minute session: the
-      # ceiling bump took the attempt from 32,768 all-reasoning tokens to
-      # 64,000 all-reasoning tokens and still delivered nothing, so the retry
-      # cost 2x and recovered zero. Thinking is now switched off for the
-      # recovery attempt, which is the lever that actually works on a provider
-      # that will not accept a reasoning budget (see
-      # `[OI]Compat.maybe_disable_thinking/2` for the per-provider evidence).
-      #
-      # Scoped to the reasoning-only case on purpose: a content-ful truncation
-      # is a real answer that ran long, and disabling thinking there would
-      # discard reasoning the model is mid-way through for no reason.
-      if reasoning_only?, do: Process.put(:osa_disable_thinking, true)
-
-      run(state)
     end
   end
 
@@ -1116,92 +1239,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       iteration: state.iteration
     })
 
-    # Same duplicate-id repair as the normal tool-call path: `tool_msgs` below is
-    # built one-per-tool_call, so a collision would emit two `tool_result`s
-    # carrying the same `tool_call_id` against a single `tool_use` block.
-    tool_calls = ToolOrchestrator.uniquify_ids(tool_calls)
+    # Shared per-turn recovery budget (P2 audit gap C). This path used to
+    # carry NO counter of its own at all — a model that kept re-truncating
+    # over the same tool call could re-emit forever.
+    case spend_recovery(state, "a response truncated mid tool-call") do
+      {:exhausted, state} ->
+        halt_recovery_exhausted(state, "a response repeatedly truncated mid tool-call")
 
-    content = Map.get(resp, :content) || ""
-    assistant_msg = %{role: "assistant", content: content, tool_calls: tool_calls}
-
-    # Reconcile with the streaming tool executor. Complete tool_use blocks are
-    # executed EAGERLY as they stream — BEFORE the terminal stop_reason is known.
-    # So some of this turn's tool calls may have ALREADY run (real side effects
-    # like file_write / shell_execute). Failing them all and asking the model to
-    # re-emit would DUPLICATE those side effects and orphan any still-running
-    # task. Instead: keep the real results for calls that already streamed, and
-    # only fail the trailing call(s) whose arguments the token limit actually cut
-    # off (those never started). Best-effort: on any error, fall back to the
-    # original "fail all + re-emit" behavior.
-    {streamed_msgs_by_id, streamed_ids} =
-      try do
-        case Process.get(:osa_streaming_tool_ctx) do
-          nil ->
-            {%{}, MapSet.new()}
-
-          streaming_ctx ->
-            collected = StreamingToolExecutor.collect_results(streaming_ctx)
-
-            by_id =
-              streaming_ctx.order
-              |> Enum.zip(collected)
-              |> Map.new(fn {id, {tool_msg, _result_str}} -> {id, tool_msg} end)
-
-            {by_id, MapSet.new(streaming_ctx.order)}
-        end
-      rescue
-        _ -> {%{}, MapSet.new()}
-      catch
-        :exit, _ -> {%{}, MapSet.new()}
-      end
-
-    Process.delete(:osa_streaming_tool_ctx)
-
-    truncated_fail = fn tc ->
-      %{
-        role: "tool",
-        tool_call_id: tc.id,
-        content:
-          "Error: tool call not executed — the assistant message was truncated by the token " <>
-            "limit, so the arguments may be incomplete. Re-issue this call with complete arguments."
-      }
+      {:ok, state} ->
+        handle_truncated_tool_calls(resp, tool_calls, stop_reason, state)
     end
-
-    {tool_msgs, kept_any?} =
-      Enum.map_reduce(tool_calls, false, fn tc, kept? ->
-        if MapSet.member?(streamed_ids, tc.id) do
-          # Already executed during streaming — keep its real result.
-          case Map.get(streamed_msgs_by_id, tc.id) do
-            nil -> {truncated_fail.(tc), kept?}
-            tool_msg -> {tool_msg, true}
-          end
-        else
-          {truncated_fail.(tc), kept?}
-        end
-      end)
-
-    directive = %{
-      role: "user",
-      content:
-        if kept_any? do
-          "[System: Your previous message was truncated by the token limit. Any tool call that " <>
-            "had already completed was executed and its result is included above; the trailing " <>
-            "call(s) marked with a truncation error were NOT executed. Re-emit ONLY those " <>
-            "incomplete tool call(s) now.]"
-        else
-          "[System: Your previous message was truncated by the token limit before the tool " <>
-            "call(s) finished. None were executed, because their arguments may be incomplete. " <>
-            "Re-emit the complete tool call(s) now.]"
-        end
-    }
-
-    state = %{
-      state
-      | messages: state.messages ++ [assistant_msg] ++ tool_msgs ++ [directive],
-        iteration: state.iteration + 1
-    }
-
-    run(state)
   end
 
   # No tool calls — final response or behavioural nudge
@@ -2081,6 +2128,32 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     finalize_interrupt(state, partial)
   end
 
+  # Send-now: the stream was cut so the user's queued message could be read
+  # now, not at the end of the current generation. Unlike a cancel, the turn
+  # KEEPS GOING: commit the partial text (so its already-executed streamed
+  # tool_use ids are owned by a real assistant message) and re-enter run/1,
+  # whose next `do_iteration` drains the queued steer at the top and folds the
+  # user's message in before the model's next action.
+  defp handle_result({:send_now, %{content: partial}}, state, _context) do
+    Logger.info("[loop] Send-now at iteration #{state.iteration} — pausing to read a new message")
+
+    {state, _names} = commit_streamed_tool_results(state, :send_now)
+
+    state =
+      if is_binary(partial) and String.trim(partial) != "" and
+           not last_message_is_this_assistant?(state.messages, partial) do
+        %{state | messages: state.messages ++ [%{role: "assistant", content: partial}]}
+      else
+        state
+      end
+
+    # Fresh segment: the paused generation is closed, and the continuation the
+    # steer drives is a new assistant message, not a weld onto the cut one.
+    LLMClient.start_new_message_segment()
+
+    run(%{state | iteration: state.iteration + 1})
+  end
+
   # Turn-level retry budget for a stream idle timeout. Small on purpose: each
   # attempt costs a full generation, and the committed tool results mean the
   # retry resumes rather than restarts.
@@ -2149,20 +2222,50 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       run(state)
     else
       if context_overflow?(reason_str) do
-        Logger.error("Context overflow after 3 recovery attempts (iteration #{state.iteration})")
+        # Last resort, one shot only: `collapse/2` and full compaction above
+        # have both already failed 3 times, which only happens when the
+        # overflow survives everything that can be dropped or summarized —
+        # i.e. the single latest user message is, on its own, too large.
+        # Guarded by `latest_message_trimmed` so a turn can never attempt this
+        # twice (a repaired message that STILL overflows has a different
+        # problem, and re-trimming an already-trimmed excerpt would eat the
+        # excerpt itself).
+        trimmed =
+          if state.latest_message_trimmed do
+            :error
+          else
+            ContextCollapse.trim_oversized_latest_message(
+              state.messages,
+              OptimalSystemAgent.Agent.Loop.ContextWindow.resolve(state),
+              state.session_id
+            )
+          end
 
-        Observability.emit(
-          :system_event,
-          %{event: :error, kind: :context_overflow, iteration: state.iteration},
-          state,
-          source: "agent.react_loop"
-        )
+        case trimmed do
+          {:ok, trimmed_messages} ->
+            state
+            |> Map.put(:messages, trimmed_messages)
+            |> Map.put(:latest_message_trimmed, true)
+            |> run()
 
-        TerminalSource.halt(
-          "I've exceeded the context window. Try breaking your request into smaller parts.",
-          state,
-          :error
-        )
+          :error ->
+            Logger.error(
+              "Context overflow after 3 recovery attempts (iteration #{state.iteration})"
+            )
+
+            Observability.emit(
+              :system_event,
+              %{event: :error, kind: :context_overflow, iteration: state.iteration},
+              state,
+              source: "agent.react_loop"
+            )
+
+            TerminalSource.halt(
+              "I've exceeded the context window. Try breaking your request into smaller parts.",
+              state,
+              :error
+            )
+        end
       else
         idle_attempt = Map.get(state, :idle_timeout_retries, 0) + 1
 
@@ -2281,6 +2384,209 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         end
       end
     end
+  end
+
+  # Extracted from the no-tool-call `stop_reason: "max_tokens"` clause above so
+  # its shared-budget `cond` reads as one decision, not two nested branches.
+  defp handle_max_tokens_continuation(_resp, state, content) do
+    current_max = max_response_tokens()
+    # Clamp so recovery NEVER shrinks the budget below what the model just had
+    # (the default max_response_tokens is now 32_768; a hardcoded 16_384 ceiling
+    # would HALVE it and make truncation loop). Grow-only, doubling up to 64_000.
+    bumped = max(current_max, min(current_max * 2, 64_000))
+
+    Logger.info(
+      "[loop] Response truncated (stop_reason=max_tokens), bumping max_tokens #{current_max} → #{bumped}"
+    )
+
+    # Typed observability event (item 7) so the truncate-and-continue path is
+    # visible instead of a silent re-call.
+    Bus.emit(:system_event, %{
+      event: :response_truncated,
+      session_id: state.session_id,
+      reason: :max_tokens_bump,
+      old_max_tokens: current_max,
+      new_max_tokens: bumped,
+      iteration: state.iteration
+    })
+
+    # Inject the continuation directive. Two shapes: a partial answer gets
+    # replayed so the model resumes from it; an EMPTY generation (a reasoning
+    # model that spent the whole budget thinking and produced no content) has
+    # nothing to resume — replaying an empty assistant message would also break
+    # role-alternation on stricter providers — so it gets only a budget-raise
+    # directive telling it to answer within the larger ceiling and keep its
+    # internal reasoning brief.
+    # A reasoning-only exhaustion: the model spent the WHOLE ceiling
+    # thinking and emitted nothing to deliver. Named here because the
+    # recovery below branches on it twice.
+    reasoning_only? = String.trim(to_string(content)) == ""
+
+    injected =
+      if reasoning_only? do
+        [
+          %{
+            role: "system",
+            content:
+              "[Your previous attempt reached the output-token limit while reasoning and " <>
+                "produced no answer. The output budget has been raised to #{bumped} and " <>
+                "extended thinking has been TURNED OFF for this attempt. Answer directly, " <>
+                "without a reasoning preamble.]"
+          }
+        ]
+      else
+        [
+          %{role: "assistant", content: content},
+          %{
+            role: "system",
+            content:
+              "[Your previous response was truncated due to length. Continue from where you left off.]"
+          }
+        ]
+      end
+
+    state = %{
+      state
+      | messages: state.messages ++ injected,
+        overflow_retries: state.overflow_retries + 1,
+        iteration: state.iteration + 1
+    }
+
+    # Store bumped max_tokens for this session
+    Process.put(:osa_bumped_max_tokens, bumped)
+
+    # A reasoning-only exhaustion is NOT recovered by a bigger ceiling alone,
+    # and the old directive asked the model to "keep internal reasoning
+    # brief" - a polite request against a model that had just spent 64,000
+    # tokens thinking. MEASURED 2026-09-10 on a live 21-minute session: the
+    # ceiling bump took the attempt from 32,768 all-reasoning tokens to
+    # 64,000 all-reasoning tokens and still delivered nothing, so the retry
+    # cost 2x and recovered zero. Thinking is now switched off for the
+    # recovery attempt, which is the lever that actually works on a provider
+    # that will not accept a reasoning budget (see
+    # `[OI]Compat.maybe_disable_thinking/2` for the per-provider evidence).
+    #
+    # Scoped to the reasoning-only case on purpose: a content-ful truncation
+    # is a real answer that ran long, and disabling thinking there would
+    # discard reasoning the model is mid-way through for no reason.
+    if reasoning_only?, do: Process.put(:osa_disable_thinking, true)
+
+    run(state)
+  end
+
+  # Extracted from the truncated-tool-calls `handle_result/3` clause above —
+  # the shared-budget decision stays a one-line `case` there, and this keeps
+  # the (unchanged) reconciliation logic readable on its own.
+  defp handle_truncated_tool_calls(resp, tool_calls, _stop_reason, state) do
+    # Captured before this turn's assistant/tool messages are appended below —
+    # same snapshot semantics as the normal tool-calls clause's own
+    # `resample_snapshot = state`, so a doom-loop halt can rewind to discard
+    # this turn's response exactly like it does there.
+    resample_snapshot = state
+
+    # Same duplicate-id repair as the normal tool-call path: `tool_msgs` below is
+    # built one-per-tool_call, so a collision would emit two `tool_result`s
+    # carrying the same `tool_call_id` against a single `tool_use` block.
+    tool_calls = ToolOrchestrator.uniquify_ids(tool_calls)
+
+    content = Map.get(resp, :content) || ""
+    assistant_msg = %{role: "assistant", content: content, tool_calls: tool_calls}
+
+    # Reconcile with the streaming tool executor. Complete tool_use blocks are
+    # executed EAGERLY as they stream — BEFORE the terminal stop_reason is known.
+    # So some of this turn's tool calls may have ALREADY run (real side effects
+    # like file_write / shell_execute). Failing them all and asking the model to
+    # re-emit would DUPLICATE those side effects and orphan any still-running
+    # task. Instead: keep the real results for calls that already streamed, and
+    # only fail the trailing call(s) whose arguments the token limit actually cut
+    # off (those never started). Best-effort: on any error, fall back to the
+    # original "fail all + re-emit" behavior.
+    {streamed_msgs_by_id, streamed_ids} =
+      try do
+        case Process.get(:osa_streaming_tool_ctx) do
+          nil ->
+            {%{}, MapSet.new()}
+
+          streaming_ctx ->
+            collected = StreamingToolExecutor.collect_results(streaming_ctx)
+
+            by_id =
+              streaming_ctx.order
+              |> Enum.zip(collected)
+              |> Map.new(fn {id, {tool_msg, _result_str}} -> {id, tool_msg} end)
+
+            {by_id, MapSet.new(streaming_ctx.order)}
+        end
+      rescue
+        _ -> {%{}, MapSet.new()}
+      catch
+        :exit, _ -> {%{}, MapSet.new()}
+      end
+
+    Process.delete(:osa_streaming_tool_ctx)
+
+    truncated_fail = fn tc ->
+      %{
+        role: "tool",
+        tool_call_id: tc.id,
+        content:
+          "Error: tool call not executed — the assistant message was truncated by the token " <>
+            "limit, so the arguments may be incomplete. Re-issue this call with complete arguments."
+      }
+    end
+
+    {tool_msgs, kept_any?} =
+      Enum.map_reduce(tool_calls, false, fn tc, kept? ->
+        if MapSet.member?(streamed_ids, tc.id) do
+          # Already executed during streaming — keep its real result.
+          case Map.get(streamed_msgs_by_id, tc.id) do
+            nil -> {truncated_fail.(tc), kept?}
+            tool_msg -> {tool_msg, true}
+          end
+        else
+          {truncated_fail.(tc), kept?}
+        end
+      end)
+
+    directive = %{
+      role: "user",
+      content:
+        if kept_any? do
+          "[System: Your previous message was truncated by the token limit. Any tool call that " <>
+            "had already completed was executed and its result is included above; the trailing " <>
+            "call(s) marked with a truncation error were NOT executed. Re-emit ONLY those " <>
+            "incomplete tool call(s) now.]"
+        else
+          "[System: Your previous message was truncated by the token limit before the tool " <>
+            "call(s) finished. None were executed, because their arguments may be incomplete. " <>
+            "Re-emit the complete tool call(s) now.]"
+        end
+    }
+
+    state = %{
+      state
+      | messages: state.messages ++ [assistant_msg] ++ tool_msgs ++ [directive],
+        iteration: state.iteration + 1
+    }
+
+    # P2 audit gap C: route through the SAME continuation join point every
+    # other tool-call turn uses, instead of recursing into `run/1` directly.
+    # `continue_after_tools/4` is where the doom-loop detectors
+    # (`DoomLoop.check/3`) actually run; calling `run/1` here skipped them
+    # entirely, so a model that kept re-truncating over the same tool call had
+    # nothing watching for the repeat. `results` mirrors the shape every other
+    # caller of `continue_after_tools/4` builds — `tool_msgs` pairs 1:1 with
+    # `tool_calls` (both built by the same `Enum.map_reduce/3` above) — so the
+    # doom-loop's failure-signature detector sees each truncation-fail /
+    # kept-result exactly as it would from a normal tool round.
+    results =
+      Enum.zip(tool_calls, tool_msgs)
+      |> Enum.map(fn {tc, tool_msg} ->
+        result_str = Map.get(tool_msg, :content) || Map.get(tool_msg, "content") || ""
+        {tc, {tool_msg, result_str}}
+      end)
+
+    continue_after_tools(results, tool_calls, state, resample_snapshot)
   end
 
   # Hand a truncated no-tool-call generation to the user MARKED as incomplete
@@ -2664,11 +2970,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   defp refresh_tokens_after_fold(state, false), do: state
 
   defp refresh_tokens_after_fold(state, true) do
-    Map.put(
-      state,
+    state
+    |> Map.put(
       :last_input_tokens,
       OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
     )
+    |> Map.put(:last_input_message_count, length(state.messages))
   rescue
     _ -> state
   end
@@ -2877,35 +3184,63 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         # attempts bound only a *stuck* stretch, not the session lifetime.
         state = Map.put(state, :doom_resamples, 0)
 
-        # Auto-mode: if the safety Guardian paused this session after N blocked
-        # dangerous actions, halt the loop and surface a review prompt instead
-        # of recursing into another unattended iteration.
-        if state.permission_tier == :auto and
-             OptimalSystemAgent.Agent.Safety.Guardian.paused?(state.session_id) do
-          blocks = OptimalSystemAgent.Agent.Safety.Guardian.block_count(state.session_id)
+        # Shared per-turn recovery budget (P2 audit gap C): a REASK or
+        # terminal invalid-arguments result from `ToolArgValidator` is a
+        # failure-recovery attempt exactly like a truncation or a cut-off
+        # stream, and must count against the same ceiling. `ToolArgValidator`
+        # only bounds ONE tool at a time (its own cap resets the moment that
+        # tool validates cleanly once), so a model alternating between
+        # different malformed calls — or between a validator reask and an
+        # unrelated truncation — could keep "recovering" indefinitely with
+        # nothing watching the total.
+        if Enum.any?(results, fn {_tc, {tool_msg, _result_str}} ->
+             content = Map.get(tool_msg, :content) || Map.get(tool_msg, "content")
+             ToolArgValidator.reask_message?(content)
+           end) do
+          case spend_recovery(state, "invalid tool-call arguments") do
+            {:exhausted, state} ->
+              halt_recovery_exhausted(state, "invalid tool-call arguments")
 
-          pause_message =
-            "Auto-mode paused for review: #{blocks} dangerous action(s) were blocked. " <>
-              "Review the blocked calls, then resume to continue."
-
-          TerminalSource.halt(pause_message, state, :control)
+            {:ok, state} ->
+              continue_after_tools_ok(state)
+          end
         else
-          # Goal-level verification runs HERE — at the tool-result boundary,
-          # before the next generation — and nowhere else. Two reasons:
-          #
-          #   1. ONE ENDING. Assistant text streams to the user token-by-token,
-          #      so a conclusion cannot be retracted once generated. Verifying
-          #      after a text response and then looping is what made a turn end
-          #      twice. Verifying here puts the panel's findings in context
-          #      *before* the model writes its conclusion, so there is exactly
-          #      one.
-          #   2. CHEAP BY DEFAULT. `maybe_gate/1` is a three-tier gate: free
-          #      local skips → one cheap triage call → the expensive skeptic
-          #      panel only on `candidate_complete`. It appends at most one
-          #      system directive and never raises.
-          state = GoalVerifier.maybe_gate(state)
-          run(state)
+          continue_after_tools_ok(state)
         end
+    end
+  end
+
+  # The "normal" continuation once `continue_after_tools/4` has decided this
+  # turn is not doom-looping and has not exhausted the shared recovery budget.
+  defp continue_after_tools_ok(state) do
+    # Auto-mode: if the safety Guardian paused this session after N blocked
+    # dangerous actions, halt the loop and surface a review prompt instead
+    # of recursing into another unattended iteration.
+    if state.permission_tier == :auto and
+         OptimalSystemAgent.Agent.Safety.Guardian.paused?(state.session_id) do
+      blocks = OptimalSystemAgent.Agent.Safety.Guardian.block_count(state.session_id)
+
+      pause_message =
+        "Auto-mode paused for review: #{blocks} dangerous action(s) were blocked. " <>
+          "Review the blocked calls, then resume to continue."
+
+      TerminalSource.halt(pause_message, state, :control)
+    else
+      # Goal-level verification runs HERE — at the tool-result boundary,
+      # before the next generation — and nowhere else. Two reasons:
+      #
+      #   1. ONE ENDING. Assistant text streams to the user token-by-token,
+      #      so a conclusion cannot be retracted once generated. Verifying
+      #      after a text response and then looping is what made a turn end
+      #      twice. Verifying here puts the panel's findings in context
+      #      *before* the model writes its conclusion, so there is exactly
+      #      one.
+      #   2. CHEAP BY DEFAULT. `maybe_gate/1` is a three-tier gate: free
+      #      local skips → one cheap triage call → the expensive skeptic
+      #      panel only on `candidate_complete`. It appends at most one
+      #      system directive and never raises.
+      state = GoalVerifier.maybe_gate(state)
+      run(state)
     end
   end
 
@@ -2932,6 +3267,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
   # Drain the streaming tool executor into message history on the ERROR path.
   # Returns `{state, executed_tool_names}`.
+  # Guard against double-appending the partial when `commit_streamed_tool_results`
+  # already synthesized an assistant message carrying it (the streamed-tools
+  # path uses the partial as that message's content).
+  defp last_message_is_this_assistant?(messages, partial) do
+    case List.last(messages) do
+      %{role: "assistant", content: ^partial} -> true
+      _ -> false
+    end
+  end
+
   defp commit_streamed_tool_results(state, reason) do
     ctx = Process.get(:osa_streaming_tool_ctx)
 
@@ -3020,69 +3365,21 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # that owns it, not appended at the end: Anthropic requires the `tool_result`
   # blocks to be in the message directly following their `tool_use`, so a tail
   # append would trade one invalid transcript for another.
+  #
+  # Delegates the scan/insert to `Providers.HistorySanitizer` (shared with the
+  # pre-flight/one-shot-repair call sites — same orphan definition, same
+  # insert-immediately-after placement) and supplies this call site's own
+  # placeholder wording, distinct from the sanitizer's generic default and
+  # from `Loop.init/1`'s crash-restore wording.
   defp fill_orphaned_tool_results(messages) do
-    answered = answered_tool_ids(messages)
+    {messages, filled_any?} =
+      OptimalSystemAgent.Providers.HistorySanitizer.fill_missing_tool_results(
+        messages,
+        "Interrupted by user"
+      )
 
-    {reversed, filled_any?} =
-      Enum.reduce(messages, {[], false}, fn msg, {acc, filled?} ->
-        case orphaned_tool_call_ids(msg, answered) do
-          [] ->
-            {[msg | acc], filled?}
-
-          ids ->
-            results =
-              Enum.map(ids, fn id ->
-                %{role: "tool", tool_call_id: id, content: "Interrupted by user"}
-              end)
-
-            # `acc` is reversed, so the results must be pushed in reverse order
-            # to land after `msg` in the restored list.
-            {Enum.reverse(results) ++ [msg | acc], true}
-        end
-      end)
-
-    messages = Enum.reverse(reversed)
     {messages, filled_any? or trailing_interrupted_tool?(messages)}
   end
-
-  # Ids of every tool call in `msg` that no `tool` message answers. Tolerates
-  # both atom- and string-keyed messages (checkpoint restore decodes to strings)
-  # and tool calls missing an id (nothing to answer — skipped).
-  defp orphaned_tool_call_ids(msg, answered) do
-    case msg_role(msg) do
-      "assistant" ->
-        msg
-        |> tool_calls_of()
-        |> Enum.map(&tool_call_id/1)
-        |> Enum.reject(&(is_nil(&1) or MapSet.member?(answered, &1)))
-        |> Enum.uniq()
-
-      _ ->
-        []
-    end
-  end
-
-  defp answered_tool_ids(messages) do
-    for msg <- messages,
-        msg_role(msg) == "tool",
-        id = Map.get(msg, :tool_call_id) || Map.get(msg, "tool_call_id"),
-        not is_nil(id),
-        into: MapSet.new(),
-        do: id
-  end
-
-  defp msg_role(msg) when is_map(msg), do: Map.get(msg, :role) || Map.get(msg, "role")
-  defp msg_role(_), do: nil
-
-  defp tool_calls_of(msg) do
-    case Map.get(msg, :tool_calls) || Map.get(msg, "tool_calls") do
-      list when is_list(list) -> list
-      _ -> []
-    end
-  end
-
-  defp tool_call_id(tc) when is_map(tc), do: Map.get(tc, :id) || Map.get(tc, "id")
-  defp tool_call_id(_), do: nil
 
   # True when the tool batch itself was killed (ToolOrchestrator appended
   # "Error: Interrupted by user" results) — the marker should then say

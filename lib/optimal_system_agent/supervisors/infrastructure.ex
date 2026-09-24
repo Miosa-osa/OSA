@@ -119,7 +119,13 @@ defmodule OptimalSystemAgent.Supervisors.Infrastructure do
       OptimalSystemAgent.Telemetry.Metrics,
 
       # API key rotation pool (reads ANTHROPIC_API_KEYS, OPENAI_API_KEYS, etc.)
-      OptimalSystemAgent.Providers.CredentialPool
+      OptimalSystemAgent.Providers.CredentialPool,
+
+      # Daemon's own memory watchdog (BEAM total + OS RSS). Warn-only — see
+      # moduledoc. Independent of the MCP child-process watchdog above
+      # (MCP.Client.Manager -> per-server Stdio transports), which watches
+      # OTHER processes, not this one.
+      OptimalSystemAgent.System.MemoryMonitor
     ]
 
     children

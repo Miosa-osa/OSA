@@ -323,7 +323,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
             # continuation turn injected later by `ReactLoop` is the `role:
             # "user"` instruction to act on it.
             reminder =
-              case CompactionSafety.build_reminder_message(session_id) do
+              case CompactionSafety.build_reminder_message(session_id, recent) do
                 nil -> []
                 msg -> [msg]
               end
@@ -867,7 +867,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   that a compaction happened is already carried by the compact-boundary message
   at the head of the rebuilt history and does not need repeating.
 
-  This composes with — does NOT replace — `CompactionSafety.build_reminder_message/1`.
+  This composes with — does NOT replace — `CompactionSafety.build_reminder_message/2`.
   The reminder is a `role: "system"` message describing *what* is still
   active (background tasks, TODOs, subagents); this is a `role: "user"`
   message telling the model *to act* on that state. When both fire for the

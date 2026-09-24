@@ -80,6 +80,9 @@ impl App {
                 // send simply leaves its chip off (no "effort:" / "$" shown).
                 self.status.set_effort(health.effort.clone());
                 self.status.set_reasoning(health.reasoning.clone());
+                if let Some(can) = health.thinking_can_disable {
+                    self.thinking_can_disable = can;
+                }
                 self.status.set_billing(health.billing.clone());
 
                 // Update-available signal (Codex parity: understated, no
@@ -781,6 +784,18 @@ impl App {
         }
     }
 
+    /// Push the current queue to BOTH surfaces that display it: the composer's
+    /// one-row affordance (count + how to send now) and the conversation block
+    /// above the spinner (the message texts, marked queued). One helper so the
+    /// two can never drift — every mutation of `message_queue` ends by calling
+    /// this. `set_queued` on the chat is what makes a queued message part of the
+    /// transcript flow until the model starts on it (`send_queued_now` /
+    /// `maybe_dequeue_message` then echo it as an ordinary user message).
+    pub(crate) fn refresh_queue_display(&mut self) {
+        self.input.set_queued_items(self.message_queue.clone());
+        self.chat.set_queued(self.message_queue.clone());
+    }
+
     /// Enqueue a message typed while the agent is Processing. It runs (FIFO)
     /// when the current turn completes. Shows a toast + updates the "N queued"
     /// indicator on the input.
@@ -789,7 +804,7 @@ impl App {
         // WS5 — the queued text renders as dim lines directly above the
         // composer (CC PromptInputQueuedCommands), so no toast: the user can
         // see and verify exactly what they queued, and recall it with ↑/Esc.
-        self.input.set_queued_items(self.message_queue.clone());
+        self.refresh_queue_display();
         self.activity.set_queued(self.message_queue.len());
         self.recompute_layout();
     }
@@ -844,7 +859,7 @@ impl App {
             return;
         }
         let next = self.message_queue.remove(0);
-        self.input.set_queued_items(self.message_queue.clone());
+        self.refresh_queue_display();
         self.activity.set_queued(self.message_queue.len());
         self.recompute_layout();
         // Re-enter the normal submit path so queued commands / shell / prompts
@@ -861,14 +876,19 @@ impl App {
     /// now` key that did not exist — the press armed the interrupt, and the next
     /// one killed the turn.
     ///
-    /// The mechanism is `POST /sessions/:id/steer`, which is already the
-    /// product's explicit gesture for injecting into a live turn: the backend
-    /// parks the text in an ETS queue (`Agent.Loop.Steer`) that a busy loop can
-    /// still read, and `ReactLoop.inject_pending_steer/1` drains it at the next
-    /// ReAct step boundary — not mid-stream, which is neither possible nor
-    /// desirable. `Steer.to_messages/1` labels it "[User steer — a mid-turn
-    /// directive from the user…]", so the model reads it as a new instruction
-    /// from the user rather than as a continuation of its own reasoning.
+    /// The mechanism is `POST /sessions/:id/send-now`, which queues the text as
+    /// a steer AND interrupts the turn's current step: the backend parks the
+    /// text in an ETS queue (`Agent.Loop.Steer`) that a busy loop can still
+    /// read, raises a send-now yield flag, and the running turn stops waiting on
+    /// its in-flight tools — moving any still-running shell command or subagent
+    /// to the background (its result arrives later as a `<task-notification>`)
+    /// rather than cancelling it, and cutting the LLM stream if one is mid-flight
+    /// (its partial text is kept). `ReactLoop.inject_pending_steer/1` then folds
+    /// the message in at the very next step boundary, which is now reached
+    /// immediately instead of after the slowest tool. `Steer.to_messages/1`
+    /// delivers it as a `user`-role turn carrying the user's own words with only
+    /// a minimal neutral marker that it arrived mid-turn — so the model reads it
+    /// as a new message from the user, not a continuation of its own reasoning.
     ///
     /// What this is NOT: a reopening of implicit mid-turn steering. Plain text
     /// typed mid-turn still queues (see `submit_input` for why automatic
@@ -903,7 +923,7 @@ impl App {
         for text in &items {
             self.chat.add_midturn_user_message(text);
         }
-        self.input.set_queued_items(Vec::new());
+        self.refresh_queue_display();
         self.activity.set_queued(0);
         self.recompute_layout();
 
@@ -911,19 +931,24 @@ impl App {
         let session_id = self.session_id.clone();
         let tx = self.event_tx.clone();
         tokio::spawn(async move {
-            for (i, text) in items.iter().enumerate() {
-                if let Err(e) = client.steer_session(&session_id, text).await {
-                    // Hand back everything from the failure onwards. The items
-                    // before it are genuinely delivered and must not be sent
-                    // twice.
+            // ONE request for all messages. The backend's `/send-now` queues
+            // them in order atomically AND interrupts the current step, moving
+            // still-running tools to the background instead of cancelling them —
+            // so the user's messages are folded into the turn NOW rather than
+            // at the next natural boundary. A single call also means a partial
+            // failure can never leave some delivered and some not: either the
+            // batch lands or the whole set returns to the queue.
+            match client.send_now(&session_id, &items).await {
+                Ok(()) => {
+                    let _ = tx.send(Event::Backend(BackendEvent::SendNowDelivered { count }));
+                }
+                Err(e) => {
                     let _ = tx.send(Event::Backend(BackendEvent::SendNowFailed {
-                        undelivered: items[i..].to_vec(),
+                        undelivered: items,
                         error: e.to_string(),
                     }));
-                    return;
                 }
             }
-            let _ = tx.send(Event::Backend(BackendEvent::SendNowDelivered { count }));
         });
     }
 
@@ -935,7 +960,7 @@ impl App {
     pub(super) fn restore_undelivered_queue(&mut self, mut undelivered: Vec<String>) {
         undelivered.append(&mut self.message_queue);
         self.message_queue = undelivered;
-        self.input.set_queued_items(self.message_queue.clone());
+        self.refresh_queue_display();
         self.activity.set_queued(self.message_queue.len());
         self.recompute_layout();
     }
@@ -952,7 +977,7 @@ impl App {
         let joined = join_queued_for_composer(&items, self.input.value());
         self.input.reset();
         self.input.insert_str(&joined);
-        self.input.set_queued_items(Vec::new());
+        self.refresh_queue_display();
         self.toasts.push(
             "Queued messages moved to composer".into(),
             crate::components::toast::ToastLevel::Info,

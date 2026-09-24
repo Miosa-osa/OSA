@@ -83,4 +83,31 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolArgValidatorTest do
       assert {:ok, %{arguments: _}} = ToolArgValidator.validate(tool_call, %{session_id: sid})
     end
   end
+
+  # P2 audit gap C: `ReactLoop` counts a REASK/terminal validator message
+  # against the shared per-turn recovery budget by recognizing the exact
+  # bodies this module produces, via `reask_message?/1`.
+  describe "reask_message?/1" do
+    test "recognizes a REASK message", %{session_id: sid} do
+      tool_call = %{name: "file_edit", arguments: %{}}
+      assert {:reask, message} = ToolArgValidator.validate(tool_call, %{session_id: sid})
+      assert ToolArgValidator.reask_message?(message)
+    end
+
+    test "recognizes a terminal (budget-exhausted) message", %{session_id: sid} do
+      tool_call = %{name: "file_edit", arguments: %{}}
+      state = %{session_id: sid}
+      ToolArgValidator.validate(tool_call, state)
+      ToolArgValidator.validate(tool_call, state)
+      assert {:error, message} = ToolArgValidator.validate(tool_call, state)
+      assert ToolArgValidator.reask_message?(message)
+    end
+
+    test "an ordinary tool error is NOT mistaken for a reask", %{session_id: _sid} do
+      refute ToolArgValidator.reask_message?("Error: file not found: /tmp/missing.txt")
+      refute ToolArgValidator.reask_message?("Blocked: destructive command denied")
+      refute ToolArgValidator.reask_message?(nil)
+      refute ToolArgValidator.reask_message?(%{not: "a string"})
+    end
+  end
 end

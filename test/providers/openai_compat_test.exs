@@ -863,6 +863,75 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatTest do
   end
 
   # ---------------------------------------------------------------------------
+  # stream_from_sse_chunks/3 — P2 audit gap A: a stream that closes cleanly but
+  # never sends `data: [DONE]` — every OpenAI-compatible backend OSA speaks to
+  # sends it at the true end of a successful response, so its absence means the
+  # connection ended before the model's own protocol confirmed it was finished
+  # (a proxy timeout, a dropped connection, a truncating gateway).
+  # ---------------------------------------------------------------------------
+  describe "stream_from_sse_chunks/3 — stream_incomplete (no [DONE] marker)" do
+    test "content produced but the stream closes WITHOUT [DONE] is flagged stream_incomplete" do
+      chunks = [
+        sse(%{"choices" => [%{"delta" => %{"content" => "Partial answer, cut off"}}]})
+        # No finish_reason chunk, no "data: [DONE]\n\n" — the connection just ended.
+      ]
+
+      result = OpenAICompat.stream_from_sse_chunks(chunks)
+
+      refute match?({:error, _}, result), "non-empty content must not be dropped as empty"
+      assert result.content == "Partial answer, cut off"
+      assert result.stream_incomplete == true
+    end
+
+    test "a normal stream that DOES send [DONE] is NOT flagged incomplete" do
+      chunks = [
+        sse(%{"choices" => [%{"delta" => %{"content" => "All done."}}]}),
+        sse(%{"choices" => [%{"delta" => %{}, "finish_reason" => "stop"}]}),
+        "data: [DONE]\n\n"
+      ]
+
+      result = OpenAICompat.stream_from_sse_chunks(chunks)
+
+      assert result.content == "All done."
+      refute Map.get(result, :stream_incomplete, false)
+    end
+
+    test "tool_calls produced but no [DONE] is also flagged (not silently dropped)" do
+      chunks = [
+        sse(%{
+          "choices" => [
+            %{
+              "delta" => %{
+                "tool_calls" => [
+                  %{
+                    "index" => 0,
+                    "id" => "call_1",
+                    "function" => %{"name" => "file_read", "arguments" => "{}"}
+                  }
+                ]
+              }
+            }
+          ]
+        })
+        # Connection ends here — no finish_reason, no [DONE].
+      ]
+
+      result = OpenAICompat.stream_from_sse_chunks(chunks)
+
+      refute match?({:error, _}, result)
+      assert [%{name: "file_read"}] = result.tool_calls
+      assert result.stream_incomplete == true
+    end
+
+    test "an empty stream with no [DONE] is still the existing retryable empty-response error" do
+      # The empty-response path (already retryable via Resilience) must be
+      # unaffected — stream_incomplete is only for a NON-empty result.
+      assert {:error, reason} = OpenAICompat.stream_from_sse_chunks([])
+      assert OptimalSystemAgent.Providers.ErrorCatalog.classify(reason) == :empty_response
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Partial (cut-off) tool-call arguments — the customer-critical fix. A flaky
   # provider truncates a large tool call mid-arguments; the accumulated
   # `arguments_json` is non-blank but will not decode. Previously it was emitted

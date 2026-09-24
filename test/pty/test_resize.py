@@ -20,6 +20,8 @@ from __future__ import annotations
 import os
 import re
 import sys
+import termios
+import time
 import traceback
 from pathlib import Path
 
@@ -325,6 +327,79 @@ def test_height_resize(backend: StubBackend) -> None:
             s.pump(0.05)
         s.pump(SETTLE * 2)
         assert_live_region_ok(s, "after heightening sweep 20 -> 40")
+
+
+def test_a_resize_never_asks_the_terminal_where_the_cursor_is(
+    backend: StubBackend,
+) -> None:
+    """A drag must not issue a single cursor query, so a dropped reply can't kill it.
+
+    The shipped defect: ratatui's `Terminal::draw` begins with `autoresize`,
+    which re-anchors an inline viewport through a DSR (`ESC[6n`) whenever the
+    terminal's size differs from the one the viewport was built at. A resize
+    landing between the run loop's size sample and its draw therefore issued
+    a query from inside `draw`, and a reply that missed crossterm's 2s window
+    came back as "The cursor position could not be read within a normal
+    duration" — a fatal exit, mid-drag. The three resize tests above hit it
+    60-90% of runs on a loaded machine. It was never the terminal's fault:
+    OSA owns resizes itself and already knows every row it needs.
+
+    Answering the query from pyte made the defect probabilistic. Here the
+    harness STOPS answering after boot, so any query at all is a guaranteed
+    timeout; the drag must leave the process alive, having emitted no
+    `ESC[6n`, with one live region. Then a clean quit must hand the shell back
+    a cooked terminal with a visible cursor.
+    """
+    with PtySession(backend.base_url, cols=120, rows=30) as s:
+        s.boot()
+        s.answer_dsr = False
+        mark = s.mark()
+
+        # Oscillate across the 50ms resize-settle window. A step that lands
+        # just after the loop decided the size had settled, and before it drew,
+        # is exactly the size-changed-under-draw race; stepping at intervals
+        # straddling the window hits it within seconds even on an idle machine
+        # (measured: every one of 0.05/0.055/0.06s killed v1.0.202). Both
+        # axes, since a height-only change took the same path.
+        for interval in (0.045, 0.05, 0.055, 0.06, 0.065):
+            deadline = time.time() + 1.5
+            while time.time() < deadline:
+                for cols, rows in ((100, 30), (120, 30), (120, 24), (120, 30)):
+                    s.resize(cols, rows)
+                    s.pump(interval)
+        # Past crossterm's 2s query timeout, so a query issued by the last
+        # step of the drag has had time to become fatal.
+        s.pump(SETTLE * 3)
+
+        queries = s.emitted_since(mark).count(b"\x1b[6n")
+        if queries:
+            raise AssertionError(
+                f"the resize drag issued {queries} cursor-position quer"
+                f"{'y' if queries == 1 else 'ies'} (ESC[6n); a dropped reply to "
+                "any one of them is a fatal exit. Screen:\n" + s.dump()
+            )
+        pid, _ = os.waitpid(s.pid, os.WNOHANG)
+        if pid:
+            s.pid = None
+            raise AssertionError(
+                "osagent exited during a resize drag. Screen:\n" + s.dump()
+            )
+        assert_live_region_ok(s, "after a resize drag with DSR unanswered")
+
+        # Ctrl+D on an empty composer quits. The terminal must come back
+        # cooked (echo + canonical input) with the cursor shown.
+        s.write(b"\x04")
+        if not s.wait_exit(5.0):
+            raise AssertionError("Ctrl+D did not quit. Screen:\n" + s.dump())
+        lflag = termios.tcgetattr(s.fd)[3]
+        if not (lflag & termios.ECHO and lflag & termios.ICANON):
+            raise AssertionError(
+                "the terminal was left in raw mode after exit (ECHO="
+                f"{bool(lflag & termios.ECHO)}, ICANON={bool(lflag & termios.ICANON)})"
+            )
+        raw = bytes(s.raw)
+        if raw.rfind(b"\x1b[?25l") > raw.rfind(b"\x1b[?25h"):
+            raise AssertionError("the cursor was left hidden after exit")
 
 
 def test_small_viewport(backend: StubBackend) -> None:
@@ -2350,10 +2425,12 @@ def test_a_queued_message_does_not_make_the_interrupt_harder_to_reach(
         release_turn()
 
 
-#: The wire path the send-now feature rides. The real backend parks the text in
-#: an ETS queue a busy loop can still read and folds it in at the next ReAct
-#: step boundary; nothing about that needs a model to be exercised here.
-STEER_PATH = "/api/v1/sessions/pty-stub-session/steer"
+#: The wire path the send-now feature rides. Send-now delivers every queued
+#: message in one request to `/send-now`, which queues each as a steer (an ETS
+#: queue a busy loop can still read) AND raises a yield flag that interrupts the
+#: current step so the message is folded in NOW, not at the next natural
+#: boundary. Nothing about that needs a model to be exercised here.
+STEER_PATH = "/api/v1/sessions/pty-stub-session/send-now"
 CANCEL_PATH = "/api/v1/sessions/pty-stub-session/cancel"
 
 
@@ -3188,6 +3265,7 @@ TESTS = [
     test_resize_with_transcript,
     test_resize_emits_nothing_that_deposits_into_scrollback,
     test_height_resize,
+    test_a_resize_never_asks_the_terminal_where_the_cursor_is,
     test_small_viewport,
     test_narrow_terminal_still_dispatches,
     test_provider_surface,

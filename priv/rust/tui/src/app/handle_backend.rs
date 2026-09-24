@@ -1490,6 +1490,9 @@ impl App {
                     if let Some(effort) = resp.effort.clone() {
                         self.status.set_effort(Some(effort));
                     }
+                    // A switch changes what "thinking off" can mean; absent on an
+                    // older backend ⇒ the control stays offered.
+                    self.thinking_can_disable = resp.thinking_can_disable.unwrap_or(true);
                     self.check_health();
                     let toast = model_switch_toast(&resp);
                     let level = if resp.compacted.unwrap_or(false) {
@@ -1506,8 +1509,10 @@ impl App {
                     }
                 }
                 Err(e) => {
+                    // The server's own sentence, never the raw JSON body or a
+                    // request id (see `client::error_text`).
                     self.toasts.push(
-                        format!("Model switch failed: {}", e),
+                        model_switch_error_text(&e),
                         crate::components::toast::ToastLevel::Error,
                     );
                 }
@@ -2538,6 +2543,7 @@ impl App {
                 exit_code,
                 command,
                 task_id,
+                status,
             } => {
                 if self.bg_shell_count > 0 {
                     self.bg_shell_count -= 1;
@@ -2557,17 +2563,58 @@ impl App {
                 } else {
                     command.clone()
                 };
+                // `status` is the backend's own classification, the SOURCE OF
+                // TRUTH — not `exit_code == 0`. A background `grep`/`diff`/`test`
+                // that exits 1 for a normal, meaningful reason (no matches /
+                // differs / false) is classified "done" even though
+                // `exit_code != 0`; painting that red would show a failure toast
+                // for a correct, negative answer. An older backend that has not
+                // been upgraded yet sends no `status` at all — fall back to the
+                // exit-code check so this degrades gracefully rather than
+                // misreporting every completion as a failure.
+                let verb = match status.as_str() {
+                    "killed" => "was stopped",
+                    "failed" => "failed",
+                    "done" => "completed",
+                    "" if exit_code == 0 => "completed",
+                    "" => "failed",
+                    _ => "completed",
+                };
                 let note = format!(
-                    "Background command '{}' completed (exit code {})",
-                    label, exit_code
+                    "Background command '{}' {} (exit code {})",
+                    label, verb, exit_code
                 );
-                let (severity, level) = if exit_code == 0 {
-                    ("info", crate::components::toast::ToastLevel::Success)
-                } else {
-                    ("error", crate::components::toast::ToastLevel::Error)
+                let (severity, level) = match verb {
+                    "failed" => ("error", crate::components::toast::ToastLevel::Error),
+                    "was stopped" => ("warning", crate::components::toast::ToastLevel::Warning),
+                    _ => ("info", crate::components::toast::ToastLevel::Success),
                 };
                 self.chat.add_system_message(&note, severity);
                 self.toasts.push(note, level);
+                self.recompute_layout();
+            }
+            BackendEvent::DaemonMemoryWarning {
+                rss_mb,
+                beam_mb,
+                limit_mb,
+                message,
+            } => {
+                // Warn-only: this never stops anything on its own, so the
+                // message (composed on the backend) names concrete steps —
+                // finish/stop background tasks, compact, restart.
+                let note = if message.trim().is_empty() {
+                    format!(
+                        "\u{26a0} OSA is using {} MB (BEAM {} MB), over the {} MB critical threshold.",
+                        rss_mb, beam_mb, limit_mb
+                    )
+                } else {
+                    message
+                };
+                self.chat.add_system_message(&note, "warning");
+                self.toasts.push(
+                    format!("Memory critical: {} MB (limit {} MB)", rss_mb, limit_mb),
+                    crate::components::toast::ToastLevel::Warning,
+                );
                 self.recompute_layout();
             }
             BackendEvent::TaskNotification { count, summary } => {
@@ -4199,5 +4246,47 @@ mod handle_backend_tests {
         assert!(is_orphan_tool_end(false));
         // A real start queued args → render the tool line as usual.
         assert!(!is_orphan_tool_end(true));
+    }
+}
+
+/// Toast text for a refused model switch: the server's human-readable message
+/// (`error.message`, `details`, Ollama's bare `error`), with request ids
+/// stripped. Any caller-added context before the HTTP status (e.g.
+/// "--model/--provider could not be applied: ") is kept.
+pub(crate) fn model_switch_error_text(raw: &str) -> String {
+    let (context, body) = match raw.find("HTTP ") {
+        Some(i) if i > 0 => (raw[..i].trim_end(), &raw[i..]),
+        _ => ("", raw),
+    };
+    let msg = crate::client::error_text::human_error_message(body);
+    if context.is_empty() {
+        format!("Model switch failed: {msg}")
+    } else {
+        format!("Model switch failed: {context} {msg}")
+    }
+}
+
+#[cfg(test)]
+mod model_switch_error_text_tests {
+    use super::model_switch_error_text;
+
+    #[test]
+    fn a_refused_switch_shows_the_server_sentence_not_json() {
+        let raw = r#"HTTP 400 Bad Request from /api/v1/sessions/abc/provider: {"error":"invalid_model","details":"unknown model \"gpt-9\" for provider openai"}"#;
+        let t = model_switch_error_text(raw);
+        assert_eq!(
+            t,
+            r#"Model switch failed: unknown model "gpt-9" for provider openai"#
+        );
+        assert!(!t.contains('{') && !t.contains("/api/v1"), "{t}");
+    }
+
+    #[test]
+    fn caller_context_survives() {
+        let raw = r#"--model/--provider could not be applied: HTTP 400 Bad Request from /p: {"error":"invalid_model","details":"unknown model \"x\" for provider ollama"}"#;
+        assert_eq!(
+            model_switch_error_text(raw),
+            r#"Model switch failed: --model/--provider could not be applied: unknown model "x" for provider ollama"#
+        );
     }
 }

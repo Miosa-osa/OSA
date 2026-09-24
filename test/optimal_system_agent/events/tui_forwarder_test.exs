@@ -246,4 +246,55 @@ defmodule OptimalSystemAgent.Events.TuiForwarderTest do
 
     refute_receive {:osa_event, %{event: :some_unlisted_internal_event}}, 500
   end
+
+  # ── daemon_memory_warning: no natural session_id, must fan out ──────
+  #
+  # Regression target: `@forward_events`' `is_binary(session_id) ` guard would
+  # silently drop a DAEMON-scoped warning (the memory watchdog has no single
+  # session to address) forever. `@broadcast_all_events` fans it out to every
+  # live ROOT session instead.
+  describe "daemon_memory_warning (daemon-scoped, no session_id)" do
+    setup %{session_id: sid} do
+      {:ok, _owner} = Registry.register(OptimalSystemAgent.SessionRegistry, sid, :test_owner)
+      :ok
+    end
+
+    test "reaches a live root session even though the emit carries no session_id",
+         %{session_id: sid} do
+      Bus.emit(:system_event, %{
+        event: :daemon_memory_warning,
+        rss_mb: 5_000,
+        beam_mb: 3_000,
+        limit_mb: 4_096,
+        message: "OSA is using 5000 MB, over the 4096 MB threshold."
+      })
+
+      assert_receive {:osa_event, event}, 2000
+      assert event.type == :system_event
+      assert event.event == :daemon_memory_warning
+      assert event.session_id == sid
+      assert event.rss_mb == 5_000
+      assert event.limit_mb == 4_096
+    end
+
+    test "does NOT fan out to a subagent-shaped registry key", %{session_id: sid} do
+      subagent_id = "agent:#{sid}:1"
+      {:ok, _owner} = Registry.register(OptimalSystemAgent.SessionRegistry, subagent_id, :test)
+      Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{subagent_id}")
+
+      Bus.emit(:system_event, %{
+        event: :daemon_memory_warning,
+        rss_mb: 5_000,
+        beam_mb: 3_000,
+        limit_mb: 4_096,
+        message: "over the line"
+      })
+
+      # The root session still gets it...
+      assert_receive {:osa_event, %{event: :daemon_memory_warning, session_id: ^sid}}, 2000
+      # ...but the subagent's own topic never does.
+      refute_receive {:osa_event, %{event: :daemon_memory_warning, session_id: ^subagent_id}},
+                     500
+    end
+  end
 end
