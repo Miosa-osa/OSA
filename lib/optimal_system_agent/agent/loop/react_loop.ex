@@ -805,6 +805,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       ok: match?({:ok, _}, result)
     })
 
+    # This generation's wall-clock time, for the regulation core's
+    # reasoning-overflow signal (`Regulation.Signals`) — a reasoning-only
+    # generation that ran unusually long and produced nothing is a shape none
+    # of the tool-call-keyed doom-loop detectors can see, and the loop only
+    # has ONE point where `duration_ms` is known: here.
+    state = Map.put(state, :last_generation_ms, duration_ms)
+
     # A request that died mid-stream returns no usage (the `_ -> %{}` above is
     # right about what it was handed), but it was still billed: Anthropic
     # delivers the whole prompt cost in `message_start`, before the failure.
@@ -3192,33 +3199,55 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         Resample.handle(doom_message, halted_state, resample_snapshot, &run/1)
 
       {:ok, state} ->
-        # Clean turn — reset the consecutive-resample budget so recovery
-        # attempts bound only a *stuck* stretch, not the session lifetime.
-        state = Map.put(state, :doom_resamples, 0)
+        # The regulation core (item 1/6/11/14) — a unified pain score over
+        # the SAME per-iteration evidence the doom-loop detectors above just
+        # updated, plus the homeostat's context/cost/progress/error bands.
+        # Ordered AFTER `DoomLoop.check/3`, never before: a doom-loop halt
+        # already ends the turn, so there is nothing left to regulate, and
+        # `DoomLoop`'s own counters (`:windowed_call_keys`,
+        # `:stall_checkpoint_count`, `:reasoning_only_streak`, …) must already
+        # reflect this iteration before `Regulation.Signals` reads them.
+        #
+        # A pain-triggered pause is marked `:control`, not routed through
+        # `Resample`: it hands the turn back to the user, it does not discard
+        # the last response and re-roll it (see `Regulation.regulate/3`).
+        case OptimalSystemAgent.Agent.Loop.Regulation.regulate(results, tool_calls, state) do
+          {:halt, pain_message, halted_state} ->
+            TerminalSource.halt(pain_message, halted_state, :control)
 
-        # Shared per-turn recovery budget (P2 audit gap C): a REASK or
-        # terminal invalid-arguments result from `ToolArgValidator` is a
-        # failure-recovery attempt exactly like a truncation or a cut-off
-        # stream, and must count against the same ceiling. `ToolArgValidator`
-        # only bounds ONE tool at a time (its own cap resets the moment that
-        # tool validates cleanly once), so a model alternating between
-        # different malformed calls — or between a validator reask and an
-        # unrelated truncation — could keep "recovering" indefinitely with
-        # nothing watching the total.
-        if Enum.any?(results, fn {_tc, {tool_msg, _result_str}} ->
-             content = Map.get(tool_msg, :content) || Map.get(tool_msg, "content")
-             ToolArgValidator.reask_message?(content)
-           end) do
-          case spend_recovery(state, "invalid tool-call arguments") do
-            {:exhausted, state} ->
-              halt_recovery_exhausted(state, "invalid tool-call arguments")
-
-            {:ok, state} ->
-              continue_after_tools_ok(state)
-          end
-        else
-          continue_after_tools_ok(state)
+          {:ok, state} ->
+            continue_after_regulation(results, state)
         end
+    end
+  end
+
+  defp continue_after_regulation(results, state) do
+    # Clean turn — reset the consecutive-resample budget so recovery
+    # attempts bound only a *stuck* stretch, not the session lifetime.
+    state = Map.put(state, :doom_resamples, 0)
+
+    # Shared per-turn recovery budget (P2 audit gap C): a REASK or
+    # terminal invalid-arguments result from `ToolArgValidator` is a
+    # failure-recovery attempt exactly like a truncation or a cut-off
+    # stream, and must count against the same ceiling. `ToolArgValidator`
+    # only bounds ONE tool at a time (its own cap resets the moment that
+    # tool validates cleanly once), so a model alternating between
+    # different malformed calls — or between a validator reask and an
+    # unrelated truncation — could keep "recovering" indefinitely with
+    # nothing watching the total.
+    if Enum.any?(results, fn {_tc, {tool_msg, _result_str}} ->
+         content = Map.get(tool_msg, :content) || Map.get(tool_msg, "content")
+         ToolArgValidator.reask_message?(content)
+       end) do
+      case spend_recovery(state, "invalid tool-call arguments") do
+        {:exhausted, state} ->
+          halt_recovery_exhausted(state, "invalid tool-call arguments")
+
+        {:ok, state} ->
+          continue_after_tools_ok(state)
+      end
+    else
+      continue_after_tools_ok(state)
     end
   end
 

@@ -2617,6 +2617,25 @@ impl App {
                 );
                 self.recompute_layout();
             }
+            BackendEvent::PainAlert {
+                severity,
+                score: _score,
+                message,
+            } => {
+                // The status row is the persistent "distinct row" (item 1):
+                // it reflects whatever the backend last reported, including a
+                // `"none"` clear once the turn stops looking stuck.
+                self.status.set_pain_alert(&severity, &message);
+
+                // A toast on top, for `"high"`/`"critical"` only — the row
+                // above is already always visible, so this is for the
+                // moment attention is actually warranted, not routine noise
+                // as the score drifts through the lower bands.
+                if matches!(severity.as_str(), "high" | "critical") {
+                    self.toasts
+                        .push(message, crate::components::toast::ToastLevel::Warning);
+                }
+            }
             BackendEvent::TaskNotification { count, summary } => {
                 // WS6: the backend just folded completed background task(s) into
                 // the agent's context — show why the agent is about to pivot.

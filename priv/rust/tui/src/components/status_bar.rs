@@ -559,6 +559,13 @@ pub struct StatusBar {
     /// `~/.osa/jailbreak.json`) so the component never reaches out to machine
     /// state on its own and tests stay hermetic.
     liberated: bool,
+    /// The turn's algedonic (pain) channel — severity + plain-language cause
+    /// from the most recent `pain_alert` (`Regulation.Pain`), or `None` once
+    /// it has cleared / before the first one arrives. Drives the "stuck: …"
+    /// notice row (see `App::draw_context_hint`). `severity` is one of
+    /// `"low" | "medium" | "high" | "critical"` — a `"none"` report clears
+    /// this to `None` rather than being stored.
+    pain_alert: Option<(String, String)>,
 }
 
 impl StatusBar {
@@ -615,12 +622,31 @@ impl StatusBar {
             fleet_select: false,
             update_latest: None,
             liberated: false,
+            pain_alert: None,
         }
     }
 
     /// `/jailbreak` armed state — drives the ⚡ LIBERATED badge on row 0.
     pub fn set_liberated(&mut self, armed: bool) {
         self.liberated = armed;
+    }
+
+    /// A `pain_alert` arrived. `"none"` (or an empty message) clears the
+    /// current alert; anything else replaces it — the backend always sends
+    /// the full current cause, never a delta, so replacing is correct.
+    pub fn set_pain_alert(&mut self, severity: &str, message: &str) {
+        if severity == "none" || message.trim().is_empty() {
+            self.pain_alert = None;
+        } else {
+            self.pain_alert = Some((severity.to_string(), message.to_string()));
+        }
+    }
+
+    /// The current pain alert, if any: `(severity, message)`.
+    pub fn pain_alert(&self) -> Option<(&str, &str)> {
+        self.pain_alert
+            .as_ref()
+            .map(|(sev, msg)| (sev.as_str(), msg.as_str()))
     }
 
     /// Set the folder label from the session's real working directory (the same
@@ -1870,6 +1896,39 @@ mod status_bar_tests {
         sb.set_context_warning(None, false, 0, 0);
         assert!(!sb.context_low());
         assert_eq!(sb.percent_left(), None);
+    }
+
+    #[test]
+    fn pain_alert_roundtrip() {
+        let mut sb = StatusBar::new();
+        assert_eq!(sb.pain_alert(), None);
+
+        sb.set_pain_alert("high", "stuck: 5 probes, no edits, 42s");
+        assert_eq!(
+            sb.pain_alert(),
+            Some(("high", "stuck: 5 probes, no edits, 42s"))
+        );
+
+        // A severity increase replaces it outright — the backend always
+        // sends the current full cause, never a delta.
+        sb.set_pain_alert("critical", "stuck: 8 probes, no edits, 1m10s");
+        assert_eq!(
+            sb.pain_alert(),
+            Some(("critical", "stuck: 8 probes, no edits, 1m10s"))
+        );
+
+        // A `"none"` report clears the row.
+        sb.set_pain_alert("none", "");
+        assert_eq!(sb.pain_alert(), None);
+    }
+
+    #[test]
+    fn pain_alert_ignores_an_empty_message_even_at_a_non_none_severity() {
+        // Defensive: a malformed frame (severity set, message blank) must not
+        // leave a blank row on screen.
+        let mut sb = StatusBar::new();
+        sb.set_pain_alert("high", "   ");
+        assert_eq!(sb.pain_alert(), None);
     }
 
     /// The reported screen: `Context low (6% remaining)` above a bar reading

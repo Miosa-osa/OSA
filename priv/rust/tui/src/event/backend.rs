@@ -413,6 +413,17 @@ pub enum BackendEvent {
         limit_mb: u64,
         message: String,
     },
+    /// The turn's algedonic (pain) channel (`pain_alert`) — a unified,
+    /// rate-limited report of how stuck the current turn looks, with a
+    /// severity and a plain-language cause. `severity` is one of
+    /// `"none" | "low" | "medium" | "high" | "critical"`; `"none"` is a
+    /// CLEAR (the alarm just resolved) rather than a fresh alert, and carries
+    /// an empty `message`.
+    PainAlert {
+        severity: String,
+        score: f64,
+        message: String,
+    },
     /// Queued background `<task-notification>`s were folded into the agent's
     /// context (busy-turn drain or idle poke). Rendered as a system line so
     /// the user sees WHY the agent pivots to a finished background task.
