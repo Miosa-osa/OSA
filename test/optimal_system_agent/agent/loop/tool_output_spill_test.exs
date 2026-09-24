@@ -28,6 +28,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolOutputSpillTest do
     # The middle is spilled to a file and cited so the agent can read it on demand.
     assert out =~ "saved at"
     assert out =~ "file_read"
+    # A handle (the bare filename) is named too, for `expand_output` /
+    # `ToolResultStorage.expand/2` — shares one storage + retrieval path with
+    # `ToolResultStorage.apply_budget/4`'s own offload.
+    assert out =~ "handle:"
+    assert out =~ "expand_output"
   end
 
   test "a result within the cap is returned untouched" do
