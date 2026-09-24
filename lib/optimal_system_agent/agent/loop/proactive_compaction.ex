@@ -371,9 +371,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
               )
             end
 
+            # `session_id` is additive (no existing consumer read it) — it is
+            # what lets a `:post_compact` handler flush THIS session's
+            # buffered state (e.g. `Learning.DoubleLoop`'s pain-event
+            # consolidation) instead of guessing which session just compacted.
             fire_compact_hook(:post_compact, %{
               phase: :post,
               strategy: :proactive,
+              session_id: session_id,
               tokens_before: total_before,
               tokens_after: after_tokens,
               tokens_saved: total_before - after_tokens

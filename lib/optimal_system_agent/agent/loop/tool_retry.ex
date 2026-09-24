@@ -38,6 +38,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolRetry do
   require Logger
 
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Learning.PainSink
 
   # Total attempts (initial + retries). 3 => up to 2 retries.
   @default_max_attempts 3
@@ -57,14 +58,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolRetry do
     * `:base_ms`      — base backoff, ms (default #{@default_base_ms}); `0`
       disables sleeping (used by tests)
     * `:tool`         — tool name, for telemetry
-    * `:session_id`   — session, for telemetry
+    * `:session_id`   — session, for telemetry and for the pain event
+      recorded when a transient failure is recovered by a retry (see
+      `OptimalSystemAgent.Learning.PainSink`)
   """
   @spec run((-> term()), keyword()) :: term()
   def run(fun, opts \\ []) when is_function(fun, 0) do
-    attempt(fun, 1, opts)
+    attempt(fun, 1, opts, nil)
   end
 
-  defp attempt(fun, n, opts) do
+  defp attempt(fun, n, opts, last_error) do
     result = fun.()
 
     case result do
@@ -81,14 +84,33 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolRetry do
           )
 
           if delay > 0, do: Process.sleep(delay)
-          attempt(fun, n + 1, opts)
+          attempt(fun, n + 1, opts, reason)
         else
           result
         end
 
       other ->
+        # `n > 1` means at least one prior attempt hit a transient failure
+        # and THIS attempt recovered — exactly "a command failed and how it
+        # was fixed" (retrying it). Feed that into the double-loop learner's
+        # pain buffer so a session with a lot of this pattern surfaces a
+        # lesson at session end/compaction (`Learning.DoubleLoop`).
+        if n > 1, do: record_recovery(opts, n, last_error)
         other
     end
+  end
+
+  defp record_recovery(opts, attempts, last_error) do
+    session_id = Keyword.get(opts, :session_id)
+    tool = Keyword.get(opts, :tool) || "tool"
+
+    PainSink.record(
+      session_id,
+      :command_fix,
+      "#{tool} recovered on attempt #{attempts} after: #{trim(last_error)}"
+    )
+  rescue
+    _ -> :ok
   end
 
   @doc """

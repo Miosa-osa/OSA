@@ -799,10 +799,15 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       saved = tokens_before - tokens_after
       record_compaction(saved, last_step)
 
-      # Emit post_compact hook event
+      # Emit post_compact hook event. `session_id` is additive here (no
+      # existing consumer read it, so nothing downstream changes) — it is
+      # what lets a `:post_compact` handler flush THIS session's buffered
+      # state (e.g. `Learning.DoubleLoop`'s pain-event consolidation) instead
+      # of guessing which session just compacted.
       try do
         OptimalSystemAgent.Agent.Hooks.run_async(:post_compact, %{
           phase: :post,
+          session_id: session_id,
           tokens_before: tokens_before,
           tokens_after: tokens_after,
           tokens_saved: saved,

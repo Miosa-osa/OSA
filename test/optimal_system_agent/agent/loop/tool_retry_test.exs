@@ -122,4 +122,48 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolRetryTest do
       assert count.() == 1
     end
   end
+
+  describe "pain-event wiring (double-loop learning input)" do
+    alias OptimalSystemAgent.Learning.PainSink
+
+    setup do
+      session_id = "tool-retry-test-#{System.unique_integer([:positive])}"
+      on_exit(fn -> PainSink.clear(session_id) end)
+      {:ok, session_id: session_id}
+    end
+
+    test "a recovered transient failure records exactly one :command_fix pain event",
+         %{session_id: sid} do
+      {fun, _count} =
+        counting_fun([
+          {:error, "Command timed out after 30s"},
+          {:ok, "build passed"}
+        ])
+
+      assert {:ok, "build passed"} =
+               ToolRetry.run(fun, @fast ++ [session_id: sid, tool: "shell_execute"])
+
+      assert [event] = PainSink.events(sid)
+      assert event.kind == :command_fix
+      assert event.detail =~ "shell_execute"
+    end
+
+    test "a first-try success records no pain event", %{session_id: sid} do
+      {fun, _count} = counting_fun([{:ok, "done"}])
+      ToolRetry.run(fun, @fast ++ [session_id: sid, tool: "shell_execute"])
+      assert PainSink.events(sid) == []
+    end
+
+    test "a failure that never recovers records no :command_fix pain event", %{session_id: sid} do
+      {fun, _count} =
+        counting_fun([
+          {:error, :timeout},
+          {:error, "connection reset by peer"},
+          {:error, "503 Service Unavailable"}
+        ])
+
+      ToolRetry.run(fun, @fast ++ [session_id: sid, tool: "shell_execute"])
+      assert PainSink.events(sid) == []
+    end
+  end
 end
