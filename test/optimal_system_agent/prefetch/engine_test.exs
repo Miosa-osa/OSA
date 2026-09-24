@@ -185,6 +185,11 @@ defmodule OptimalSystemAgent.Prefetch.EngineTest do
       {:ok, before} =
         OptimalSystemAgent.Prefetch.ReadOnlyTools.run("dir_list", %{"path" => target}, sid)
 
+      # Settled state, as the real cache requires before storing (the test env
+      # turns `prefetch_settle_seconds` off): the listing was last changed a
+      # few seconds ago. Linux keeps a whole-second directory mtime, so a change
+      # in the same second as the put would otherwise be invisible.
+      File.touch!(target, System.os_time(:second) - 10)
       stat = Cache.stat_snapshot(target)
       key = Cache.fingerprint("dir_list", %{"path" => target})
       assert :ok = Cache.put(key, before, Cache.path_watch(target), stat, 2)

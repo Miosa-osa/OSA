@@ -207,7 +207,17 @@ defmodule OptimalSystemAgent.Prefetch.CacheTest do
 
     test "a file replaced (unlink + recreate) with byte-identical content still misses — inode changed",
          %{tmp_dir: dir} do
-      {key, path} = cache_a_real_file(dir, "replaced", "same bytes")
+      path = Path.join(dir, "replaced-#{System.unique_integer([:positive])}.txt")
+      File.write!(path, "same bytes")
+      # Model the settled state the real cache requires before it will store
+      # a file (`prefetch_settle_seconds`, off in the test env): the original
+      # was last written a few seconds ago. Linux can reuse the freed inode
+      # for the recreated file, so the protection that holds on every
+      # platform is the recreated file's NEW mtime, not the inode.
+      File.touch!(path, System.os_time(:second) - 10)
+      stat = Cache.stat_snapshot(path)
+      key = Cache.fingerprint("file_read", %{"path" => path})
+      assert :ok = Cache.put(key, "same bytes", Cache.path_watch(path), stat, 1)
 
       # Many editors/atomic writers replace a file by writing a temp file and
       # renaming over the original rather than editing in place. That can
@@ -217,14 +227,7 @@ defmodule OptimalSystemAgent.Prefetch.CacheTest do
       File.rm!(path)
       File.write!(path, "same bytes")
 
-      case Cache.stat_snapshot(path) do
-        %{inode: inode} when is_integer(inode) and inode > 0 ->
-          # Only meaningful on a platform that actually reports real inodes.
-          assert Cache.get(key) == :miss
-
-        _ ->
-          :ok
-      end
+      assert Cache.get(key) == :miss
     end
 
     test "an untouched file still hits after other unrelated activity", %{tmp_dir: dir} do
