@@ -2307,6 +2307,27 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
             })
         }
 
+        "pain_alert" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                severity: String,
+                #[serde(default)]
+                score: f64,
+                #[serde(default)]
+                message: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("pain_alert", e)),
+            };
+            Some(BackendEvent::PainAlert {
+                severity: ev.severity,
+                score: ev.score,
+                message: ev.message,
+            })
+        }
+
         "overdrive_resumed" => {
             #[derive(serde::Deserialize)]
             struct Ev {
@@ -3196,6 +3217,38 @@ mod tests {
         let frame = br#"{"type":"system_event","event":"daemon_memory_warning","rss_mb":5000,"beam_mb":3000,"limit_mb":4096,"message":"critical"}"#;
         match parse_sse_event("system_event", frame) {
             Some(BackendEvent::DaemonMemoryWarning { rss_mb, .. }) => assert_eq!(rss_mb, 5000),
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    /// The turn's algedonic pain channel (`Regulation.Pain`) always broadcasts
+    /// wrapped as a `system_event` — this is the only frame shape it ever
+    /// sends, unlike `daemon_memory_warning`'s dual-path legacy support above.
+    #[test]
+    fn parses_pain_alert_wrapped_in_a_system_event_frame() {
+        let frame = br#"{"type":"system_event","event":"pain_alert","session_id":"s1","severity":"high","score":0.62,"message":"stuck: 5 `file_read` probes, no edits, 42s \u2014 re-verifying the same thing"}"#;
+        match parse_sse_event("system_event", frame) {
+            Some(BackendEvent::PainAlert {
+                severity,
+                score,
+                message,
+            }) => {
+                assert_eq!(severity, "high");
+                assert!((score - 0.62).abs() < f64::EPSILON);
+                assert!(message.starts_with("stuck:"));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    /// A `"none"` severity is a CLEAR, not a fresh alert — it must still parse
+    /// cleanly (the app maps it onto `StatusBar::set_pain_alert`, which is
+    /// what actually removes the row).
+    #[test]
+    fn parses_pain_alert_clear() {
+        let frame = br#"{"type":"system_event","event":"pain_alert","session_id":"s1","severity":"none","score":0.0,"message":""}"#;
+        match parse_sse_event("system_event", frame) {
+            Some(BackendEvent::PainAlert { severity, .. }) => assert_eq!(severity, "none"),
             other => panic!("unexpected: {:?}", other),
         }
     }
