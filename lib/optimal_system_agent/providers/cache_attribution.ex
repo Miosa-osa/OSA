@@ -155,6 +155,7 @@ defmodule OptimalSystemAgent.Providers.CacheAttribution do
       cold_run = next_cold_run(prev, fp, read)
 
       put(key, {fp, read, now, cold_run})
+      record_rate(key, read, total_input(usage))
 
       case prev do
         {prev_fp, prev_read, prev_at, _}
@@ -233,17 +234,41 @@ defmodule OptimalSystemAgent.Providers.CacheAttribution do
 
   defp report_break(key, prev_fp, fp, prev_read, read, gap_ms, now) do
     verdict = attribute(prev_fp, fp, gap_ms)
+    token_cost = max(prev_read - read, 0)
+    costly? = token_cost > break_warn_threshold()
 
-    Logger.warning("[PROMPT CACHE] scope=#{key} cache_read #{prev_read} → #{read} — #{verdict}")
+    log_fn = if costly?, do: :warning, else: :info
+    prefix = if costly?, do: "COSTLY BREAK", else: "break"
+
+    Logger.log(
+      log_fn,
+      "[PROMPT CACHE] #{prefix} scope=#{key} cache_read #{prev_read} → #{read} " <>
+        "(#{token_cost} tok re-billed) — #{verdict}"
+    )
 
     :telemetry.execute(
       [:osa, :prompt_cache, :break],
-      %{from: prev_read, to: read},
-      %{scope: key, verdict: verdict}
+      %{from: prev_read, to: read, token_cost: token_cost},
+      %{scope: key, verdict: verdict, above_threshold: costly?}
     )
 
-    put_break(key, verdict, now, prev_read, read)
+    put_break(key, verdict, now, prev_read, read, token_cost, costly?)
     {:break, verdict}
+  end
+
+  # Tokens re-billed at full/write rate that a break must cost before it is
+  # logged as a WARNING rather than an INFO line and flagged `above_threshold`
+  # in telemetry. Every break is still recorded either way — this only
+  # controls how loudly it surfaces, so a one-line "params changed, 40 tokens"
+  # blip does not drown out the breaks that actually move the bill.
+  @default_break_warn_tokens 2_000
+
+  defp break_warn_threshold do
+    Application.get_env(
+      :optimal_system_agent,
+      :prompt_cache_break_warn_tokens,
+      @default_break_warn_tokens
+    )
   end
 
   defp maybe_report_cold(key, cold_run, read) do
@@ -289,6 +314,81 @@ defmodule OptimalSystemAgent.Providers.CacheAttribution do
   def cold_run(_), do: 0
 
   @doc """
+  Smoothed cache hit rate for a scope — an exponential moving average of
+  `cache_read_input_tokens / input_tokens` across requests observed for this
+  scope, in `[0.0, 1.0]`. `nil` until at least one request with a positive
+  `input_tokens` has been observed.
+
+  An EMA rather than a plain running average on purpose: a scope that has been
+  warm for 40 turns and just broke should show the drop within a couple of
+  turns, not have it diluted to invisibility by the 40 warm ones before it.
+  """
+  @spec hit_rate(String.t()) :: float() | nil
+  def hit_rate(key) when is_binary(key) do
+    case rate_of(key) do
+      %{ema: ema} -> ema
+      _ -> nil
+    end
+  end
+
+  def hit_rate(_), do: nil
+
+  @doc "Number of requests `observe/3` has recorded a token ratio for, in this scope."
+  @spec requests(String.t()) :: non_neg_integer()
+  def requests(key) when is_binary(key) do
+    case rate_of(key) do
+      %{requests: n} -> n
+      _ -> 0
+    end
+  end
+
+  def requests(_), do: 0
+
+  @doc """
+  Compact status for a scope — the one call site the TUI status line and the
+  bench/trace siblings need: smoothed hit rate, the most recent break's
+  verdict (if any), and the cold-run counter.
+  """
+  @spec status(String.t()) ::
+          %{
+            hit_rate: float() | nil,
+            last_break: verdict() | nil,
+            token_cost: non_neg_integer(),
+            above_threshold: boolean(),
+            cold_run: non_neg_integer(),
+            requests: non_neg_integer()
+          }
+  def status(key) when is_binary(key) do
+    {verdict, token_cost, above_threshold} =
+      case last_break(key) do
+        %{verdict: v, token_cost: tc} = report ->
+          {v, tc, Map.get(report, :above_threshold, false)}
+
+        _ ->
+          {nil, 0, false}
+      end
+
+    %{
+      hit_rate: hit_rate(key),
+      last_break: verdict,
+      token_cost: token_cost,
+      above_threshold: above_threshold,
+      cold_run: cold_run(key),
+      requests: requests(key)
+    }
+  end
+
+  def status(_),
+    do: %{
+      hit_rate: nil,
+      last_break: nil,
+      token_cost: 0,
+      above_threshold: false,
+      cold_run: 0,
+      requests: 0
+    }
+
+  @doc """
   Render the verdict for two fingerprints without touching any state.
 
   `gap_ms` is the wall-clock gap between the two requests, used only to
@@ -317,7 +417,15 @@ defmodule OptimalSystemAgent.Providers.CacheAttribution do
 
   @doc "Most recent attributed break for a scope, or `nil`."
   @spec last_break(String.t()) ::
-          %{verdict: verdict(), at: integer(), from: integer(), to: integer()} | nil
+          %{
+            verdict: verdict(),
+            at: integer(),
+            from: integer(),
+            to: integer(),
+            token_cost: integer(),
+            above_threshold: boolean()
+          }
+          | nil
   def last_break(key) when is_binary(key) do
     ensure_table()
 
@@ -353,6 +461,7 @@ defmodule OptimalSystemAgent.Providers.CacheAttribution do
     ensure_table()
     :ets.delete(@table, key)
     :ets.delete(@table, {:break, key})
+    :ets.delete(@table, {:rate, key})
     :ok
   rescue
     _ -> :ok
@@ -555,8 +664,59 @@ defmodule OptimalSystemAgent.Providers.CacheAttribution do
 
   defp cache_read(_), do: 0
 
+  defp total_input(usage) when is_map(usage) do
+    Map.get(usage, :input_tokens) || Map.get(usage, "input_tokens") || 0
+  end
+
+  defp total_input(_), do: 0
+
   defp enabled? do
     Application.get_env(:optimal_system_agent, :cache_attribution_enabled, true)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Hit-rate EMA
+  # ---------------------------------------------------------------------------
+
+  # Weight given to the newest observation. Higher = more reactive to a
+  # sudden break, lower = smoother across noisy per-turn ratios.
+  @rate_ema_alpha 0.3
+
+  defp record_rate(_key, _read, 0), do: :ok
+
+  defp record_rate(key, read, total) when total > 0 do
+    ratio = read / total
+    prev = rate_of(key)
+
+    ema =
+      case prev do
+        %{ema: e} -> @rate_ema_alpha * ratio + (1 - @rate_ema_alpha) * e
+        _ -> ratio
+      end
+
+    requests = (prev && prev.requests) || 0
+    put_rate(key, %{ema: ema, requests: requests + 1})
+  rescue
+    _ -> :ok
+  end
+
+  defp rate_of(key) do
+    ensure_table()
+
+    case :ets.lookup(@table, {:rate, key}) do
+      [{_, rate}] -> rate
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp put_rate(key, rate) do
+    ensure_table()
+    :ets.insert(@table, {{:rate, key}, rate})
+    :ok
+  rescue
+    _ -> :ok
   end
 
   # ---------------------------------------------------------------------------
@@ -582,9 +742,22 @@ defmodule OptimalSystemAgent.Providers.CacheAttribution do
     _ -> :ok
   end
 
-  defp put_break(key, verdict, at, from, to) do
+  defp put_break(key, verdict, at, from, to, token_cost \\ 0, above_threshold \\ false) do
     ensure_table()
-    :ets.insert(@table, {{:break, key}, %{verdict: verdict, at: at, from: from, to: to}})
+
+    :ets.insert(
+      @table,
+      {{:break, key},
+       %{
+         verdict: verdict,
+         at: at,
+         from: from,
+         to: to,
+         token_cost: token_cost,
+         above_threshold: above_threshold
+       }}
+    )
+
     :ok
   rescue
     _ -> :ok

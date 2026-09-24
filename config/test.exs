@@ -240,3 +240,13 @@ config :optimal_system_agent, :mcp_memory_check_ms, nil
 # samples RSS by shelling out to `ps` on a timer. Tests exercise the pure
 # `decide/4` core and the measurement functions directly instead.
 config :optimal_system_agent, :daemon_memory_check_ms, nil
+
+# `Prefetch.Cache` refuses to cache a file whose mtime is "racily fresh" —
+# modified within the last whole second — because a SECOND write landing in
+# that same second can leave mtime/size/inode all unchanged (Erlang's
+# `File.stat/2` mtime is whole-second-granular), which would make a stale
+# rewrite undetectable. Tests write a fixture and cache it in the same
+# instant on purpose, so the racy-window guard is disabled here; the ONE test
+# that exercises the guard itself overrides this back to the production
+# default locally.
+config :optimal_system_agent, :prefetch_settle_seconds, 0

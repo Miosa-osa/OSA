@@ -608,20 +608,53 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             struct Usage {
                 input_tokens: u64,
                 output_tokens: u64,
+                // Present once a route emits `cache_control`/`cachePoint` markers;
+                // absent (never sent) on a route/provider that never populates the
+                // fields at all. Both default to 0 rather than fail parsing, since
+                // a provider that reports usage without a cache slice is a route
+                // this instrument diagnoses (see `cache_status` below), not a
+                // malformed event.
+                #[serde(default)]
+                cache_read_input_tokens: u64,
+                #[serde(default)]
+                cache_creation_input_tokens: u64,
+            }
+            #[derive(serde::Deserialize, Default)]
+            struct CacheStatus {
+                #[serde(default)]
+                hit_rate: Option<f64>,
+                #[serde(default)]
+                last_break: Option<String>,
+                #[serde(default)]
+                token_cost: u64,
+                #[serde(default)]
+                above_threshold: bool,
+                #[serde(default)]
+                cold_run: u64,
             }
             #[derive(serde::Deserialize)]
             struct Ev {
                 duration_ms: u64,
                 usage: Usage,
+                #[serde(default)]
+                cache_status: Option<CacheStatus>,
             }
             let ev: Ev = match serde_json::from_slice(data) {
                 Ok(e) => e,
                 Err(e) => return Some(parse_warning("llm_response", e)),
             };
+            let cache_status = ev.cache_status.unwrap_or_default();
             Some(BackendEvent::LlmResponse {
                 duration_ms: ev.duration_ms,
                 input_tokens: ev.usage.input_tokens,
                 output_tokens: ev.usage.output_tokens,
+                cache_read_tokens: ev.usage.cache_read_input_tokens,
+                cache_creation_tokens: ev.usage.cache_creation_input_tokens,
+                cache_hit_rate: cache_status.hit_rate,
+                cache_last_break: cache_status.last_break,
+                cache_break_token_cost: cache_status.token_cost,
+                cache_break_above_threshold: cache_status.above_threshold,
+                cache_cold_run: cache_status.cold_run,
             })
         }
 
@@ -2420,6 +2453,90 @@ mod tests {
 
         let doom = br#"{"type":"doom_loop_detected","tool_name":"file_read"}"#;
         assert!(parse_sse_event("doom_loop_detected", doom).is_none());
+    }
+
+    #[test]
+    fn llm_response_without_cache_fields_defaults_them_rather_than_failing_to_parse() {
+        // A route/provider that never populates the cache slice (older
+        // backend, or a route this instrument does not cover) must still
+        // parse — the cache fields default to their "nothing observed"
+        // values instead of the whole event becoming a parse warning.
+        let frame = br#"{"duration_ms":120,"usage":{"input_tokens":500,"output_tokens":30}}"#;
+        let event = parse_sse_event("llm_response", frame).expect("must parse");
+
+        match event {
+            BackendEvent::LlmResponse {
+                duration_ms,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                cache_hit_rate,
+                cache_last_break,
+                cache_break_token_cost,
+                cache_break_above_threshold,
+                cache_cold_run,
+            } => {
+                assert_eq!(duration_ms, 120);
+                assert_eq!(input_tokens, 500);
+                assert_eq!(output_tokens, 30);
+                assert_eq!(cache_read_tokens, 0);
+                assert_eq!(cache_creation_tokens, 0);
+                assert_eq!(cache_hit_rate, None);
+                assert_eq!(cache_last_break, None);
+                assert_eq!(cache_break_token_cost, 0);
+                assert!(!cache_break_above_threshold);
+                assert_eq!(cache_cold_run, 0);
+            }
+            other => panic!("expected LlmResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn llm_response_carries_the_full_cache_status_through_to_the_event() {
+        let frame = br#"{
+            "duration_ms": 340,
+            "usage": {
+                "input_tokens": 10000,
+                "output_tokens": 50,
+                "cache_read_input_tokens": 9000,
+                "cache_creation_input_tokens": 0
+            },
+            "cache_status": {
+                "hit_rate": 0.9,
+                "last_break": "model changed (claude-opus-5 \u2192 claude-sonnet-5)",
+                "token_cost": 9000,
+                "above_threshold": true,
+                "cold_run": 0
+            }
+        }"#;
+
+        let event = parse_sse_event("llm_response", frame).expect("must parse");
+
+        match event {
+            BackendEvent::LlmResponse {
+                cache_read_tokens,
+                cache_creation_tokens,
+                cache_hit_rate,
+                cache_last_break,
+                cache_break_token_cost,
+                cache_break_above_threshold,
+                cache_cold_run,
+                ..
+            } => {
+                assert_eq!(cache_read_tokens, 9000);
+                assert_eq!(cache_creation_tokens, 0);
+                assert_eq!(cache_hit_rate, Some(0.9));
+                assert_eq!(
+                    cache_last_break.as_deref(),
+                    Some("model changed (claude-opus-5 \u{2192} claude-sonnet-5)")
+                );
+                assert_eq!(cache_break_token_cost, 9000);
+                assert!(cache_break_above_threshold);
+                assert_eq!(cache_cold_run, 0);
+            }
+            other => panic!("expected LlmResponse, got {other:?}"),
+        }
     }
 
     #[test]

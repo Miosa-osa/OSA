@@ -355,4 +355,146 @@ defmodule OptimalSystemAgent.Providers.CacheAttributionTest do
              "fingerprinting cost #{median}us — too expensive to leave on"
     end
   end
+
+  describe "hit_rate/1 and status/1" do
+    test "nil before anything has been observed", %{key: key} do
+      assert CacheAttribution.hit_rate(key) == nil
+      assert CacheAttribution.status(key).hit_rate == nil
+      assert CacheAttribution.status(key).requests == 0
+    end
+
+    test "a single request with input_tokens sets the rate to that request's ratio", %{key: key} do
+      fp = CacheAttribution.fingerprint(body())
+      CacheAttribution.observe(key, fp, %{cache_read_input_tokens: 8_000, input_tokens: 10_000})
+
+      assert_in_delta CacheAttribution.hit_rate(key), 0.8, 0.0001
+      assert CacheAttribution.requests(key) == 1
+    end
+
+    test "a request reporting zero input_tokens does not move or create the rate", %{key: key} do
+      fp = CacheAttribution.fingerprint(body())
+      CacheAttribution.observe(key, fp, %{cache_read_input_tokens: 8_000, input_tokens: 10_000})
+      CacheAttribution.observe(key, fp, %{cache_read_input_tokens: 0, input_tokens: 0})
+
+      assert_in_delta CacheAttribution.hit_rate(key), 0.8, 0.0001
+      assert CacheAttribution.requests(key) == 1
+    end
+
+    test "the EMA reacts toward a sustained drop across repeated observations", %{key: key} do
+      fp = CacheAttribution.fingerprint(body())
+
+      for _ <- 1..30 do
+        CacheAttribution.observe(key, fp, %{cache_read_input_tokens: 9_500, input_tokens: 10_000})
+      end
+
+      warm_rate = CacheAttribution.hit_rate(key)
+      assert warm_rate > 0.9
+
+      for _ <- 1..10 do
+        CacheAttribution.observe(key, fp, %{cache_read_input_tokens: 0, input_tokens: 10_000})
+      end
+
+      cold_rate = CacheAttribution.hit_rate(key)
+      assert cold_rate < warm_rate
+      assert cold_rate < 0.2
+    end
+
+    test "status/1 surfaces the last break's verdict and token cost next to the rate", %{
+      key: key
+    } do
+      usage_warm = %{cache_read_input_tokens: 9_000, input_tokens: 10_000}
+      usage_cold = %{cache_read_input_tokens: 0, input_tokens: 10_000}
+
+      CacheAttribution.observe(key, CacheAttribution.fingerprint(body()), usage_warm)
+
+      mutated = body(max_tokens: 4096)
+
+      {:break, verdict} =
+        CacheAttribution.observe(key, CacheAttribution.fingerprint(mutated), usage_cold)
+
+      status = CacheAttribution.status(key)
+      assert status.last_break == verdict
+      assert status.token_cost == 9_000
+      assert is_float(status.hit_rate)
+    end
+
+    test "reset/1 clears the rate along with the fingerprint and break state", %{key: key} do
+      CacheAttribution.observe(key, CacheAttribution.fingerprint(body()), %{
+        cache_read_input_tokens: 9_000,
+        input_tokens: 10_000
+      })
+
+      assert CacheAttribution.hit_rate(key) != nil
+
+      CacheAttribution.reset(key)
+
+      assert CacheAttribution.hit_rate(key) == nil
+      assert CacheAttribution.requests(key) == 0
+    end
+  end
+
+  describe "break-cost threshold" do
+    setup do
+      prev = Application.get_env(:optimal_system_agent, :prompt_cache_break_warn_tokens)
+
+      on_exit(fn ->
+        if prev do
+          Application.put_env(:optimal_system_agent, :prompt_cache_break_warn_tokens, prev)
+        else
+          Application.delete_env(:optimal_system_agent, :prompt_cache_break_warn_tokens)
+        end
+      end)
+
+      :ok
+    end
+
+    test "a break under the configured threshold is not flagged above_threshold", %{key: key} do
+      Application.put_env(:optimal_system_agent, :prompt_cache_break_warn_tokens, 1_000_000)
+
+      test_pid = self()
+
+      handler_id = "cache-break-threshold-#{key}"
+
+      :telemetry.attach(
+        handler_id,
+        [:osa, :prompt_cache, :break],
+        fn _event, measurements, metadata, _config ->
+          send(test_pid, {:break_telemetry, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      break_between(key, body(), body(max_tokens: 4096))
+
+      assert_receive {:break_telemetry, measurements, metadata}, 1_000
+      assert measurements.token_cost == 30_000
+      refute metadata.above_threshold
+    end
+
+    test "a break over the configured threshold IS flagged above_threshold", %{key: key} do
+      Application.put_env(:optimal_system_agent, :prompt_cache_break_warn_tokens, 100)
+
+      test_pid = self()
+      handler_id = "cache-break-threshold-#{key}"
+
+      :telemetry.attach(
+        handler_id,
+        [:osa, :prompt_cache, :break],
+        fn _event, measurements, metadata, _config ->
+          send(test_pid, {:break_telemetry, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      break_between(key, body(), body(max_tokens: 4096))
+
+      assert_receive {:break_telemetry, measurements, metadata}, 1_000
+      assert measurements.token_cost == 30_000
+      assert metadata.above_threshold
+    end
+  end
 end
