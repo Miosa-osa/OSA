@@ -65,6 +65,14 @@ defmodule OptimalSystemAgent.Supervisors.Infrastructure do
       # :settings_watcher_enabled is false (test suite).
       OptimalSystemAgent.Settings.Watcher,
 
+      # RepoMap background watcher — polls registered workspace roots on its
+      # own timer and syncs the live repo model (`RepoMap.sync_from_git/1`)
+      # from a cheap `git status` diff, so an edit made OUTSIDE OSA is not
+      # invisible until the model happens to touch that file itself. Like
+      # Settings.Watcher, its init returns :ignore when
+      # :repo_map_watcher_enabled is false (test suite).
+      OptimalSystemAgent.RepoMap.Watcher,
+
       # Provider health / circuit breaker — must start before Registry
       OptimalSystemAgent.Providers.HealthChecker,
 

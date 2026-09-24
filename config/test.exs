@@ -68,6 +68,12 @@ config :optimal_system_agent, classifier_llm_enabled: false
 # re-enables it explicitly around a supervised instance.
 config :optimal_system_agent, settings_watcher_enabled: false
 
+# Disable the RepoMap background watcher's app-supervised singleton in tests,
+# same reasoning as settings_watcher_enabled above — plus it shares the
+# watcher's registered name with `RepoMap.WatcherTest`'s own supervised
+# instance, which would otherwise collide with `{:error, {:already_started, _}}`.
+config :optimal_system_agent, repo_map_watcher_enabled: false
+
 # Disable Onboarding.live_env/1's ~/.osa/.env (and ./.env) disk fallback in
 # tests — same reasoning as the .env FILE load config/runtime.exs itself
 # skips under config_env() == :test: the suite must never read the
