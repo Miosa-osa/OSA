@@ -181,6 +181,11 @@ defmodule OptimalSystemAgent.Application do
     # app master for the same reason as every other table here.
     OptimalSystemAgent.Supervisors.BootTiming.init_table()
 
+    # Per-turn timing record behind `/trace` and GET /sessions/:id/trace. Written
+    # from the loop, tool tasks and stream callbacks, so owned here like the
+    # other cross-process tables.
+    OptimalSystemAgent.Agent.TurnTrace.init_tables()
+
     # ETS table for Loop cancel flags — must exist before any agent session starts.
     # public + set so Loop.cancel/1 and run_loop can read/write concurrently.
     :ets.new(:osa_cancel_flags, [:named_table, :public, :set])

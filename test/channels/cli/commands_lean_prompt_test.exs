@@ -23,6 +23,11 @@ defmodule OptimalSystemAgent.Channels.CLI.CommandsLeanPromptTest do
   setup do
     prev_config_dir = Application.get_env(:optimal_system_agent, :config_dir)
     prev_lean_system_prompt = Application.get_env(:optimal_system_agent, :lean_system_prompt)
+    # Restored below too: a test here flips `:lean_prompt` off, and leaving it
+    # off leaks into every later suite that builds the static base (bundled
+    # non-substantive rules come back in, which fails RulesAlwaysApplyTest and
+    # StaticBaseSizeTest whenever this module happens to run before them).
+    prev_lean_prompt = Application.get_env(:optimal_system_agent, :lean_prompt)
 
     home =
       Path.join(System.tmp_dir!(), "osa-lean-cmd-#{System.unique_integer([:positive])}")
@@ -42,6 +47,10 @@ defmodule OptimalSystemAgent.Channels.CLI.CommandsLeanPromptTest do
         do:
           Application.put_env(:optimal_system_agent, :lean_system_prompt, prev_lean_system_prompt),
         else: Application.delete_env(:optimal_system_agent, :lean_system_prompt)
+
+      if is_nil(prev_lean_prompt),
+        do: Application.delete_env(:optimal_system_agent, :lean_prompt),
+        else: Application.put_env(:optimal_system_agent, :lean_prompt, prev_lean_prompt)
 
       Settings.reset_cache()
       Soul.invalidate_static_base()

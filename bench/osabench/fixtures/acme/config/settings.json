@@ -1,0 +1,7 @@
+{
+  "log_level": "info",
+  "max_retries": 3,
+  "request_timeout_ms": 30000,
+  "http_timeout": 30000,
+  "webhook_url": "https://hooks.example.invalid/acme"
+}

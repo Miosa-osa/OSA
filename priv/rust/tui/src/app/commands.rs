@@ -39,6 +39,10 @@ pub(crate) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("recap", "Summarize the session so far"),
     ("context", "Show the token-usage breakdown"),
     ("cost", "Show cost & token accounting"),
+    (
+        "trace",
+        "Where the last turn's time went (model, tools, approval, waste)",
+    ),
     ("status", "Show model, tools, context, session"),
     ("usage", "Show account quota and token usage"),
     ("tools", "Show how many tools are available"),
@@ -1205,6 +1209,20 @@ mod tests {
             "`update` missing from BUILTIN_SLASH_COMMANDS"
         );
         assert_eq!(entry.unwrap().1, "Update OSA to the latest version");
+    }
+
+    #[test]
+    fn trace_command_is_registered() {
+        // `/trace` has no TUI-side handler: it falls through to the backend
+        // `trace` command, whose table is rendered into chat. It must still be
+        // discoverable in the completions popup / palette.
+        let entry = BUILTIN_SLASH_COMMANDS
+            .iter()
+            .find(|(name, _)| *name == "trace");
+        assert!(
+            entry.is_some(),
+            "`trace` missing from BUILTIN_SLASH_COMMANDS"
+        );
     }
 
     #[test]

@@ -50,6 +50,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   alias OptimalSystemAgent.Agent.AskUserMode
   alias OptimalSystemAgent.Agent.CompactionEvents
+  alias OptimalSystemAgent.Agent.TurnTrace
   alias OptimalSystemAgent.Agent.Loop.Accounting
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
   alias OptimalSystemAgent.Agent.Loop.Guardrails
@@ -1684,6 +1685,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # turn takes — which, with tool execution unbounded by design, is unbounded.
     publish_live(state, message)
 
+    TurnTrace.begin_turn(state.session_id, %{
+      model: state.model,
+      provider: state.provider,
+      prompt: message
+    })
+
     try do
       # The per-turn pre-LLM gates (cancel-clear, overrides, turn-increment,
       # budget/turn limits, cache clears, UserPromptSubmit hook, prompt-injection
@@ -1705,6 +1712,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
       # session failed, and a dead session's next incarnation overwrites the row
       # at its own turn start.
       clear_live_key(state.session_id)
+      TurnTrace.end_turn(state.session_id)
     end
   end
 
@@ -2223,7 +2231,20 @@ defmodule OptimalSystemAgent.Agent.Loop do
               # a real turn does at this point; a synthetic turn deserves the same
               # guarantee.
               TurnPipeline.clear_message_caches()
-              {:reply, _reply, final_state} = during_turn(fn -> run_and_reply(next_state) end)
+
+              TurnTrace.begin_turn(state.session_id, %{
+                model: state.model,
+                provider: state.provider,
+                prompt: "[background task notification]"
+              })
+
+              {:reply, _reply, final_state} =
+                try do
+                  during_turn(fn -> run_and_reply(next_state) end)
+                after
+                  TurnTrace.end_turn(state.session_id)
+                end
+
               {:noreply, final_state}
 
             {:error, _reason} ->

@@ -56,6 +56,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "cost" => {"Show cost breakdown", :cmd_cost},
     "usage" => {"Show account quota and this session's token usage", :cmd_usage},
     "context" => {"Show context window usage", :cmd_context},
+    "trace" =>
+      {"Show where the current or last turn's time went (model, tools, approval, waste)",
+       :cmd_trace},
     "revert" => {"Restore files to N mutating-tool steps ago (transcript kept)", :cmd_revert},
     "memory" => {"Show memory entries", :cmd_memory},
     "tools" => {"List available tools", :cmd_tools},
@@ -1970,6 +1973,33 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     _ ->
       IO.puts("  #{@yellow}error: usage unavailable#{@reset}\n")
       session_id
+  end
+
+  @doc """
+  `/trace [all]` - where the current (or last) turn's time went: model, tools
+  per tool with the slowest calls, approval waits, background waits,
+  retries/recoveries and repeated read-only probes. `all` lists every retained
+  turn, newest first. Same data as `GET /api/v1/sessions/:id/trace`.
+  """
+  def cmd_trace(args, session_id) do
+    alias OptimalSystemAgent.Agent.TurnTrace
+
+    text =
+      case String.trim(to_string(args)) do
+        "all" ->
+          case TurnTrace.turns(session_id) do
+            [] -> TurnTrace.format(nil)
+            turns -> Enum.map_join(turns, "\n\n", &TurnTrace.format/1)
+          end
+
+        _ ->
+          session_id |> TurnTrace.latest() |> TurnTrace.format()
+      end
+
+    IO.puts("")
+    IO.puts(text)
+    IO.puts("")
+    session_id
   end
 
   def cmd_context(_args, session_id) do
