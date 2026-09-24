@@ -10,6 +10,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
   alias OptimalSystemAgent.Providers.Registry, as: Providers
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Providers.CacheAttribution
   alias OptimalSystemAgent.Providers.ErrorCatalog
   alias OptimalSystemAgent.Providers.HistorySanitizer
   alias OptimalSystemAgent.Providers.Resilience
@@ -334,17 +335,31 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     # WS5 — accumulate the partial text (reverse-prepended iodata; single writer
     # = this stream task) so a hard abort can persist what the model had already
     # produced.
-    try do
-      case :ets.lookup(:osa_stream_partial, session_id) do
-        [{^session_id, acc}] when is_list(acc) ->
-          :ets.insert(:osa_stream_partial, {session_id, [text | acc]})
+    accumulated =
+      try do
+        case :ets.lookup(:osa_stream_partial, session_id) do
+          [{^session_id, acc}] when is_list(acc) ->
+            new_acc = [text | acc]
+            :ets.insert(:osa_stream_partial, {session_id, new_acc})
+            new_acc
 
-        _ ->
-          :ets.insert(:osa_stream_partial, {session_id, [text]})
+          _ ->
+            :ets.insert(:osa_stream_partial, {session_id, [text]})
+            [text]
+        end
+      rescue
+        ArgumentError -> [text]
       end
-    rescue
-      ArgumentError -> :ok
-    end
+
+    # Speculative prefetch: scan the FULL accumulated answer so far (not just
+    # this delta — a file path can straddle two streamed chunks) for
+    # file-path-looking tokens and start reading the ones that exist, so a
+    # `file_read` the model is about to ask for is already cached by the time
+    # it does. The throttle check happens HERE, on the cheap `iodata_length`
+    # (no copy), so the O(n) reverse+binary-join below only runs when the
+    # engine is actually about to act on it — not on every delta of a long
+    # streamed answer.
+    maybe_observe_text(session_id, accumulated)
 
     Bus.emit(:system_event, %{
       event: :streaming_token,
@@ -367,6 +382,47 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
          text: text
        }}
     )
+  end
+
+  # Cheap pre-filter for `Prefetch.Engine.observe_text/2`: only pay for the
+  # O(n) reverse+binary-join of the accumulated answer once it has grown
+  # enough, since `iodata_length/1` (no copy) is enough to decide that. The
+  # engine throttles again on its own, coarser interval before it ever
+  # touches disk — this is purely about not rebuilding a growing string on
+  # every single delta of a long streamed answer.
+  @prefetch_scan_min_growth_bytes 40
+
+  # Compact prompt-cache readout for the TUI status line. `nil` fields (no
+  # requests observed yet, no break ever attributed) are carried through as
+  # `nil` on the wire — the TUI chip renders nothing until there is a real
+  # number, rather than a misleading 0%.
+  defp cache_status_for(session_id) do
+    status = CacheAttribution.status(session_id)
+
+    %{
+      hit_rate: status.hit_rate,
+      last_break: status.last_break,
+      token_cost: status.token_cost,
+      above_threshold: status.above_threshold,
+      cold_run: status.cold_run
+    }
+  rescue
+    _ ->
+      %{hit_rate: nil, last_break: nil, token_cost: 0, above_threshold: false, cold_run: 0}
+  end
+
+  defp maybe_observe_text(session_id, accumulated) do
+    key = {:prefetch_scan_len, session_id}
+    len = IO.iodata_length(accumulated)
+    last = Process.get(key, 0)
+
+    if len - last >= @prefetch_scan_min_growth_bytes do
+      Process.put(key, len)
+      text = accumulated |> Enum.reverse() |> IO.iodata_to_binary()
+      OptimalSystemAgent.Prefetch.Engine.observe_text(session_id, text)
+    end
+  rescue
+    _ -> :ok
   end
 
   # Redact and broadcast one THINKING-channel delta to the local bus and the TUI
@@ -707,6 +763,10 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     # sequence held on one channel never bleeds into the other.
     Process.delete({:moji_carry, session_id})
     Process.delete({:moji_think_carry, session_id})
+    # Same reset for the prefetch text-scan watermark: a reused stream-task
+    # process must not think this fresh stream already scanned bytes a PRIOR
+    # stream accumulated.
+    Process.delete({:prefetch_scan_len, session_id})
 
     # Grok phase signal: the request is going out and not one byte has come back
     # yet. Clear this stream's phase guards (mirroring the moji-carry reset above)
@@ -800,6 +860,14 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         usage = Map.get(result, :usage) || %{}
 
         if usage != %{} do
+          # Prompt-cache status for the TUI's compact status-line meter.
+          # `CacheAttribution.observe/3` (called inside the provider, before
+          # this callback runs) already recorded this request under the SAME
+          # scope key every provider passes it: `session_id` — see
+          # `CacheAttribution.scope/1`'s fallback chain — so reading it back
+          # here needs no extra plumbing through the provider return value.
+          cache_status = cache_status_for(session_id)
+
           Phoenix.PubSub.broadcast(
             OptimalSystemAgent.PubSub,
             "osa:session:#{session_id}",
@@ -810,8 +878,11 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
                duration_ms: 0,
                usage: %{
                  input_tokens: Map.get(usage, :input_tokens, 0),
-                 output_tokens: Map.get(usage, :output_tokens, 0)
-               }
+                 output_tokens: Map.get(usage, :output_tokens, 0),
+                 cache_read_input_tokens: Map.get(usage, :cache_read_input_tokens, 0),
+                 cache_creation_input_tokens: Map.get(usage, :cache_creation_input_tokens, 0)
+               },
+               cache_status: cache_status
              }}
           )
         end
