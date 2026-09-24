@@ -133,4 +133,128 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorageTest do
       assert ToolResultStorage.apply_budget(big, "shell_execute", "call_verbose") == big
     end
   end
+
+  describe "key lines — errors and matches surfaced alongside head+tail" do
+    test "a line matching an error pattern outside the head/tail window is surfaced" do
+      session = "tr-storage-keylines-#{System.unique_integer([:positive])}"
+
+      lines =
+        List.duplicate("ok", 100) ++
+          ["Error: connection refused on line 101"] ++ List.duplicate("ok", 3000)
+
+      big = Enum.join(lines, "\n")
+
+      result =
+        ToolResultStorage.apply_budget(big, "shell_execute", "call_kl_#{session}", session)
+
+      on_exit(fn -> ToolResultStorage.cleanup(session) end)
+
+      assert result =~ "Key lines"
+      assert result =~ "Error: connection refused on line 101"
+    end
+
+    test "content with no error-like lines gets no Key lines section" do
+      session = "tr-storage-nokeylines-#{System.unique_integer([:positive])}"
+      big = Enum.map_join(1..3000, "\n", &"row #{&1} is perfectly fine")
+
+      result =
+        ToolResultStorage.apply_budget(big, "shell_execute", "call_nkl_#{session}", session)
+
+      on_exit(fn -> ToolResultStorage.cleanup(session) end)
+
+      refute result =~ "Key lines"
+    end
+  end
+
+  describe "reference note carries a handle" do
+    test "the note names a short handle in addition to the full path" do
+      session = "tr-storage-handle-#{System.unique_integer([:positive])}"
+      big = Enum.map_join(1..3000, "\n", &"line #{&1}")
+
+      result =
+        ToolResultStorage.apply_budget(big, "shell_execute", "call_handle_#{session}", session)
+
+      on_exit(fn -> ToolResultStorage.cleanup(session) end)
+
+      [_, path] = Regex.run(~r/Full output written to (\S+) /, result)
+      handle = Path.basename(path)
+
+      assert result =~ "Handle: #{handle}"
+    end
+  end
+
+  describe "persist/4 — the shared write path" do
+    test "writes content to the tool-results directory and returns its path" do
+      session = "tr-storage-persist-#{System.unique_integer([:positive])}"
+      content = "hello from persist/4"
+
+      assert {:ok, path} = ToolResultStorage.persist(content, "shell_execute", "call_p1", session)
+      on_exit(fn -> ToolResultStorage.cleanup(session) end)
+
+      assert File.read!(path) == content
+      assert Path.basename(path) == "#{session}_call_p1_shell_execute.txt"
+    end
+
+    test "apply_budget's own offload goes through persist/4's exact filename scheme" do
+      session = "tr-storage-persist2-#{System.unique_integer([:positive])}"
+      big = Enum.map_join(1..3000, "\n", &"line #{&1}")
+
+      _ = ToolResultStorage.apply_budget(big, "shell_execute", "call_p2", session)
+      on_exit(fn -> ToolResultStorage.cleanup(session) end)
+
+      {:ok, path} = ToolResultStorage.persist("anything", "shell_execute", "call_p2", session)
+      assert Path.basename(path) == "#{session}_call_p2_shell_execute.txt"
+    end
+  end
+
+  describe "expand/2 — retrieval by handle, with a range or a grep" do
+    setup do
+      session = "tr-storage-expand-#{System.unique_integer([:positive])}"
+      content = Enum.map_join(1..500, "\n", &"line #{&1}")
+      {:ok, path} = ToolResultStorage.persist(content, "shell_execute", "call_e1", session)
+      on_exit(fn -> ToolResultStorage.cleanup(session) end)
+      {:ok, path: path, handle: Path.basename(path), content: content}
+    end
+
+    test "resolves a bare handle against the shared tool-results directory", %{handle: handle} do
+      assert {:ok, out} = ToolResultStorage.expand(handle, limit: 5)
+      assert out =~ "line 1"
+    end
+
+    test "accepts the full absolute path too", %{path: path} do
+      assert {:ok, out} = ToolResultStorage.expand(path, limit: 5)
+      assert out =~ "line 1"
+    end
+
+    test "range mode honours offset and limit", %{handle: handle} do
+      assert {:ok, out} = ToolResultStorage.expand(handle, offset: 100, limit: 3)
+      assert out =~ "line 100"
+      assert out =~ "line 102"
+      refute out =~ "line 103"
+      refute out =~ "line 99\n"
+    end
+
+    test "grep mode returns only matching lines, with their line numbers", %{handle: handle} do
+      assert {:ok, out} = ToolResultStorage.expand(handle, grep: "line 42$")
+      assert out =~ "42: line 42"
+      refute out =~ "line 420"
+    end
+
+    test "grep mode reports no matches without erroring", %{handle: handle} do
+      assert {:ok, out} = ToolResultStorage.expand(handle, grep: "nothing-will-match-this")
+      assert out =~ "No lines matched"
+    end
+
+    test "refuses a handle that escapes the tool-results directory" do
+      assert {:error, reason} = ToolResultStorage.expand("../../etc/passwd")
+      assert reason =~ "Refusing"
+    end
+
+    test "a handle with no stored output returns an error, not a crash" do
+      assert {:error, _reason} =
+               ToolResultStorage.expand(
+                 "does-not-exist-#{System.unique_integer([:positive])}.txt"
+               )
+    end
+  end
 end
