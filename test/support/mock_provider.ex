@@ -44,6 +44,7 @@ defmodule OptimalSystemAgent.Test.MockProvider do
     maybe_sleep()
     bump_round_trips()
     record_opts(opts)
+    record_messages(messages)
 
     case forced_error(messages) do
       nil ->
@@ -232,6 +233,7 @@ defmodule OptimalSystemAgent.Test.MockProvider do
     # path, so without this the opts the loop actually sends are unobservable
     # and a recovery flag threaded through them cannot be asserted on.
     record_opts(opts)
+    record_messages(messages)
     run_after_call_once()
 
     case forced_error(messages) do
@@ -373,6 +375,41 @@ defmodule OptimalSystemAgent.Test.MockProvider do
   @spec reset_last_opts() :: :ok
   def reset_last_opts do
     :ets.delete(counter_table(), :last_opts)
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  # The MESSAGES of the most recent `chat/2`/`chat_stream/3`, same table.
+  #
+  # `last_opts/0` answers "what request-level params reached the wire" but not
+  # "what is actually in the message list" — the budget-note / cache-placement
+  # class of test needs the latter: whether a per-step note landed as its own
+  # trailing message, whether a `cache_control` breakpoint moved, etc.
+  defp record_messages(messages) when is_list(messages) do
+    :ets.insert(counter_table(), {:last_messages, messages})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp record_messages(_), do: :ok
+
+  @doc "Messages of the most recent `chat/2`/`chat_stream/3` call, or `nil` if there has been none."
+  @spec last_messages() :: list() | nil
+  def last_messages do
+    case :ets.lookup(counter_table(), :last_messages) do
+      [{:last_messages, messages}] -> messages
+      _ -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  @doc "Forget the recorded messages (call in test setup)."
+  @spec reset_last_messages() :: :ok
+  def reset_last_messages do
+    :ets.delete(counter_table(), :last_messages)
     :ok
   rescue
     ArgumentError -> :ok
