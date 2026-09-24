@@ -197,7 +197,7 @@ defmodule OptimalSystemAgent.Tools.RecoveryPathsTest do
       assert out =~ "read any part with file_read"
       assert out =~ ~s("offset":)
 
-      [path] = Regex.run(~r{saved at (\S+)\.}, out, capture: :all_but_first)
+      [path] = Regex.run(~r{saved at (\S+) \(handle:}, out, capture: :all_but_first)
       assert File.read!(path) == big
       on_exit(fn -> File.rm(path) end)
 
@@ -210,7 +210,7 @@ defmodule OptimalSystemAgent.Tools.RecoveryPathsTest do
 
       out = ToolExecutor.spill_or_truncate(big, 2_000, %{name: "t", id: "c"})
 
-      [path] = Regex.run(~r{saved at (\S+)\.}, out, capture: :all_but_first)
+      [path] = Regex.run(~r{saved at (\S+) \(handle:}, out, capture: :all_but_first)
       on_exit(fn -> File.rm(path) end)
 
       # The head shows the FIRST lines and the tail shows the LAST line — the
@@ -230,8 +230,8 @@ defmodule OptimalSystemAgent.Tools.RecoveryPathsTest do
       a = ToolExecutor.spill_or_truncate(big, 1_000, call)
       b = ToolExecutor.spill_or_truncate(big, 1_000, %{name: "t", id: "different_id"})
 
-      [pa] = Regex.run(~r{saved at (\S+)\.}, a, capture: :all_but_first)
-      [pb] = Regex.run(~r{saved at (\S+)\.}, b, capture: :all_but_first)
+      [pa] = Regex.run(~r{saved at (\S+) \(handle:}, a, capture: :all_but_first)
+      [pb] = Regex.run(~r{saved at (\S+) \(handle:}, b, capture: :all_but_first)
 
       assert pa == pb
       on_exit(fn -> File.rm(pa) end)
@@ -250,7 +250,7 @@ defmodule OptimalSystemAgent.Tools.RecoveryPathsTest do
       out = ToolExecutor.spill_or_truncate(big, 1_001, %{name: "t", id: "c"})
       assert String.valid?(out)
 
-      [path] = Regex.run(~r{saved at (\S+)\.}, out, capture: :all_but_first)
+      [path] = Regex.run(~r{saved at (\S+) \(handle:}, out, capture: :all_but_first)
       on_exit(fn -> File.rm(path) end)
     end
   end
