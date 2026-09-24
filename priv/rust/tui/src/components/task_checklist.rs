@@ -56,6 +56,15 @@ pub struct ChecklistItem {
     pub subject: String,
     pub status: ChecklistStatus,
     pub active_form: Option<String>,
+    /// The item's acceptance-check verdict (`"pending"` / `"passed"` /
+    /// `"failed"`), or `None` for a plan item with no check. Distinct from
+    /// `status`: a task can be `InProgress` with a `"pending"` check, or
+    /// `Completed` with a `"passed"` one -- the check is a harness-verified
+    /// fact ABOUT the item, not another value on the same status axis.
+    pub check_status: Option<String>,
+    /// One-line failure reason, set only alongside `check_status ==
+    /// Some("failed")`.
+    pub check_reason: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -107,6 +116,8 @@ impl TaskChecklist {
                 subject,
                 status: ChecklistStatus::Pending,
                 active_form,
+                check_status: None,
+                check_reason: None,
             });
         }
     }
@@ -114,6 +125,17 @@ impl TaskChecklist {
     pub fn update(&mut self, id: &str, status: ChecklistStatus) {
         if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
             item.status = status;
+        }
+    }
+
+    /// Set (or clear) an item's acceptance-check verdict. Separate from
+    /// `update/2` because a check can change with NO task-status transition
+    /// at all -- an explicit `run_check` mid-work, or a `complete` attempt
+    /// the check refused.
+    pub fn set_check(&mut self, id: &str, status: Option<String>, reason: Option<String>) {
+        if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
+            item.check_status = status;
+            item.check_reason = reason;
         }
     }
 
@@ -294,8 +316,12 @@ impl TaskChecklist {
         }
     }
 
-    /// Dim header line: `Plan` plus a compact `done/total` count. Both spans are
-    /// faint so the header stays quiet.
+    /// Dim header line: `Plan` plus a compact `done/total` count, and — only
+    /// when at least one item carries an acceptance check — a second compact
+    /// count: `N/M checks passed`. Both counts are faint so the header stays
+    /// quiet; the check count is omitted entirely for a plan with no checks,
+    /// so a checkless plan's header is byte-identical to before this feature
+    /// existed.
     ///
     /// The title used to flip to `Updated plan` whenever a step was in progress.
     /// That is what made the transcript alternate `Plan 1/3` / `Updated plan 1/3`
@@ -314,24 +340,73 @@ impl TaskChecklist {
         // the in-progress step — which is the only thing in this band that is
         // actually news. The `n/m` count keeps the meta tier: it is the one fact
         // here that changes, and it is what a reader glances at for progress.
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(title.to_string(), theme.recede()),
             Span::styled(
                 format!("  {}/{}", completed, self.items.len()),
                 theme.faint(),
             ),
-        ])
+        ];
+
+        let checked = self
+            .items
+            .iter()
+            .filter(|i| i.check_status.is_some())
+            .count();
+
+        if checked > 0 {
+            let passed = self
+                .items
+                .iter()
+                .filter(|i| i.check_status.as_deref() == Some("passed"))
+                .count();
+
+            spans.push(Span::styled(
+                format!("  \u{00b7}  {}/{} checks passed", passed, checked),
+                theme.faint(),
+            ));
+        }
+
+        Line::from(spans)
+    }
+
+    /// The check-status tag appended after an item's subject: `""` for a
+    /// checkless item (unchanged appearance), a dim `○` while pending, a
+    /// green `✓` once passed, or a red `✗ <reason>` on failure. Returns the
+    /// tag text and the style to paint it in, so the caller can measure its
+    /// column width BEFORE fitting the subject into what remains of the row
+    /// — the tag lives on the SAME row as the subject, never a second one,
+    /// which is what keeps `height()` (1 row per item) true regardless of
+    /// whether an item carries a check.
+    fn check_tag(item: &ChecklistItem, theme: &crate::style::Theme) -> (String, Style) {
+        match item.check_status.as_deref() {
+            Some("passed") => ("  \u{2713}".to_string(), theme.task_done()),
+            Some("failed") => {
+                let reason = item
+                    .check_reason
+                    .as_deref()
+                    .map(|r| format!(" {r}"))
+                    .unwrap_or_default();
+                (format!("  \u{2717}{reason}"), theme.task_failed())
+            }
+            Some(_pending_or_unknown) => ("  \u{25cb}".to_string(), theme.task_pending()),
+            None => (String::new(), theme.faint()),
+        }
     }
 
     /// One styled item line. When `max_width` is `Some`, the subject is truncated
-    /// on a char boundary to fit (glyph + space prefix accounted for); `None`
-    /// keeps the full subject (used by the frozen scrollback snapshot).
+    /// on a char boundary to fit (glyph + space prefix, and the check tag if any,
+    /// accounted for); `None` keeps the full subject (used by the frozen
+    /// scrollback snapshot).
     fn item_line(
         item: &ChecklistItem,
         theme: &crate::style::Theme,
         max_width: Option<usize>,
     ) -> Line<'static> {
+        use unicode_width::UnicodeWidthStr;
+
         let (glyph, style) = Self::glyph_style(&item.status, theme);
+        let (tag, tag_style) = Self::check_tag(item, theme);
         // Backend subjects are model-written and routinely contain markdown, but
         // this is rendered as a plain styled span (no markdown pass) — strip the
         // markers so `**Add a new page**` doesn't show up literally.
@@ -342,13 +417,29 @@ impl TaskChecklist {
             // third of its space. `fit_cols` also guarantees the item occupies
             // exactly one row, which is what the 1-row-per-item height contract
             // assumes — the mismatch is what clipped subjects mid-word.
-            Some(w) => crate::util::fit_cols(&raw, w.saturating_sub(2)), // "{glyph} " prefix
+            //
+            // The tag's width is reserved BEFORE fitting the subject (not the
+            // other way round): a long failure reason must never push the row
+            // past `max_width` and cost a second one, which is what the
+            // 1-row-per-item contract (and the reserved/painted parity
+            // `Measured` enforces) depends on.
+            Some(w) => {
+                let tag_cols = UnicodeWidthStr::width(tag.as_str());
+                crate::util::fit_cols(&raw, w.saturating_sub(2).saturating_sub(tag_cols))
+            }
             None => raw,
         };
-        Line::from(vec![
+
+        let mut spans = vec![
             Span::styled(format!("{} ", glyph), style),
             Span::styled(subject, style),
-        ])
+        ];
+
+        if !tag.is_empty() {
+            spans.push(Span::styled(tag, tag_style));
+        }
+
+        Line::from(spans)
     }
 
     /// A frozen, full-width snapshot of the current checklist as styled text,
@@ -379,16 +470,42 @@ impl TaskChecklist {
             out.push_str(mark);
             out.push(' ');
             out.push_str(&item.subject);
+
+            match item.check_status.as_deref() {
+                Some("passed") => out.push_str(" (check: passed)"),
+                Some("failed") => {
+                    out.push_str(" (check: failed");
+
+                    if let Some(reason) = item.check_reason.as_deref() {
+                        out.push_str(": ");
+                        out.push_str(reason);
+                    }
+
+                    out.push(')');
+                }
+                Some(_pending_or_unknown) => out.push_str(" (check: pending)"),
+                None => {}
+            }
         }
         out
     }
 
-    /// Dedupe key: the ordered set of `id:status` pairs. Changes when an item is
-    /// added, removed, or transitions status; unaffected by anything cosmetic.
+    /// Dedupe key: the ordered set of `id:status:check_status` triples.
+    /// Changes when an item is added, removed, transitions status, OR its
+    /// check verdict changes with no status transition at all (an explicit
+    /// `run_check`, or a `complete` attempt the check refused) — unaffected
+    /// by anything cosmetic.
     fn snapshot_key(&self) -> String {
         self.items
             .iter()
-            .map(|i| format!("{}:{}", i.id, i.status.ordinal()))
+            .map(|i| {
+                format!(
+                    "{}:{}:{}",
+                    i.id,
+                    i.status.ordinal(),
+                    i.check_status.as_deref().unwrap_or("-")
+                )
+            })
             .collect::<Vec<_>>()
             .join("|")
     }
@@ -478,6 +595,22 @@ mod tests {
             subject: subject.to_string(),
             status,
             active_form: None,
+            check_status: None,
+            check_reason: None,
+        }
+    }
+
+    fn checked_item(
+        id: &str,
+        subject: &str,
+        status: ChecklistStatus,
+        check_status: &str,
+        check_reason: Option<&str>,
+    ) -> ChecklistItem {
+        ChecklistItem {
+            check_status: Some(check_status.to_string()),
+            check_reason: check_reason.map(|r| r.to_string()),
+            ..item(id, subject, status)
         }
     }
 
@@ -574,6 +707,164 @@ mod tests {
         assert!(done.add_modifier.contains(Modifier::DIM));
         let (_g, active) = TaskChecklist::glyph_style(&ChecklistStatus::InProgress, &theme);
         assert!(active.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn checks_summary_is_absent_from_a_checkless_plan_header() {
+        let theme = crate::style::theme();
+        let c = checklist(vec![
+            item("1", "a", ChecklistStatus::Completed),
+            item("2", "b", ChecklistStatus::Pending),
+        ]);
+        let header: String = c
+            .header_line(&theme)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            !header.contains("checks"),
+            "a checkless plan's header must be unchanged: {header:?}"
+        );
+    }
+
+    #[test]
+    fn checks_summary_counts_passed_over_total_checked_items_only() {
+        let theme = crate::style::theme();
+        let c = checklist(vec![
+            checked_item("1", "a", ChecklistStatus::Completed, "passed", None),
+            checked_item("2", "b", ChecklistStatus::InProgress, "pending", None),
+            checked_item(
+                "3",
+                "c",
+                ChecklistStatus::InProgress,
+                "failed",
+                Some("boom"),
+            ),
+            // A checkless item must not count toward the checked total.
+            item("4", "d", ChecklistStatus::Pending),
+        ]);
+        let header: String = c
+            .header_line(&theme)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            header.contains("1/3 checks passed"),
+            "expected 1/3 checks passed, got {header:?}"
+        );
+    }
+
+    #[test]
+    fn check_tag_renders_pending_passed_and_failed_distinctly() {
+        let theme = crate::style::theme();
+
+        let pending = item("1", "a", ChecklistStatus::InProgress);
+        let (tag, _) = TaskChecklist::check_tag(&pending, &theme);
+        assert_eq!(tag, "", "a checkless item gets no tag at all");
+
+        let mut pending_checked = pending;
+        pending_checked.check_status = Some("pending".to_string());
+        let (tag, _) = TaskChecklist::check_tag(&pending_checked, &theme);
+        assert!(tag.contains('\u{25cb}'), "pending tag: {tag:?}");
+
+        let passed = checked_item("2", "b", ChecklistStatus::Completed, "passed", None);
+        let (tag, style) = TaskChecklist::check_tag(&passed, &theme);
+        assert!(tag.contains('\u{2713}'), "passed tag: {tag:?}");
+        assert_eq!(style, theme.task_done());
+
+        let failed = checked_item(
+            "3",
+            "c",
+            ChecklistStatus::InProgress,
+            "failed",
+            Some("boom"),
+        );
+        let (tag, style) = TaskChecklist::check_tag(&failed, &theme);
+        assert!(tag.contains('\u{2717}'), "failed tag: {tag:?}");
+        assert!(
+            tag.contains("boom"),
+            "failed tag must carry the reason: {tag:?}"
+        );
+        assert_eq!(style, theme.task_failed());
+    }
+
+    #[test]
+    fn failed_check_reason_appears_inline_in_the_item_line() {
+        let theme = crate::style::theme();
+        let failed = checked_item(
+            "1",
+            "ship the fix",
+            ChecklistStatus::InProgress,
+            "failed",
+            Some("exit 1 boom"),
+        );
+        let line = TaskChecklist::item_line(&failed, &theme, Some(80));
+        let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(rendered.contains("ship the fix"));
+        assert!(rendered.contains("boom"));
+    }
+
+    #[test]
+    fn a_long_failure_reason_never_grows_the_row_past_one_line() {
+        // The row-budget/one-chrome-adjacent contract this whole feature must
+        // not violate: `height()` is items.len() + 1 REGARDLESS of check
+        // content, so `Measured::desired_height` (which delegates to it) never
+        // drifts from what `draw` actually paints. A failure reason long
+        // enough to overflow a real terminal width must be truncated to fit
+        // the SAME row, never wrapped onto a second one.
+        let long_reason = "x".repeat(200);
+        let c = checklist(vec![checked_item(
+            "1",
+            "a subject long enough to compete for the row too",
+            ChecklistStatus::InProgress,
+            "failed",
+            Some(&long_reason),
+        )]);
+
+        assert_eq!(c.height(), 2, "header + exactly one row for the one item");
+
+        let rows = drawn(&c, 40, c.height());
+        assert_eq!(rows.len() as u16, c.height());
+        // The item row exists and is non-empty; nothing overflowed into a
+        // nonexistent third row because `drawn` only ever reads `c.height()`
+        // rows from the buffer, and `draw` did not panic doing so.
+        assert!(!rows[1].is_empty());
+    }
+
+    #[test]
+    fn set_check_on_an_unknown_id_is_a_silent_no_op() {
+        let mut c = checklist(vec![item("1", "a", ChecklistStatus::Pending)]);
+        c.set_check("does-not-exist", Some("passed".to_string()), None);
+        assert_eq!(c.items[0].check_status, None);
+    }
+
+    #[test]
+    fn set_check_updates_only_the_matching_item() {
+        let mut c = checklist(vec![
+            item("1", "a", ChecklistStatus::Pending),
+            item("2", "b", ChecklistStatus::Pending),
+        ]);
+        c.set_check("2", Some("failed".to_string()), Some("boom".to_string()));
+        assert_eq!(c.items[0].check_status, None);
+        assert_eq!(c.items[1].check_status, Some("failed".to_string()));
+        assert_eq!(c.items[1].check_reason, Some("boom".to_string()));
+    }
+
+    #[test]
+    fn snapshot_key_changes_on_a_check_only_change_with_no_status_transition() {
+        let mut c = checklist(vec![item("1", "a", ChecklistStatus::InProgress)]);
+        assert!(c.snapshot_if_changed(80).is_some());
+        assert!(c.snapshot_if_changed(80).is_none());
+
+        // The task's own status does not move — only its check does (an
+        // explicit `run_check`, or a `complete` attempt the check refused).
+        c.set_check("1", Some("failed".to_string()), Some("boom".to_string()));
+        assert!(
+            c.snapshot_if_changed(80).is_some(),
+            "a check-only change must still be treated as real progress"
+        );
     }
 
     #[test]

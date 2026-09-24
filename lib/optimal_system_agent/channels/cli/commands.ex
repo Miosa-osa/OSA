@@ -81,6 +81,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "coordinator" => {"Toggle coordinator mode (delegation only)", :cmd_coordinator},
     "ask-user" => {"Let the agent ask you questions mid-task (off by default)", :cmd_ask_user},
     "effort" => {"Set thinking effort level (low/medium/high/max)", :cmd_effort},
+    "budget" =>
+      {"Show or set the per-step turn-budget pacing note (tokens: <n>|auto, steps: <n>, off/on)",
+       :cmd_budget},
     "fast" => {"Toggle provider Fast processing (reasoning and tools unchanged)", :cmd_fast},
     "think" => {"Toggle model reasoning on/off (off = faster replies)", :cmd_think},
     "permissions" => {"View and manage permission rules", :cmd_permissions},
@@ -3432,6 +3435,99 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       IO.puts("  #{@yellow}error: invalid level#{@reset}")
       IO.puts("  #{@dim}Valid levels: fast, medium, high, xhigh, ultra#{@reset}\n")
       session_id
+  end
+
+  # `/budget` — the per-step turn-budget pacing note (`Agent.Loop.TurnBudget`).
+  #
+  #   /budget               show current config + what the note would say
+  #   /budget tokens <n>    set the whole-turn output-token target for this session
+  #   /budget tokens auto   clear the override — back to the effort-scaled default
+  #   /budget steps <n>     set the steps-remaining wrap-up threshold
+  #   /budget off | on      hide/show the note entirely
+  #
+  # `Settings.set_session/2` — same session-scoped, in-memory-only mechanism
+  # `/effort` uses, via `Settings.set_session(:effort_level, ...)`.
+  def cmd_budget(args, session_id) do
+    alias OptimalSystemAgent.Settings
+    IO.puts("")
+
+    case String.trim(args) |> String.split(~r/\s+/, trim: true) do
+      [] ->
+        show_budget_status(session_id)
+
+      ["tokens", "auto"] ->
+        Settings.delete_session(:budget_turn_tokens)
+        IO.puts("  #{@green}✓#{@reset} Turn token budget reset to the effort-scaled default")
+
+      ["tokens", n] ->
+        case Integer.parse(n) do
+          {tokens, ""} when tokens > 0 ->
+            Settings.set_session(:budget_turn_tokens, tokens)
+            IO.puts("  #{@green}✓#{@reset} Turn token budget set to #{tokens}")
+
+          _ ->
+            IO.puts("  #{@yellow}error: expected a positive whole number or 'auto'#{@reset}")
+        end
+
+      ["steps", n] ->
+        case Integer.parse(n) do
+          {steps, ""} when steps > 0 ->
+            Settings.set_session(:budget_warn_steps, steps)
+            IO.puts("  #{@green}✓#{@reset} Wrap-up threshold set to #{steps} steps remaining")
+
+          _ ->
+            IO.puts("  #{@yellow}error: expected a positive whole number#{@reset}")
+        end
+
+      ["off"] ->
+        Settings.set_session(:budget_note_enabled, false)
+        IO.puts("  #{@green}✓#{@reset} Budget note hidden")
+
+      ["on"] ->
+        Settings.set_session(:budget_note_enabled, true)
+        IO.puts("  #{@green}✓#{@reset} Budget note shown")
+
+      _ ->
+        IO.puts("  #{@dim}Usage: /budget | tokens <n>|auto | steps <n> | off | on#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  rescue
+    _ ->
+      IO.puts("  #{@yellow}error: could not read/update the budget setting#{@reset}\n")
+      session_id
+  end
+
+  defp show_budget_status(session_id) do
+    alias OptimalSystemAgent.Agent.Loop.TurnBudget
+
+    enabled = TurnBudget.enabled?()
+    tokens = TurnBudget.token_budget()
+    steps = TurnBudget.warn_steps()
+    frac = TurnBudget.warn_frac()
+
+    IO.puts("  #{@bold}Turn budget note: #{if enabled, do: "on", else: "off"}#{@reset}")
+    IO.puts("  #{@dim}Token target:#{@reset}      ~#{tokens} output tokens/turn")
+
+    IO.puts(
+      "  #{@dim}Wrap-up below:#{@reset}     #{steps} steps remaining, or #{Float.round(frac * 100, 0)}% of tokens left"
+    )
+
+    IO.puts("")
+
+    example = TurnBudget.note(%{session_id: session_id, iteration: 0}, budget_iteration_ceiling())
+    if example, do: IO.puts("  #{@dim}#{example}#{@reset}")
+
+    IO.puts("")
+    IO.puts("  #{@dim}Usage: /budget tokens <n>|auto | steps <n> | off | on#{@reset}")
+  end
+
+  # Display-only mirror of `ReactLoop`'s private `max_iterations(state)`, whose
+  # own module is not the CLI's to call into. Enough to render a realistic
+  # example note; never the value an actual turn budgets against.
+  defp budget_iteration_ceiling do
+    Application.get_env(:optimal_system_agent, :max_iterations) || 1_000_000
   end
 
   # `/think` — force the model's reasoning phase on or off.

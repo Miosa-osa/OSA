@@ -111,6 +111,24 @@ defmodule OptimalSystemAgent.Agent.Tasks do
     GenServer.call(server, {:fail_task, session_id, task_id, reason})
   end
 
+  @doc """
+  Run a task's acceptance check BY THE HARNESS, without completing the task.
+  Returns `{:ok, check} | {:error, :not_found | :no_check}`.
+  """
+  def run_check(session_id, task_id, server \\ __MODULE__) do
+    GenServer.call(server, {:run_check, session_id, task_id})
+  end
+
+  @doc """
+  Progress across a session's checklist: `%{passed, total, fraction}`, where
+  "passed" honors each item's acceptance check (harness-verified) instead of
+  trusting a bare `:completed` status on a checked item. See
+  `Tasks.Tracker.plan_progress/2`.
+  """
+  def plan_progress(session_id, server \\ __MODULE__) do
+    GenServer.call(server, {:plan_progress, session_id})
+  end
+
   @doc "Get all tasks for a session."
   def get_tasks(session_id, server \\ __MODULE__) do
     GenServer.call(server, {:get_tasks, session_id})
@@ -200,6 +218,33 @@ defmodule OptimalSystemAgent.Agent.Tasks do
   end
 
   defp broadcast_session_event(_session_id, _event, _extra), do: :ok
+
+  # Fires on every mutation that can change the passed/total ratio -- new
+  # items, a completion (harness-verified or not), a failure, or a check run.
+  # A small function AND an event, per the task: `Tasks.plan_progress/2` is
+  # the pull side, this is the push side the homeostat sibling (or the TUI
+  # plan view) can subscribe to instead of polling.
+  defp emit_progress(session_id, sessions) do
+    progress = Tracker.plan_progress(sessions, session_id)
+
+    OptimalSystemAgent.Events.Bus.emit(:system_event, %{
+      event: :task_plan_progress,
+      session_id: session_id,
+      passed: progress.passed,
+      total: progress.total,
+      fraction: progress.fraction
+    })
+
+    broadcast_session_event(session_id, :task_plan_progress, %{
+      passed: progress.passed,
+      total: progress.total,
+      fraction: progress.fraction
+    })
+
+    :ok
+  rescue
+    _ -> :ok
+  end
 
   @doc "Extract task titles from a text response."
   defdelegate extract_tasks_from_response(text), to: Tracker, as: :extract_from_response
@@ -311,12 +356,14 @@ defmodule OptimalSystemAgent.Agent.Tasks do
   @impl true
   def handle_call({:add_task, session_id, title, opts}, _from, state) do
     {sessions, result} = Tracker.add_task(state.sessions, session_id, title, opts)
+    emit_progress(session_id, sessions)
     {:reply, result, %{state | sessions: sessions}}
   end
 
   @impl true
   def handle_call({:add_tasks, session_id, titles}, _from, state) do
     {sessions, result} = Tracker.add_tasks(state.sessions, session_id, titles)
+    emit_progress(session_id, sessions)
     {:reply, result, %{state | sessions: sessions}}
   end
 
@@ -329,13 +376,28 @@ defmodule OptimalSystemAgent.Agent.Tasks do
   @impl true
   def handle_call({:complete_task, session_id, task_id}, _from, state) do
     {sessions, result} = Tracker.complete_task(state.sessions, session_id, task_id)
+    emit_progress(session_id, sessions)
     {:reply, result, %{state | sessions: sessions}}
   end
 
   @impl true
   def handle_call({:fail_task, session_id, task_id, reason}, _from, state) do
     {sessions, result} = Tracker.fail_task(state.sessions, session_id, task_id, reason)
+    emit_progress(session_id, sessions)
     {:reply, result, %{state | sessions: sessions}}
+  end
+
+  @impl true
+  def handle_call({:run_check, session_id, task_id}, _from, state) do
+    {sessions, result} = Tracker.run_check(state.sessions, session_id, task_id)
+    emit_progress(session_id, sessions)
+    {:reply, result, %{state | sessions: sessions}}
+  end
+
+  @impl true
+  def handle_call({:plan_progress, session_id}, _from, state) do
+    result = Tracker.plan_progress(state.sessions, session_id)
+    {:reply, result, state}
   end
 
   @impl true

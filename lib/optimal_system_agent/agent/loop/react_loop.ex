@@ -6,7 +6,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   1. Check cancel flag and iteration budget
   2. Build context (with frozen system-prompt cache)
   3. Inject memory on first iteration
-  4. Inject iteration budget message
+  4. Resolve tool selection and the per-step pacing note (`TurnBudget`)
+     against the SESSION's real effort, then call the LLM inside a
+     turn-scoped effort override (`with_turn_effort/2`) that only ever
+     touches request-level, cache-safe params (thinking depth,
+     reasoning_effort) — never `tools` or `context.messages`
   5. Call LLM via `LLMClient.llm_chat_stream/3`
   6. Handle result:
      - No tool calls → apply behavioural nudges or return final response
@@ -45,6 +49,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   alias OptimalSystemAgent.Agent.Loop.GoalVerifier
   alias OptimalSystemAgent.Agent.Loop.GoalTracker
   alias OptimalSystemAgent.Agent.Loop.ProactiveCompaction
+  alias OptimalSystemAgent.Agent.Loop.TurnBudget
   alias OptimalSystemAgent.Agent.Effort
   alias OptimalSystemAgent.Agent.FastPath
   alias OptimalSystemAgent.Agent.Cancellation
@@ -634,7 +639,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
     # Advance the cross-turn goal tracker once per new top-level turn (iteration 0)
     # so its reverify cadence + stall detection track real turn progress.
-    if state.iteration == 0, do: GoalTracker.tick_turn(state.session_id)
+    if state.iteration == 0 do
+      GoalTracker.tick_turn(state.session_id)
+      TurnBudget.start_turn(state.session_id)
+    end
 
     # Start async memory prefetch on iteration 0 (fires search while we build context)
     memory_task =
@@ -678,7 +686,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       end
 
     context = inject_pending_agent_messages(context, state)
-    context = inject_iteration_budget(context, state)
 
     max_iter = max_iterations(state)
 
@@ -720,13 +727,40 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     streaming_ctx = StreamingToolExecutor.start(state)
     Process.put(:osa_streaming_tool_ctx, streaming_ctx)
 
-    # The effort read by thinking_config, ToolFilter and the provider's
-    # reasoning_decision must all see the same per-turn level, so the override
-    # wraps the whole request-building region, not just the call.
+    # Tool selection is resolved OUTSIDE `with_turn_effort`, deliberately.
+    # `ToolFilter.filter/2` (via `FastPath.select_tools/2` and
+    # `Effort.tool_budget/0`) reads `Effort.current()`, and tool definitions
+    # sit at the front of the CACHED prefix on every provider that honours
+    # `cache_control`. `with_turn_effort` floors a continuation turn down to
+    # `:fast` for snappier tool-loop digestion — a legitimate depth choice for
+    # `thinking_config`/`reasoning_decision`, both request-level params that
+    # never touch `messages` or `tools` — but resolving the TOOL LIST inside
+    # that same override meant which tools were sent changed with iteration
+    # position, busting the tools-array cache breakpoint on every single
+    # continuation. Computing it here, once, against the SESSION's real
+    # effort, is the fix: a continuation still thinks less, it just never
+    # changes what it can call. See `Agent.Loop.TurnBudget` for the sibling
+    # fix to the same class of bug (a per-step note that must not touch the
+    # cached region either).
+    tools_for_call = ToolFilter.filter(state.tools, state)
+
+    # Per-step pacing note (a compact, cache-safe countdown -- steps, output
+    # tokens against a turn target, elapsed time). Also resolved outside the
+    # effort closure: it is unrelated to thinking depth and travels through
+    # `opts[:budget_note]`, appended to the wire messages only AFTER
+    # `Providers.PromptCache.restructure/3` has placed its cache_control
+    # breakpoint (`Providers.Registry.append_budget_note/2`) -- never inside
+    # `context.messages`, which would risk being the message that breakpoint
+    # lands on.
+    budget_note = TurnBudget.note(state, max_iter)
+
+    # The effort read by thinking_config and the provider's reasoning_decision
+    # must both see the same per-turn level, so the override wraps the LLM
+    # call itself -- but NOT tool selection or the budget note above, both
+    # resolved against the session's real settings a moment ago.
     result =
       with_turn_effort(state, fn ->
         thinking_opts = LLMClient.thinking_config(state)
-        tools_for_call = ToolFilter.filter(state.tools, state)
 
         llm_opts = [
           tools: tools_for_call,
@@ -740,6 +774,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
         llm_opts =
           if thinking_opts, do: Keyword.put(llm_opts, :thinking, thinking_opts), else: llm_opts
+
+        llm_opts =
+          if budget_note,
+            do: Keyword.put(llm_opts, :budget_note, budget_note),
+            else: llm_opts
 
         LLMClient.llm_chat_stream(state, context.messages, llm_opts)
       end)
@@ -794,6 +833,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # last_input_tokens for context-pressure telemetry.
     cost_before = Map.get(state, :session_cost_usd) || 0.0
     state = Accounting.record(state, usage, billing_opts)
+    # Same round-trip's output tokens, into the PER-TURN pacing counter
+    # (`TurnBudget`) that the NEXT iteration's budget note reads. Separate
+    # from `Accounting`, which is session-cumulative and never resets.
+    TurnBudget.record(state.session_id, usage)
 
     # `/trace`: the same measured duration and usage as the `:llm_response`
     # emit below, plus what this round-trip added to the session's bill.
@@ -3809,29 +3852,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         end)
 
       %{context | messages: context.messages ++ injections}
-    end
-  end
-
-  defp inject_iteration_budget(context, state) do
-    max_iter = max_iterations(state)
-    remaining = max_iter - state.iteration
-
-    # Only nag when GENUINELY near the ceiling — not every iteration. The old
-    # guard `remaining <= max_iter` was a tautology (remaining is always < max_iter
-    # once iteration > 0), so a budget message was appended on EVERY iteration,
-    # inflating context and pushing the model to "wrap up" thousands of turns early.
-    budget_warn_threshold = 10
-
-    if state.iteration > 0 and remaining <= budget_warn_threshold do
-      budget_msg = %{
-        role: "system",
-        content:
-          "[Iteration #{state.iteration + 1}/#{max_iter} — #{remaining} remaining. Be efficient. Wrap up if the task is done.]"
-      }
-
-      %{context | messages: context.messages ++ [budget_msg]}
-    else
-      context
     end
   end
 
