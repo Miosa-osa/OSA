@@ -130,6 +130,15 @@ pub enum BackendEvent {
     LlmRequest {
         iteration: u32,
         max_iterations: Option<u32>,
+        // Per-step model routing (StepRouter): the model actually about to
+        // run THIS step, when it differs from the session's own model —
+        // `None` on every request routing never touched, so old backends and
+        // routing-off sessions are byte-identical to before this field
+        // existed. Named `routed_model` (not `model`): the intent is "here is
+        // the override for this one step", not "here is the session model".
+        routed_model: Option<String>,
+        routed_provider: Option<String>,
+        routing_reason: Option<String>,
     },
     LlmResponse {
         duration_ms: u64,

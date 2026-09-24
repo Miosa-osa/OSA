@@ -123,7 +123,20 @@ defmodule OptimalSystemAgent.Providers.Registry do
                  ollama_cloud: Providers.Ollama
                },
                if Mix.env() == :test do
-                 %{mock: OptimalSystemAgent.Test.MockProvider}
+                 %{
+                   mock: OptimalSystemAgent.Test.MockProvider,
+                   # A second, independently-scripted test provider.
+                   # `register_provider/2` cannot serve this purpose: it only
+                   # writes into this GenServer's OWN state
+                   # (`state.extra_providers`), which `chat/2`/`chat_stream/3`
+                   # never consult — dispatch is this compile-time `@providers`
+                   # map alone. A fixture that needs a DIFFERENT response
+                   # script than `:mock`'s (see
+                   # `Test.StepRerouteProvider`, used by the fast-routed
+                   # final-answer reroute test) needs its own entry here,
+                   # exactly like `:mock` itself.
+                   step_reroute_mock: OptimalSystemAgent.Test.StepRerouteProvider
+                 }
                else
                  %{}
                end

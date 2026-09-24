@@ -1260,7 +1260,10 @@ defmodule OptimalSystemAgent.Tools.Registry do
       # reads back anything `ToolResultStorage`, the tool-executor's
       # spill-on-overflow, or `ContextCollapse` offloaded to the shared
       # tool-results store, by handle, with a range or a grep.
-      "expand_output" => OptimalSystemAgent.Tools.Builtins.ExpandOutput
+      "expand_output" => OptimalSystemAgent.Tools.Builtins.ExpandOutput,
+
+      # ── Advisor consult (per-step routing epic, item 4) ─────────────────
+      "advisor_consult" => OptimalSystemAgent.Tools.Builtins.AdvisorConsult
 
       # NOT registered on purpose: mcts_index, wallet_ops, and the vault_*
       # tools have no backend (MCTS.Indexer / Integrations.Wallet / Vault do
