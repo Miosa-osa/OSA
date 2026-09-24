@@ -34,6 +34,7 @@ defmodule OptimalSystemAgent.Agent.Loop.Regulation.Pain do
   alias OptimalSystemAgent.Agent.Loop.Regulation.Question
   alias OptimalSystemAgent.Agent.Loop.Regulation.Signals
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Learning.PainSink
 
   @type severity :: :none | :low | :medium | :high | :critical
 
@@ -72,7 +73,7 @@ defmodule OptimalSystemAgent.Agent.Loop.Regulation.Pain do
       cause = cause_text(signals, homeostat_report)
       session_id = Map.get(state, :session_id)
 
-      surface(session_id, severity, score, cause)
+      surface(session_id, severity, score, cause, learning_kind(signals))
 
       state
       |> maybe_clear_alert(session_id, severity)
@@ -168,9 +169,9 @@ defmodule OptimalSystemAgent.Agent.Loop.Regulation.Pain do
 
   # ── Surfacing (item 1: "surface it to the user immediately, not just the log") ──
 
-  defp surface(_session_id, :none, _score, _cause), do: :ok
+  defp surface(_session_id, :none, _score, _cause, _kind), do: :ok
 
-  defp surface(session_id, severity, score, cause) when is_binary(session_id) do
+  defp surface(session_id, severity, score, cause, kind) when is_binary(session_id) do
     if PainChannel.should_emit?(session_id, severity, min_emit_interval_ms()) do
       PainChannel.record_emit(session_id, severity)
 
@@ -182,12 +183,32 @@ defmodule OptimalSystemAgent.Agent.Loop.Regulation.Pain do
       )
 
       broadcast(session_id, severity, score, message)
+
+      # Feed the learning loop: the same rate-limited pain the user saw becomes
+      # a candidate lesson at session end. The algedonic signal was already
+      # emitted above, so the sink must not emit a second one.
+      PainSink.record(session_id, kind, cause, %{
+        source: "regulation.pain",
+        severity: severity,
+        score: score,
+        bus_already_emitted: true
+      })
     end
 
     :ok
   end
 
-  defp surface(_session_id, _severity, _score, _cause), do: :ok
+  defp surface(_session_id, _severity, _score, _cause, _kind), do: :ok
+
+  # Maps the dominant pain signal onto the learning loop's lesson vocabulary.
+  defp learning_kind(signals) do
+    cond do
+      signals.probe_streak >= 3 -> :repeated_probe
+      signals.escalation_ratio >= 0.5 -> :reverification_loop
+      signals.recovery_ratio >= 0.5 -> :command_fix
+      true -> :other
+    end
+  end
 
   defp broadcast(session_id, severity, score, message) do
     Phoenix.PubSub.broadcast(

@@ -49,7 +49,11 @@ defmodule OptimalSystemAgent.Learning.PainSink do
     ensure_table()
     :ets.insert(@table, {{session_id, System.unique_integer([:monotonic, :positive])}, event})
     enforce_cap(session_id)
-    emit_alert(event)
+
+    # A producer that already raised its own algedonic signal (the turn
+    # regulation core) records here only to feed the learning loop.
+    unless Map.get(metadata, :bus_already_emitted, false), do: emit_alert(event)
+
     :ok
   rescue
     _ -> :ok

@@ -123,6 +123,34 @@ defmodule OptimalSystemAgent.Agent.Loop.Regulation.PainTest do
     end
   end
 
+  describe "feeding the learning loop" do
+    alias OptimalSystemAgent.Learning.PainSink
+
+    test "a surfaced alert is recorded as a lesson candidate of the dominant kind" do
+      session_id = sid()
+      on_exit(fn -> PainSink.clear(session_id) end)
+
+      Pain.evaluate(
+        %{session_id: session_id},
+        signals(probe_streak: 4, probe_tool: "file_read"),
+        homeostat_report()
+      )
+
+      assert [event] = PainSink.events(session_id)
+      assert event.kind == :repeated_probe
+      assert event.metadata.bus_already_emitted == true
+    end
+
+    test "nothing is recorded when no alert surfaces" do
+      session_id = sid()
+      on_exit(fn -> PainSink.clear(session_id) end)
+
+      Pain.evaluate(%{session_id: session_id}, signals(), homeostat_report())
+
+      assert PainSink.events(session_id) == []
+    end
+  end
+
   describe "cause_text (surfaced via the broadcast message)" do
     test "leads with the probe repeat when that is the dominant signal" do
       session_id = sid()
