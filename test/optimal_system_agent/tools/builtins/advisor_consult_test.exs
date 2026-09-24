@@ -4,6 +4,8 @@ defmodule OptimalSystemAgent.Tools.Builtins.AdvisorConsultTest do
   alias OptimalSystemAgent.Tools.Builtins.AdvisorConsult
 
   setup do
+    OptimalSystemAgent.Test.CredentialIsolation.isolate()
+
     prev = %{
       advisor_enabled: Application.fetch_env(:optimal_system_agent, :advisor_enabled),
       advisor_provider: Application.fetch_env(:optimal_system_agent, :advisor_provider),

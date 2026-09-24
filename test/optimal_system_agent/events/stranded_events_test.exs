@@ -56,6 +56,9 @@ defmodule OptimalSystemAgent.Events.StrandedEventsTest do
     "compaction_completed" => "CompactionEvents broadcasts directly",
     "compaction_failed" => "CompactionEvents broadcasts directly",
     "pain_alert" => "Regulation.Pain broadcasts directly on osa:session:<id>",
+    "advisor_consulted" => "Advisor broadcasts directly on osa:session:<id>",
+    "fast_final_answer_reroute" => "ReactLoop broadcasts directly on osa:session:<id>",
+    "model_fallback_used" => "FallbackChain broadcasts directly on osa:session:<id>",
     # Delivered through the permission/ask request-response path, not the feed.
     "permission_required" => "permission flow has its own delivery path",
     "ask_user_question" => "delivered as `ask_user`, which IS forwarded",

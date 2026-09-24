@@ -5,6 +5,8 @@ defmodule OptimalSystemAgent.Agent.Loop.AdvisorTest do
   alias OptimalSystemAgent.Test.MockProvider
 
   setup do
+    OptimalSystemAgent.Test.CredentialIsolation.isolate()
+
     prev = %{
       advisor_enabled: Application.fetch_env(:optimal_system_agent, :advisor_enabled),
       advisor_auto_enabled: Application.fetch_env(:optimal_system_agent, :advisor_auto_enabled),

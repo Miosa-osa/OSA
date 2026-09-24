@@ -20,6 +20,8 @@ defmodule OptimalSystemAgent.Agent.Loop.AdvisorResolutionTest do
   alias OptimalSystemAgent.Auth.SubscriptionStore
 
   setup do
+    OptimalSystemAgent.Test.CredentialIsolation.isolate()
+
     prev = %{
       advisor_provider: Application.fetch_env(:optimal_system_agent, :advisor_provider),
       advisor_model: Application.fetch_env(:optimal_system_agent, :advisor_model),
