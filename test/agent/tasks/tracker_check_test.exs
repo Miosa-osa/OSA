@@ -162,6 +162,111 @@ defmodule OptimalSystemAgent.Agent.Tasks.TrackerCheckTest do
     end
   end
 
+  describe "check status reaches the session SSE topic" do
+    defp subscribe(sid),
+      do: Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{sid}")
+
+    defp assert_task_updated(check_status_expected) do
+      assert_receive {:osa_event, %{event: :task_updated} = payload}, 1_000
+      assert payload.check_status == check_status_expected
+      payload
+    end
+
+    test "run_check/3 broadcasts task_updated with the fresh check_status" do
+      {_pid, name} = start_tracker()
+      sid = session_id()
+      subscribe(sid)
+
+      {:ok, id} =
+        Tasks.add_task(
+          sid,
+          "check me",
+          %{check: %{"type" => "command", "command" => "true"}},
+          name
+        )
+
+      # Drain the :task_created broadcast from add_task before the one under test.
+      assert_receive {:osa_event, %{event: :task_created} = created}, 1_000
+      assert created.check_status == "pending"
+
+      Tasks.run_check(sid, id, name)
+
+      payload = assert_task_updated("passed")
+      assert payload.task_id == id
+      assert payload.check_reason == nil
+    end
+
+    test "a failed check broadcasts task_updated with a one-line reason" do
+      {_pid, name} = start_tracker()
+      sid = session_id()
+      subscribe(sid)
+
+      {:ok, id} =
+        Tasks.add_task(
+          sid,
+          "check me",
+          %{check: %{"type" => "command", "command" => "echo boom && false"}},
+          name
+        )
+
+      assert_receive {:osa_event, %{event: :task_created}}, 1_000
+
+      Tasks.run_check(sid, id, name)
+
+      payload = assert_task_updated("failed")
+      assert payload.check_reason =~ "boom"
+    end
+
+    test "a check-gated complete_task/3 failure ALSO broadcasts, without completing" do
+      {_pid, name} = start_tracker()
+      sid = session_id()
+      subscribe(sid)
+
+      {:ok, id} =
+        Tasks.add_task(
+          sid,
+          "check me",
+          %{check: %{"type" => "command", "command" => "false"}},
+          name
+        )
+
+      assert_receive {:osa_event, %{event: :task_created}}, 1_000
+
+      assert {:error, {:check_failed, _}} = Tasks.complete_task(sid, id, name)
+
+      payload = assert_task_updated("failed")
+      assert payload.status != "completed"
+    end
+
+    test "plan progress is pushed alongside the check-driven task_updated" do
+      {_pid, name} = start_tracker()
+      sid = session_id()
+      subscribe(sid)
+
+      {:ok, id} =
+        Tasks.add_task(
+          sid,
+          "check me",
+          %{check: %{"type" => "command", "command" => "true"}},
+          name
+        )
+
+      assert_receive {:osa_event, %{event: :task_created}}, 1_000
+      # add_task's own progress push.
+      assert_receive {:osa_event, %{event: :task_plan_progress, passed: 0, total: 1}}, 1_000
+
+      Tasks.run_check(sid, id, name)
+
+      assert_receive {:osa_event, %{event: :task_updated, check_status: "passed"}}, 1_000
+      # run_check does not complete the task, so it is still not "passed" by
+      # plan_progress's own definition (checkless-and-completed, or
+      # checked-and-passed-AND-completed is not required here — plan_progress
+      # counts a passed CHECK regardless of completion status, so this DOES
+      # flip to 1/1).
+      assert_receive {:osa_event, %{event: :task_plan_progress, passed: 1, total: 1}}, 1_000
+    end
+  end
+
   describe "plan_progress/2" do
     test "a checkless completed task counts as passed" do
       {_pid, name} = start_tracker()

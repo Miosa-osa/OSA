@@ -927,13 +927,23 @@ impl App {
                 task_id,
                 subject,
                 active_form,
+                check_status,
             } => {
                 self.tasks
                     .add(task_id.clone(), subject.clone(), String::new());
-                self.task_checklist.add(task_id, subject, Some(active_form));
+                self.task_checklist
+                    .add(task_id.clone(), subject, Some(active_form));
+                if check_status.is_some() {
+                    self.task_checklist.set_check(&task_id, check_status, None);
+                }
                 self.recompute_layout();
             }
-            BackendEvent::TaskUpdated { task_id, status } => {
+            BackendEvent::TaskUpdated {
+                task_id,
+                status,
+                check_status,
+                check_reason,
+            } => {
                 self.tasks.update(&task_id, &status);
                 let checklist_status = match status.as_str() {
                     "completed" => crate::components::task_checklist::ChecklistStatus::Completed,
@@ -942,6 +952,14 @@ impl App {
                     _ => crate::components::task_checklist::ChecklistStatus::Pending,
                 };
                 self.task_checklist.update(&task_id, checklist_status);
+                // Always applied, including `None` -- a checkless item stays
+                // checkless, and this is also the ONLY path a check verdict
+                // change with no status transition reaches the panel through
+                // (an explicit `run_check`, or a `complete` attempt the check
+                // refused both arrive as a `TaskUpdated` whose `status` is
+                // unchanged from before).
+                self.task_checklist
+                    .set_check(&task_id, check_status, check_reason);
                 // Drive the activity spinner from the active step, like Claude
                 // Code's activeForm. Clears automatically when nothing is in
                 // progress (current_active_form -> None).
@@ -965,6 +983,8 @@ impl App {
                     self.task_checklist
                         .add(task.id, task.subject, task.active_form);
                     self.task_checklist.update(&id, status);
+                    self.task_checklist
+                        .set_check(&id, task.check_status, task.check_reason);
                 }
                 self.task_checklist.show();
                 self.activity

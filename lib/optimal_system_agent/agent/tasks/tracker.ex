@@ -67,11 +67,15 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
       session_id: session_id
     })
 
+    {check_status, check_reason} = check_summary(task)
+
     # Bridge to the per-session SSE topic so the TUI checklist updates live.
     broadcast_session_event(session_id, :task_created, %{
       task_id: task.id,
       subject: title,
-      active_form: active_form_of(task) || title
+      active_form: active_form_of(task) || title,
+      check_status: check_status,
+      check_reason: check_reason
     })
 
     {sessions, {:ok, task.id}}
@@ -141,11 +145,7 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
           session_id: session_id
         })
 
-        broadcast_session_event(session_id, :task_updated, %{
-          task_id: task_id,
-          status: "in_progress",
-          active_form: active_form_of(task)
-        })
+        broadcast_task_update(session_id, task, "in_progress")
       end
     )
   end
@@ -217,11 +217,7 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
           session_id: session_id
         })
 
-        broadcast_session_event(session_id, :task_updated, %{
-          task_id: task_id,
-          status: "completed",
-          active_form: active_form_of(task)
-        })
+        broadcast_task_update(session_id, task, "completed")
       end
     )
   end
@@ -262,17 +258,28 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
     end
   end
 
+  # Writes the check's verdict onto the task AND broadcasts it -- the single
+  # write path for both `run_check/3` and `complete_task/3`'s failure branch,
+  # so a check result reaches the TUI's Plan panel however it was reached
+  # instead of only when it happens to also complete the task.
   defp put_check(sessions, session_id, task_id, check) do
-    {new_sessions, _} =
+    {new_sessions, result} =
       do_update_task(
         sessions,
         session_id,
         task_id,
         fn task -> %{task | check: check} end,
-        fn _task -> :ok end
+        fn task -> broadcast_task_update(session_id, task, to_string(task.status)) end
       )
 
-    new_sessions
+    case result do
+      :ok -> new_sessions
+      # `do_update_task` returns `sessions` unchanged on `:not_found`, and the
+      # two callers already re-check existence before ever reaching this
+      # function -- so this branch is unreachable in practice, kept only so a
+      # future third caller fails loudly instead of silently dropping a write.
+      {:error, :not_found} -> new_sessions
+    end
   end
 
   @doc "Transition task to :failed."
@@ -304,11 +311,7 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
           session_id: session_id
         })
 
-        broadcast_session_event(session_id, :task_updated, %{
-          task_id: task_id,
-          status: "failed",
-          active_form: active_form_of(task)
-        })
+        broadcast_task_update(session_id, task, "failed")
       end
     )
   end
@@ -338,6 +341,13 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
           fields: Map.keys(allowed),
           title: task.title
         })
+
+        # A newly-attached (or replaced) check resets to "pending" -- worth a
+        # push so the Plan panel shows it immediately rather than waiting for
+        # the next unrelated status change or an explicit `run_check`.
+        if Map.has_key?(allowed, :check) do
+          broadcast_task_update(session_id, task, to_string(task.status))
+        end
       end
     )
   end
@@ -456,12 +466,15 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
   @doc "Convert a task to a UI map."
   @spec task_to_map(%Task{}) :: map()
   def task_to_map(%Task{} = task) do
+    {check_status, check_reason} = check_summary(task)
+
     %{
       id: task.id,
       subject: task.title,
       status: to_string(task.status),
       active_form: task.metadata[:active_form],
-      check_status: task.check && Map.get(task.check, :status)
+      check_status: check_status,
+      check_reason: check_reason
     }
   end
 
@@ -657,6 +670,61 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
   end
 
   defp broadcast_session_event(_session_id, _event, _extra), do: :ok
+
+  # The one place `:task_updated` is broadcast, so `check_status`/`check_reason`
+  # cannot be forgotten at one call site and present at another — every status
+  # transition (start/complete/fail) AND every check-only change (a failed
+  # `complete_task/3` attempt, an explicit `run_check/3`) goes through this,
+  # carrying the task's CURRENT check verdict alongside whatever status word
+  # the caller is reporting. Flat top-level keys, matching `task_created`'s
+  # shape: the SSE bridge (`SessionRoutes.session_sse_loop/2`) JSON-encodes a
+  # `%{type: :system_event, event: sub}` payload VERBATIM as the event's `data`
+  # body, so these keys are what the Rust client's `sse.rs` parses directly —
+  # no `data` nesting (that shape is `task_checklist_show`'s, not this one's).
+  defp broadcast_task_update(session_id, %Task{} = task, status) do
+    {check_status, check_reason} = check_summary(task)
+
+    broadcast_session_event(session_id, :task_updated, %{
+      task_id: task.id,
+      status: status,
+      active_form: active_form_of(task),
+      check_status: check_status,
+      check_reason: check_reason
+    })
+  end
+
+  # `{status, reason}` for the task's check, or `{nil, nil}` for a checkless
+  # task. `reason` is populated ONLY on failure -- a passed/pending check has
+  # nothing worth a line in the checklist, and `Check.run/2`'s `output` on a
+  # PASS is often just the command's stdout, not a "reason" in any useful
+  # sense.
+  defp check_summary(%Task{check: nil}), do: {nil, nil}
+
+  defp check_summary(%Task{check: %{status: status} = check}) do
+    {status, check_reason_line(status, Map.get(check, :output))}
+  end
+
+  defp check_summary(_), do: {nil, nil}
+
+  # First line only, capped -- this is broadcast on every check run and
+  # rendered inline in a checklist row, not the tool-result console a full
+  # command log belongs in. `Check.run/2` already caps `output` at 4,000
+  # chars; this caps it again, harder, for the one-line UI surface.
+  @check_reason_max_chars 120
+
+  # Collapsed to ONE line rather than taking the first, because the first line
+  # of a failed `"command"` check's output is `Check.run/2`'s own "exit N"
+  # header (`Tasks.Check.run_command/2`), not the command's actual output --
+  # a checklist row reading "exit 1" tells the reader nothing a red ✗ did not
+  # already say.
+  defp check_reason_line("failed", output) when is_binary(output) and output != "" do
+    output
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
+    |> String.slice(0, @check_reason_max_chars)
+  end
+
+  defp check_reason_line(_status, _output), do: nil
 
   # Read :active_form from task metadata, tolerating both atom and string keys
   # (metadata round-trips through JSON persistence, which stringifies keys).

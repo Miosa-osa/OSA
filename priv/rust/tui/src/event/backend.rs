@@ -467,10 +467,28 @@ pub enum BackendEvent {
         task_id: String,
         subject: String,
         active_form: String,
+        /// The task's acceptance check verdict at creation time -- `"pending"`
+        /// for a task created with one, `None` for a checkless task. See
+        /// `TaskUpdated::check_status` for why this rides alongside status
+        /// rather than as a separate event.
+        check_status: Option<String>,
     },
     TaskUpdated {
         task_id: String,
         status: String,
+        /// The task's CURRENT acceptance-check verdict (`"pending"` /
+        /// `"passed"` / `"failed"`), or `None` for a checkless task.
+        /// Piggybacks on `task_updated` rather than a separate event: the
+        /// backend (`Tracker.broadcast_task_update/3`) emits this for every
+        /// status transition AND every check-only change (a check run that
+        /// does not complete the task, or a failed `complete` attempt), so
+        /// one field, always present, is simpler than a second event type
+        /// the client would have to correlate back to the same row.
+        check_status: Option<String>,
+        /// One-line failure reason, populated only when `check_status` is
+        /// `"failed"` -- the checklist item renders this inline rather than
+        /// the full check output, which belongs in the tool-result console.
+        check_reason: Option<String>,
     },
     TaskChecklistShow {
         tasks: Vec<crate::client::types::ChecklistTaskWire>,

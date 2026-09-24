@@ -1590,12 +1590,15 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 subject: String,
                 #[serde(default)]
                 active_form: String,
+                #[serde(default)]
+                check_status: Option<String>,
             }
             let ev: Ev = serde_json::from_slice(data).ok()?;
             Some(BackendEvent::TaskCreated {
                 task_id: ev.task_id,
                 subject: ev.subject,
                 active_form: ev.active_form,
+                check_status: ev.check_status,
             })
         }
 
@@ -1604,11 +1607,17 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
             struct Ev {
                 task_id: String,
                 status: String,
+                #[serde(default)]
+                check_status: Option<String>,
+                #[serde(default)]
+                check_reason: Option<String>,
             }
             let ev: Ev = serde_json::from_slice(data).ok()?;
             Some(BackendEvent::TaskUpdated {
                 task_id: ev.task_id,
                 status: ev.status,
+                check_status: ev.check_status,
+                check_reason: ev.check_reason,
             })
         }
 
