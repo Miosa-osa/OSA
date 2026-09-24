@@ -1652,6 +1652,18 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     # included. Two events, computed two ways, disagreeing on every failure, and
     # the one that was always-true is the one a permission denial surfaced on.
     tool_success = not tool_failed
+
+    # Speculative prefetch: a successful write invalidates whatever it
+    # touched and fires the likely-next read-only calls (siblings, test
+    # file, `git status`/`git diff`) in the background. Fire-and-forget —
+    # never on the critical path of returning this result to the model.
+    OptimalSystemAgent.Prefetch.Engine.observe_tool_result(
+      tool_call.name,
+      Map.get(tool_call, :arguments) || %{},
+      tool_success,
+      state.session_id
+    )
+
     result_preview = String.slice(result_str, 0, 2000)
 
     # Retrieve tool metadata (diff data, etc.) if the tool stored any
@@ -2025,16 +2037,22 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   # found, ambiguous, validation, permission denied) are never retried; those
   # are handled by the deterministic {:error, reason} path below.
   defp execute_tool(tool_name, enriched_args) do
-    session_id = Map.get(enriched_args, "__session_id__")
+    case OptimalSystemAgent.Prefetch.Engine.lookup(tool_name, enriched_args) do
+      {:hit, content} ->
+        content
 
-    result =
-      OptimalSystemAgent.Agent.Loop.ToolRetry.run(
-        fn -> Tools.execute(tool_name, enriched_args) end,
-        tool: tool_name,
-        session_id: session_id
-      )
+      :miss ->
+        session_id = Map.get(enriched_args, "__session_id__")
 
-    handle_execute_result(result, tool_name, enriched_args)
+        result =
+          OptimalSystemAgent.Agent.Loop.ToolRetry.run(
+            fn -> Tools.execute(tool_name, enriched_args) end,
+            tool: tool_name,
+            session_id: session_id
+          )
+
+        handle_execute_result(result, tool_name, enriched_args)
+    end
   end
 
   defp handle_execute_result(result, tool_name, enriched_args) do

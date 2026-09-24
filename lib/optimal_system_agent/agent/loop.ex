@@ -2784,6 +2784,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # at turn start, so the per-session event stream brackets each turn.
     Observability.turn_end(state, response)
 
+    # Speculative prefetch's per-turn hit-rate/time-saved summary — one
+    # telemetry event per turn, right next to the turn-end lifecycle event it
+    # is scoped the same way.
+    OptimalSystemAgent.Prefetch.Engine.end_turn(state.session_id)
+
     Bus.emit(
       :agent_response,
       %{
