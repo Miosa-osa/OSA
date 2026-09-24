@@ -1153,8 +1153,22 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   def await_permission(tool_call, state, request_id, summary) do
     emit_permission_required(state, request_id, tool_call, summary)
     timeout_ms = Map.get(summary, :timeout_ms) || PermissionBroker.default_timeout_ms()
+    wait_started = System.monotonic_time(:millisecond)
 
-    case PermissionBroker.await(state.session_id, request_id, state: state, timeout: timeout_ms) do
+    awaited =
+      PermissionBroker.await(state.session_id, request_id, state: state, timeout: timeout_ms)
+
+    # `/trace`: this park sits INSIDE the tool call's measured duration; the
+    # trace subtracts it so time spent waiting on the user is not billed to the
+    # tool.
+    OptimalSystemAgent.Agent.TurnTrace.record_approval_wait(state.session_id, %{
+      tool: tool_call.name,
+      id: tool_call.id,
+      wait_ms: System.monotonic_time(:millisecond) - wait_started,
+      outcome: approval_outcome(awaited)
+    })
+
+    case awaited do
       {:ok, %{decision: decision, note: note}} ->
         apply_permission_decision(decision, note, tool_call, state)
 
@@ -1178,6 +1192,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         {:blocked, "Blocked: #{tool_call.name} cancelled before approval"}
     end
   end
+
+  defp approval_outcome({:ok, %{decision: decision}}), do: decision
+  defp approval_outcome({:error, reason}), do: reason
+  defp approval_outcome(_), do: nil
 
   @doc false
   # Map a normalized permission decision onto an execution outcome. Public
@@ -1592,6 +1610,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
           "resolution disagreeing with itself, not a model error: #{String.slice(result_str, 0, 300)}"
       )
     end
+
+    # `/trace`: same measured duration as the `phase: :end` event below.
+    OptimalSystemAgent.Agent.TurnTrace.record_tool(state.session_id, %{
+      id: tool_call.id,
+      name: tool_call.name,
+      args: Map.get(tool_call, :arguments),
+      hint: arg_hint,
+      duration_ms: tool_duration_ms,
+      success: not tool_failed
+    })
 
     Bus.emit(
       :tool_call,

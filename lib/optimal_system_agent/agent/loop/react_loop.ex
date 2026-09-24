@@ -792,7 +792,18 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # Record real token usage + cost for this LLM round-trip and accumulate it
     # into the per-session accounting (primitive #29). Also refreshes
     # last_input_tokens for context-pressure telemetry.
+    cost_before = Map.get(state, :session_cost_usd) || 0.0
     state = Accounting.record(state, usage, billing_opts)
+
+    # `/trace`: the same measured duration and usage as the `:llm_response`
+    # emit below, plus what this round-trip added to the session's bill.
+    OptimalSystemAgent.Agent.TurnTrace.record_llm(state.session_id, %{
+      duration_ms: duration_ms,
+      model: state.model,
+      usage: usage,
+      cost_usd: (Map.get(state, :session_cost_usd) || 0.0) - cost_before,
+      ok: match?({:ok, _}, result)
+    })
 
     # A request that died mid-stream returns no usage (the `_ -> %{}` above is
     # right about what it was handed), but it was still billed: Anthropic
@@ -1104,6 +1115,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   @spec spend_recovery(map(), String.t()) :: {:ok, map()} | {:exhausted, map()}
   defp spend_recovery(state, kind) do
     used = Map.get(state, :recovery_attempts, 0)
+    OptimalSystemAgent.Agent.TurnTrace.record_recovery(state.session_id, :loop_recovery, kind)
 
     if used >= @max_recovery_attempts do
       Logger.warning(

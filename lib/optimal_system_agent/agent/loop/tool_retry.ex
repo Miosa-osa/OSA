@@ -220,6 +220,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolRetry do
   end
 
   defp emit_retry(opts, attempt, max, reason, delay) do
+    OptimalSystemAgent.Agent.TurnTrace.record_recovery(
+      Keyword.get(opts, :session_id),
+      :tool_retry,
+      "#{Keyword.get(opts, :tool)}: #{trim(reason)}"
+    )
+
     Bus.emit(:system_event, %{
       event: :tool_retry,
       tool: Keyword.get(opts, :tool),

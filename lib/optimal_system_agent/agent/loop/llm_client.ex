@@ -867,6 +867,12 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         # no session_id, so this is the only session-routed path (WS1 item 8).
         :atomics.add(heartbeat, 1, 1)
 
+        OptimalSystemAgent.Agent.TurnTrace.record_recovery(
+          session_id,
+          :provider_retry,
+          Map.get(info, :reason, "")
+        )
+
         Phoenix.PubSub.broadcast(
           OptimalSystemAgent.PubSub,
           "osa:session:#{session_id}",
@@ -950,6 +956,12 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
                 capped_retry_delay_ms(
                   OptimalSystemAgent.Providers.FallbackChain.retry_delay_ms(reason)
                 )
+
+              OptimalSystemAgent.Agent.TurnTrace.record_recovery(
+                session_id,
+                :provider_fallback,
+                OptimalSystemAgent.Providers.Resilience.reason_to_string(reason)
+              )
 
               Logger.warning(
                 "[llm] Primary provider failed: #{inspect(reason)}, trying fallback chain" <>
