@@ -237,7 +237,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
             Map.get(args, "max_turns") ||
             Map.get(args, "max_iterations") ||
             (agent_def && agent_def[:max_iterations])
-        ) || Tier.max_iterations(tier),
+        ) || Tier.max_iterations(tier, parent_depth + 1),
       isolation: isolation,
       merge_worktree: Map.get(args, "merge_worktree") == true,
       discard_worktree: Map.get(args, "discard_worktree") == true,
@@ -264,7 +264,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.Delegate.Handler do
       # `Tier.max_budget_usd/1`.
       max_budget_usd:
         parse_budget_usd(Map.get(args, "max_budget_usd") || Map.get(args, "maxBudgetUsd")) ||
-          Tier.max_budget_usd(tier),
+          Tier.max_budget_usd(tier, parent_depth + 1),
       # Speed/cost tier, normalized by DelegationRouter (nil → :standard). Biases
       # model tier + provider order toward cheaper/local for :loose long-horizon
       # work and toward the best model for :immediate.

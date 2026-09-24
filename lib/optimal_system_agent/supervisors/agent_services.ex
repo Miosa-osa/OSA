@@ -56,6 +56,10 @@ defmodule OptimalSystemAgent.Supervisors.AgentServices do
       # File Locking — region-level concurrent file editing
       OptimalSystemAgent.FileLocking.RegionLock,
 
+      # Claims Board — cross-agent visibility of files/tasks in flight, built
+      # on RegionLock (files) plus its own small task-claim table.
+      OptimalSystemAgent.FileLocking.ClaimsBoard,
+
       # Speculative Execution — agents work ahead on predicted tasks
       OptimalSystemAgent.Speculative.Executor,
 

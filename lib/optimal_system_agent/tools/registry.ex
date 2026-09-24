@@ -1173,6 +1173,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "peer_claim_region" => OptimalSystemAgent.Tools.Builtins.PeerClaimRegion.Tool,
       "peer_negotiate_task" => OptimalSystemAgent.Tools.Builtins.PeerNegotiateTask.Tool,
       "cross_team_query" => OptimalSystemAgent.Tools.Builtins.CrossTeamQuery.Tool,
+      "claims_board" => OptimalSystemAgent.Tools.Builtins.ClaimsBoard,
 
       # ── Comms / interaction ────────────────────────────────────────────
       "ask_user" => OptimalSystemAgent.Tools.Builtins.AskUser.Tool,

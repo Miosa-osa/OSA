@@ -203,6 +203,65 @@ defmodule OptimalSystemAgent.Agent.TierTest do
     end
   end
 
+  # ── Recursion scale-down (VSM item 9) ────────────────────────────────
+
+  describe "depth_scale/1" do
+    test "a direct child (depth 1) is unaffected — exactly 1.0" do
+      assert Tier.depth_scale(1) == 1.0
+    end
+
+    test "depth 0 (malformed/absent) is treated the same as a direct child" do
+      assert Tier.depth_scale(0) == 1.0
+    end
+
+    test "every level past 1 shrinks monotonically" do
+      scales = for d <- 1..8, do: Tier.depth_scale(d)
+      assert scales == Enum.sort(scales, :desc)
+      assert Enum.at(scales, 0) > Enum.at(scales, -1)
+    end
+
+    test "floored at 0.2 no matter how deep" do
+      assert Tier.depth_scale(50) == 0.2
+    end
+  end
+
+  describe "tier_scale/1" do
+    test "elite > specialist > utility" do
+      assert Tier.tier_scale(:elite) > Tier.tier_scale(:specialist)
+      assert Tier.tier_scale(:specialist) > Tier.tier_scale(:utility)
+    end
+
+    test "an unknown tier defaults to the specialist (1.0) scale" do
+      assert Tier.tier_scale(:nonsense) == Tier.tier_scale(:specialist)
+    end
+  end
+
+  describe "max_budget_usd/2 and max_iterations/2 — inherited from the parent, scaled down" do
+    test "depth 1 equals the flat tier default exactly (a direct child is unaffected)" do
+      for tier <- [:elite, :specialist, :utility] do
+        assert Tier.max_budget_usd(tier, 1) == Tier.max_budget_usd(tier)
+        assert Tier.max_iterations(tier, 1) == Tier.max_iterations(tier)
+      end
+    end
+
+    test "a grandchild (depth 2+) gets a STRICTLY SMALLER cap than its own parent's default" do
+      assert Tier.max_budget_usd(:specialist, 2) < Tier.max_budget_usd(:specialist)
+      assert Tier.max_iterations(:specialist, 2) < Tier.max_iterations(:specialist)
+    end
+
+    test "max_iterations/2 never floors below 5, even at extreme depth" do
+      assert Tier.max_iterations(:utility, 100) >= 5
+    end
+
+    test "a deeply-delegated utility worker cannot out-budget a direct specialist child" do
+      # The exact regression this exists to prevent: re-deriving the flat tier
+      # table at every recursion level let a deep chain re-inflate back up to
+      # (or past) what its own parent had. A deep :utility worker's scaled cap
+      # must stay below even a DIRECT :specialist child's cap.
+      assert Tier.max_budget_usd(:utility, 4) < Tier.max_budget_usd(:specialist, 1)
+    end
+  end
+
   # Restore an application env key to its snapshotted value (nil => delete),
   # so budget-override tests never leak into the rest of the suite.
   defp restore(key, nil), do: Application.delete_env(:optimal_system_agent, key)
