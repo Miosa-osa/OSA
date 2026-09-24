@@ -49,6 +49,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   alias OptimalSystemAgent.Agent.FastPath
   alias OptimalSystemAgent.Agent.Cancellation
   alias OptimalSystemAgent.Providers.StopReason
+  alias OptimalSystemAgent.Providers.StepRouter
 
   @cancel_table :osa_cancel_flags
 
@@ -634,7 +635,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
     # Advance the cross-turn goal tracker once per new top-level turn (iteration 0)
     # so its reverify cadence + stall detection track real turn progress.
-    if state.iteration == 0, do: GoalTracker.tick_turn(state.session_id)
+    if state.iteration == 0 do
+      GoalTracker.tick_turn(state.session_id)
+      # Fresh advisor spend bucket per top-level turn (see `Advisor`
+      # moduledoc) — mirrors GoalTracker's own turn-boundary tick above.
+      OptimalSystemAgent.Agent.Loop.Advisor.reset_turn_budget(state.session_id)
+    end
 
     # Start async memory prefetch on iteration 0 (fires search while we build context)
     memory_task =
@@ -686,6 +692,23 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       "[loop] About to call LLM for #{state.session_id}, iteration #{state.iteration + 1}/#{max_iter}"
     )
 
+    # Per-step model routing (opt-in, off by default — see `StepRouter`
+    # moduledoc): decide ONCE, before either user-visible event fires, and
+    # thread the same decision through the request event, the call itself,
+    # accounting, and the response event, so all four ever agree on which
+    # model actually ran this step. `restore_route` puts the user's chosen
+    # provider/model back on `state` right before this function returns —
+    # every OTHER field this call mutated (messages, tokens, ledger) survives.
+    routing = StepRouter.decide(state)
+    {state, restore_route} = StepRouter.apply(state, routing)
+
+    if routing.route == :fast do
+      Logger.info(
+        "[route] step #{state.iteration + 1} → #{routing.provider}:#{routing.model} " <>
+          "(#{routing.reason}: #{routing.explain})"
+      )
+    end
+
     Bus.emit(
       :llm_request,
       %{
@@ -695,7 +718,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         # as the loop approaches the cap (item 6). max_iter computed just above.
         max_iterations: max_iter,
         model: state.model,
-        agent: state.session_id
+        agent: state.session_id,
+        # Which model is ACTUALLY about to run this step, and why — `model`
+        # above stays byte-identical when routing kept the strong model, so
+        # existing consumers see no change.
+        routed_provider: to_string(routing.provider),
+        routed_model: routing.model,
+        routing_reason: to_string(routing.reason)
       },
       Observability.annotate(state, source: "agent.react_loop")
     )
@@ -807,8 +836,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       :llm_response,
       %{
         session_id: state.session_id,
+        # `state.provider`/`state.model` are the ROUTED pair while this
+        # request is in flight (see `StepRouter.apply/2` above) — the model
+        # that genuinely answered, restored to the user's chosen pair right
+        # after this block.
         provider: state.provider,
         model: state.model,
+        routing_reason: to_string(routing.reason),
         duration_ms: duration_ms,
         usage: usage,
         agent: state.session_id
@@ -846,6 +880,15 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     Observability.otel_model_response(state, usage)
 
     Logger.info("[loop] LLM call completed in #{duration_ms}ms (#{input_tokens} input tokens)")
+
+    # Put the user's chosen provider/model back now that the call, its
+    # billing, and both `:llm_request`/`:llm_response` events are done —
+    # every other mutation this call made to `state` (messages, tokens, the
+    # accounting ledger) survives. From here on `state.provider`/`state.model`
+    # are the session's real identity again, exactly as if routing had never
+    # fired, so tool capability checks, the next iteration's context build,
+    # and the status bar all see the model the user actually picked.
+    state = restore_route.(state)
 
     # A stream that ended without its provider's own terminal marker (P2 audit
     # gap A) is handled FIRST and can short-circuit the rest of this pipeline
@@ -3175,6 +3218,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
     state = inject_post_tool_nudges(state, tool_calls)
 
+    # Advisor auto-triggers #1 and #2 ("plan made" / "risky action") — see
+    # `Advisor` moduledoc. Both fire AFTER the tool call resolves rather than
+    # gating it: the model has already emitted (and by this point executed)
+    # the tool_use, so there is no free "pause and ask" point that does not
+    # add a synchronous paid round-trip's latency to every risky tool call.
+    # The advice still lands before the model decides its NEXT step, which is
+    # what actually matters for "sanity check before compounding". Reuses
+    # `StepRouter`'s risky deny-list rather than a second copy of it.
+    state = maybe_advise_plan_made(state, tool_calls, results)
+    state = maybe_advise_risky_action(state, tool_calls)
+
     case DoomLoop.check(results, tool_calls, state) do
       {:halt, doom_message, halted_state} ->
         Resample.handle(doom_message, halted_state, resample_snapshot, &run/1)
@@ -3183,6 +3237,25 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         # Clean turn — reset the consecutive-resample budget so recovery
         # attempts bound only a *stuck* stretch, not the session lifetime.
         state = Map.put(state, :doom_resamples, 0)
+
+        # Advisor auto-trigger #3 ("stuck"): the graded escalation sequence
+        # (`DoomLoop.Escalation`) just injected its FINAL nudge this tick —
+        # one more repeat falls through to a hard halt with no cheap nudge
+        # left to try. `escalated_this_tick` makes this fire exactly once per
+        # exhaustion, not on every iteration afterward. Never blocks: a
+        # disabled/unconfigured/capped advisor leaves `state` untouched.
+        state =
+          if Map.get(state, :escalated_this_tick, false) and
+               Map.get(state, :graded_escalation_count, 0) >=
+                 OptimalSystemAgent.Agent.Loop.DoomLoop.Escalation.max_steps() do
+            OptimalSystemAgent.Agent.Loop.Advisor.maybe_auto_consult(
+              state,
+              :stuck,
+              "graded escalation nudges are exhausted; the same failure signature keeps repeating"
+            )
+          else
+            state
+          end
 
         # Shared per-turn recovery budget (P2 audit gap C): a REASK or
         # terminal invalid-arguments result from `ToolArgValidator` is a
@@ -3207,6 +3280,48 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         else
           continue_after_tools_ok(state)
         end
+    end
+  end
+
+  # Advisor auto-trigger #1: a plan was just made. Fires once, when
+  # `exit_plan_mode` resolved WITHOUT an error result — the same success test
+  # the `memory_save` cache-invalidation check above uses.
+  defp maybe_advise_plan_made(state, tool_calls, results) do
+    plan_made? =
+      Enum.any?(tool_calls, fn tc -> tc.name == "exit_plan_mode" end) and
+        Enum.any?(results, fn {tc, {_msg, result_str}} ->
+          tc.name == "exit_plan_mode" and not String.starts_with?(result_str, "Error:")
+        end)
+
+    if plan_made? do
+      OptimalSystemAgent.Agent.Loop.Advisor.maybe_auto_consult(
+        state,
+        :plan_made,
+        "a plan was just proposed via exit_plan_mode"
+      )
+    else
+      state
+    end
+  end
+
+  # Advisor auto-trigger #2: at least one KNOWN risky/write/execute tool
+  # (`StepRouter.risky?/1` — same deny-list `StepRouter` uses to decide
+  # per-step model routing, not a second copy of it) ran this iteration.
+  defp maybe_advise_risky_action(state, tool_calls) do
+    risky_names =
+      tool_calls
+      |> Enum.map(& &1.name)
+      |> Enum.filter(&OptimalSystemAgent.Providers.StepRouter.risky?/1)
+      |> Enum.uniq()
+
+    if risky_names != [] do
+      OptimalSystemAgent.Agent.Loop.Advisor.maybe_auto_consult(
+        state,
+        :risky_action,
+        "just ran risky tool(s): #{Enum.join(risky_names, ", ")}"
+      )
+    else
+      state
     end
   end
 

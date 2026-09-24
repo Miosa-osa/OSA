@@ -1247,7 +1247,10 @@ defmodule OptimalSystemAgent.Tools.Registry do
       # ── Workspace shape ────────────────────────────────────────────────
       # Classifies submodules / nested independent repos / workspace members,
       # which `git ls-files` collapses to a single entry each. Cached per root.
-      "workspace_map" => OptimalSystemAgent.Tools.Builtins.WorkspaceMap
+      "workspace_map" => OptimalSystemAgent.Tools.Builtins.WorkspaceMap,
+
+      # ── Advisor consult (per-step routing epic, item 4) ─────────────────
+      "advisor_consult" => OptimalSystemAgent.Tools.Builtins.AdvisorConsult
 
       # NOT registered on purpose: mcts_index, wallet_ops, and the vault_*
       # tools have no backend (MCTS.Indexer / Integrations.Wallet / Vault do
