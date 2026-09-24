@@ -97,6 +97,17 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
     {:noreply, state}
   end
 
+  # VSM item 9 — the generic, cross-cause pain channel (`Agent.SubagentPain`)
+  # every recursion level reports through: a stall, a subagent approaching or
+  # exceeding ITS OWN budget cap, or a subagent's own result failing its
+  # spot-check. Not arbitrated through `mark_notified/1` for the same reason
+  # `:background_agent_stalled` above is not — pain is an observation about an
+  # in-flight or just-finished child, never the exactly-once terminal result.
+  def handle_info({:osa_event, %{type: :subagent_pain} = ev}, state) do
+    inject_pain(state.parent_id, ev)
+    {:noreply, state}
+  end
+
   # Background SHELL command completion — same re-entry mechanism as subagents.
   # Reproduces Claude Code's "Background command '<cmd>' completed (exit code N)"
   # so the model picks the result up on its next turn without manual polling.
@@ -300,6 +311,33 @@ defmodule OptimalSystemAgent.Agent.BackgroundNotifier do
     TaskNotifications.poke_after_batch(parent_id)
   rescue
     e -> Logger.debug("[BackgroundNotifier] inject_stall failed: #{Exception.message(e)}")
+  end
+
+  # As `inject_stall/2`, generalized to any `SubagentPain` cause. Carries the
+  # structured `cause`/`severity` through into the queued notification's
+  # summary so the model sees WHAT kind of trouble this is, not just that
+  # something is wrong.
+  defp inject_pain(parent_id, ev) do
+    agent_id = ev |> Map.get(:agent_id, "unknown") |> to_string()
+    display = Map.get(ev, :display_name) || Map.get(ev, :role) || agent_id
+    cause = Map.get(ev, :cause, :unknown)
+    severity = Map.get(ev, :severity, :warning)
+
+    summary =
+      case ev |> Map.get(:message, "") |> to_string() do
+        "" -> "Subagent '#{display}' (#{agent_id}) reported #{severity} pain: #{cause}."
+        msg -> msg
+      end
+
+    TaskNotifications.queue(parent_id, %{
+      task_id: agent_id,
+      status: :pain,
+      summary: summary
+    })
+
+    TaskNotifications.poke_after_batch(parent_id)
+  rescue
+    e -> Logger.debug("[BackgroundNotifier] inject_pain failed: #{Exception.message(e)}")
   end
 
   defp registry_key(parent_id), do: "bg-notifier:" <> parent_id
