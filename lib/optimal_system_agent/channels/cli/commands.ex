@@ -23,6 +23,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   alias OptimalSystemAgent.Tools.Builtins.{SkillManager, UseSkill}
   alias OptimalSystemAgent.Tools.Registry, as: ToolsRegistry
   alias OptimalSystemAgent.Providers.Registry, as: ProviderRegistry
+  alias OptimalSystemAgent.Providers.StepRouter
+  alias OptimalSystemAgent.Agent.Loop.Advisor
 
   @reset IO.ANSI.reset()
   @bold IO.ANSI.bright()
@@ -43,6 +45,12 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "lean-prompt" =>
       {"Show/toggle the lean system-prompt template (persists to settings.json; not /lean — see TUI's lean view)",
        :cmd_lean_prompt},
+    "route" =>
+      {"Per-step model routing — status | on | off | fast <model> (persists to settings.json)",
+       :cmd_route},
+    "advisor" =>
+      {"Advisor consult — status | on | off | model <id> (persists to settings.json)",
+       :cmd_advisor},
     "models" => {"Pick a model from the current provider", :cmd_models},
     "uncensored" =>
       {"Hop the current model to its unfiltered twin (off to return)", :cmd_uncensored},
@@ -792,6 +800,225 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
           "rule templates.#{@reset}"
       )
     end
+  end
+
+  # ── /route — per-step model routing (StepRouter) ──────────────────────────
+  #
+  # Same pattern as `/lean-prompt`: writes the settings-cascade key via
+  # `Settings.set_user/2`, which both persists to ~/.osa/settings.json AND
+  # invalidates the settings read cache, so `StepRouter.decide/1`'s
+  # `Settings.get_session_for/3` picks it up on the very next iteration of
+  # THIS session — no restart, no separate session-scoped write needed.
+  #
+  #   /route                     show enabled state + this session's pairing
+  #   /route status              same as bare /route
+  #   /route on | off            toggle per-step routing (persists)
+  #   /route fast <model>        pair <model> as the fast counterpart for
+  #                              THIS session's current provider (persists)
+  def cmd_route(args, session_id) do
+    IO.puts("")
+
+    case parse_route_args(args) do
+      {:status, _} ->
+        print_route_state(session_id)
+
+      {:on, _} ->
+        write_route_toggle(session_id, true)
+
+      {:off, _} ->
+        write_route_toggle(session_id, false)
+
+      {:fast, model} ->
+        write_route_fast_pairing(session_id, model)
+
+      {:error, usage} ->
+        IO.puts("  #{@yellow}#{usage}#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  defp parse_route_args(args) do
+    case args |> to_string() |> String.trim() |> String.split(~r/\s+/, trim: true, parts: 2) do
+      [] -> {:status, nil}
+      ["status"] -> {:status, nil}
+      ["on"] -> {:on, nil}
+      ["off"] -> {:off, nil}
+      ["fast", model] -> {:fast, model}
+      ["fast"] -> {:error, "usage: /route fast <model>"}
+      _ -> {:error, "usage: /route [status|on|off|fast <model>]"}
+    end
+  end
+
+  defp write_route_toggle(session_id, on?) do
+    case OptimalSystemAgent.Settings.set_user("step_routing_enabled", on?) do
+      :ok ->
+        state = if on?, do: "#{@green}on#{@reset}", else: "#{@dim}off#{@reset}"
+        IO.puts("  Per-step routing: #{state} #{@dim}(saved to settings.json)#{@reset}")
+        print_route_state(session_id)
+
+      other ->
+        IO.puts("  #{@red}✗#{@reset} Could not write settings: #{inspect(other)}")
+    end
+  end
+
+  defp write_route_fast_pairing(session_id, model) do
+    provider = session_provider(session_id)
+    pairs = OptimalSystemAgent.Settings.get("step_routing_fast_models", %{}) || %{}
+    updated = Map.put(pairs, to_string(provider), model)
+
+    case OptimalSystemAgent.Settings.set_user("step_routing_fast_models", updated) do
+      :ok ->
+        IO.puts("  #{provider} → #{model} #{@dim}(fast pairing saved to settings.json)#{@reset}")
+
+        print_route_state(session_id)
+
+      other ->
+        IO.puts("  #{@red}✗#{@reset} Could not write settings: #{inspect(other)}")
+    end
+  end
+
+  defp print_route_state(session_id) do
+    enabled? = StepRouter.enabled?(%{session_id: session_id})
+    provider = session_provider(session_id)
+    fast_model = StepRouter.fast_model_for(provider, %{session_id: session_id})
+
+    IO.puts("  #{@bold}Per-step model routing#{@reset}")
+    IO.puts("")
+
+    state = if enabled?, do: "#{@green}on#{@reset}", else: "#{@dim}off#{@reset}"
+    IO.puts("  routing    #{state}  #{@dim}(default off)#{@reset}")
+
+    pairing =
+      if fast_model, do: "#{provider} → #{fast_model}", else: "#{@dim}none configured#{@reset}"
+
+    IO.puts("  this session's provider (#{provider}) pairs with  #{pairing}")
+    IO.puts("")
+
+    IO.puts(
+      "  #{@dim}/route on|off toggles routing; /route fast <model> pairs a fast model with " <>
+        "this session's current provider. Both persist to settings.json.#{@reset}"
+    )
+  end
+
+  # The session's own live provider, not `default_provider` — StepRouter
+  # keys its decision (and its fast pairing) on THIS session's actual
+  # provider, which can differ from the daemon default after a `/model` swap.
+  defp session_provider(session_id) do
+    case Loop.get_state(session_id) do
+      {:ok, state} ->
+        state[:provider] || Application.get_env(:optimal_system_agent, :default_provider)
+
+      _ ->
+        Application.get_env(:optimal_system_agent, :default_provider)
+    end
+  end
+
+  # ── /advisor — advisor consult (Agent.Loop.Advisor) ────────────────────────
+  #
+  #   /advisor                   show enabled state + configured pair
+  #   /advisor status            same as bare /advisor
+  #   /advisor on | off          toggle the advisor (manual tool + auto triggers)
+  #   /advisor model <id>        set the advisor's model, paired with THIS
+  #                              session's current provider (persists)
+  def cmd_advisor(args, session_id) do
+    IO.puts("")
+
+    case parse_advisor_args(args) do
+      {:status, _} ->
+        print_advisor_state(session_id)
+
+      {:on, _} ->
+        write_advisor_toggle(session_id, true)
+
+      {:off, _} ->
+        write_advisor_toggle(session_id, false)
+
+      {:model, id} ->
+        write_advisor_model(session_id, id)
+
+      {:error, usage} ->
+        IO.puts("  #{@yellow}#{usage}#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  defp parse_advisor_args(args) do
+    case args |> to_string() |> String.trim() |> String.split(~r/\s+/, trim: true, parts: 2) do
+      [] -> {:status, nil}
+      ["status"] -> {:status, nil}
+      ["on"] -> {:on, nil}
+      ["off"] -> {:off, nil}
+      ["model", id] -> {:model, id}
+      ["model"] -> {:error, "usage: /advisor model <id>"}
+      _ -> {:error, "usage: /advisor [status|on|off|model <id>]"}
+    end
+  end
+
+  defp write_advisor_toggle(session_id, on?) do
+    case OptimalSystemAgent.Settings.set_user("advisor_enabled", on?) do
+      :ok ->
+        state = if on?, do: "#{@green}on#{@reset}", else: "#{@dim}off#{@reset}"
+        IO.puts("  Advisor: #{state} #{@dim}(saved to settings.json)#{@reset}")
+        print_advisor_state(session_id)
+
+      other ->
+        IO.puts("  #{@red}✗#{@reset} Could not write settings: #{inspect(other)}")
+    end
+  end
+
+  # A single `/advisor model <id>` is meant to be enough on its own — no
+  # separate `/advisor provider` subcommand — so the provider defaults to
+  # THIS session's current one. An operator who genuinely wants a DIFFERENT
+  # provider for the advisor sets `advisor_provider` directly in
+  # settings.json; nothing here can express a cross-provider pin.
+  defp write_advisor_model(session_id, id) do
+    provider = session_provider(session_id)
+
+    with :ok <- OptimalSystemAgent.Settings.set_user("advisor_model", id),
+         :ok <- OptimalSystemAgent.Settings.set_user("advisor_provider", to_string(provider)) do
+      IO.puts("  advisor → #{provider}:#{id} #{@dim}(saved to settings.json)#{@reset}")
+
+      print_advisor_state(session_id)
+    else
+      other -> IO.puts("  #{@red}✗#{@reset} Could not write settings: #{inspect(other)}")
+    end
+  end
+
+  defp print_advisor_state(session_id) do
+    enabled? =
+      OptimalSystemAgent.Settings.get_session_for(
+        session_id,
+        "advisor_enabled",
+        Application.get_env(:optimal_system_agent, :advisor_enabled, true)
+      ) == true
+
+    pair = Advisor.configured_pair(%{session_id: session_id})
+    cap = Advisor.cost_cap_usd(%{session_id: session_id})
+
+    IO.puts("  #{@bold}Advisor consult#{@reset}")
+    IO.puts("")
+
+    state = if enabled?, do: "#{@green}on#{@reset}", else: "#{@dim}off#{@reset}"
+    IO.puts("  advisor    #{state}  #{@dim}(default on; unusable until a model is set)#{@reset}")
+
+    configured =
+      case pair do
+        {provider, model} -> "#{provider}:#{model}"
+        nil -> "#{@dim}not configured#{@reset}"
+      end
+
+    IO.puts("  model      #{configured}")
+    IO.puts("  cost cap   $#{cap} #{@dim}per turn#{@reset}")
+    IO.puts("")
+
+    IO.puts(
+      "  #{@dim}/advisor on|off toggles the advisor; /advisor model <id> pairs a model " <>
+        "with this session's current provider. Both persist to settings.json.#{@reset}"
+    )
   end
 
   # ── /models — local model manager ─────────────────────────────────────────

@@ -890,6 +890,20 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # and the status bar all see the model the user actually picked.
     state = restore_route.(state)
 
+    # A fast-routed step must never DELIVER the turn's final answer — the
+    # spec is "reading files, choosing the next read" on the cheap model,
+    # "the final answer" on the model the user chose. A mechanical-looking
+    # run of reads can still end in the model deciding it has everything it
+    # needs and answering right there with no further tool call, and that
+    # answer came from the wrong model. Discard it (it is never shown to the
+    # user or folded into history) and re-ask the SAME messages of the
+    # strong model — same prefix, so its cache still applies — before this
+    # result reaches the normal truncation/stream-incomplete/handle_result
+    # pipeline. The fast attempt is still billed and reported above (it
+    # really ran); the strong re-ask is billed and logged here as the extra
+    # cost this correction costs.
+    {result, state} = maybe_reroute_fast_final_answer(routing, result, state, context)
+
     # A stream that ended without its provider's own terminal marker (P2 audit
     # gap A) is handled FIRST and can short-circuit the rest of this pipeline
     # (a fresh retry or a marked-incomplete delivery) — see
@@ -907,6 +921,137 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       {:halted, outcome} ->
         outcome
     end
+  end
+
+  # ── Fast-routed final answer must come from the strong model ─────────────
+  #
+  # See `StepRouter` — routing only ever fires between iterations, on
+  # EVIDENCE from the previous step's tool mix, because nothing before the
+  # call knows what the model is about to do. Most of the time "mechanical
+  # tool mix" evidence holds and the fast model asks for another read. It is
+  # not guaranteed to: the fast model can just as validly decide it now has
+  # enough to answer, with no further tool call — and that answer is the
+  # turn's user-facing result, which the spec keeps on the strong model
+  # unconditionally. This is the backstop for that case.
+  defp maybe_reroute_fast_final_answer(
+         %{route: :fast} = routing,
+         {:ok, resp} = result,
+         state,
+         context
+       )
+       when is_map(resp) do
+    if fast_final_answer_without_tools?(resp) do
+      Logger.info(
+        "[route] #{routing.provider}:#{routing.model} answered with no tool calls — " <>
+          "discarding it and re-asking #{state.provider}:#{state.model} (the strong model " <>
+          "must produce the final answer, not the fast one)"
+      )
+
+      redo_start = System.monotonic_time(:millisecond)
+      redo_requested_at = DateTime.utc_now()
+
+      redo_result =
+        with_turn_effort(state, fn ->
+          thinking_opts = LLMClient.thinking_config(state)
+          tools_for_call = ToolFilter.filter(state.tools, state)
+
+          llm_opts = [
+            tools: tools_for_call,
+            temperature: LLMClient.temperature(),
+            max_tokens: max_response_tokens(),
+            thinking_disabled: Process.get(:osa_disable_thinking, false)
+          ]
+
+          llm_opts =
+            if thinking_opts, do: Keyword.put(llm_opts, :thinking, thinking_opts), else: llm_opts
+
+          # SAME messages the fast model just saw (`context.messages`, not
+          # rebuilt) — the point is that the strong model's own prefix cache
+          # still applies to this re-ask.
+          LLMClient.llm_chat_stream(state, context.messages, llm_opts)
+        end)
+
+      redo_duration_ms = System.monotonic_time(:millisecond) - redo_start
+
+      redo_usage =
+        case redo_result do
+          {:ok, redo_resp} -> Map.get(redo_resp, :usage, %{})
+          _ -> %{}
+        end
+
+      redo_billing_opts =
+        case redo_result do
+          {:ok, redo_resp} ->
+            [
+              provider_cost_usd: Map.get(redo_resp, :provider_cost_usd),
+              provider_quota: Map.get(redo_resp, :provider_quota),
+              requested_at: redo_requested_at
+            ]
+
+          _ ->
+            [requested_at: redo_requested_at]
+        end
+
+      # Billed for real — the strong re-ask is a genuine second round-trip,
+      # not just a log line. `absorb_side_spend/1` mirrors the primary call's
+      # handling of a request billed on the wire before it errored.
+      state = Accounting.record(state, redo_usage, redo_billing_opts)
+      state = Accounting.absorb_side_spend(state)
+
+      redo_cost_usd = OptimalSystemAgent.Agent.Pricing.cost(state.model, redo_usage)
+
+      emit_fast_final_answer_reroute(state, routing, redo_duration_ms, redo_usage, redo_cost_usd)
+
+      {redo_result, state}
+    else
+      {result, state}
+    end
+  end
+
+  defp maybe_reroute_fast_final_answer(_routing, result, state, _context), do: {result, state}
+
+  # A CLEAN final answer: real text, no tool calls, and not a cut-off stream
+  # (`:stream_incomplete` responses are not "an answer" yet — the EXISTING
+  # stream-incomplete/truncation recovery already owns those, downstream of
+  # this check, and must run on whatever `result` this function returns).
+  defp fast_final_answer_without_tools?(resp) do
+    tool_calls = Map.get(resp, :tool_calls) || []
+    content = Map.get(resp, :content)
+
+    tool_calls == [] and
+      not Map.get(resp, :stream_incomplete, false) and
+      is_binary(content) and String.trim(content) != ""
+  end
+
+  defp emit_fast_final_answer_reroute(state, routing, duration_ms, usage, cost_usd) do
+    payload = %{
+      event: :fast_final_answer_reroute,
+      session_id: state.session_id,
+      iteration: state.iteration,
+      fast_provider: to_string(routing.provider),
+      fast_model: routing.model,
+      strong_provider: to_string(state.provider),
+      strong_model: state.model,
+      duration_ms: duration_ms,
+      usage: usage,
+      cost_usd: cost_usd
+    }
+
+    Bus.emit(:system_event, payload)
+
+    if is_binary(state.session_id) and state.session_id != "" do
+      Phoenix.PubSub.broadcast(
+        OptimalSystemAgent.PubSub,
+        "osa:session:#{state.session_id}",
+        {:osa_event, Map.put(payload, :type, :system_event)}
+      )
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   # ── Truncation ingest ─────────────────────────────────────────────────────
