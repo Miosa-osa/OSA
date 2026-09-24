@@ -535,8 +535,41 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
       # answer of the next turn would spend a continuation on a fold that
       # happened in a previous turn.
       just_compacted: false,
-      just_compacted_overflow: false
+      just_compacted_overflow: false,
+      # Regulation core (`Agent.Loop.Regulation`) — every counter below is
+      # scoped to ONE turn's pain score, and must not bleed into the next:
+      #   regulation_turn_started_ms          — the turn clock `Signals` reports
+      #                                          elapsed time against.
+      #   regulation_turn_baseline_cost_usd   — session-cost snapshot at turn
+      #                                          start; `Signals` reports the
+      #                                          DELTA since this as the turn's
+      #                                          own spend.
+      #   regulation_surprise_count           — `Surprise.check/3`'s tally.
+      #   regulation_progress_idle_streak /
+      #   regulation_prev_distinct_tool_count — `Homeostat`'s progress-rate
+      #                                          variable.
+      #   regulation_context_relief_iteration — `Homeostat`'s context-relief
+      #                                          cooldown gate.
+      #   regulation_error_window             — `Homeostat`'s error-rate
+      #                                          rolling window.
+      #   regulation_question_asked           — `Question`'s one-per-turn guard.
+      #   regulation_last_reported_severity   — `Pain`'s clear-on-drop guard.
+      # A turn that never exercised the regulation core (a hand-built test
+      # state, or a caller predating this feature) still resets cleanly:
+      # every reader below defaults an absent key rather than requiring it.
+      regulation_turn_started_ms: System.monotonic_time(:millisecond),
+      regulation_turn_baseline_cost_usd: Map.get(state, :session_cost_usd, 0.0),
+      regulation_surprise_count: 0,
+      regulation_progress_idle_streak: 0,
+      regulation_prev_distinct_tool_count: 0,
+      regulation_context_relief_iteration: nil,
+      regulation_error_window: [],
+      regulation_question_asked: false,
+      regulation_last_reported_severity: nil
     })
+    |> tap(fn state ->
+      OptimalSystemAgent.Agent.Loop.Regulation.PainChannel.clear(Map.get(state, :session_id))
+    end)
   end
 
   @doc """

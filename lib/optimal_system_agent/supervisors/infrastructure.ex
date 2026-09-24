@@ -53,6 +53,12 @@ defmodule OptimalSystemAgent.Supervisors.Infrastructure do
       # re-registers its handler on init).
       OptimalSystemAgent.Events.TuiForwarder,
 
+      # Turn regulation core — the algedonic pain channel's long-lived process
+      # (`Agent.Loop.Regulation.PainChannel`). Registers its own Bus handler
+      # for `:permission_wait` on init, same ordering requirement as
+      # `TuiForwarder` above and for the same reason.
+      OptimalSystemAgent.Agent.Loop.Regulation.PainChannel,
+
       # Persistent storage
       OptimalSystemAgent.Store.Repo,
 

@@ -399,7 +399,57 @@ config :optimal_system_agent,
   # effective context window — never the full leftover slack.
   dynamic_recall_budget_frac: 0.20,
   # Floor so a genuinely relevant memory still fits on small (8k) windows.
-  dynamic_recall_budget_floor: 512
+  dynamic_recall_budget_floor: 512,
+
+  # ---------------------------------------------------------------------------
+  # Turn regulation — the algedonic pain channel (`Agent.Loop.Regulation.Pain`).
+  # Unifies the existing turn-level detectors (doom-loop repeats, stall,
+  # reasoning overflow, recovery-budget use, long approval waits, cost rising
+  # with nothing changed on disk) into one per-turn pain score with a severity
+  # and a plain-language cause. See `Agent.Loop.Regulation`.
+  # ---------------------------------------------------------------------------
+  regulation_pain: [
+    # Master switch.
+    enabled: true,
+    # Score bands (0.0-1.0). Below `low_at`: no alert. `medium_at`..`question_at`:
+    # surfaced, no steering. `question_at`..`pause_at`: surfaced, and (when the
+    # cause looks like ambiguity) steered toward asking the user one question.
+    # At/above `pause_at`: the turn is PAUSED and control handed back to the
+    # user (item 1).
+    low_at: 0.15,
+    medium_at: 0.35,
+    question_at: 0.55,
+    pause_at: 0.85,
+    # Minimum time between two algedonic emissions for the SAME session, so a
+    # sustained high-pain stretch does not flood the bus/TUI. A severity
+    # INCREASE always bypasses this (see `Regulation.PainChannel`).
+    min_emit_interval_ms: 5_000,
+    # Approval wait (ms) at/above which "waiting on an approval" alone can
+    # explain an elevated score.
+    wait_alarm_ms: 60_000
+  ],
+  regulation_homeostat: [
+    enabled: true,
+    # Context utilization (%) at/above which the homeostat requests relief
+    # (a standalone micro-compact pass — see `Regulation.Homeostat`).
+    context_high_pct: 85.0,
+    # Minimum iterations between two context-relief passes.
+    context_relief_cooldown_iterations: 3,
+    # USD spent THIS TURN, with no disk change, above which the cost-rate
+    # variable reads "too high" and feeds the unified pain score.
+    cost_no_progress_usd: 0.25,
+    # Consecutive iterations with zero measured progress (no edit, no newly
+    # tried tool, no check run clean) before the progress-rate variable reads
+    # "too low" and a single reorientation note is injected.
+    progress_low_streak: 6,
+    # Tool-error ratio (errors / calls) over the rolling window above which
+    # the error-rate variable reads "too high" and feeds the unified pain
+    # score. Requires at least 3 calls in the window to avoid one failing
+    # call in a fresh window reading as 100%.
+    error_rate_high: 0.5,
+    # Rolling window (tool calls) used for the error-rate variable.
+    error_rate_window: 10
+  ]
 
 # Database — SQLite3
 config :optimal_system_agent, OptimalSystemAgent.Store.Repo,

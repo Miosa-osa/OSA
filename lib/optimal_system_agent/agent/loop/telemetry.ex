@@ -178,6 +178,35 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
     e -> Logger.debug("emit_context_pressure failed: #{inspect(e)}")
   end
 
+  @doc """
+  The SAME context-utilization percentage (0.0-100.0) `emit_context_pressure/1`
+  broadcasts, computed synchronously and returned instead of emitted.
+
+  Exists so a caller in the SAME process (the homeostat's context-utilization
+  variable, `Agent.Loop.Regulation.Homeostat`) can read the live figure without
+  a second, independently-derived denominator — see the moduledoc on
+  `utilization` above for why two derivations of "how full is the context
+  window" drift apart. Never raises; a resolution failure reads as `0.0`,
+  exactly like the emitted event's fallback.
+  """
+  @spec context_utilization(map()) :: float()
+  def context_utilization(state) do
+    model_window = provider_context_window(state)
+
+    max_tok =
+      if model_window > 0,
+        do: CompactionThresholds.operative_window(model_window),
+        else: 0
+
+    estimated = context_occupancy(state)
+
+    if max_tok > 0,
+      do: min(100.0, Float.round(estimated / max_tok * 100, 1)),
+      else: 0.0
+  rescue
+    _ -> 0.0
+  end
+
   # Resolve the usable context window for the state's model + provider. Falls
   # back to the trained window (and 0 on total failure) so a provider lookup
   # miss never crashes the telemetry path.
