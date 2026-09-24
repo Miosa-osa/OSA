@@ -1,0 +1,11 @@
+{
+  "features": {
+    "beta": {
+      "enabled": false,
+      "rollout": 0.1
+    },
+    "legacy_ui": {
+      "enabled": true
+    }
+  }
+}

@@ -48,10 +48,17 @@ defmodule OptimalSystemAgent.Test.MockProvider do
     case forced_error(messages) do
       nil ->
         result =
-          case forced_final_text() do
-            nil -> chat_scripted()
-            text -> {:ok, %{content: text, tool_calls: []}}
+          case scripted_response(messages, opts) do
+            %{} = resp -> {:ok, resp}
+            nil -> nil
           end
+
+        result =
+          result ||
+            case forced_final_text() do
+              nil -> chat_scripted()
+              text -> {:ok, %{content: text, tool_calls: []}}
+            end
 
         case with_forced_usage(result) do
           {:ok, resp} -> {:ok, with_forced_stop_reason(resp)}
@@ -236,27 +243,53 @@ defmodule OptimalSystemAgent.Test.MockProvider do
 
     case forced_error(messages) do
       nil ->
-        case forced_final_text() do
-          nil ->
-            chat_stream_scripted(callback)
-
-          text ->
-            # `""` means "finish the turn with NO final text" — the
-            # silent-child case the delegation result-recovery path exists for.
-            if text != "", do: callback.({:text_delta, text})
-
-            result =
-              %{content: text, tool_calls: []}
-              |> with_forced_tool_calls()
-              |> with_forced_stop_reason()
-              |> with_forced_stream_incomplete()
-
-            callback.({:done, result})
+        case scripted_response(messages, opts) do
+          %{} = resp ->
+            content = Map.get(resp, :content) || ""
+            if content != "", do: callback.({:text_delta, content})
+            callback.({:done, Map.put_new(resp, :tool_calls, [])})
             :ok
+
+          nil ->
+            chat_stream_unscripted(messages, callback)
         end
 
       reason ->
         {:error, reason}
+    end
+  end
+
+  # A caller-supplied script decides the whole response. Opt-in via
+  # `:mock_provider_script`, a 2-arity function receiving the exact `messages`
+  # and `opts` of the call and returning a response map (`:content`,
+  # `:tool_calls`, optional `:usage`) or `nil` to fall through to the default
+  # behaviour. Used by the bench harness to replay a task's reference solution
+  # (and its do-nothing control) through the real agent loop and real tools.
+  defp scripted_response(messages, opts) do
+    case Application.get_env(:optimal_system_agent, :mock_provider_script) do
+      fun when is_function(fun, 2) -> fun.(messages, opts)
+      _ -> nil
+    end
+  end
+
+  defp chat_stream_unscripted(_messages, callback) do
+    case forced_final_text() do
+      nil ->
+        chat_stream_scripted(callback)
+
+      text ->
+        # `""` means "finish the turn with NO final text" — the
+        # silent-child case the delegation result-recovery path exists for.
+        if text != "", do: callback.({:text_delta, text})
+
+        result =
+          %{content: text, tool_calls: []}
+          |> with_forced_tool_calls()
+          |> with_forced_stop_reason()
+          |> with_forced_stream_incomplete()
+
+        callback.({:done, result})
+        :ok
     end
   end
 
