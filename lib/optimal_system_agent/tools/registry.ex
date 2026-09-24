@@ -1173,6 +1173,7 @@ defmodule OptimalSystemAgent.Tools.Registry do
       "peer_claim_region" => OptimalSystemAgent.Tools.Builtins.PeerClaimRegion.Tool,
       "peer_negotiate_task" => OptimalSystemAgent.Tools.Builtins.PeerNegotiateTask.Tool,
       "cross_team_query" => OptimalSystemAgent.Tools.Builtins.CrossTeamQuery.Tool,
+      "claims_board" => OptimalSystemAgent.Tools.Builtins.ClaimsBoard,
 
       # ── Comms / interaction ────────────────────────────────────────────
       "ask_user" => OptimalSystemAgent.Tools.Builtins.AskUser.Tool,
@@ -1247,7 +1248,22 @@ defmodule OptimalSystemAgent.Tools.Registry do
       # ── Workspace shape ────────────────────────────────────────────────
       # Classifies submodules / nested independent repos / workspace members,
       # which `git ls-files` collapses to a single entry each. Cached per root.
-      "workspace_map" => OptimalSystemAgent.Tools.Builtins.WorkspaceMap
+      "workspace_map" => OptimalSystemAgent.Tools.Builtins.WorkspaceMap,
+
+      # Live per-workspace map — file tree, per-file symbols, last test run,
+      # git checkout identity. Incrementally maintained; this is the cheap
+      # consult path (`RepoMap`) instead of re-grepping to rediscover
+      # structure or shape every turn.
+      "repo_map" => OptimalSystemAgent.Tools.Builtins.RepoMap,
+
+      # Retrieval half of "summaries in context, full output on demand":
+      # reads back anything `ToolResultStorage`, the tool-executor's
+      # spill-on-overflow, or `ContextCollapse` offloaded to the shared
+      # tool-results store, by handle, with a range or a grep.
+      "expand_output" => OptimalSystemAgent.Tools.Builtins.ExpandOutput,
+
+      # ── Advisor consult (per-step routing epic, item 4) ─────────────────
+      "advisor_consult" => OptimalSystemAgent.Tools.Builtins.AdvisorConsult
 
       # NOT registered on purpose: mcts_index, wallet_ops, and the vault_*
       # tools have no backend (MCTS.Indexer / Integrations.Wallet / Vault do

@@ -24,7 +24,120 @@ bench/
     report.py          merges telemetry + grading -> results.json / summary.md
     instances/         curated instance-id subsets
     runs/<run_id>/     all output (gitignored)
+  osabench/            OSA's own efficiency suite (`mix osa.bench`, section 0)
 ```
+
+---
+
+## 0. osabench: did my change make OSA faster, cheaper or more reliable?
+
+`mix osa.bench` is the exception to the rule above, and it is scoped so the rule still holds.
+It is not a capability benchmark and its pass rate is not a claim about OSA.
+It is a measuring instrument for before/after comparisons of OSA itself: routing, context handling, prompts, prefetch, recovery.
+Every task is small, deterministic and modeled on a failure mode an operator actually hit.
+
+### What a run measures
+
+Each task runs in a fresh scratch copy of `osabench/fixtures/acme` (a tiny Elixir project whose tests run with plain `elixir`, no Mix).
+Every run is scored on:
+
+| column | source |
+|---|---|
+| pass / FAIL | the task's deterministic checker (file contents, JSON values, test suite exit code, reply text) |
+| wall | the harness's own clock around the turn |
+| model, tools, approval, background, other | the turn's `/trace` record (`Agent.TurnTrace`) |
+| llm calls, tool calls, calls/par | the same trace; `par` is the tool-call count of the task's reference solution |
+| tokens in/out, cache read, cost | the provider's reported usage for each round-trip, priced by `Accounting` |
+| retries | provider retries/fallbacks, tool retries and loop recoveries in the turn |
+| waste | identical read-only probes repeated with nothing written in between |
+
+### Running it
+
+```bash
+# the configured provider/model (whatever ~/.osa selects)
+mix osa.bench
+
+# a specific model, three attempts per task (medians are reported)
+mix osa.bench --provider ollama_cloud --model glm-5.2:cloud --repeat 3
+mix osa.bench --provider ollama_cloud --model deepseek-v4.1-flash:cloud
+
+# a subset
+mix osa.bench --only settings-one-line,fix-failing-test
+mix osa.bench --category search
+mix osa.bench --list
+
+# before/after: run on each branch, then
+mix osa.bench --compare bench/osabench/runs/<before>.json bench/osabench/runs/<after>.json
+mix osa.bench --compare a.json b.json --fail-on-regression   # exit 1 on pass->fail
+```
+
+The in-process runner boots the checkout's own code in the mix BEAM, on a private HTTP port, so it runs fine next to a live daemon.
+Results go to `bench/osabench/runs/<run_id>.json` (gitignored) plus a compact table on stdout.
+Each row keeps its full trace, so a surprising number can be inspected without re-running.
+
+To measure an already-running daemon (for example the installed release) instead of the checkout, point the harness at its API.
+That daemon must be new enough to serve `GET /api/v1/sessions/:id/trace`.
+
+```bash
+mix osa.bench --url http://127.0.0.1:9089 [--token $OSA_API_TOKEN]
+```
+
+The HTTP runner creates a session bound to the workspace (`POST /sessions`), sets overdrive and the model, sends the prompt (`POST /orchestrate`), polls `/trace` until the turn is done and reads the reply from `/messages`.
+It signs requests when `OSA_SHARED_SECRET` is set.
+
+### Controls, and the CI smoke
+
+```bash
+MIX_ENV=test mix osa.bench --control oracle   # replay every reference solution: must be 26/26
+MIX_ENV=test mix osa.bench --control nop      # answer without doing anything: must be 0/26
+```
+
+Controls replay a script through the real agent loop and the real tools using the test-only mock provider, so they cost nothing and need no network.
+`oracle` passing everything proves every task is solvable and its checker recognises a right answer.
+`nop` failing everything proves no checker is satisfied by the starting state.
+`test/bench/bench_smoke_test.exs` runs both (plus the HTTP runner through the API router) in about a minute; it is part of `mix test`.
+
+### Tasks
+
+| id | category | failure mode it models |
+|---|---|---|
+| stale-release-key | verify | checkout says one config key, the installed release reads another: verify once where it runs, then act |
+| source-of-truth-port | verify | README says 4000, the loaded config says 4102 |
+| env-var-trace | verify | docs name an env var the code no longer reads |
+| settings-one-line | edit | one-line settings change |
+| json-nested-flag | edit | flip the right one of two identically named keys |
+| add-test-case | edit | small additive edit plus one confirming run |
+| delete-unused-module | edit | one reference search, then the delete |
+| settings-told-location | oververify | the user already said where the setting lives |
+| typo-fix | oververify | one-word fix that tempts reading the repo |
+| append-line | oververify | "don't run anything": an append needs no verification run |
+| stop-when-answered | oververify | yes/no question that needs one look |
+| fix-failing-test | fix | fix the code, not the test |
+| fix-off-by-one | fix | localise from test output, fix, re-run once |
+| fix-compile-error | fix | read the compiler's own error instead of searching |
+| rename-function | refactor | rename a function across files |
+| rename-module | refactor | rename a module and move its file |
+| extract-validation | refactor | long multi-step refactor over three callers |
+| add-struct-field | refactor | thread a field through three layers, checked by a hidden test |
+| large-log-needle | search | answer from a 40k-line log (search it, don't read it) |
+| large-file-constant | search | one constant out of an 8k-line generated module |
+| deps-trap-definition | search | the obvious search walks 3,000 lookalike files in deps/ and _build/ |
+| deps-trap-count | search | an unscoped count includes vendored copies |
+| dead-function | search | find the unused public function |
+| explain-function | search | answer from the one relevant function |
+| git-history | search | answer from git history, not the current tree |
+| three-versions | parallel | three independent reads that should batch into one round-trip |
+
+### Adding a task
+
+One file per task in `osabench/tasks/<id>.exs`, evaluating to a plain map: `id`, `title`, `category`, `failure_mode`, `prompt`, `setup` (ops applied to the fixture copy), `check` (all must pass) and `reference` (the known-good tool calls, `$WORKDIR` = the workspace).
+The ops are documented in `OptimalSystemAgent.Bench.Workspace` (setup) and `OptimalSystemAgent.Bench.Check` (checks).
+A new task is done when `MIX_ENV=test mix osa.bench --control oracle --only <id>` passes and `--control nop --only <id>` fails.
+
+### Reading the numbers
+
+Live models are not deterministic: compare runs with `--repeat 3` or more, and quote the compare mode's geometric-mean wall ratio over tasks passed on both sides, not a sum (a sum is dominated by the slowest task).
+Cost is OSA's rate-card estimate for the model, the same number `/cost` shows; on a flat-rate plan read it as relative, not as a bill.
 
 ---
 

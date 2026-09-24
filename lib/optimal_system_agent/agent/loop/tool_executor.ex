@@ -1153,8 +1153,22 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   def await_permission(tool_call, state, request_id, summary) do
     emit_permission_required(state, request_id, tool_call, summary)
     timeout_ms = Map.get(summary, :timeout_ms) || PermissionBroker.default_timeout_ms()
+    wait_started = System.monotonic_time(:millisecond)
 
-    case PermissionBroker.await(state.session_id, request_id, state: state, timeout: timeout_ms) do
+    awaited =
+      PermissionBroker.await(state.session_id, request_id, state: state, timeout: timeout_ms)
+
+    # `/trace`: this park sits INSIDE the tool call's measured duration; the
+    # trace subtracts it so time spent waiting on the user is not billed to the
+    # tool.
+    OptimalSystemAgent.Agent.TurnTrace.record_approval_wait(state.session_id, %{
+      tool: tool_call.name,
+      id: tool_call.id,
+      wait_ms: System.monotonic_time(:millisecond) - wait_started,
+      outcome: approval_outcome(awaited)
+    })
+
+    case awaited do
       {:ok, %{decision: decision, note: note}} ->
         apply_permission_decision(decision, note, tool_call, state)
 
@@ -1178,6 +1192,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         {:blocked, "Blocked: #{tool_call.name} cancelled before approval"}
     end
   end
+
+  defp approval_outcome({:ok, %{decision: decision}}), do: decision
+  defp approval_outcome({:error, reason}), do: reason
+  defp approval_outcome(_), do: nil
 
   @doc false
   # Map a normalized permission decision onto an execution outcome. Public
@@ -1544,6 +1562,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       success: not tool_failed
     })
 
+    # Keep the live repo model (`RepoMap`) current from what this tool call
+    # just did — a write tool's touched file, a test-shaped shell command's
+    # outcome, a git-mutating command's effect — without a rewalk. Runs even
+    # on a FAILED tool call (a failed `git commit` still changed nothing, but
+    # a failed `shell_execute` test run is itself the test status worth
+    # recording). Best-effort: `observe_tool_result/4` never raises, and this
+    # is fire-and-forget so a slow/unlucky git call can never add latency to
+    # the turn.
+    repo_map_observe(tool_call.name, Map.get(tool_call, :arguments) || %{}, result_str)
+
     # Cross-cutting <system-reminder> pipeline (grok src/reminders parity):
     # surface finished background tasks / subagents, a SKILL.md near a touched
     # path, and post-edit diagnostics — deduped per session, non-fatal. Both
@@ -1592,6 +1620,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
           "resolution disagreeing with itself, not a model error: #{String.slice(result_str, 0, 300)}"
       )
     end
+
+    # `/trace`: same measured duration as the `phase: :end` event below.
+    OptimalSystemAgent.Agent.TurnTrace.record_tool(state.session_id, %{
+      id: tool_call.id,
+      name: tool_call.name,
+      args: Map.get(tool_call, :arguments),
+      hint: arg_hint,
+      duration_ms: tool_duration_ms,
+      success: not tool_failed
+    })
 
     Bus.emit(
       :tool_call,
@@ -1652,6 +1690,18 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     # included. Two events, computed two ways, disagreeing on every failure, and
     # the one that was always-true is the one a permission denial surfaced on.
     tool_success = not tool_failed
+
+    # Speculative prefetch: a successful write invalidates whatever it
+    # touched and fires the likely-next read-only calls (siblings, test
+    # file, `git status`/`git diff`) in the background. Fire-and-forget —
+    # never on the critical path of returning this result to the model.
+    OptimalSystemAgent.Prefetch.Engine.observe_tool_result(
+      tool_call.name,
+      Map.get(tool_call, :arguments) || %{},
+      tool_success,
+      state.session_id
+    )
+
     result_preview = String.slice(result_str, 0, 2000)
 
     # Retrieve tool metadata (diff data, etc.) if the tool stored any
@@ -1784,10 +1834,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
               "\n\n#{@elision_sentinel} showing the first #{byte_size(head)} and last " <>
                 "#{byte_size(tail)} of #{byte_size(result_str)} bytes " <>
                 "(~#{max(total_lines - shown_lines, 0)} of #{total_lines} lines omitted from the " <>
-                "middle).\nThe COMPLETE output is saved at #{path}.\n" <>
+                "middle).\nThe COMPLETE output is saved at #{path} " <>
+                "(handle: #{Path.basename(path)}).\n" <>
                 "Next step: read any part with file_read " <>
                 ~s({"path": "#{path}", "offset": 1, "limit": 200}) <>
-                " (raise offset to page), or grep it for what you need.]\n\n"
+                " (raise offset to page), expand_output with that handle, or grep it for " <>
+                "what you need.]\n\n"
 
             :error ->
               "\n\n#{@elision_sentinel} #{byte_size(result_str)} bytes total, showing the first " <>
@@ -1822,6 +1874,23 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
   defp count_lines(""), do: 0
   defp count_lines(bin), do: bin |> :binary.matches("\n") |> length() |> Kernel.+(1)
+
+  # The workspace root `RepoMap` is keyed by: the OUTERMOST enclosing
+  # workspace when one exists, else the resolved cwd — the SAME default
+  # `Tools.Builtins.RepoMap` resolves to, so an observation made here lands
+  # in the exact cache entry a later `repo_map` tool call reads.
+  defp repo_map_root do
+    cwd = OptimalSystemAgent.Workspace.Cwd.get()
+    OptimalSystemAgent.Workspace.Topology.workspace_root(cwd) || cwd
+  end
+
+  defp repo_map_observe(tool_name, args, result_str) do
+    OptimalSystemAgent.RepoMap.observe_tool_result(repo_map_root(), tool_name, args, result_str)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
 
   # Write the full result to a content-hashed file under the shared
   # tool-results directory. Returns {:ok, path, total_lines} or :error.
@@ -2025,16 +2094,22 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   # found, ambiguous, validation, permission denied) are never retried; those
   # are handled by the deterministic {:error, reason} path below.
   defp execute_tool(tool_name, enriched_args) do
-    session_id = Map.get(enriched_args, "__session_id__")
+    case OptimalSystemAgent.Prefetch.Engine.lookup(tool_name, enriched_args) do
+      {:hit, content} ->
+        content
 
-    result =
-      OptimalSystemAgent.Agent.Loop.ToolRetry.run(
-        fn -> Tools.execute(tool_name, enriched_args) end,
-        tool: tool_name,
-        session_id: session_id
-      )
+      :miss ->
+        session_id = Map.get(enriched_args, "__session_id__")
 
-    handle_execute_result(result, tool_name, enriched_args)
+        result =
+          OptimalSystemAgent.Agent.Loop.ToolRetry.run(
+            fn -> Tools.execute(tool_name, enriched_args) end,
+            tool: tool_name,
+            session_id: session_id
+          )
+
+        handle_execute_result(result, tool_name, enriched_args)
+    end
   end
 
   defp handle_execute_result(result, tool_name, enriched_args) do

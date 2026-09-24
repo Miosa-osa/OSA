@@ -854,9 +854,32 @@ impl App {
             BackendEvent::LlmRequest {
                 iteration,
                 max_iterations,
+                routed_model,
+                routed_provider,
+                routing_reason,
             } => {
                 self.activity.set_iteration(iteration as u32);
                 self.activity.set_max_iterations(max_iterations);
+                // Per-step model routing (StepRouter): name the model THIS
+                // step is actually going to — the activity row's "Waiting
+                // for <model>" must never claim the session's own model when
+                // a cheaper one is answering instead, or the routing feature
+                // is invisible/silent exactly where the operator would
+                // notice a wrong answer first. Falls back to the session's
+                // own model when the field is absent (routing off, or an
+                // older backend that predates it).
+                let step_model = routed_model
+                    .clone()
+                    .filter(|m| !m.is_empty())
+                    .unwrap_or_else(|| self.header.model_name().to_string());
+                self.activity.set_model_name(&step_model);
+                if let (Some(provider), Some(model), Some(reason)) =
+                    (&routed_provider, &routed_model, &routing_reason)
+                {
+                    if reason != "turn_start" && reason != "disabled" {
+                        debug!("step routed: {}:{} ({})", provider, model, reason);
+                    }
+                }
                 // A request just went out: until a token or a tool comes back,
                 // this time is the MODEL's, and the row says so.
                 self.activity.note_model_request();
@@ -867,6 +890,13 @@ impl App {
                 duration_ms,
                 input_tokens,
                 output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                cache_hit_rate,
+                cache_last_break,
+                cache_break_token_cost,
+                cache_break_above_threshold,
+                cache_cold_run,
             } => {
                 self.status
                     .set_stats(input_tokens, output_tokens, duration_ms);
@@ -879,6 +909,16 @@ impl App {
                 // streaming path). Derive it from the real request size here.
                 self.status.note_input_tokens(input_tokens);
                 self.sidebar.set_context(self.status.context_ratio());
+                self.status
+                    .set_cache_status(crate::components::status_bar::CacheStatus {
+                        read_tokens: cache_read_tokens,
+                        creation_tokens: cache_creation_tokens,
+                        hit_rate: cache_hit_rate,
+                        last_break: cache_last_break,
+                        break_token_cost: cache_break_token_cost,
+                        break_above_threshold: cache_break_above_threshold,
+                        cold_run: cache_cold_run,
+                    });
             }
             BackendEvent::SignalClassified { signal } => {
                 self.status.set_signal(signal);
@@ -927,13 +967,23 @@ impl App {
                 task_id,
                 subject,
                 active_form,
+                check_status,
             } => {
                 self.tasks
                     .add(task_id.clone(), subject.clone(), String::new());
-                self.task_checklist.add(task_id, subject, Some(active_form));
+                self.task_checklist
+                    .add(task_id.clone(), subject, Some(active_form));
+                if check_status.is_some() {
+                    self.task_checklist.set_check(&task_id, check_status, None);
+                }
                 self.recompute_layout();
             }
-            BackendEvent::TaskUpdated { task_id, status } => {
+            BackendEvent::TaskUpdated {
+                task_id,
+                status,
+                check_status,
+                check_reason,
+            } => {
                 self.tasks.update(&task_id, &status);
                 let checklist_status = match status.as_str() {
                     "completed" => crate::components::task_checklist::ChecklistStatus::Completed,
@@ -942,6 +992,14 @@ impl App {
                     _ => crate::components::task_checklist::ChecklistStatus::Pending,
                 };
                 self.task_checklist.update(&task_id, checklist_status);
+                // Always applied, including `None` -- a checkless item stays
+                // checkless, and this is also the ONLY path a check verdict
+                // change with no status transition reaches the panel through
+                // (an explicit `run_check`, or a `complete` attempt the check
+                // refused both arrive as a `TaskUpdated` whose `status` is
+                // unchanged from before).
+                self.task_checklist
+                    .set_check(&task_id, check_status, check_reason);
                 // Drive the activity spinner from the active step, like Claude
                 // Code's activeForm. Clears automatically when nothing is in
                 // progress (current_active_form -> None).
@@ -965,6 +1023,8 @@ impl App {
                     self.task_checklist
                         .add(task.id, task.subject, task.active_form);
                     self.task_checklist.update(&id, status);
+                    self.task_checklist
+                        .set_check(&id, task.check_status, task.check_reason);
                 }
                 self.task_checklist.show();
                 self.activity
@@ -2616,6 +2676,25 @@ impl App {
                     crate::components::toast::ToastLevel::Warning,
                 );
                 self.recompute_layout();
+            }
+            BackendEvent::PainAlert {
+                severity,
+                score: _score,
+                message,
+            } => {
+                // The status row is the persistent "distinct row" (item 1):
+                // it reflects whatever the backend last reported, including a
+                // `"none"` clear once the turn stops looking stuck.
+                self.status.set_pain_alert(&severity, &message);
+
+                // A toast on top, for `"high"`/`"critical"` only — the row
+                // above is already always visible, so this is for the
+                // moment attention is actually warranted, not routine noise
+                // as the score drifts through the lower bands.
+                if matches!(severity.as_str(), "high" | "critical") {
+                    self.toasts
+                        .push(message, crate::components::toast::ToastLevel::Warning);
+                }
             }
             BackendEvent::TaskNotification { count, summary } => {
                 // WS6: the backend just folded completed background task(s) into

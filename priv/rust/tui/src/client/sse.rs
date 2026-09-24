@@ -592,6 +592,17 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
                 iteration: u32,
                 #[serde(default)]
                 max_iterations: Option<u32>,
+                // Per-step model routing (StepRouter): present only when
+                // routing actually fired for this request. `model` on the
+                // wire is the session's own model — deliberately NOT read
+                // here, so an unrouted request stays byte-identical to
+                // before these fields existed.
+                #[serde(default)]
+                routed_model: Option<String>,
+                #[serde(default)]
+                routed_provider: Option<String>,
+                #[serde(default)]
+                routing_reason: Option<String>,
             }
             let ev: Ev = match serde_json::from_slice(data) {
                 Ok(e) => e,
@@ -600,6 +611,9 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             Some(BackendEvent::LlmRequest {
                 iteration: ev.iteration,
                 max_iterations: ev.max_iterations,
+                routed_model: ev.routed_model,
+                routed_provider: ev.routed_provider,
+                routing_reason: ev.routing_reason,
             })
         }
 
@@ -608,20 +622,53 @@ fn parse_sse_event(event_type: &str, data: &[u8]) -> Option<BackendEvent> {
             struct Usage {
                 input_tokens: u64,
                 output_tokens: u64,
+                // Present once a route emits `cache_control`/`cachePoint` markers;
+                // absent (never sent) on a route/provider that never populates the
+                // fields at all. Both default to 0 rather than fail parsing, since
+                // a provider that reports usage without a cache slice is a route
+                // this instrument diagnoses (see `cache_status` below), not a
+                // malformed event.
+                #[serde(default)]
+                cache_read_input_tokens: u64,
+                #[serde(default)]
+                cache_creation_input_tokens: u64,
+            }
+            #[derive(serde::Deserialize, Default)]
+            struct CacheStatus {
+                #[serde(default)]
+                hit_rate: Option<f64>,
+                #[serde(default)]
+                last_break: Option<String>,
+                #[serde(default)]
+                token_cost: u64,
+                #[serde(default)]
+                above_threshold: bool,
+                #[serde(default)]
+                cold_run: u64,
             }
             #[derive(serde::Deserialize)]
             struct Ev {
                 duration_ms: u64,
                 usage: Usage,
+                #[serde(default)]
+                cache_status: Option<CacheStatus>,
             }
             let ev: Ev = match serde_json::from_slice(data) {
                 Ok(e) => e,
                 Err(e) => return Some(parse_warning("llm_response", e)),
             };
+            let cache_status = ev.cache_status.unwrap_or_default();
             Some(BackendEvent::LlmResponse {
                 duration_ms: ev.duration_ms,
                 input_tokens: ev.usage.input_tokens,
                 output_tokens: ev.usage.output_tokens,
+                cache_read_tokens: ev.usage.cache_read_input_tokens,
+                cache_creation_tokens: ev.usage.cache_creation_input_tokens,
+                cache_hit_rate: cache_status.hit_rate,
+                cache_last_break: cache_status.last_break,
+                cache_break_token_cost: cache_status.token_cost,
+                cache_break_above_threshold: cache_status.above_threshold,
+                cache_cold_run: cache_status.cold_run,
             })
         }
 
@@ -1590,12 +1637,15 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
                 subject: String,
                 #[serde(default)]
                 active_form: String,
+                #[serde(default)]
+                check_status: Option<String>,
             }
             let ev: Ev = serde_json::from_slice(data).ok()?;
             Some(BackendEvent::TaskCreated {
                 task_id: ev.task_id,
                 subject: ev.subject,
                 active_form: ev.active_form,
+                check_status: ev.check_status,
             })
         }
 
@@ -1604,11 +1654,17 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
             struct Ev {
                 task_id: String,
                 status: String,
+                #[serde(default)]
+                check_status: Option<String>,
+                #[serde(default)]
+                check_reason: Option<String>,
             }
             let ev: Ev = serde_json::from_slice(data).ok()?;
             Some(BackendEvent::TaskUpdated {
                 task_id: ev.task_id,
                 status: ev.status,
+                check_status: ev.check_status,
+                check_reason: ev.check_reason,
             })
         }
 
@@ -2307,6 +2363,27 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
             })
         }
 
+        "pain_alert" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                severity: String,
+                #[serde(default)]
+                score: f64,
+                #[serde(default)]
+                message: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("pain_alert", e)),
+            };
+            Some(BackendEvent::PainAlert {
+                severity: ev.severity,
+                score: ev.score,
+                message: ev.message,
+            })
+        }
+
         "overdrive_resumed" => {
             #[derive(serde::Deserialize)]
             struct Ev {
@@ -2316,6 +2393,107 @@ fn parse_system_event(data: &[u8]) -> Option<BackendEvent> {
             let ev: Ev = match serde_json::from_slice(data) {
                 Ok(e) => e,
                 Err(e) => return Some(parse_warning("overdrive_resumed", e)),
+            };
+            if ev.message.trim().is_empty() {
+                None
+            } else {
+                Some(BackendEvent::SystemNotice {
+                    message: ev.message,
+                    level: "warning".to_string(),
+                })
+            }
+        }
+
+        // Advisor consult (Agent.Loop.Advisor) resolved and answered — never
+        // silent: the model+cost line always names which advisor actually
+        // ran, whether it was explicitly configured or auto-resolved.
+        "advisor_consulted" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                provider: String,
+                #[serde(default)]
+                model: String,
+                #[serde(default)]
+                cost_usd: f64,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("advisor_consulted", e)),
+            };
+            if ev.model.is_empty() {
+                None
+            } else {
+                Some(BackendEvent::SystemNotice {
+                    message: format!(
+                        "advisor consulted: {}:{} (${:.4})",
+                        ev.provider, ev.model, ev.cost_usd
+                    ),
+                    level: "info".to_string(),
+                })
+            }
+        }
+
+        // A fast-routed step's answer was discarded and re-asked of the
+        // strong model — either because it tried to deliver the turn's
+        // final answer (never allowed) or because the fast model itself
+        // failed. Per-step routing must never silently swap the delivered
+        // answer's model without saying so.
+        "fast_final_answer_reroute" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                reroute_reason: String,
+                #[serde(default)]
+                fast_provider: String,
+                #[serde(default)]
+                fast_model: String,
+                #[serde(default)]
+                strong_provider: String,
+                #[serde(default)]
+                strong_model: String,
+                #[serde(default)]
+                cost_usd: f64,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("fast_final_answer_reroute", e)),
+            };
+            if ev.fast_model.is_empty() || ev.strong_model.is_empty() {
+                None
+            } else {
+                let why = match ev.reroute_reason.as_str() {
+                    "fast_model_error" => "it failed",
+                    _ => "it tried to deliver the final answer",
+                };
+                Some(BackendEvent::SystemNotice {
+                    message: format!(
+                        "{}:{} was routed but {} — re-answered by {}:{} (+${:.4})",
+                        ev.fast_provider,
+                        ev.fast_model,
+                        why,
+                        ev.strong_provider,
+                        ev.strong_model,
+                        ev.cost_usd
+                    ),
+                    level: "warning".to_string(),
+                })
+            }
+        }
+
+        // Explicit per-model fallback (FallbackChain `:model_fallback`) fired
+        // — the requested model was unavailable and a configured fallback
+        // model answered instead. The backend already built a full sentence;
+        // forward it verbatim, same shape as `overdrive_resumed` above.
+        "model_fallback_used" => {
+            #[derive(serde::Deserialize)]
+            struct Ev {
+                #[serde(default)]
+                message: String,
+            }
+            let ev: Ev = match serde_json::from_slice(data) {
+                Ok(e) => e,
+                Err(e) => return Some(parse_warning("model_fallback_used", e)),
             };
             if ev.message.trim().is_empty() {
                 None
@@ -2393,11 +2571,191 @@ mod tests {
     }
 
     #[test]
+    fn llm_response_without_cache_fields_defaults_them_rather_than_failing_to_parse() {
+        // A route/provider that never populates the cache slice (older
+        // backend, or a route this instrument does not cover) must still
+        // parse — the cache fields default to their "nothing observed"
+        // values instead of the whole event becoming a parse warning.
+        let frame = br#"{"duration_ms":120,"usage":{"input_tokens":500,"output_tokens":30}}"#;
+        let event = parse_sse_event("llm_response", frame).expect("must parse");
+
+        match event {
+            BackendEvent::LlmResponse {
+                duration_ms,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                cache_hit_rate,
+                cache_last_break,
+                cache_break_token_cost,
+                cache_break_above_threshold,
+                cache_cold_run,
+            } => {
+                assert_eq!(duration_ms, 120);
+                assert_eq!(input_tokens, 500);
+                assert_eq!(output_tokens, 30);
+                assert_eq!(cache_read_tokens, 0);
+                assert_eq!(cache_creation_tokens, 0);
+                assert_eq!(cache_hit_rate, None);
+                assert_eq!(cache_last_break, None);
+                assert_eq!(cache_break_token_cost, 0);
+                assert!(!cache_break_above_threshold);
+                assert_eq!(cache_cold_run, 0);
+            }
+            other => panic!("expected LlmResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn llm_response_carries_the_full_cache_status_through_to_the_event() {
+        let frame = br#"{
+            "duration_ms": 340,
+            "usage": {
+                "input_tokens": 10000,
+                "output_tokens": 50,
+                "cache_read_input_tokens": 9000,
+                "cache_creation_input_tokens": 0
+            },
+            "cache_status": {
+                "hit_rate": 0.9,
+                "last_break": "model changed (claude-opus-5 \u2192 claude-sonnet-5)",
+                "token_cost": 9000,
+                "above_threshold": true,
+                "cold_run": 0
+            }
+        }"#;
+
+        let event = parse_sse_event("llm_response", frame).expect("must parse");
+
+        match event {
+            BackendEvent::LlmResponse {
+                cache_read_tokens,
+                cache_creation_tokens,
+                cache_hit_rate,
+                cache_last_break,
+                cache_break_token_cost,
+                cache_break_above_threshold,
+                cache_cold_run,
+                ..
+            } => {
+                assert_eq!(cache_read_tokens, 9000);
+                assert_eq!(cache_creation_tokens, 0);
+                assert_eq!(cache_hit_rate, Some(0.9));
+                assert_eq!(
+                    cache_last_break.as_deref(),
+                    Some("model changed (claude-opus-5 \u{2192} claude-sonnet-5)")
+                );
+                assert_eq!(cache_break_token_cost, 9000);
+                assert!(cache_break_above_threshold);
+                assert_eq!(cache_cold_run, 0);
+            }
+            other => panic!("expected LlmResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn resumed_overdrive_is_a_visible_warning() {
         let frame = br#"{"type":"system_event","event":"overdrive_resumed","message":"full auto restored"}"#;
         match parse_sse_event("system_event", frame) {
             Some(BackendEvent::SystemNotice { message, level }) => {
                 assert_eq!(message, "full auto restored");
+                assert_eq!(level, "warning");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn llm_request_carries_the_routed_model_when_step_routing_fired() {
+        let frame = br#"{"type":"llm_request","iteration":3,"max_iterations":100,"model":"claude-sonnet-5","routed_provider":"anthropic","routed_model":"claude-haiku-4-5","routing_reason":"mechanical_tool_mix"}"#;
+        match parse_sse_event("llm_request", frame) {
+            Some(BackendEvent::LlmRequest {
+                iteration,
+                routed_provider,
+                routed_model,
+                routing_reason,
+                ..
+            }) => {
+                assert_eq!(iteration, 3);
+                assert_eq!(routed_provider.as_deref(), Some("anthropic"));
+                assert_eq!(routed_model.as_deref(), Some("claude-haiku-4-5"));
+                assert_eq!(routing_reason.as_deref(), Some("mechanical_tool_mix"));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn llm_request_without_routing_fields_still_parses_an_older_backend_frame() {
+        // Byte-identical to the frame shape before per-step routing existed —
+        // an older backend, or routing genuinely never firing, must not fail
+        // to parse or silently invent a routed model.
+        let frame = br#"{"type":"llm_request","iteration":0,"max_iterations":100}"#;
+        match parse_sse_event("llm_request", frame) {
+            Some(BackendEvent::LlmRequest {
+                iteration,
+                routed_model,
+                ..
+            }) => {
+                assert_eq!(iteration, 0);
+                assert!(routed_model.is_none());
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn advisor_consult_is_a_visible_notice_naming_the_model_and_cost() {
+        let frame = br#"{"type":"system_event","event":"advisor_consulted","provider":"claude_cli","model":"claude-opus-5-5","cost_usd":0.0114}"#;
+        match parse_sse_event("system_event", frame) {
+            Some(BackendEvent::SystemNotice { message, level }) => {
+                assert!(
+                    message.contains("claude_cli:claude-opus-5-5"),
+                    "{}",
+                    message
+                );
+                assert!(message.contains("0.0114"), "{}", message);
+                assert_eq!(level, "info");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fast_final_answer_reroute_is_a_visible_warning_naming_both_models() {
+        let frame = br#"{"type":"system_event","event":"fast_final_answer_reroute","reroute_reason":"final_answer","fast_provider":"anthropic","fast_model":"claude-haiku-4-5","strong_provider":"anthropic","strong_model":"claude-sonnet-5","cost_usd":0.01}"#;
+        match parse_sse_event("system_event", frame) {
+            Some(BackendEvent::SystemNotice { message, level }) => {
+                assert!(message.contains("claude-haiku-4-5"), "{}", message);
+                assert!(message.contains("claude-sonnet-5"), "{}", message);
+                assert!(message.contains("final answer"), "{}", message);
+                assert_eq!(level, "warning");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fast_model_error_reroute_names_the_failure_not_the_final_answer_wording() {
+        let frame = br#"{"type":"system_event","event":"fast_final_answer_reroute","reroute_reason":"fast_model_error","fast_provider":"anthropic","fast_model":"claude-haiku-4-5","strong_provider":"anthropic","strong_model":"claude-sonnet-5","cost_usd":0.01}"#;
+        match parse_sse_event("system_event", frame) {
+            Some(BackendEvent::SystemNotice { message, .. }) => {
+                assert!(message.contains("it failed"), "{}", message);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn model_fallback_used_forwards_the_backends_message_as_a_warning() {
+        let frame = br#"{"type":"system_event","event":"model_fallback_used","message":"[fallback] anthropic:model-a unavailable, answered by anthropic:model-b"}"#;
+        match parse_sse_event("system_event", frame) {
+            Some(BackendEvent::SystemNotice { message, level }) => {
+                assert_eq!(
+                    message,
+                    "[fallback] anthropic:model-a unavailable, answered by anthropic:model-b"
+                );
                 assert_eq!(level, "warning");
             }
             other => panic!("unexpected: {:?}", other),
@@ -3196,6 +3554,38 @@ mod tests {
         let frame = br#"{"type":"system_event","event":"daemon_memory_warning","rss_mb":5000,"beam_mb":3000,"limit_mb":4096,"message":"critical"}"#;
         match parse_sse_event("system_event", frame) {
             Some(BackendEvent::DaemonMemoryWarning { rss_mb, .. }) => assert_eq!(rss_mb, 5000),
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    /// The turn's algedonic pain channel (`Regulation.Pain`) always broadcasts
+    /// wrapped as a `system_event` — this is the only frame shape it ever
+    /// sends, unlike `daemon_memory_warning`'s dual-path legacy support above.
+    #[test]
+    fn parses_pain_alert_wrapped_in_a_system_event_frame() {
+        let frame = br#"{"type":"system_event","event":"pain_alert","session_id":"s1","severity":"high","score":0.62,"message":"stuck: 5 `file_read` probes, no edits, 42s \u2014 re-verifying the same thing"}"#;
+        match parse_sse_event("system_event", frame) {
+            Some(BackendEvent::PainAlert {
+                severity,
+                score,
+                message,
+            }) => {
+                assert_eq!(severity, "high");
+                assert!((score - 0.62).abs() < f64::EPSILON);
+                assert!(message.starts_with("stuck:"));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    /// A `"none"` severity is a CLEAR, not a fresh alert — it must still parse
+    /// cleanly (the app maps it onto `StatusBar::set_pain_alert`, which is
+    /// what actually removes the row).
+    #[test]
+    fn parses_pain_alert_clear() {
+        let frame = br#"{"type":"system_event","event":"pain_alert","session_id":"s1","severity":"none","score":0.0,"message":""}"#;
+        match parse_sse_event("system_event", frame) {
+            Some(BackendEvent::PainAlert { severity, .. }) => assert_eq!(severity, "none"),
             other => panic!("unexpected: {:?}", other),
         }
     }

@@ -1084,6 +1084,10 @@ pub struct ChecklistTaskWire {
     pub subject: String,
     pub status: String,
     pub active_form: Option<String>,
+    #[serde(default)]
+    pub check_status: Option<String>,
+    #[serde(default)]
+    pub check_reason: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]

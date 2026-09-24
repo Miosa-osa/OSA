@@ -233,6 +233,25 @@ config :optimal_system_agent,
   otel_enabled: false,
   otel_adapter: OptimalSystemAgent.Observability.OTel.Noop,
 
+  # ---------------------------------------------------------------------------
+  # Per-step model routing (Providers.StepRouter) and the advisor consult
+  # (Agent.Loop.Advisor) — ON by operator decision. Both degrade gracefully
+  # when there is nothing usable to route/consult to (see each module's
+  # moduledoc): a fast pairing that turns out to be unavailable for the
+  # user's credentials silently keeps the step on the strong model and logs
+  # why once (`StepRouter.mark_unavailable/3`); an advisor with no explicit
+  # `advisor_provider`/`advisor_model` auto-resolves from whatever Anthropic/
+  # OpenAI credential is reachable, falling back to the session's own model
+  # at high effort rather than ever erroring `:advisor_not_configured`.
+  #
+  # `config/test.exs` turns both OFF — the existing suite (and any new test
+  # that does not opt in explicitly) must not exercise real routing/advisor
+  # behavior, and `resolve_pair/1`'s auto-detection reads REAL machine
+  # credentials it has no business touching from a test run.
+  step_routing_enabled: true,
+  advisor_enabled: true,
+  advisor_auto_enabled: true,
+
   # Proactive monitor interval (milliseconds)
   proactive_interval: 30 * 60 * 1000,
 
@@ -399,7 +418,57 @@ config :optimal_system_agent,
   # effective context window — never the full leftover slack.
   dynamic_recall_budget_frac: 0.20,
   # Floor so a genuinely relevant memory still fits on small (8k) windows.
-  dynamic_recall_budget_floor: 512
+  dynamic_recall_budget_floor: 512,
+
+  # ---------------------------------------------------------------------------
+  # Turn regulation — the algedonic pain channel (`Agent.Loop.Regulation.Pain`).
+  # Unifies the existing turn-level detectors (doom-loop repeats, stall,
+  # reasoning overflow, recovery-budget use, long approval waits, cost rising
+  # with nothing changed on disk) into one per-turn pain score with a severity
+  # and a plain-language cause. See `Agent.Loop.Regulation`.
+  # ---------------------------------------------------------------------------
+  regulation_pain: [
+    # Master switch.
+    enabled: true,
+    # Score bands (0.0-1.0). Below `low_at`: no alert. `medium_at`..`question_at`:
+    # surfaced, no steering. `question_at`..`pause_at`: surfaced, and (when the
+    # cause looks like ambiguity) steered toward asking the user one question.
+    # At/above `pause_at`: the turn is PAUSED and control handed back to the
+    # user (item 1).
+    low_at: 0.15,
+    medium_at: 0.35,
+    question_at: 0.55,
+    pause_at: 0.85,
+    # Minimum time between two algedonic emissions for the SAME session, so a
+    # sustained high-pain stretch does not flood the bus/TUI. A severity
+    # INCREASE always bypasses this (see `Regulation.PainChannel`).
+    min_emit_interval_ms: 5_000,
+    # Approval wait (ms) at/above which "waiting on an approval" alone can
+    # explain an elevated score.
+    wait_alarm_ms: 60_000
+  ],
+  regulation_homeostat: [
+    enabled: true,
+    # Context utilization (%) at/above which the homeostat requests relief
+    # (a standalone micro-compact pass — see `Regulation.Homeostat`).
+    context_high_pct: 85.0,
+    # Minimum iterations between two context-relief passes.
+    context_relief_cooldown_iterations: 3,
+    # USD spent THIS TURN, with no disk change, above which the cost-rate
+    # variable reads "too high" and feeds the unified pain score.
+    cost_no_progress_usd: 0.25,
+    # Consecutive iterations with zero measured progress (no edit, no newly
+    # tried tool, no check run clean) before the progress-rate variable reads
+    # "too low" and a single reorientation note is injected.
+    progress_low_streak: 6,
+    # Tool-error ratio (errors / calls) over the rolling window above which
+    # the error-rate variable reads "too high" and feeds the unified pain
+    # score. Requires at least 3 calls in the window to avoid one failing
+    # call in a fresh window reading as 100%.
+    error_rate_high: 0.5,
+    # Rolling window (tool calls) used for the error-rate variable.
+    error_rate_window: 10
+  ]
 
 # Database — SQLite3
 config :optimal_system_agent, OptimalSystemAgent.Store.Repo,
@@ -429,6 +498,33 @@ config :optimal_system_agent,
   # its own edits. Opt in via `post_edit_format_enabled: true` in settings.json
   # or this app env. See Verify.PostEdit.format_enabled?/0.
   post_edit_format: false
+
+# Signal Theory applied to OSA's OWN answers (outbound, mirroring the
+# existing inbound `Agent.Loop.GenreRouter`). ON by default for real use:
+#
+#   * `output_contract_enabled` — `Agent.Loop.MessageHandler` injects a tiny,
+#     genre-classified per-turn directive (`Signal.OutputContract`) telling
+#     the model how to shape THIS answer (numbered actions, answer-first,
+#     recommendation+tradeoffs, ...). Classification is the existing fast,
+#     deterministic, no-LLM-call path, so this adds no round-trip and — being
+#     a per-turn DYNAMIC message, never part of a `Soul` static-base template
+#     — has zero effect on the static prompt size `StaticBaseSizeTest` pins.
+#   * `signal_quality_enforcement_enabled` — `Agent.Loop`'s `run_and_reply/1`
+#     runs the finished answer through `Signal.SnScorer.enforce/2` before
+#     display: TRIMS only sentences that are ENTIRELY a fixed filler phrase
+#     or an exact immediate repeat (never a sentence containing a backtick,
+#     a digit, a `/`, or a shell/VCS command word — see
+#     `Signal.SnScorer.trim/1`'s `protected_sentence?/1`), and FLAGS (logs,
+#     no rewrite) anything that still scores low. Heuristic only, no LLM call.
+#
+# Both are `false` in `config/test.exs` — the existing suite has many call
+# sites elsewhere that assert an exact `build_messages/2,4` message shape or
+# an exact LLM-mock response string, and this repo's test env keeps every
+# such deterministic-path assertion stable (same convention as
+# `classifier_llm_enabled: false` in `config/test.exs`).
+config :optimal_system_agent,
+  output_contract_enabled: true,
+  signal_quality_enforcement_enabled: true
 
 # Auto-mode safety Guardian. In :auto permission tier, the classifier blocks
 # dangerous tool calls and the Guardian pauses unattended execution after

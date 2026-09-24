@@ -36,9 +36,55 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWrite.Handler do
 
   # ── Stage 2: Permission check ──────────────────────────────────────────
 
+  # `run_check` and `complete` can execute a shell command — the task's own
+  # acceptance `check`, set earlier via `add`/`update` and run BY THE HARNESS
+  # in `Tasks.Check.run/2`. That is the entire point of the feature (an item
+  # is only marked done when its check passes, not when the model asserts
+  # it), but it means these two actions are NOT the harmless bookkeeping every
+  # other `task_write` action is — a `{"type": "command", "command": "..."}`
+  # check set by a compromised or injected turn would otherwise bypass the
+  # exact permission gate `shell_execute` enforces on the identical command.
+  # So route a command-type check through THAT gate before letting `execute/2`
+  # reach it, reusing `ShellExecute.Handler.classify_command/1` rather than a
+  # second, drifting copy of the same policy.
   @spec check_permissions(map(), UseContext.t()) ::
           {:allow, map()} | {:deny, String.t()} | {:ask, String.t()}
+  def check_permissions(%{"action" => action} = input, ctx)
+      when action in ["run_check", "complete"] do
+    session_id = resolve_session_id(input, ctx)
+    task_id = Map.get(input, "task_id")
+
+    case command_check_for(session_id, task_id) do
+      nil ->
+        {:allow, input}
+
+      command ->
+        case OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler.classify_command(command) do
+          :allow -> {:allow, input}
+          {:ask, reason} -> {:ask, reason}
+          {:deny, reason} -> {:deny, reason}
+        end
+    end
+  end
+
   def check_permissions(input, _ctx), do: {:allow, input}
+
+  # The command string of `task_id`'s check, IF it is a `"command"`-type
+  # check — `nil` for no task, no check, or a non-command check (file_exists /
+  # symbol_exists never shell out, so they carry no permission question).
+  defp command_check_for(session_id, task_id) when is_binary(task_id) do
+    session_id
+    |> Tasks.get_tasks()
+    |> Enum.find(&(&1.id == task_id))
+    |> case do
+      %{check: %{type: "command", command: command}} when is_binary(command) -> command
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp command_check_for(_session_id, _task_id), do: nil
 
   # ── Stage 3: Execute ───────────────────────────────────────────────────
 
@@ -92,6 +138,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWrite.Handler do
       |> maybe_put(:owner, args["owner"])
       |> maybe_put(:blocked_by, args["blocked_by"])
       |> maybe_put(:metadata, args["metadata"])
+      |> maybe_put(:check, args["check"])
 
     case Tasks.add_task(session_id, title, opts) do
       {:ok, id} -> {:ok, "Created task #{id}: #{title}"}
@@ -126,13 +173,39 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWrite.Handler do
 
   defp do_action("complete", session_id, %{"task_id" => task_id}) do
     case Tasks.complete_task(session_id, task_id) do
-      :ok -> {:ok, "Completed task #{task_id}"}
-      {:error, :not_found} -> {:error, "Task #{task_id} not found"}
-      {:error, reason} -> {:error, "Failed to complete task: #{inspect(reason)}"}
+      :ok ->
+        {:ok, "Completed task #{task_id}"}
+
+      {:error, :not_found} ->
+        {:error, "Task #{task_id} not found"}
+
+      {:error, {:check_failed, output}} ->
+        {:error,
+         "Task #{task_id} NOT completed — its acceptance check failed:\n#{output}\n" <>
+           "Fix the underlying issue, then try `complete` again."}
+
+      {:error, reason} ->
+        {:error, "Failed to complete task: #{inspect(reason)}"}
     end
   end
 
   defp do_action("complete", _session_id, _args),
+    do: {:error, "Missing required parameter: task_id"}
+
+  defp do_action("run_check", session_id, %{"task_id" => task_id}) do
+    case Tasks.run_check(session_id, task_id) do
+      {:ok, check} ->
+        {:ok, "Check for #{task_id}: #{check.status}#{format_check_output(check)}"}
+
+      {:error, :not_found} ->
+        {:error, "Task #{task_id} not found"}
+
+      {:error, :no_check} ->
+        {:error, "Task #{task_id} has no acceptance check"}
+    end
+  end
+
+  defp do_action("run_check", _session_id, _args),
     do: {:error, "Missing required parameter: task_id"}
 
   defp do_action("fail", session_id, %{"task_id" => task_id} = args) do
@@ -164,6 +237,7 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWrite.Handler do
       |> maybe_put(:description, args["description"])
       |> maybe_put(:owner, args["owner"])
       |> maybe_put(:metadata, args["metadata"])
+      |> maybe_put(:check, args["check"])
 
     case Tasks.update_task_fields(session_id, task_id, updates) do
       :ok -> {:ok, "Updated task #{task_id}"}
@@ -251,10 +325,24 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWrite.Handler do
   defp status_icon(:failed), do: "✘"
   defp status_icon(_), do: "◻"
 
-  defp status_suffix(%{status: :in_progress}), do: "  [in_progress]"
-  defp status_suffix(%{status: :failed, reason: nil}), do: "  [failed]"
-  defp status_suffix(%{status: :failed, reason: reason}), do: "  [failed: #{reason}]"
-  defp status_suffix(_), do: ""
+  defp status_suffix(%{status: :in_progress} = task), do: "  [in_progress]" <> check_tag(task)
+  defp status_suffix(%{status: :failed, reason: nil} = task), do: "  [failed]" <> check_tag(task)
+
+  defp status_suffix(%{status: :failed, reason: reason} = task),
+    do: "  [failed: #{reason}]" <> check_tag(task)
+
+  defp status_suffix(task), do: check_tag(task)
+
+  # `[check: passed|failed|pending]` — only for a task that carries one, so a
+  # checkless plan reads exactly as it did before this feature existed.
+  defp check_tag(%{check: %{status: status}}), do: "  [check: #{status}]"
+  defp check_tag(_), do: ""
+
+  defp format_check_output(%{output: output}) when is_binary(output) and output != "" do
+    "\n" <> output
+  end
+
+  defp format_check_output(_), do: ""
 
   defp format_blocked_tag(task) do
     blocked_by = Map.get(task, :blocked_by) || []

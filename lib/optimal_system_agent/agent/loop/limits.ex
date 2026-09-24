@@ -7,7 +7,15 @@ defmodule OptimalSystemAgent.Agent.Loop.Limits do
   Emits the same `:budget_limit_reached` / `:turn_limit_reached` system events
   on the Bus and returns identical error strings.
   """
+  alias OptimalSystemAgent.Agent.SubagentPain
   alias OptimalSystemAgent.Events.Bus
+
+  # Fraction of `max_budget_usd` past which a subagent reports "approaching"
+  # pain to its parent (VSM item 9) — mirrors `Agent.Budget`'s own 80%
+  # session-wide warning threshold. Purely advisory: it does not itself abort
+  # the turn, and it fires at most once per `SubagentPain`'s dedupe window
+  # even though `check/1` runs on every iteration.
+  @approaching_budget_ratio 0.8
 
   @doc """
   Check budget and turn limits for the given loop state.
@@ -49,15 +57,25 @@ defmodule OptimalSystemAgent.Agent.Loop.Limits do
     if is_number(max) and max > 0 do
       current = current_cost(state)
 
-      if current >= max do
-        Bus.emit(:system_event, %{
-          event: :budget_limit_reached,
-          session_id: Map.get(state, :session_id),
-          current_cost: current,
-          limit: max
-        })
+      cond do
+        current >= max ->
+          Bus.emit(:system_event, %{
+            event: :budget_limit_reached,
+            session_id: Map.get(state, :session_id),
+            current_cost: current,
+            limit: max
+          })
 
-        "Budget limit reached ($#{Float.round(current / 1, 4)} / $#{max})"
+          report_subagent_pain(state, :budget_exceeded, :critical, current, max)
+
+          "Budget limit reached ($#{Float.round(current / 1, 4)} / $#{max})"
+
+        current >= max * @approaching_budget_ratio ->
+          report_subagent_pain(state, :budget_approaching, :warning, current, max)
+          nil
+
+        true ->
+          nil
       end
     end
   end
@@ -66,6 +84,26 @@ defmodule OptimalSystemAgent.Agent.Loop.Limits do
     case Map.get(state, :session_cost_usd, 0.0) do
       n when is_number(n) -> n
       _ -> 0.0
+    end
+  end
+
+  # A subagent (any recursion depth) reports its own budget pressure to its
+  # PARENT — `:parent_session_id` is only ever set on a delegated session (see
+  # `Orchestrator.run_fresh_subagent/1`'s `subagent_opts`), so a top-level
+  # session with no parent to tell simply has nothing to report here.
+  defp report_subagent_pain(state, cause, severity, current, max) do
+    case Map.get(state, :parent_session_id) do
+      parent when is_binary(parent) and parent != "" ->
+        session_id = Map.get(state, :session_id, "unknown")
+
+        SubagentPain.report(parent, session_id, cause, severity,
+          display_name: Map.get(state, :display_name) || session_id,
+          role: Map.get(state, :role),
+          detail: %{spent: current, cap: max}
+        )
+
+      _ ->
+        :ok
     end
   end
 

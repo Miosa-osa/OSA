@@ -2556,6 +2556,30 @@ impl App {
             frame.render_widget(para, area);
             return;
         }
+        // Item 1 — the turn's algedonic (pain) channel: a distinct row naming
+        // WHY the turn looks stuck, the moment the backend judges it so —
+        // not just a log line the operator has to go find. Takes priority
+        // over the passive context hint below (a stuck turn is more urgent
+        // than a token-budget notice), but yields to the reconnect notice
+        // above (nothing about this turn can be judged while the stream
+        // itself is down).
+        if let Some((severity, message)) = self.status.pain_alert() {
+            let color = match severity {
+                "critical" | "high" => crate::style::theme().colors.error,
+                _ => crate::style::theme().colors.warning,
+            };
+            let para = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(
+                ratatui::text::Span::styled(
+                    format!("\u{26a0} {}", message),
+                    ratatui::style::Style::default()
+                        .fg(color)
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                ),
+            ))
+            .alignment(ratatui::layout::Alignment::Right);
+            frame.render_widget(para, area);
+            return;
+        }
         // WS12 — CC TokenWarning parity: once the backend's context_pressure
         // report crosses the low threshold, the passive "N% context used" hint
         // becomes an explicit red warning showing the % LEFT until auto-compact

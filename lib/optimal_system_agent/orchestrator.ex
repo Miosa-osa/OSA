@@ -12,7 +12,10 @@ defmodule OptimalSystemAgent.Orchestrator do
   require Logger
 
   alias OptimalSystemAgent.Agent.Loop
+  alias OptimalSystemAgent.Agent.Loop.SpotCheckAuditor
+  alias OptimalSystemAgent.Agent.Loop.VerificationEvidence
   alias OptimalSystemAgent.Agent.Tier
+  alias OptimalSystemAgent.FileLocking.ClaimsBoard
   alias OptimalSystemAgent.Agent.Hooks
   alias OptimalSystemAgent.Agent.RunStore
   alias OptimalSystemAgent.Agent.ExecutionControl
@@ -20,6 +23,7 @@ defmodule OptimalSystemAgent.Orchestrator do
   alias OptimalSystemAgent.Agent.ActiveSkills
   alias OptimalSystemAgent.Agent.BackgroundNotifier
   alias OptimalSystemAgent.Agent.Orchestrator.ResultSummarizer
+  alias OptimalSystemAgent.Agent.SubagentPain
   alias OptimalSystemAgent.Events.Bus
 
   # Real, configurable backstop for a subagent JOIN — deliberately NOT
@@ -288,13 +292,20 @@ defmodule OptimalSystemAgent.Orchestrator do
     role = Map.get(config, :role, "agent")
     tier = Map.get(config, :tier, :specialist)
 
+    # This child's OWN delegation depth (1 = a direct child of a top-level
+    # session, 2 = a grandchild, ...) — the same value `subagent_opts`
+    # threads through below as `:delegation_depth`. Computed once here so
+    # every recursion-scaled default (budget, turn cap, stall thresholds)
+    # agrees on it, rather than each site re-deriving it from `config`.
+    child_depth = Map.get(config, :delegation_depth, 0) + 1
+
     # Resolve model
     provider =
       Map.get(config, :provider) ||
         Application.get_env(:optimal_system_agent, :default_provider, :ollama)
 
     model = Map.get(config, :model) || Tier.model_for(tier, provider)
-    max_iter = Map.get(config, :max_iterations) || Tier.max_iterations(tier)
+    max_iter = Map.get(config, :max_iterations) || Tier.max_iterations(tier, child_depth)
 
     # Generate subagent session ID, or honor a caller-provided ID for
     # background/lifecycle tooling that returns the id before execution starts.
@@ -343,6 +354,19 @@ defmodule OptimalSystemAgent.Orchestrator do
       background: Map.get(config, :background_dispatch) == true
     })
 
+    # Claims board (VSM item 7 — anti-oscillation for parallel work): register
+    # this subagent's task as an active claim so a SIBLING dispatched moments
+    # later (another fan-out member, another `delegate` call) can see it via
+    # `claims_board list` before starting the same investigation. A conflicting
+    # existing claim is surfaced (logged + a system event) but never blocks
+    # dispatch here — this automatic registration is advisory-only; the
+    # `claims_board` tool's explicit `claim` action is where opt-in blocking
+    # (`:claims_board_block_on_conflict`) actually applies. A granted claim is
+    # released by `ClaimsBoard`'s own liveness sweep once this subagent's
+    # process is no longer registered (finishes OR dies) — no explicit release
+    # call needed on any of this function's several exit paths.
+    register_task_claim(parent_id, subagent_id, task, role)
+
     ensure_execution_control(subagent_id, config, %{
       parent_session_id: parent_id,
       task: task,
@@ -386,7 +410,7 @@ defmodule OptimalSystemAgent.Orchestrator do
       # The per-subagent spend ceiling (per-call override or the tier default),
       # so the TUI can render live cost against its cap ("$2.48 / $4.00") instead
       # of an unbounded-looking number. Same value enforced in run_subagent.
-      budget_cap_usd: Map.get(config, :max_budget_usd) || Tier.max_budget_usd(tier),
+      budget_cap_usd: Map.get(config, :max_budget_usd) || Tier.max_budget_usd(tier, child_depth),
       # Age of the RUN, not of this frame. The run row is created at DISPATCH,
       # so a subagent that waited behind the concurrency cap reports the wait it
       # actually did rather than restarting the clock when it finally starts —
@@ -537,16 +561,18 @@ defmodule OptimalSystemAgent.Orchestrator do
       # the *parent's* depth (0 for a top-level session, set by the delegate
       # handler from its UseContext). ToolFilter strips the child's spawning
       # tools once this reaches the configured max — the fork-bomb ceiling.
-      delegation_depth: Map.get(config, :delegation_depth, 0) + 1,
+      delegation_depth: child_depth,
       # Per-subagent spend ceiling. A caller-supplied value wins; otherwise the
-      # child inherits its TIER default (`Tier.max_budget_usd/1`, elite $8 /
-      # specialist $4 / utility $1.50) so EVERY subagent path — delegate,
-      # orchestrate, swarm, fleet — is bounded by dollars, not just by the turn
-      # cap. The child Loop aborts its own run mid-loop via
+      # child inherits its TIER default (`Tier.max_budget_usd/2`, elite $8 /
+      # specialist $4 / utility $1.50 at depth 1, shrinking per `Tier.depth_scale/1`
+      # at every level deeper) so EVERY subagent path — delegate, orchestrate,
+      # swarm, fleet — is bounded by dollars, not just by the turn cap, AND a
+      # sub-delegation cannot re-inflate back up to (or past) what its own
+      # parent was given. The child Loop aborts its own run mid-loop via
       # `Loop.Limits.budget_exceeded?` once it crosses the cap, so a wide fan-out
       # (or a single 120-turn elite) cannot burn unbounded spend. Enforced per
       # child; the parent's own budget is independent.
-      max_budget_usd: Map.get(config, :max_budget_usd) || Tier.max_budget_usd(tier),
+      max_budget_usd: Map.get(config, :max_budget_usd) || Tier.max_budget_usd(tier, child_depth),
       # Speed/cost priority (routes a service_tier for OpenAI; also set the
       # quality tier + provider order in DelegationRouter).
       priority: Map.get(config, :priority)
@@ -577,6 +603,31 @@ defmodule OptimalSystemAgent.Orchestrator do
           "waiting for the first response from #{model}"
         )
 
+        # Ensure SOMETHING is listening for this parent's `:subagent_pain` /
+        # stall events and forwarding them into its own turn — not just the
+        # background-dispatch path, which is the only caller that used to
+        # call this. Idempotent (returns the existing notifier if one is
+        # already running), so calling it again here for a background run is
+        # harmless.
+        BackgroundNotifier.ensure_started(parent_id)
+
+        # Every subagent is itself a viable system (VSM item 9): it gets its
+        # own stall/pain detection, not just the background-dispatch path.
+        # `do_run_background/2` already starts one covering the ADMISSION
+        # QUEUE wait (before this function is even reached) — skip a second,
+        # redundant watcher there. Every other path (a plain `run_subagent/1`
+        # call, a `delegate` foreground call, a `run_parallel`/fan-out wave
+        # member, a read-only skeptic panel member) used to have NO progressive
+        # stall observation at all: the only thing that could ever catch a
+        # wedged one was the outer join timeout, sometimes days away. Starting
+        # it here, uniformly, means a stuck child surfaces to the parent's TUI
+        # (a separate PubSub-subscribed process, reachable even while the
+        # parent Loop itself is blocked joining this child) within minutes
+        # instead of at the join ceiling.
+        unless Map.get(config, :background_dispatch) == true do
+          start_stall_watcher(parent_id, subagent_id, display_name, role, tier, child_depth)
+        end
+
         # Execute the task (blocking call)
         result =
           execute_and_collect(subagent_id, task, parent_id, role, max_iter, worktree_info,
@@ -593,6 +644,18 @@ defmodule OptimalSystemAgent.Orchestrator do
             timeout_ms: Map.get(config, :timeout_ms),
             stop_ticket: Map.get(config, :stop_ticket)
           )
+
+        # VSM item 9 — a subagent's own claim of success is judged by the SAME
+        # cheap spot-check tier a top-level turn's completion claim is
+        # (`Agent.Loop.GoalVerifier`'s Tier 1.5), scaled down for the child's
+        # depth. This does NOT escalate to a full skeptic panel on failure —
+        # spawning a panel of MORE subagents from inside a delegated child is
+        # exactly the unbounded-recursion shape item 9 exists to prevent.
+        # Instead a failed spot check ANNOTATES the result (so the parent model
+        # sees a claim was NOT independently confirmed, rather than silently
+        # trusting it) and reports `:spot_check_failed` pain.
+        result =
+          maybe_spot_check_result(result, subagent_id, parent_id, display_name, role, child_depth)
 
         # Fire subagent_stop hook (learning capture, telemetry)
         {tool_uses_final, tokens_final} = get_subagent_stats(subagent_id)
@@ -686,6 +749,86 @@ defmodule OptimalSystemAgent.Orchestrator do
   #   2. If the outer deadline is hit anyway, the task gets a further
   #      grace window to finish persisting BEFORE anything is killed. Only a
   #      task that is still stuck after that is reaped, and loudly.
+
+  # A subagent's own claim of success is not taken on faith any more than a
+  # top-level turn's is — see the call site's comment in `run_fresh_subagent/1`.
+  # Skips entirely (no audit, no pain, `result` unchanged) when the subagent
+  # made no successful write: a pure research/read-only teammate has no
+  # "did the claimed change land" claim to spot-check at all, and auditing it
+  # anyway would be pure noise on the common case this is meant to stay cheap
+  # for.
+  defp maybe_spot_check_result({:ok, text}, subagent_id, parent_id, display_name, role, depth) do
+    if has_write_claim?(subagent_id) do
+      # Depth-scaled sample cap (VSM item 9: the audit itself is inherited
+      # from the parent's configuration and scaled down) — a direct child
+      # gets the same 3-sample budget the top-level goal verifier's spot
+      # check uses; each level deeper samples less. `allow_rerun?: false`:
+      # this runs from the ORCHESTRATOR, not the child's own working
+      # directory, and the child's worktree (if any) may already be mid
+      # teardown by the time this runs — re-executing a command from here is
+      # not a well-defined operation the way it is inside `GoalVerifier`'s
+      # own spot check, called from within the turn that produced the diff.
+      max_samples = max(round(3 * Tier.depth_scale(depth)), 1)
+
+      case SpotCheckAuditor.spot_check(subagent_id, max_samples: max_samples, allow_rerun?: false) do
+        {:pass, _report} ->
+          {:ok, text}
+
+        {:fail, reason, _report} ->
+          SubagentPain.report(parent_id, subagent_id, :spot_check_failed, :warning,
+            display_name: display_name,
+            role: role,
+            detail: %{reason: reason}
+          )
+
+          {:ok, "[unverified — spot check: #{reason}]\n\n" <> text}
+      end
+    else
+      {:ok, text}
+    end
+  rescue
+    _ -> {:ok, text}
+  end
+
+  defp maybe_spot_check_result(other, _subagent_id, _parent_id, _display_name, _role, _depth),
+    do: other
+
+  defp register_task_claim(parent_id, subagent_id, task, role) do
+    case ClaimsBoard.claim_task(subagent_id, task, note: role) do
+      {:ok, _claim_id} ->
+        :ok
+
+      {:conflict, holder} ->
+        Logger.info(
+          "[Orchestrator] #{subagent_id}'s task overlaps an active claim by " <>
+            "#{holder.agent_id} (#{inspect(holder.target)}) — proceeding (advisory, not blocked)"
+        )
+
+        Bus.emit(:system_event, %{
+          event: :claims_board_conflict,
+          session_id: parent_id,
+          agent_id: subagent_id,
+          kind: :task,
+          conflicting_agent: holder.agent_id,
+          target: holder.target
+        })
+
+        :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp has_write_claim?(subagent_id) do
+    Enum.any?(VerificationEvidence.entries(subagent_id), fn e ->
+      Map.get(e, :kind) == :write and Map.get(e, :success) == true
+    end)
+  rescue
+    _ -> false
+  end
+
   @doc false
   # Public only so the deadline ladder can be unit-tested without booting a
   # subagent Loop.
@@ -1232,7 +1375,14 @@ defmodule OptimalSystemAgent.Orchestrator do
       recovery_state: "restartable"
     })
 
-    start_stall_watcher(parent_id, subagent_id, display_name, role)
+    start_stall_watcher(
+      parent_id,
+      subagent_id,
+      display_name,
+      role,
+      Map.get(config, :tier, :specialist),
+      Map.get(config, :delegation_depth, 0) + 1
+    )
 
     # The wall clock the USER experiences starts here, at dispatch — not at
     # admission. See `dispatched_at` in the completion payload below.
@@ -2427,11 +2577,38 @@ defmodule OptimalSystemAgent.Orchestrator do
         @stall_threshold_working_ms
       )
 
-  @doc false
-  @spec start_stall_watcher(String.t(), String.t(), String.t(), String.t()) :: :ok
-  def start_stall_watcher(parent_id, subagent_id, display_name, role) do
+  @doc """
+  Start the per-subagent stall watcher.
+
+  `tier` and `depth` (delegation depth, 1 = a direct child) scale the
+  observation thresholds via `Tier.tier_scale/1` / `Tier.depth_scale/1` — the
+  same recursion-scaling idea as the budget/turn caps (VSM item 9): a
+  `:utility` worker doing quick, narrow work is judged stalled sooner than an
+  `:elite` worker doing slow, deep work, and a worker several delegations deep
+  gets a tighter window than a direct child. Both default to the flat,
+  unscaled thresholds (`:specialist`, depth 1) when omitted, so every existing
+  call site keeps its exact prior behavior.
+  """
+  @spec start_stall_watcher(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          Tier.tier(),
+          pos_integer()
+        ) :: :ok
+  def start_stall_watcher(
+        parent_id,
+        subagent_id,
+        display_name,
+        role,
+        tier \\ :specialist,
+        depth \\ 1
+      ) do
+    thresholds = stall_thresholds(tier, depth)
+
     Task.Supervisor.start_child(OptimalSystemAgent.TaskSupervisor, fn ->
-      watch_for_stall(parent_id, subagent_id, display_name, role, nil, progressing())
+      watch_for_stall(parent_id, subagent_id, display_name, role, nil, progressing(), thresholds)
     end)
 
     :ok
@@ -2440,6 +2617,22 @@ defmodule OptimalSystemAgent.Orchestrator do
   catch
     :exit, _ -> :ok
   end
+
+  # Scaled thresholds for ONE watcher instance, computed once at start so the
+  # recursive poll loop never has to re-derive them (or know about tier/depth
+  # at all beyond carrying this map through).
+  defp stall_thresholds(tier, depth) do
+    scale = Tier.tier_scale(tier) * Tier.depth_scale(depth)
+
+    %{
+      starting_ms: round(stall_threshold_ms(:starting) * scale),
+      working_ms: round(stall_threshold_ms(:working) * scale),
+      hard_stop_ms: round(stall_hard_stop_ms() * scale)
+    }
+  end
+
+  defp threshold_for(thresholds, :starting), do: thresholds.starting_ms
+  defp threshold_for(thresholds, :working), do: thresholds.working_ms
 
   # Backoff for repeat stall reports.
   #
@@ -2453,8 +2646,7 @@ defmodule OptimalSystemAgent.Orchestrator do
   # stall it has already been told about.
   @max_stall_report_gap_ms 60 * 60 * 1000
 
-  defp stall_report_gap_ms(phase, reports) do
-    base = stall_threshold_ms(phase)
+  defp stall_report_gap_ms(base, reports) do
     # Cap the shift before computing so a long-lived watcher cannot build a
     # bignum here.
     scale = Bitwise.bsl(1, min(reports, 16))
@@ -2473,7 +2665,7 @@ defmodule OptimalSystemAgent.Orchestrator do
   #                     a two-hour-old one.
   #   :reports        - how many times we have already reported THIS stall, which
   #                     drives the backoff above. Reset whenever work lands.
-  defp watch_for_stall(parent_id, subagent_id, display_name, role, last_print, stall) do
+  defp watch_for_stall(parent_id, subagent_id, display_name, role, last_print, stall, thresholds) do
     Process.sleep(stall_poll_interval_ms())
 
     case RunStore.get(subagent_id) do
@@ -2486,17 +2678,34 @@ defmodule OptimalSystemAgent.Orchestrator do
       # life — the one component that could have explained the silence was the
       # first thing the silence took out.)
       %{status: :running, phase: :queued} ->
-        watch_for_stall(parent_id, subagent_id, display_name, role, last_print, progressing())
+        watch_for_stall(
+          parent_id,
+          subagent_id,
+          display_name,
+          role,
+          last_print,
+          progressing(),
+          thresholds
+        )
 
       %{status: :running} = run ->
         print = progress_fingerprint(run)
         phase = if run.tool_count > 0, do: :working, else: :starting
+        base = threshold_for(thresholds, phase)
 
         cond do
           print != last_print ->
-            watch_for_stall(parent_id, subagent_id, display_name, role, print, progressing())
+            watch_for_stall(
+              parent_id,
+              subagent_id,
+              display_name,
+              role,
+              print,
+              progressing(),
+              thresholds
+            )
 
-          now_ms() - stall.last_change_at >= stall_report_gap_ms(phase, stall.reports) and
+          now_ms() - stall.last_change_at >= stall_report_gap_ms(base, stall.reports) and
               not stall.nudged ->
             # FIRST stall for this agent: bounded, non-destructive recovery.
             #
@@ -2517,22 +2726,30 @@ defmodule OptimalSystemAgent.Orchestrator do
 
             nudge_stalled(parent_id, subagent_id, display_name, role, phase)
 
-            watch_for_stall(parent_id, subagent_id, display_name, role, print, %{
-              last_change_at: now_ms(),
-              since: since,
-              reports: stall.reports,
-              nudged: true
-            })
+            watch_for_stall(
+              parent_id,
+              subagent_id,
+              display_name,
+              role,
+              print,
+              %{
+                last_change_at: now_ms(),
+                since: since,
+                reports: stall.reports,
+                nudged: true
+              },
+              thresholds
+            )
 
           stall.nudged and
-              now_ms() - (stall.since || stall.last_change_at) >= stall_hard_stop_ms() ->
-            # Definitely-dead hang: no progress for the hard threshold (default
-            # 2h) even AFTER a nudge. Auto-stop it and report it cancelled so the
+              now_ms() - (stall.since || stall.last_change_at) >= thresholds.hard_stop_ms ->
+            # Definitely-dead hang: no progress for the (scaled) hard threshold
+            # even AFTER a nudge. Auto-stop it and report it cancelled so the
             # operator/coordinator doesn't have to notice and `task_stop` it by
             # hand. Safe against the days requirement: a healthy long/slow agent
-            # makes SOME progress well inside 2h, and every legitimate long call
-            # resolves sooner (MCP 60s, shell backgrounds, provider retries
-            # ~90min). Stop watching once stopped.
+            # makes SOME progress well inside the window, and every legitimate
+            # long call resolves sooner (MCP 60s, shell backgrounds, provider
+            # retries ~90min). Stop watching once stopped.
             auto_stop_stalled(
               parent_id,
               subagent_id,
@@ -2544,7 +2761,7 @@ defmodule OptimalSystemAgent.Orchestrator do
 
             :ok
 
-          now_ms() - stall.last_change_at >= stall_report_gap_ms(phase, stall.reports) ->
+          now_ms() - stall.last_change_at >= stall_report_gap_ms(base, stall.reports) ->
             since = stall.since || stall.last_change_at
 
             emit_stall(
@@ -2564,18 +2781,31 @@ defmodule OptimalSystemAgent.Orchestrator do
             # after — including a run that recovered and stalled again, and
             # including one that never came back at all. Continuing costs one
             # poll every 30s and means the observation keeps up with reality.
-            watch_for_stall(parent_id, subagent_id, display_name, role, print, %{
-              last_change_at: now_ms(),
-              since: since,
-              reports: stall.reports + 1,
-              nudged: true
-            })
+            watch_for_stall(
+              parent_id,
+              subagent_id,
+              display_name,
+              role,
+              print,
+              %{
+                last_change_at: now_ms(),
+                since: since,
+                reports: stall.reports + 1,
+                nudged: true
+              },
+              thresholds
+            )
 
           true ->
-            watch_for_stall(parent_id, subagent_id, display_name, role, print, %{
-              stall
-              | since: stall.since || stall.last_change_at
-            })
+            watch_for_stall(
+              parent_id,
+              subagent_id,
+              display_name,
+              role,
+              print,
+              %{stall | since: stall.since || stall.last_change_at},
+              thresholds
+            )
         end
 
       # Terminal, or the row was pruned: nothing left to watch.
@@ -2709,6 +2939,19 @@ defmodule OptimalSystemAgent.Orchestrator do
           {:osa_event, Map.put(payload, :type, :background_agent_auto_stopped)}
         )
 
+        # VSM item 9 — the structured pain escalation, distinct from the
+        # `:background_agent_auto_stopped` event above: that event is this
+        # SUBSYSTEM's own lifecycle notice (consumed by BackgroundNotifier's
+        # existing terminal-result path); this is the generic cross-cause pain
+        # channel every recursion level reports through, so a listener does not
+        # need to know every individual lifecycle event name to answer "is any
+        # of my subagents in trouble, and how badly".
+        SubagentPain.report(parent_id, subagent_id, :stall_hard_stop, :critical,
+          display_name: display_name,
+          role: role,
+          detail: %{stalled_ms: stalled_ms, phase: phase}
+        )
+
         :ok
 
       _ ->
@@ -2776,6 +3019,17 @@ defmodule OptimalSystemAgent.Orchestrator do
       OptimalSystemAgent.PubSub,
       "osa:session:#{parent_id}",
       {:osa_event, Map.put(payload, :type, :background_agent_stalled)}
+    )
+
+    # Generic pain escalation (VSM item 9) alongside the subsystem-specific
+    # `:background_agent_stalled` event above — see the matching note in
+    # `auto_stop_stalled/6`. `:warning`, not `:critical`: nothing has been
+    # stopped yet, and the watcher itself already tried one non-destructive
+    # nudge before this report is ever reached.
+    SubagentPain.report(parent_id, subagent_id, :stalled, :warning,
+      display_name: display_name,
+      role: role,
+      detail: %{stalled_ms: stalled_ms, phase: phase}
     )
 
     :ok

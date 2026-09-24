@@ -61,6 +61,17 @@ defmodule OptimalSystemAgent.Settings.Schema do
     "mcp_exclude" =>
       {:string_list,
        ~s(Use a list of server names to never load, from any source: {"mcp_exclude": ["serena"]})},
+    "budget_note_enabled" =>
+      {:boolean, "Use true or false — show the per-step turn-budget pacing note (default true)"},
+    "budget_turn_tokens" =>
+      {:pos_integer,
+       "Use a whole number of output tokens — the target for a WHOLE turn, e.g. 150000. Unset scales with effort level"},
+    "budget_warn_steps" =>
+      {:pos_integer,
+       "Use a whole-number step count — below this many steps remaining, the note switches to wrap-up wording (default 10)"},
+    "budget_warn_frac" =>
+      {:number,
+       "Use a fraction 0-1 — below this share of the token budget remaining, the note switches to wrap-up wording (default 0.15)"},
     "lean_prompt" =>
       {:boolean,
        "Use true or false — skip unfilled bundled rule templates in the system prompt " <>

@@ -26,6 +26,7 @@ defmodule OptimalSystemAgent.Agent.Loop.PermissionBroker do
   require Logger
 
   alias OptimalSystemAgent.Agent.Attendance
+  alias OptimalSystemAgent.Events.Bus
 
   @responses :osa_permission_responses
   @session_allows :osa_permission_session_allows
@@ -120,6 +121,7 @@ defmodule OptimalSystemAgent.Agent.Loop.PermissionBroker do
       result = poll(session_id, request_id, timeout)
       elapsed = System.monotonic_time(:millisecond) - started
       log_outcome(result, request_id, elapsed)
+      emit_wait(session_id, request_id, elapsed, result)
       result
     else
       Logger.info(
@@ -139,6 +141,35 @@ defmodule OptimalSystemAgent.Agent.Loop.PermissionBroker do
 
   defp log_outcome({:error, reason}, request_id, ms),
     do: Logger.info("[permissions] #{request_id} ended #{inspect(reason)} after #{ms}ms")
+
+  # A wait that actually parked the turn on a human is exactly the "long wait"
+  # signal the regulation homeostat needs — it happens in a Task spawned by
+  # `Agent.Loop.ToolOrchestrator`, a different process than the one running the
+  # ReAct loop, so the elapsed time cannot flow back through the normal `state`
+  # return value the way every other loop-local signal does. Emitted on the
+  # Bus (best-effort, never raises) and picked up by
+  # `Agent.Loop.Regulation.PainChannel`, which is the one long-lived process
+  # that accumulates it back onto the originating session.
+  defp emit_wait(session_id, request_id, elapsed_ms, result) when is_binary(session_id) do
+    Bus.emit(:system_event, %{
+      event: :permission_wait,
+      session_id: session_id,
+      request_id: request_id,
+      elapsed_ms: elapsed_ms,
+      outcome: wait_outcome(result)
+    })
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp emit_wait(_session_id, _request_id, _elapsed_ms, _result), do: :ok
+
+  defp wait_outcome({:ok, %{decision: d}}), do: d
+  defp wait_outcome({:error, reason}), do: reason
 
   @doc "Remember an \"allow for this session\" grant for `tool`."
   @spec allow_for_session(String.t() | nil, String.t()) :: :ok

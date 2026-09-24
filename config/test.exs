@@ -62,11 +62,30 @@ config :optimal_system_agent, OptimalSystemAgent.Store.Repo,
 # exercised and tests remain fast, repeatable, and provider-independent.
 config :optimal_system_agent, classifier_llm_enabled: false
 
+# Output-contract injection and S/N enforcement default ON in prod
+# (config/config.exs) but stay OFF here: many existing tests elsewhere
+# assert an exact `MessageHandler.build_messages/2,4` shape or an exact
+# LLM-mock response string, and this keeps that a stable, deterministic
+# baseline. The dedicated suites for both
+# (test/agent/loop/message_handler_test.exs,
+# test/optimal_system_agent/agent/loop_signal_quality_test.exs) flip them on
+# explicitly per-test via `Application.put_env/3` and restore this default on
+# `on_exit`.
+config :optimal_system_agent,
+  output_contract_enabled: false,
+  signal_quality_enforcement_enabled: false
+
 # Disable the settings file watcher in tests — the suite changes cwd per test,
 # so the watcher would see every project-path change as an external edit and
 # fire spurious settings_changed events / cache resets. The watcher's own test
 # re-enables it explicitly around a supervised instance.
 config :optimal_system_agent, settings_watcher_enabled: false
+
+# Disable the RepoMap background watcher's app-supervised singleton in tests,
+# same reasoning as settings_watcher_enabled above — plus it shares the
+# watcher's registered name with `RepoMap.WatcherTest`'s own supervised
+# instance, which would otherwise collide with `{:error, {:already_started, _}}`.
+config :optimal_system_agent, repo_map_watcher_enabled: false
 
 # Disable Onboarding.live_env/1's ~/.osa/.env (and ./.env) disk fallback in
 # tests — same reasoning as the .env FILE load config/runtime.exs itself
@@ -124,6 +143,19 @@ config :optimal_system_agent, mcp_discovery_enabled: false
 # the suite ran. The Browser unit test re-enables this explicitly, with PATH
 # pointed at a harmless stub opener.
 config :optimal_system_agent, browser_open_enabled: false
+
+# Per-step model routing and the advisor consult default ON in real use
+# (config/config.exs) but OFF here: the suite must exercise the (many)
+# existing tests that were written before either feature existed without
+# either one silently firing, and `Advisor.resolve_pair/1`'s auto-detection
+# in particular reads REAL on-disk credentials
+# (`Auth.SubscriptionStore`/`OSA_HOME`) that a test run has no business
+# touching. Tests FOR these features turn them on explicitly and (where the
+# auto-resolution path is exercised) redirect `OSA_HOME` to an isolated temp
+# dir — see `test/agent/loop/advisor_resolution_test.exs`.
+config :optimal_system_agent, step_routing_enabled: false
+config :optimal_system_agent, advisor_enabled: false
+config :optimal_system_agent, advisor_auto_enabled: false
 
 config :optimal_system_agent, knowledge_backend: MiosaKnowledge.Backend.ETS
 config :optimal_system_agent, compactor_llm_enabled: false
@@ -234,3 +266,13 @@ config :optimal_system_agent, :mcp_memory_check_ms, nil
 # samples RSS by shelling out to `ps` on a timer. Tests exercise the pure
 # `decide/4` core and the measurement functions directly instead.
 config :optimal_system_agent, :daemon_memory_check_ms, nil
+
+# `Prefetch.Cache` refuses to cache a file whose mtime is "racily fresh" —
+# modified within the last whole second — because a SECOND write landing in
+# that same second can leave mtime/size/inode all unchanged (Erlang's
+# `File.stat/2` mtime is whole-second-granular), which would make a stale
+# rewrite undetectable. Tests write a fixture and cache it in the same
+# instant on purpose, so the racy-window guard is disabled here; the ONE test
+# that exercises the guard itself overrides this back to the production
+# default locally.
+config :optimal_system_agent, :prefetch_settle_seconds, 0

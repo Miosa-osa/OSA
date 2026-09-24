@@ -6,7 +6,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   1. Check cancel flag and iteration budget
   2. Build context (with frozen system-prompt cache)
   3. Inject memory on first iteration
-  4. Inject iteration budget message
+  4. Resolve tool selection and the per-step pacing note (`TurnBudget`)
+     against the SESSION's real effort, then call the LLM inside a
+     turn-scoped effort override (`with_turn_effort/2`) that only ever
+     touches request-level, cache-safe params (thinking depth,
+     reasoning_effort) — never `tools` or `context.messages`
   5. Call LLM via `LLMClient.llm_chat_stream/3`
   6. Handle result:
      - No tool calls → apply behavioural nudges or return final response
@@ -45,10 +49,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   alias OptimalSystemAgent.Agent.Loop.GoalVerifier
   alias OptimalSystemAgent.Agent.Loop.GoalTracker
   alias OptimalSystemAgent.Agent.Loop.ProactiveCompaction
+  alias OptimalSystemAgent.Agent.Loop.TurnBudget
   alias OptimalSystemAgent.Agent.Effort
   alias OptimalSystemAgent.Agent.FastPath
   alias OptimalSystemAgent.Agent.Cancellation
   alias OptimalSystemAgent.Providers.StopReason
+  alias OptimalSystemAgent.Providers.StepRouter
 
   @cancel_table :osa_cancel_flags
 
@@ -634,7 +640,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
     # Advance the cross-turn goal tracker once per new top-level turn (iteration 0)
     # so its reverify cadence + stall detection track real turn progress.
-    if state.iteration == 0, do: GoalTracker.tick_turn(state.session_id)
+    if state.iteration == 0 do
+      GoalTracker.tick_turn(state.session_id)
+      TurnBudget.start_turn(state.session_id)
+      # Fresh advisor spend bucket per top-level turn (see `Advisor`
+      # moduledoc) — mirrors GoalTracker's own turn-boundary tick above.
+      OptimalSystemAgent.Agent.Loop.Advisor.reset_turn_budget(state.session_id)
+    end
 
     # Start async memory prefetch on iteration 0 (fires search while we build context)
     memory_task =
@@ -678,13 +690,29 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       end
 
     context = inject_pending_agent_messages(context, state)
-    context = inject_iteration_budget(context, state)
 
     max_iter = max_iterations(state)
 
     Logger.debug(
       "[loop] About to call LLM for #{state.session_id}, iteration #{state.iteration + 1}/#{max_iter}"
     )
+
+    # Per-step model routing (opt-in, off by default — see `StepRouter`
+    # moduledoc): decide ONCE, before either user-visible event fires, and
+    # thread the same decision through the request event, the call itself,
+    # accounting, and the response event, so all four ever agree on which
+    # model actually ran this step. `restore_route` puts the user's chosen
+    # provider/model back on `state` right before this function returns —
+    # every OTHER field this call mutated (messages, tokens, ledger) survives.
+    routing = StepRouter.decide(state)
+    {state, restore_route} = StepRouter.apply(state, routing)
+
+    if routing.route == :fast do
+      Logger.info(
+        "[route] step #{state.iteration + 1} → #{routing.provider}:#{routing.model} " <>
+          "(#{routing.reason}: #{routing.explain})"
+      )
+    end
 
     Bus.emit(
       :llm_request,
@@ -695,7 +723,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         # as the loop approaches the cap (item 6). max_iter computed just above.
         max_iterations: max_iter,
         model: state.model,
-        agent: state.session_id
+        agent: state.session_id,
+        # Which model is ACTUALLY about to run this step, and why — `model`
+        # above stays byte-identical when routing kept the strong model, so
+        # existing consumers see no change.
+        routed_provider: to_string(routing.provider),
+        routed_model: routing.model,
+        routing_reason: to_string(routing.reason)
       },
       Observability.annotate(state, source: "agent.react_loop")
     )
@@ -720,13 +754,40 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     streaming_ctx = StreamingToolExecutor.start(state)
     Process.put(:osa_streaming_tool_ctx, streaming_ctx)
 
-    # The effort read by thinking_config, ToolFilter and the provider's
-    # reasoning_decision must all see the same per-turn level, so the override
-    # wraps the whole request-building region, not just the call.
+    # Tool selection is resolved OUTSIDE `with_turn_effort`, deliberately.
+    # `ToolFilter.filter/2` (via `FastPath.select_tools/2` and
+    # `Effort.tool_budget/0`) reads `Effort.current()`, and tool definitions
+    # sit at the front of the CACHED prefix on every provider that honours
+    # `cache_control`. `with_turn_effort` floors a continuation turn down to
+    # `:fast` for snappier tool-loop digestion — a legitimate depth choice for
+    # `thinking_config`/`reasoning_decision`, both request-level params that
+    # never touch `messages` or `tools` — but resolving the TOOL LIST inside
+    # that same override meant which tools were sent changed with iteration
+    # position, busting the tools-array cache breakpoint on every single
+    # continuation. Computing it here, once, against the SESSION's real
+    # effort, is the fix: a continuation still thinks less, it just never
+    # changes what it can call. See `Agent.Loop.TurnBudget` for the sibling
+    # fix to the same class of bug (a per-step note that must not touch the
+    # cached region either).
+    tools_for_call = ToolFilter.filter(state.tools, state)
+
+    # Per-step pacing note (a compact, cache-safe countdown -- steps, output
+    # tokens against a turn target, elapsed time). Also resolved outside the
+    # effort closure: it is unrelated to thinking depth and travels through
+    # `opts[:budget_note]`, appended to the wire messages only AFTER
+    # `Providers.PromptCache.restructure/3` has placed its cache_control
+    # breakpoint (`Providers.Registry.append_budget_note/2`) -- never inside
+    # `context.messages`, which would risk being the message that breakpoint
+    # lands on.
+    budget_note = TurnBudget.note(state, max_iter)
+
+    # The effort read by thinking_config and the provider's reasoning_decision
+    # must both see the same per-turn level, so the override wraps the LLM
+    # call itself -- but NOT tool selection or the budget note above, both
+    # resolved against the session's real settings a moment ago.
     result =
       with_turn_effort(state, fn ->
         thinking_opts = LLMClient.thinking_config(state)
-        tools_for_call = ToolFilter.filter(state.tools, state)
 
         llm_opts = [
           tools: tools_for_call,
@@ -740,6 +801,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
         llm_opts =
           if thinking_opts, do: Keyword.put(llm_opts, :thinking, thinking_opts), else: llm_opts
+
+        llm_opts =
+          if budget_note,
+            do: Keyword.put(llm_opts, :budget_note, budget_note),
+            else: llm_opts
 
         LLMClient.llm_chat_stream(state, context.messages, llm_opts)
       end)
@@ -792,7 +858,29 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     # Record real token usage + cost for this LLM round-trip and accumulate it
     # into the per-session accounting (primitive #29). Also refreshes
     # last_input_tokens for context-pressure telemetry.
+    cost_before = Map.get(state, :session_cost_usd) || 0.0
     state = Accounting.record(state, usage, billing_opts)
+    # Same round-trip's output tokens, into the PER-TURN pacing counter
+    # (`TurnBudget`) that the NEXT iteration's budget note reads. Separate
+    # from `Accounting`, which is session-cumulative and never resets.
+    TurnBudget.record(state.session_id, usage)
+
+    # `/trace`: the same measured duration and usage as the `:llm_response`
+    # emit below, plus what this round-trip added to the session's bill.
+    OptimalSystemAgent.Agent.TurnTrace.record_llm(state.session_id, %{
+      duration_ms: duration_ms,
+      model: state.model,
+      usage: usage,
+      cost_usd: (Map.get(state, :session_cost_usd) || 0.0) - cost_before,
+      ok: match?({:ok, _}, result)
+    })
+
+    # This generation's wall-clock time, for the regulation core's
+    # reasoning-overflow signal (`Regulation.Signals`) — a reasoning-only
+    # generation that ran unusually long and produced nothing is a shape none
+    # of the tool-call-keyed doom-loop detectors can see, and the loop only
+    # has ONE point where `duration_ms` is known: here.
+    state = Map.put(state, :last_generation_ms, duration_ms)
 
     # A request that died mid-stream returns no usage (the `_ -> %{}` above is
     # right about what it was handed), but it was still billed: Anthropic
@@ -807,8 +895,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       :llm_response,
       %{
         session_id: state.session_id,
+        # `state.provider`/`state.model` are the ROUTED pair while this
+        # request is in flight (see `StepRouter.apply/2` above) — the model
+        # that genuinely answered, restored to the user's chosen pair right
+        # after this block.
         provider: state.provider,
         model: state.model,
+        routing_reason: to_string(routing.reason),
         duration_ms: duration_ms,
         usage: usage,
         agent: state.session_id
@@ -847,6 +940,35 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
     Logger.info("[loop] LLM call completed in #{duration_ms}ms (#{input_tokens} input tokens)")
 
+    # Put the user's chosen provider/model back now that the call, its
+    # billing, and both `:llm_request`/`:llm_response` events are done —
+    # every other mutation this call made to `state` (messages, tokens, the
+    # accounting ledger) survives. From here on `state.provider`/`state.model`
+    # are the session's real identity again, exactly as if routing had never
+    # fired, so tool capability checks, the next iteration's context build,
+    # and the status bar all see the model the user actually picked.
+    state = restore_route.(state)
+
+    # A fast-routed step must never DELIVER the turn's final answer — the
+    # spec is "reading files, choosing the next read" on the cheap model,
+    # "the final answer" on the model the user chose. A mechanical-looking
+    # run of reads can still end in the model deciding it has everything it
+    # needs and answering right there with no further tool call, and that
+    # answer came from the wrong model. Discard it (it is never shown to the
+    # user or folded into history) and re-ask the SAME messages of the
+    # strong model — same prefix, so its cache still applies — before this
+    # result reaches the normal truncation/stream-incomplete/handle_result
+    # pipeline. The fast attempt is still billed and reported above (it
+    # really ran); the strong re-ask is billed and logged here as the extra
+    # cost this correction costs.
+    {result, state} = maybe_reroute_fast_final_answer(routing, result, state, context)
+
+    # A fast-routed call that flat-out FAILED (bad credentials, an
+    # unavailable/retired model for this account, …) must not surface as a
+    # user-visible error on a step that only exists to save money — re-ask
+    # the strong model instead. See `maybe_reroute_fast_error/4`.
+    {result, state} = maybe_reroute_fast_error(routing, result, state, context)
+
     # A stream that ended without its provider's own terminal marker (P2 audit
     # gap A) is handled FIRST and can short-circuit the rest of this pipeline
     # (a fresh retry or a marked-incomplete delivery) — see
@@ -864,6 +986,214 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       {:halted, outcome} ->
         outcome
     end
+  end
+
+  # ── Fast-routed final answer must come from the strong model ─────────────
+  #
+  # See `StepRouter` — routing only ever fires between iterations, on
+  # EVIDENCE from the previous step's tool mix, because nothing before the
+  # call knows what the model is about to do. Most of the time "mechanical
+  # tool mix" evidence holds and the fast model asks for another read. It is
+  # not guaranteed to: the fast model can just as validly decide it now has
+  # enough to answer, with no further tool call — and that answer is the
+  # turn's user-facing result, which the spec keeps on the strong model
+  # unconditionally. This is the backstop for that case.
+  defp maybe_reroute_fast_final_answer(
+         %{route: :fast} = routing,
+         {:ok, resp} = result,
+         state,
+         context
+       )
+       when is_map(resp) do
+    if fast_final_answer_without_tools?(resp) do
+      Logger.info(
+        "[route] #{routing.provider}:#{routing.model} answered with no tool calls — " <>
+          "discarding it and re-asking #{state.provider}:#{state.model} (the strong model " <>
+          "must produce the final answer, not the fast one)"
+      )
+
+      {redo_result, state, redo_duration_ms, redo_usage, redo_cost_usd} =
+        redo_on_strong_model(state, context)
+
+      emit_fast_reroute(
+        state,
+        routing,
+        :final_answer,
+        redo_duration_ms,
+        redo_usage,
+        redo_cost_usd
+      )
+
+      {redo_result, state}
+    else
+      {result, state}
+    end
+  end
+
+  defp maybe_reroute_fast_final_answer(_routing, result, state, _context), do: {result, state}
+
+  # A CLEAN final answer: real text, no tool calls, and not a cut-off stream
+  # (`:stream_incomplete` responses are not "an answer" yet — the EXISTING
+  # stream-incomplete/truncation recovery already owns those, downstream of
+  # this check, and must run on whatever `result` this function returns).
+  defp fast_final_answer_without_tools?(resp) do
+    tool_calls = Map.get(resp, :tool_calls) || []
+    content = Map.get(resp, :content)
+
+    tool_calls == [] and
+      not Map.get(resp, :stream_incomplete, false) and
+      is_binary(content) and String.trim(content) != ""
+  end
+
+  # ── Fast-routed model unavailable (bad credentials/model, plan gap, …) ────
+  #
+  # By the time `result` reaches here, `LLMClient.llm_chat_stream`'s OWN
+  # same-provider retry/backoff (`Resilience.with_retry` inside
+  # `Registry.stream_with_fallback/5`) has already exhausted itself on the
+  # fast model — this is not a transient blip the caller has not tried to
+  # ride out. Redo the step on the strong model so the operator sees an
+  # answer, not an error, on a step that was only routed to save money in the
+  # first place. A NON-retryable reason (auth, model-not-found, the same
+  # categories `FallbackChain.retryable_error?/1` already treats as config
+  # errors rather than provider hiccups) additionally marks the pairing
+  # unavailable — see `StepRouter.mark_unavailable/3` — so routing stops
+  # spending a wasted attempt (plus this redo's latency) on it every
+  # mechanical step for the rest of the run. A genuinely transient reason is
+  # NOT marked: the pairing is worth trying again next time.
+  defp maybe_reroute_fast_error(
+         %{route: :fast} = routing,
+         {:error, reason} = result,
+         state,
+         context
+       ) do
+    unless OptimalSystemAgent.Providers.FallbackChain.retryable_error?(reason) do
+      OptimalSystemAgent.Providers.StepRouter.mark_unavailable(
+        routing.provider,
+        routing.model,
+        reason
+      )
+    end
+
+    Logger.info(
+      "[route] #{routing.provider}:#{routing.model} failed (#{inspect(reason)}) — " <>
+        "re-asking #{state.provider}:#{state.model} on the strong model for this step"
+    )
+
+    {redo_result, state, redo_duration_ms, redo_usage, redo_cost_usd} =
+      redo_on_strong_model(state, context)
+
+    emit_fast_reroute(
+      state,
+      routing,
+      :fast_model_error,
+      redo_duration_ms,
+      redo_usage,
+      redo_cost_usd
+    )
+
+    {redo_result, state}
+  rescue
+    e ->
+      Logger.warning(
+        "[route] fast-error reroute itself crashed: #{Exception.message(e)} — surfacing the " <>
+          "original error instead of masking it with a second failure"
+      )
+
+      {result, state}
+  end
+
+  defp maybe_reroute_fast_error(_routing, result, state, _context), do: {result, state}
+
+  # Shared by both reroutes above: re-ask the SAME messages of `state`'s
+  # CURRENT provider/model (the strong pair — `restore_route` already ran
+  # before either reroute is checked) and bill the extra round-trip for real.
+  defp redo_on_strong_model(state, context) do
+    redo_start = System.monotonic_time(:millisecond)
+    redo_requested_at = DateTime.utc_now()
+
+    redo_result =
+      with_turn_effort(state, fn ->
+        thinking_opts = LLMClient.thinking_config(state)
+        tools_for_call = ToolFilter.filter(state.tools, state)
+
+        llm_opts = [
+          tools: tools_for_call,
+          temperature: LLMClient.temperature(),
+          max_tokens: max_response_tokens(),
+          thinking_disabled: Process.get(:osa_disable_thinking, false)
+        ]
+
+        llm_opts =
+          if thinking_opts, do: Keyword.put(llm_opts, :thinking, thinking_opts), else: llm_opts
+
+        # SAME messages the fast model just saw (`context.messages`, not
+        # rebuilt) — the point is that the strong model's own prefix cache
+        # still applies to this re-ask.
+        LLMClient.llm_chat_stream(state, context.messages, llm_opts)
+      end)
+
+    redo_duration_ms = System.monotonic_time(:millisecond) - redo_start
+
+    redo_usage =
+      case redo_result do
+        {:ok, redo_resp} -> Map.get(redo_resp, :usage, %{})
+        _ -> %{}
+      end
+
+    redo_billing_opts =
+      case redo_result do
+        {:ok, redo_resp} ->
+          [
+            provider_cost_usd: Map.get(redo_resp, :provider_cost_usd),
+            provider_quota: Map.get(redo_resp, :provider_quota),
+            requested_at: redo_requested_at
+          ]
+
+        _ ->
+          [requested_at: redo_requested_at]
+      end
+
+    # Billed for real — the strong re-ask is a genuine second round-trip, not
+    # just a log line. `absorb_side_spend/1` mirrors the primary call's
+    # handling of a request billed on the wire before it errored.
+    state = Accounting.record(state, redo_usage, redo_billing_opts)
+    state = Accounting.absorb_side_spend(state)
+
+    redo_cost_usd = OptimalSystemAgent.Agent.Pricing.cost(state.model, redo_usage)
+
+    {redo_result, state, redo_duration_ms, redo_usage, redo_cost_usd}
+  end
+
+  defp emit_fast_reroute(state, routing, reroute_reason, duration_ms, usage, cost_usd) do
+    payload = %{
+      event: :fast_final_answer_reroute,
+      reroute_reason: reroute_reason,
+      session_id: state.session_id,
+      iteration: state.iteration,
+      fast_provider: to_string(routing.provider),
+      fast_model: routing.model,
+      strong_provider: to_string(state.provider),
+      strong_model: state.model,
+      duration_ms: duration_ms,
+      usage: usage,
+      cost_usd: cost_usd
+    }
+
+    Bus.emit(:system_event, payload)
+
+    if is_binary(state.session_id) and state.session_id != "" do
+      Phoenix.PubSub.broadcast(
+        OptimalSystemAgent.PubSub,
+        "osa:session:#{state.session_id}",
+        {:osa_event, Map.put(payload, :type, :system_event)}
+      )
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   # ── Truncation ingest ─────────────────────────────────────────────────────
@@ -1104,6 +1434,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   @spec spend_recovery(map(), String.t()) :: {:ok, map()} | {:exhausted, map()}
   defp spend_recovery(state, kind) do
     used = Map.get(state, :recovery_attempts, 0)
+    OptimalSystemAgent.Agent.TurnTrace.record_recovery(state.session_id, :loop_recovery, kind)
 
     if used >= @max_recovery_attempts do
       Logger.warning(
@@ -3175,38 +3506,130 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
     state = inject_post_tool_nudges(state, tool_calls)
 
+    # Advisor auto-triggers #1 and #2 ("plan made" / "risky action") — see
+    # `Advisor` moduledoc. Both fire AFTER the tool call resolves rather than
+    # gating it: the model has already emitted (and by this point executed)
+    # the tool_use, so there is no free "pause and ask" point that does not
+    # add a synchronous paid round-trip's latency to every risky tool call.
+    # The advice still lands before the model decides its NEXT step, which is
+    # what actually matters for "sanity check before compounding". Reuses
+    # `StepRouter`'s risky deny-list rather than a second copy of it.
+    state = maybe_advise_plan_made(state, tool_calls, results)
+    state = maybe_advise_risky_action(state, tool_calls)
+
     case DoomLoop.check(results, tool_calls, state) do
       {:halt, doom_message, halted_state} ->
         Resample.handle(doom_message, halted_state, resample_snapshot, &run/1)
 
       {:ok, state} ->
-        # Clean turn — reset the consecutive-resample budget so recovery
-        # attempts bound only a *stuck* stretch, not the session lifetime.
-        state = Map.put(state, :doom_resamples, 0)
+        # The regulation core (item 1/6/11/14) — a unified pain score over
+        # the SAME per-iteration evidence the doom-loop detectors above just
+        # updated, plus the homeostat's context/cost/progress/error bands.
+        # Ordered AFTER `DoomLoop.check/3`, never before: a doom-loop halt
+        # already ends the turn, so there is nothing left to regulate, and
+        # `DoomLoop`'s own counters (`:windowed_call_keys`,
+        # `:stall_checkpoint_count`, `:reasoning_only_streak`, …) must already
+        # reflect this iteration before `Regulation.Signals` reads them.
+        #
+        # A pain-triggered pause is marked `:control`, not routed through
+        # `Resample`: it hands the turn back to the user, it does not discard
+        # the last response and re-roll it (see `Regulation.regulate/3`).
+        case OptimalSystemAgent.Agent.Loop.Regulation.regulate(results, tool_calls, state) do
+          {:halt, pain_message, halted_state} ->
+            TerminalSource.halt(pain_message, halted_state, :control)
 
-        # Shared per-turn recovery budget (P2 audit gap C): a REASK or
-        # terminal invalid-arguments result from `ToolArgValidator` is a
-        # failure-recovery attempt exactly like a truncation or a cut-off
-        # stream, and must count against the same ceiling. `ToolArgValidator`
-        # only bounds ONE tool at a time (its own cap resets the moment that
-        # tool validates cleanly once), so a model alternating between
-        # different malformed calls — or between a validator reask and an
-        # unrelated truncation — could keep "recovering" indefinitely with
-        # nothing watching the total.
-        if Enum.any?(results, fn {_tc, {tool_msg, _result_str}} ->
-             content = Map.get(tool_msg, :content) || Map.get(tool_msg, "content")
-             ToolArgValidator.reask_message?(content)
-           end) do
-          case spend_recovery(state, "invalid tool-call arguments") do
-            {:exhausted, state} ->
-              halt_recovery_exhausted(state, "invalid tool-call arguments")
-
-            {:ok, state} ->
-              continue_after_tools_ok(state)
-          end
-        else
-          continue_after_tools_ok(state)
+          {:ok, state} ->
+            continue_after_regulation(results, state)
         end
+    end
+  end
+
+  defp continue_after_regulation(results, state) do
+    # Clean turn — reset the consecutive-resample budget so recovery
+    # attempts bound only a *stuck* stretch, not the session lifetime.
+    state = Map.put(state, :doom_resamples, 0)
+
+    # Advisor auto-trigger #3 ("stuck"): the graded escalation sequence
+    # (`DoomLoop.Escalation`) just injected its FINAL nudge this tick. Fires
+    # exactly once per exhaustion. Never blocks: a disabled, unconfigured or
+    # capped advisor leaves `state` untouched.
+    state =
+      if Map.get(state, :escalated_this_tick, false) and
+           Map.get(state, :graded_escalation_count, 0) >=
+             OptimalSystemAgent.Agent.Loop.DoomLoop.Escalation.max_steps() do
+        OptimalSystemAgent.Agent.Loop.Advisor.maybe_auto_consult(
+          state,
+          :stuck,
+          "graded escalation nudges are exhausted; the same failure signature keeps repeating"
+        )
+      else
+        state
+      end
+
+    # Shared per-turn recovery budget (P2 audit gap C): a REASK or
+    # terminal invalid-arguments result from `ToolArgValidator` is a
+    # failure-recovery attempt exactly like a truncation or a cut-off
+    # stream, and must count against the same ceiling. `ToolArgValidator`
+    # only bounds ONE tool at a time (its own cap resets the moment that
+    # tool validates cleanly once), so a model alternating between
+    # different malformed calls — or between a validator reask and an
+    # unrelated truncation — could keep "recovering" indefinitely with
+    # nothing watching the total.
+    if Enum.any?(results, fn {_tc, {tool_msg, _result_str}} ->
+         content = Map.get(tool_msg, :content) || Map.get(tool_msg, "content")
+         ToolArgValidator.reask_message?(content)
+       end) do
+      case spend_recovery(state, "invalid tool-call arguments") do
+        {:exhausted, state} ->
+          halt_recovery_exhausted(state, "invalid tool-call arguments")
+
+        {:ok, state} ->
+          continue_after_tools_ok(state)
+      end
+    else
+      continue_after_tools_ok(state)
+    end
+  end
+
+  # Advisor auto-trigger #1: a plan was just made. Fires once, when
+  # `exit_plan_mode` resolved WITHOUT an error result — the same success test
+  # the `memory_save` cache-invalidation check above uses.
+  defp maybe_advise_plan_made(state, tool_calls, results) do
+    plan_made? =
+      Enum.any?(tool_calls, fn tc -> tc.name == "exit_plan_mode" end) and
+        Enum.any?(results, fn {tc, {_msg, result_str}} ->
+          tc.name == "exit_plan_mode" and not String.starts_with?(result_str, "Error:")
+        end)
+
+    if plan_made? do
+      OptimalSystemAgent.Agent.Loop.Advisor.maybe_auto_consult(
+        state,
+        :plan_made,
+        "a plan was just proposed via exit_plan_mode"
+      )
+    else
+      state
+    end
+  end
+
+  # Advisor auto-trigger #2: at least one KNOWN risky/write/execute tool
+  # (`StepRouter.risky?/1` — same deny-list `StepRouter` uses to decide
+  # per-step model routing, not a second copy of it) ran this iteration.
+  defp maybe_advise_risky_action(state, tool_calls) do
+    risky_names =
+      tool_calls
+      |> Enum.map(& &1.name)
+      |> Enum.filter(&OptimalSystemAgent.Providers.StepRouter.risky?/1)
+      |> Enum.uniq()
+
+    if risky_names != [] do
+      OptimalSystemAgent.Agent.Loop.Advisor.maybe_auto_consult(
+        state,
+        :risky_action,
+        "just ran risky tool(s): #{Enum.join(risky_names, ", ")}"
+      )
+    else
+      state
     end
   end
 
@@ -3768,29 +4191,6 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         end)
 
       %{context | messages: context.messages ++ injections}
-    end
-  end
-
-  defp inject_iteration_budget(context, state) do
-    max_iter = max_iterations(state)
-    remaining = max_iter - state.iteration
-
-    # Only nag when GENUINELY near the ceiling — not every iteration. The old
-    # guard `remaining <= max_iter` was a tautology (remaining is always < max_iter
-    # once iteration > 0), so a budget message was appended on EVERY iteration,
-    # inflating context and pushing the model to "wrap up" thousands of turns early.
-    budget_warn_threshold = 10
-
-    if state.iteration > 0 and remaining <= budget_warn_threshold do
-      budget_msg = %{
-        role: "system",
-        content:
-          "[Iteration #{state.iteration + 1}/#{max_iter} — #{remaining} remaining. Be efficient. Wrap up if the task is done.]"
-      }
-
-      %{context | messages: context.messages ++ [budget_msg]}
-    else
-      context
     end
   end
 

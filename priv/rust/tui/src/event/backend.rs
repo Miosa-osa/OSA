@@ -130,11 +130,32 @@ pub enum BackendEvent {
     LlmRequest {
         iteration: u32,
         max_iterations: Option<u32>,
+        // Per-step model routing (StepRouter): the model actually about to
+        // run THIS step, when it differs from the session's own model —
+        // `None` on every request routing never touched, so old backends and
+        // routing-off sessions are byte-identical to before this field
+        // existed. Named `routed_model` (not `model`): the intent is "here is
+        // the override for this one step", not "here is the session model".
+        routed_model: Option<String>,
+        routed_provider: Option<String>,
+        routing_reason: Option<String>,
     },
     LlmResponse {
         duration_ms: u64,
         input_tokens: u64,
         output_tokens: u64,
+        /// Prompt-cache read/write slices of `input_tokens`, when the route
+        /// reports them (0 on a route/provider that never does).
+        cache_read_tokens: u64,
+        cache_creation_tokens: u64,
+        /// Compact prompt-cache status for this session, from
+        /// `Providers.CacheAttribution.status/1` — `None` fields mean "no
+        /// requests observed yet" / "no break ever attributed", not zero.
+        cache_hit_rate: Option<f64>,
+        cache_last_break: Option<String>,
+        cache_break_token_cost: u64,
+        cache_break_above_threshold: bool,
+        cache_cold_run: u64,
     },
 
     // === Signal ===
@@ -413,6 +434,17 @@ pub enum BackendEvent {
         limit_mb: u64,
         message: String,
     },
+    /// The turn's algedonic (pain) channel (`pain_alert`) — a unified,
+    /// rate-limited report of how stuck the current turn looks, with a
+    /// severity and a plain-language cause. `severity` is one of
+    /// `"none" | "low" | "medium" | "high" | "critical"`; `"none"` is a
+    /// CLEAR (the alarm just resolved) rather than a fresh alert, and carries
+    /// an empty `message`.
+    PainAlert {
+        severity: String,
+        score: f64,
+        message: String,
+    },
     /// Queued background `<task-notification>`s were folded into the agent's
     /// context (busy-turn drain or idle poke). Rendered as a system line so
     /// the user sees WHY the agent pivots to a finished background task.
@@ -467,10 +499,28 @@ pub enum BackendEvent {
         task_id: String,
         subject: String,
         active_form: String,
+        /// The task's acceptance check verdict at creation time -- `"pending"`
+        /// for a task created with one, `None` for a checkless task. See
+        /// `TaskUpdated::check_status` for why this rides alongside status
+        /// rather than as a separate event.
+        check_status: Option<String>,
     },
     TaskUpdated {
         task_id: String,
         status: String,
+        /// The task's CURRENT acceptance-check verdict (`"pending"` /
+        /// `"passed"` / `"failed"`), or `None` for a checkless task.
+        /// Piggybacks on `task_updated` rather than a separate event: the
+        /// backend (`Tracker.broadcast_task_update/3`) emits this for every
+        /// status transition AND every check-only change (a check run that
+        /// does not complete the task, or a failed `complete` attempt), so
+        /// one field, always present, is simpler than a second event type
+        /// the client would have to correlate back to the same row.
+        check_status: Option<String>,
+        /// One-line failure reason, populated only when `check_status` is
+        /// `"failed"` -- the checklist item renders this inline rather than
+        /// the full check output, which belongs in the tool-result console.
+        check_reason: Option<String>,
     },
     TaskChecklistShow {
         tasks: Vec<crate::client::types::ChecklistTaskWire>,

@@ -149,11 +149,127 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
     :ok
   end
 
+  # Per-model explicit fallback (item 19). Configured via
+  #
+  #     config :optimal_system_agent, :model_fallback, %{
+  #       "glm-5.2:cloud" => ["glm-5.3:cloud"],
+  #       "claude-opus-5" => [{:anthropic, "claude-sonnet-5"}]
+  #     }
+  #
+  # keyed by the model that is FAILING. Each entry is either a bare model
+  # string (tried on the SAME provider the failing model was requested on) or
+  # an explicit `{provider, model}` pin (for "if X is unavailable, use this
+  # DIFFERENT provider's Y instead"). Deliberately separate from
+  # `cost_gated_chain/2`'s provider-level chain: this is a per-MODEL mapping
+  # the operator wrote down for one specific model, so — unlike a blind
+  # cross-provider retry — it is always honoured on error, retryable or not.
+  # An unrecognized/retired MODEL is exactly the case a generic retry
+  # classifier refuses to cross providers for (see `retryable_error?/1`'s
+  # `:model_not_found` clause); an explicit mapping is the deliberate,
+  # user-authored exception to that rule.
+  @model_fallback_key :model_fallback
+
+  # Hard ceiling so a misconfigured mapping (accidentally pointing back at
+  # itself, or a long chain) cannot loop or fan out unboundedly.
+  @max_model_hops 5
+
+  @doc "Configured fallback models for `model`, normalized to `{provider_or_nil, model}` pairs."
+  @spec model_fallbacks(String.t()) :: [{atom() | nil, String.t()}]
+  def model_fallbacks(model) when is_binary(model) do
+    Application.get_env(:optimal_system_agent, @model_fallback_key, %{})
+    |> Map.get(model, [])
+    |> List.wrap()
+    |> Enum.map(&normalize_model_entry/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  def model_fallbacks(_), do: []
+
+  defp normalize_model_entry({provider, model}) when is_atom(provider) and is_binary(model),
+    do: {provider, model}
+
+  defp normalize_model_entry(model) when is_binary(model), do: {nil, model}
+  defp normalize_model_entry(_), do: nil
+
+  # The ordered `{provider, model}` hops to attempt for ONE provider-chain
+  # position: the model actually requested there, then its configured
+  # fallbacks (a bare entry inherits `provider`; a `{provider, model}` pin
+  # overrides it). `nil` requested model (provider default, no explicit pin)
+  # has nothing to key a mapping off, so it is a single-hop list.
+  defp model_hops(provider, nil), do: [{provider, nil}]
+
+  defp model_hops(provider, model) do
+    configured =
+      model_fallbacks(model)
+      |> Enum.map(fn
+        {nil, m} -> {provider, m}
+        {p, m} -> {p, m}
+      end)
+
+    [{provider, model} | configured]
+    |> Enum.uniq()
+    |> Enum.take(@max_model_hops)
+  end
+
+  # Announce a fallback that actually changed the answering model/provider —
+  # every occurrence, not once-per-VM like `warn_once/2` (this is not a
+  # repeated warning about the same misconfiguration; each occurrence is its
+  # own event the user needs to see). Silent otherwise.
+  defp announce_model_fallback(
+         requested_provider,
+         requested_model,
+         used_provider,
+         used_model,
+         opts
+       )
+       when requested_provider != used_provider or requested_model != used_model do
+    message =
+      "[fallback] #{requested_provider}:#{requested_model || "default"} unavailable — " <>
+        "answered by #{used_provider}:#{used_model || "default"} (configured model fallback)"
+
+    Logger.warning(message)
+
+    session_id = Keyword.get(opts, :session_id)
+
+    payload = %{
+      event: :model_fallback_used,
+      session_id: session_id,
+      requested_provider: to_string(requested_provider),
+      requested_model: requested_model,
+      provider: to_string(used_provider),
+      model: used_model,
+      message: message
+    }
+
+    try do
+      Bus.emit(:system_event, payload)
+
+      if is_binary(session_id) and session_id != "" do
+        Phoenix.PubSub.broadcast(
+          OptimalSystemAgent.PubSub,
+          "osa:session:#{session_id}",
+          {:osa_event, Map.put(payload, :type, :system_event)}
+        )
+      end
+    rescue
+      _ -> :ok
+    catch
+      _, _ -> :ok
+    end
+
+    :ok
+  end
+
+  defp announce_model_fallback(_, _, _, _, _), do: :ok
+
   @doc """
   Try a chat call across the fallback chain.
 
   Starts with the given provider, falls back to the next on failure.
   Returns `{:ok, result, provider_used}` or `{:error, reason}` if all fail.
+  `result[:model_used]` is always present and names the model that actually
+  answered — identical to the requested model except when a per-model
+  fallback (`model_fallbacks/1`) fired.
   """
   def chat_with_fallback(messages, opts \\ []) do
     primary =
@@ -217,25 +333,23 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
 
   defp try_providers([provider | rest], messages, opts, errors) do
     opts_with_provider = Keyword.put(hop_opts(opts, errors), :provider, provider)
+    requested_model = Keyword.get(opts_with_provider, :model)
+    hops = model_hops(provider, requested_model)
 
-    result =
-      if capability_compatible?(provider, opts_with_provider) do
-        Providers.chat(messages, opts_with_provider)
-      else
-        :capability_mismatch
-      end
+    result = attempt_model_chain(hops, messages, opts_with_provider)
 
     case result do
       :capability_mismatch ->
         Logger.warning("[fallback] #{provider} skipped: selected model lacks required tools")
         try_providers(rest, messages, opts, errors ++ [{provider, :capability_mismatch}])
 
-      {:ok, result} ->
+      {:ok, result, used_provider, used_model} ->
         if errors != [] do
           Logger.info("[fallback] Succeeded with #{provider} after #{length(errors)} failure(s)")
         end
 
-        {:ok, result, provider}
+        announce_model_fallback(provider, requested_model, used_provider, used_model, opts)
+        {:ok, Map.put(result, :model_used, used_model), used_provider}
 
       {:error, reason} ->
         if OptimalSystemAgent.Agent.SubagentCloudPolicy.blocked?(reason) or
@@ -253,6 +367,41 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
       try_providers(rest, messages, opts, errors ++ [{provider, Exception.message(e)}])
   end
 
+  # Walk this provider hop's model chain (the requested model, then any
+  # configured `model_fallbacks/1`), each attempt on the model/provider that
+  # hop names. Every configured hop is tried regardless of the error's own
+  # retryable classification — presence in the config IS the user's opt-in
+  # (see the `@model_fallback_key` moduledoc note above). Only once the model
+  # chain is exhausted does the LAST error propagate to `try_providers/4`'s
+  # own (unchanged) cross-provider retryable check.
+  defp attempt_model_chain([{p, m} | rest], messages, opts) do
+    hop_opts = opts |> Keyword.put(:provider, p) |> put_model_opt(m)
+
+    if capability_compatible?(p, hop_opts) do
+      case Providers.chat(messages, hop_opts) do
+        {:ok, result} ->
+          {:ok, result, p, m}
+
+        {:error, reason} ->
+          if rest == [] do
+            {:error, reason}
+          else
+            Logger.warning(
+              "[fallback] model #{inspect(m)} on #{p} failed: #{inspect(reason)} — " <>
+                "trying configured model fallback"
+            )
+
+            attempt_model_chain(rest, messages, opts)
+          end
+      end
+    else
+      if rest == [], do: :capability_mismatch, else: attempt_model_chain(rest, messages, opts)
+    end
+  end
+
+  defp put_model_opt(opts, nil), do: Keyword.delete(opts, :model)
+  defp put_model_opt(opts, model), do: Keyword.put(opts, :model, model)
+
   defp try_stream_providers([], _messages, _callback, _opts, errors) do
     error_summary = Enum.map(errors, fn {p, e} -> "#{p}: #{inspect(e)}" end) |> Enum.join("; ")
     {:error, "All providers failed: #{error_summary}"}
@@ -260,13 +409,10 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
 
   defp try_stream_providers([provider | rest], messages, callback, opts, errors) do
     opts_with_provider = Keyword.put(hop_opts(opts, errors), :provider, provider)
+    requested_model = Keyword.get(opts_with_provider, :model)
+    hops = model_hops(provider, requested_model)
 
-    result =
-      if capability_compatible?(provider, opts_with_provider) do
-        Providers.chat_stream(messages, callback, opts_with_provider)
-      else
-        :capability_mismatch
-      end
+    result = attempt_stream_model_chain(hops, messages, callback, opts_with_provider)
 
     case result do
       :capability_mismatch ->
@@ -280,14 +426,15 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
           errors ++ [{provider, :capability_mismatch}]
         )
 
-      :ok ->
+      {:ok, used_provider, used_model} ->
         if errors != [] do
           Logger.info(
             "[fallback] Stream succeeded with #{provider} after #{length(errors)} failure(s)"
           )
         end
 
-        {:ok, :stream_started, provider}
+        announce_model_fallback(provider, requested_model, used_provider, used_model, opts)
+        {:ok, :stream_started, used_provider}
 
       {:error, reason} ->
         if OptimalSystemAgent.Agent.SubagentCloudPolicy.blocked?(reason) or
@@ -311,6 +458,44 @@ defmodule OptimalSystemAgent.Providers.FallbackChain do
         opts,
         errors ++ [{provider, Exception.message(e)}]
       )
+  end
+
+  # Streaming mirror of `attempt_model_chain/3`. The result map is never
+  # returned synchronously here (it is delivered later, INSIDE `callback`'s
+  # own `{:done, result}` invocation), so `:model_used` is tagged onto that
+  # payload via a thin per-hop callback wrapper instead of onto a return
+  # value — the wrapper is discarded, unused, if this hop fails and the chain
+  # moves to the next one.
+  defp attempt_stream_model_chain([{p, m} | rest], messages, callback, opts) do
+    hop_opts = opts |> Keyword.put(:provider, p) |> put_model_opt(m)
+
+    if capability_compatible?(p, hop_opts) do
+      tagged_callback = fn
+        {:done, result} when is_map(result) -> callback.({:done, Map.put(result, :model_used, m)})
+        other -> callback.(other)
+      end
+
+      case Providers.chat_stream(messages, tagged_callback, hop_opts) do
+        :ok ->
+          {:ok, p, m}
+
+        {:error, reason} ->
+          if rest == [] do
+            {:error, reason}
+          else
+            Logger.warning(
+              "[fallback] model #{inspect(m)} on #{p} stream failed: #{inspect(reason)} — " <>
+                "trying configured model fallback"
+            )
+
+            attempt_stream_model_chain(rest, messages, callback, opts)
+          end
+      end
+    else
+      if rest == [],
+        do: :capability_mismatch,
+        else: attempt_stream_model_chain(rest, messages, callback, opts)
+    end
   end
 
   @doc false

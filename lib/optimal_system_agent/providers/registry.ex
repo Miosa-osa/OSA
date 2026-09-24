@@ -123,7 +123,20 @@ defmodule OptimalSystemAgent.Providers.Registry do
                  ollama_cloud: Providers.Ollama
                },
                if Mix.env() == :test do
-                 %{mock: OptimalSystemAgent.Test.MockProvider}
+                 %{
+                   mock: OptimalSystemAgent.Test.MockProvider,
+                   # A second, independently-scripted test provider.
+                   # `register_provider/2` cannot serve this purpose: it only
+                   # writes into this GenServer's OWN state
+                   # (`state.extra_providers`), which `chat/2`/`chat_stream/3`
+                   # never consult — dispatch is this compile-time `@providers`
+                   # map alone. A fixture that needs a DIFFERENT response
+                   # script than `:mock`'s (see
+                   # `Test.StepRerouteProvider`, used by the fast-routed
+                   # final-answer reroute test) needs its own entry here,
+                   # exactly like `:mock` itself.
+                   step_reroute_mock: OptimalSystemAgent.Test.StepRerouteProvider
+                 }
                else
                  %{}
                end
@@ -544,12 +557,44 @@ defmodule OptimalSystemAgent.Providers.Registry do
     # provider less likely to flag pentest requests. See
     # `Providers.PlatformAuthorization` and `Providers.Moderation`.
     |> maybe_inject_authorization(opts)
-    # LAST: it reads the `cache_control` blocks the step above preserves, and
-    # appends a trailing message, so it must see the final message list.
+    # SECOND TO LAST: it reads the `cache_control` blocks the step above
+    # preserves, and appends a trailing message, so it must see the final
+    # message list.
     |> Providers.PromptCache.restructure(target, opts)
+    # ABSOLUTE LAST: `append_budget_note/2` must run AFTER `PromptCache`
+    # has placed its rolling breakpoint. That breakpoint lands on whatever is
+    # currently the LAST message — if the budget note (which changes every
+    # single iteration: step count, token estimate, elapsed time) were present
+    # before this step, IT would be the thing marked `cache_control`, and the
+    # "stable prefix" the breakpoint is supposed to protect would change on
+    # every request instead of only when the conversation actually grows. See
+    # `Agent.Loop.TurnBudget`'s moduledoc for the full placement argument.
+    |> append_budget_note(opts)
   end
 
   def normalize_outbound_messages(messages, _target, _opts), do: messages
+
+  # A per-turn pacing note (`Agent.Loop.TurnBudget`), carried in `opts` from
+  # `ReactLoop` all the way through `LLMClient`/`FallbackChain` (both thread
+  # `opts` unchanged), and appended here — after every cache_control placement
+  # decision has already been made — so it is NEVER the message a breakpoint
+  # is measured against.
+  #
+  # Wrapped like `Agent.Context.volatile_tail_message/1`: `<system-reminder>`
+  # tags mark it as operating context rather than user input, and role "user"
+  # because a trailing "system" role is rejected or silently demoted by strict
+  # chat templates (Qwen, and `Providers.Ollama.demote_trailing_system/1`).
+  defp append_budget_note(messages, opts) when is_list(messages) do
+    case Keyword.get(opts, :budget_note) do
+      note when is_binary(note) and note != "" ->
+        messages ++ [%{role: "user", content: "<system-reminder>\n#{note}\n</system-reminder>"}]
+
+      _ ->
+        messages
+    end
+  end
+
+  defp append_budget_note(messages, _opts), do: messages
 
   # ── Tool-call argument normalization ──────────────────────────────────────
   #

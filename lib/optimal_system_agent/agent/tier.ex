@@ -353,6 +353,18 @@ defmodule OptimalSystemAgent.Agent.Tier do
   end
 
   @doc """
+  As `max_iterations/1`, scaled down by `depth_scale/1` for a subagent at
+  delegation depth `depth` (see `max_budget_usd/2`'s moduledoc note for the
+  depth convention). Floored at 5 iterations — even the deepest recursion
+  level gets enough turns to make one real attempt rather than converging on
+  an unworkable cap.
+  """
+  @spec max_iterations(tier(), pos_integer()) :: non_neg_integer()
+  def max_iterations(tier, depth) when is_integer(depth) and depth > 0 do
+    max(round(max_iterations(tier) * depth_scale(depth)), 5)
+  end
+
+  @doc """
   Default per-subagent USD spend cap by tier.
 
   This is the REAL runaway bound. The turn caps (`max_iterations/1`, 120/60/25)
@@ -393,6 +405,62 @@ defmodule OptimalSystemAgent.Agent.Tier do
       n when is_number(n) and n > 0 -> n * 1.0
       _ -> default
     end
+  end
+
+  # ── Recursion scale-down (VSM item 9) ───────────────────────────────
+  #
+  # A subagent is itself a viable system: it gets its own budget, turn cap,
+  # stall thresholds and spot-check audit, INHERITED from the level above it
+  # and SCALED DOWN. Without a depth-aware scale, a deeply delegated chain
+  # (agent -> subagent -> sub-subagent -> ...) re-derives its cap from the flat
+  # tier table at every level, so a grandchild can be handed the SAME (or, if
+  # its tier happens to be richer, a LARGER) budget than its own parent ever
+  # had — the exact shape that let one delegation chain run ~32.5M tokens
+  # before per-tier budgets existed at all. `depth_scale/1` shrinks every
+  # level of nesting so the ceiling tightens monotonically with depth instead
+  # of resetting.
+  #
+  # `depth` is 1 for a direct child of a top-level (non-delegated) session, 2
+  # for a grandchild, and so on — i.e. `parent_delegation_depth + 1`, which is
+  # exactly the value `delegate/handler.ex` already threads through as the
+  # child's own `delegation_depth`. Depth 0/1 both scale to `1.0` (a direct
+  # child keeps the plain tier default byte-for-byte — this is additive, not a
+  # behavior change for the common one-level-deep case); each level past that
+  # multiplies by 0.6, floored at 0.2 so a very deep chain still gets a workable
+  # (if tight) allowance rather than converging to zero.
+  @doc """
+  Depth-based recursion scale-down factor, in `(0.2, 1.0]`. See moduledoc
+  section above for the rationale and the depth convention.
+  """
+  @spec depth_scale(pos_integer()) :: float()
+  def depth_scale(depth) when is_integer(depth) and depth > 1 do
+    max(:math.pow(0.6, depth - 1), 0.2)
+  end
+
+  def depth_scale(_depth), do: 1.0
+
+  @doc """
+  Tier-based scale factor for thresholds that are not already tier-priced
+  (unlike `max_budget_usd/1` and `max_iterations/1`, the orchestrator's stall
+  timers are currently one flat number regardless of tier). A `:utility`
+  worker is supposed to do quick, narrow work and should be judged stalled
+  sooner; an `:elite` worker doing deep, slow work is given more rope.
+  """
+  @spec tier_scale(tier()) :: float()
+  def tier_scale(:elite), do: 1.5
+  def tier_scale(:specialist), do: 1.0
+  def tier_scale(:utility), do: 0.5
+  def tier_scale(_tier), do: 1.0
+
+  @doc """
+  As `max_budget_usd/1`, scaled down by `depth_scale/1` for a subagent at
+  delegation depth `depth`. `max_budget_usd(tier, 1)` equals `max_budget_usd(tier)`
+  exactly — a direct child is unaffected; only depth 2+ (a sub-delegation)
+  tightens the cap.
+  """
+  @spec max_budget_usd(tier(), pos_integer()) :: float()
+  def max_budget_usd(tier, depth) when is_integer(depth) and depth > 0 do
+    Float.round(max_budget_usd(tier) * depth_scale(depth), 4)
   end
 
   @doc "Get tier display info."

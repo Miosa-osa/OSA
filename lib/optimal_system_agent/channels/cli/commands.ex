@@ -23,6 +23,8 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
   alias OptimalSystemAgent.Tools.Builtins.{SkillManager, UseSkill}
   alias OptimalSystemAgent.Tools.Registry, as: ToolsRegistry
   alias OptimalSystemAgent.Providers.Registry, as: ProviderRegistry
+  alias OptimalSystemAgent.Providers.StepRouter
+  alias OptimalSystemAgent.Agent.Loop.Advisor
 
   @reset IO.ANSI.reset()
   @bold IO.ANSI.bright()
@@ -43,6 +45,12 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "lean-prompt" =>
       {"Show/toggle the lean system-prompt template (persists to settings.json; not /lean — see TUI's lean view)",
        :cmd_lean_prompt},
+    "route" =>
+      {"Per-step model routing — status | on | off | fast <model> (persists to settings.json)",
+       :cmd_route},
+    "advisor" =>
+      {"Advisor consult — status | on | off | model <id> (persists to settings.json)",
+       :cmd_advisor},
     "models" => {"Pick a model from the current provider", :cmd_models},
     "uncensored" =>
       {"Hop the current model to its unfiltered twin (off to return)", :cmd_uncensored},
@@ -56,6 +64,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "cost" => {"Show cost breakdown", :cmd_cost},
     "usage" => {"Show account quota and this session's token usage", :cmd_usage},
     "context" => {"Show context window usage", :cmd_context},
+    "trace" =>
+      {"Show where the current or last turn's time went (model, tools, approval, waste)",
+       :cmd_trace},
     "revert" => {"Restore files to N mutating-tool steps ago (transcript kept)", :cmd_revert},
     "memory" => {"Show memory entries", :cmd_memory},
     "tools" => {"List available tools", :cmd_tools},
@@ -78,6 +89,9 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     "coordinator" => {"Toggle coordinator mode (delegation only)", :cmd_coordinator},
     "ask-user" => {"Let the agent ask you questions mid-task (off by default)", :cmd_ask_user},
     "effort" => {"Set thinking effort level (low/medium/high/max)", :cmd_effort},
+    "budget" =>
+      {"Show or set the per-step turn-budget pacing note (tokens: <n>|auto, steps: <n>, off/on)",
+       :cmd_budget},
     "fast" => {"Toggle provider Fast processing (reasoning and tools unchanged)", :cmd_fast},
     "think" => {"Toggle model reasoning on/off (off = faster replies)", :cmd_think},
     "permissions" => {"View and manage permission rules", :cmd_permissions},
@@ -791,6 +805,265 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
           "yet — set {\"lean_prompt\": false} in ~/.osa/settings.json to restore the long " <>
           "rule templates.#{@reset}"
       )
+    end
+  end
+
+  # ── /route — per-step model routing (StepRouter) ──────────────────────────
+  #
+  # Same pattern as `/lean-prompt`: writes the settings-cascade key via
+  # `Settings.set_user/2`, which both persists to ~/.osa/settings.json AND
+  # invalidates the settings read cache, so `StepRouter.decide/1`'s
+  # `Settings.get_session_for/3` picks it up on the very next iteration of
+  # THIS session — no restart, no separate session-scoped write needed.
+  #
+  #   /route                     show enabled state + this session's pairing
+  #   /route status              same as bare /route
+  #   /route on | off            toggle per-step routing (persists)
+  #   /route fast <model>        pair <model> as the fast counterpart for
+  #                              THIS session's current provider (persists)
+  def cmd_route(args, session_id) do
+    IO.puts("")
+
+    case parse_route_args(args) do
+      {:status, _} ->
+        print_route_state(session_id)
+
+      {:on, _} ->
+        write_route_toggle(session_id, true)
+
+      {:off, _} ->
+        write_route_toggle(session_id, false)
+
+      {:fast, model} ->
+        write_route_fast_pairing(session_id, model)
+
+      {:error, usage} ->
+        IO.puts("  #{@yellow}#{usage}#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  defp parse_route_args(args) do
+    case args |> to_string() |> String.trim() |> String.split(~r/\s+/, trim: true, parts: 2) do
+      [] -> {:status, nil}
+      ["status"] -> {:status, nil}
+      ["on"] -> {:on, nil}
+      ["off"] -> {:off, nil}
+      ["fast", model] -> {:fast, model}
+      ["fast"] -> {:error, "usage: /route fast <model>"}
+      _ -> {:error, "usage: /route [status|on|off|fast <model>]"}
+    end
+  end
+
+  defp write_route_toggle(session_id, on?) do
+    case OptimalSystemAgent.Settings.set_user("step_routing_enabled", on?) do
+      :ok ->
+        state = if on?, do: "#{@green}on#{@reset}", else: "#{@dim}off#{@reset}"
+        IO.puts("  Per-step routing: #{state} #{@dim}(saved to settings.json)#{@reset}")
+        print_route_state(session_id)
+
+      other ->
+        IO.puts("  #{@red}✗#{@reset} Could not write settings: #{inspect(other)}")
+    end
+  end
+
+  defp write_route_fast_pairing(session_id, model) do
+    provider = session_provider(session_id)
+    pairs = OptimalSystemAgent.Settings.get("step_routing_fast_models", %{}) || %{}
+    updated = Map.put(pairs, to_string(provider), model)
+
+    case OptimalSystemAgent.Settings.set_user("step_routing_fast_models", updated) do
+      :ok ->
+        IO.puts("  #{provider} → #{model} #{@dim}(fast pairing saved to settings.json)#{@reset}")
+
+        print_route_state(session_id)
+
+      other ->
+        IO.puts("  #{@red}✗#{@reset} Could not write settings: #{inspect(other)}")
+    end
+  end
+
+  defp print_route_state(session_id) do
+    enabled? = StepRouter.enabled?(%{session_id: session_id})
+    provider = session_provider(session_id)
+    fast_model = StepRouter.fast_model_for(provider, %{session_id: session_id})
+
+    IO.puts("  #{@bold}Per-step model routing#{@reset}")
+    IO.puts("")
+
+    state = if enabled?, do: "#{@green}on#{@reset}", else: "#{@dim}off#{@reset}"
+    IO.puts("  routing    #{state}  #{@dim}(default off)#{@reset}")
+
+    pairing =
+      if fast_model, do: "#{provider} → #{fast_model}", else: "#{@dim}none configured#{@reset}"
+
+    IO.puts("  this session's provider (#{provider}) pairs with  #{pairing}")
+    IO.puts("")
+
+    IO.puts(
+      "  #{@dim}/route on|off toggles routing; /route fast <model> pairs a fast model with " <>
+        "this session's current provider. Both persist to settings.json.#{@reset}"
+    )
+  end
+
+  # The session's own live provider, not `default_provider` — StepRouter
+  # keys its decision (and its fast pairing) on THIS session's actual
+  # provider, which can differ from the daemon default after a `/model` swap.
+  defp session_provider(session_id) do
+    case Loop.get_state(session_id) do
+      {:ok, state} ->
+        state[:provider] || Application.get_env(:optimal_system_agent, :default_provider)
+
+      _ ->
+        Application.get_env(:optimal_system_agent, :default_provider)
+    end
+  end
+
+  # ── /advisor — advisor consult (Agent.Loop.Advisor) ────────────────────────
+  #
+  #   /advisor                   show enabled state + configured pair
+  #   /advisor status            same as bare /advisor
+  #   /advisor on | off          toggle the advisor (manual tool + auto triggers)
+  #   /advisor model <id>        set the advisor's model, paired with THIS
+  #                              session's current provider (persists)
+  def cmd_advisor(args, session_id) do
+    IO.puts("")
+
+    case parse_advisor_args(args) do
+      {:status, _} ->
+        print_advisor_state(session_id)
+
+      {:on, _} ->
+        write_advisor_toggle(session_id, true)
+
+      {:off, _} ->
+        write_advisor_toggle(session_id, false)
+
+      {:model, id} ->
+        write_advisor_model(session_id, id)
+
+      {:error, usage} ->
+        IO.puts("  #{@yellow}#{usage}#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  end
+
+  defp parse_advisor_args(args) do
+    case args |> to_string() |> String.trim() |> String.split(~r/\s+/, trim: true, parts: 2) do
+      [] -> {:status, nil}
+      ["status"] -> {:status, nil}
+      ["on"] -> {:on, nil}
+      ["off"] -> {:off, nil}
+      ["model", id] -> {:model, id}
+      ["model"] -> {:error, "usage: /advisor model <id>"}
+      _ -> {:error, "usage: /advisor [status|on|off|model <id>]"}
+    end
+  end
+
+  defp write_advisor_toggle(session_id, on?) do
+    case OptimalSystemAgent.Settings.set_user("advisor_enabled", on?) do
+      :ok ->
+        state = if on?, do: "#{@green}on#{@reset}", else: "#{@dim}off#{@reset}"
+        IO.puts("  Advisor: #{state} #{@dim}(saved to settings.json)#{@reset}")
+        print_advisor_state(session_id)
+
+      other ->
+        IO.puts("  #{@red}✗#{@reset} Could not write settings: #{inspect(other)}")
+    end
+  end
+
+  # A single `/advisor model <id>` is meant to be enough on its own — no
+  # separate `/advisor provider` subcommand — so the provider defaults to
+  # THIS session's current one. An operator who genuinely wants a DIFFERENT
+  # provider for the advisor sets `advisor_provider` directly in
+  # settings.json; nothing here can express a cross-provider pin.
+  defp write_advisor_model(session_id, id) do
+    provider = session_provider(session_id)
+
+    with :ok <- OptimalSystemAgent.Settings.set_user("advisor_model", id),
+         :ok <- OptimalSystemAgent.Settings.set_user("advisor_provider", to_string(provider)) do
+      IO.puts("  advisor → #{provider}:#{id} #{@dim}(saved to settings.json)#{@reset}")
+
+      print_advisor_state(session_id)
+    else
+      other -> IO.puts("  #{@red}✗#{@reset} Could not write settings: #{inspect(other)}")
+    end
+  end
+
+  defp print_advisor_state(session_id) do
+    enabled? =
+      OptimalSystemAgent.Settings.get_session_for(
+        session_id,
+        "advisor_enabled",
+        Application.get_env(:optimal_system_agent, :advisor_enabled, true)
+      ) == true
+
+    call_state = %{
+      session_id: session_id,
+      provider: session_provider(session_id),
+      model: session_model(session_id)
+    }
+
+    configured_pair = Advisor.configured_pair(call_state)
+    resolved = Advisor.resolve_pair(call_state)
+    cap = Advisor.cost_cap_usd(call_state)
+
+    IO.puts("  #{@bold}Advisor consult#{@reset}")
+    IO.puts("")
+
+    state = if enabled?, do: "#{@green}on#{@reset}", else: "#{@dim}off#{@reset}"
+    IO.puts("  advisor    #{state}  #{@dim}(default on)#{@reset}")
+
+    configured_line =
+      case configured_pair do
+        {provider, model} -> "#{provider}:#{model}"
+        nil -> "#{@dim}not explicitly configured#{@reset}"
+      end
+
+    IO.puts("  configured #{configured_line}")
+
+    # "Which advisor was resolved and why" — never :advisor_not_configured in
+    # the default path (see `Advisor.resolve_pair/1`'s moduledoc): this line
+    # is what actually answers a `/advisor_consult` call right now, not just
+    # what the operator explicitly typed.
+    resolved_line =
+      case resolved do
+        {provider, model, source} ->
+          "#{provider}:#{model}  #{@dim}(#{resolve_source_label(source)})#{@reset}"
+
+        nil ->
+          "#{@yellow}none — no credential and no session model to fall back to#{@reset}"
+      end
+
+    IO.puts("  resolved   #{resolved_line}")
+    IO.puts("  cost cap   $#{cap} #{@dim}per turn#{@reset}")
+    IO.puts("")
+
+    IO.puts(
+      "  #{@dim}/advisor on|off toggles the advisor; /advisor model <id> pairs a model " <>
+        "with this session's current provider. Both persist to settings.json. With no " <>
+        "explicit model, the advisor auto-resolves from a reachable Anthropic/OpenAI " <>
+        "credential, falling back to this session's own model at high effort.#{@reset}"
+    )
+  end
+
+  defp resolve_source_label(:configured), do: "explicitly configured"
+  defp resolve_source_label(:anthropic_auto), do: "auto — Anthropic credential detected"
+  defp resolve_source_label(:openai_auto), do: "auto — OpenAI credential detected"
+
+  defp resolve_source_label(:session_model_fallback),
+    do: "auto — no advisor credential found, using this session's own model at high effort"
+
+  # The session's own live model, mirroring `session_provider/1` — used to
+  # resolve `Advisor.resolve_pair/1`'s tier-3 fallback for `/advisor status`.
+  defp session_model(session_id) do
+    case Loop.get_state(session_id) do
+      {:ok, state} -> state[:model]
+      _ -> nil
     end
   end
 
@@ -1970,6 +2243,33 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     _ ->
       IO.puts("  #{@yellow}error: usage unavailable#{@reset}\n")
       session_id
+  end
+
+  @doc """
+  `/trace [all]` - where the current (or last) turn's time went: model, tools
+  per tool with the slowest calls, approval waits, background waits,
+  retries/recoveries and repeated read-only probes. `all` lists every retained
+  turn, newest first. Same data as `GET /api/v1/sessions/:id/trace`.
+  """
+  def cmd_trace(args, session_id) do
+    alias OptimalSystemAgent.Agent.TurnTrace
+
+    text =
+      case String.trim(to_string(args)) do
+        "all" ->
+          case TurnTrace.turns(session_id) do
+            [] -> TurnTrace.format(nil)
+            turns -> Enum.map_join(turns, "\n\n", &TurnTrace.format/1)
+          end
+
+        _ ->
+          session_id |> TurnTrace.latest() |> TurnTrace.format()
+      end
+
+    IO.puts("")
+    IO.puts(text)
+    IO.puts("")
+    session_id
   end
 
   def cmd_context(_args, session_id) do
@@ -3402,6 +3702,99 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
       IO.puts("  #{@yellow}error: invalid level#{@reset}")
       IO.puts("  #{@dim}Valid levels: fast, medium, high, xhigh, ultra#{@reset}\n")
       session_id
+  end
+
+  # `/budget` — the per-step turn-budget pacing note (`Agent.Loop.TurnBudget`).
+  #
+  #   /budget               show current config + what the note would say
+  #   /budget tokens <n>    set the whole-turn output-token target for this session
+  #   /budget tokens auto   clear the override — back to the effort-scaled default
+  #   /budget steps <n>     set the steps-remaining wrap-up threshold
+  #   /budget off | on      hide/show the note entirely
+  #
+  # `Settings.set_session/2` — same session-scoped, in-memory-only mechanism
+  # `/effort` uses, via `Settings.set_session(:effort_level, ...)`.
+  def cmd_budget(args, session_id) do
+    alias OptimalSystemAgent.Settings
+    IO.puts("")
+
+    case String.trim(args) |> String.split(~r/\s+/, trim: true) do
+      [] ->
+        show_budget_status(session_id)
+
+      ["tokens", "auto"] ->
+        Settings.delete_session(:budget_turn_tokens)
+        IO.puts("  #{@green}✓#{@reset} Turn token budget reset to the effort-scaled default")
+
+      ["tokens", n] ->
+        case Integer.parse(n) do
+          {tokens, ""} when tokens > 0 ->
+            Settings.set_session(:budget_turn_tokens, tokens)
+            IO.puts("  #{@green}✓#{@reset} Turn token budget set to #{tokens}")
+
+          _ ->
+            IO.puts("  #{@yellow}error: expected a positive whole number or 'auto'#{@reset}")
+        end
+
+      ["steps", n] ->
+        case Integer.parse(n) do
+          {steps, ""} when steps > 0 ->
+            Settings.set_session(:budget_warn_steps, steps)
+            IO.puts("  #{@green}✓#{@reset} Wrap-up threshold set to #{steps} steps remaining")
+
+          _ ->
+            IO.puts("  #{@yellow}error: expected a positive whole number#{@reset}")
+        end
+
+      ["off"] ->
+        Settings.set_session(:budget_note_enabled, false)
+        IO.puts("  #{@green}✓#{@reset} Budget note hidden")
+
+      ["on"] ->
+        Settings.set_session(:budget_note_enabled, true)
+        IO.puts("  #{@green}✓#{@reset} Budget note shown")
+
+      _ ->
+        IO.puts("  #{@dim}Usage: /budget | tokens <n>|auto | steps <n> | off | on#{@reset}")
+    end
+
+    IO.puts("")
+    session_id
+  rescue
+    _ ->
+      IO.puts("  #{@yellow}error: could not read/update the budget setting#{@reset}\n")
+      session_id
+  end
+
+  defp show_budget_status(session_id) do
+    alias OptimalSystemAgent.Agent.Loop.TurnBudget
+
+    enabled = TurnBudget.enabled?()
+    tokens = TurnBudget.token_budget()
+    steps = TurnBudget.warn_steps()
+    frac = TurnBudget.warn_frac()
+
+    IO.puts("  #{@bold}Turn budget note: #{if enabled, do: "on", else: "off"}#{@reset}")
+    IO.puts("  #{@dim}Token target:#{@reset}      ~#{tokens} output tokens/turn")
+
+    IO.puts(
+      "  #{@dim}Wrap-up below:#{@reset}     #{steps} steps remaining, or #{Float.round(frac * 100, 0)}% of tokens left"
+    )
+
+    IO.puts("")
+
+    example = TurnBudget.note(%{session_id: session_id, iteration: 0}, budget_iteration_ceiling())
+    if example, do: IO.puts("  #{@dim}#{example}#{@reset}")
+
+    IO.puts("")
+    IO.puts("  #{@dim}Usage: /budget tokens <n>|auto | steps <n> | off | on#{@reset}")
+  end
+
+  # Display-only mirror of `ReactLoop`'s private `max_iterations(state)`, whose
+  # own module is not the CLI's to call into. Enough to render a realistic
+  # example note; never the value an actual turn budgets against.
+  defp budget_iteration_ceiling do
+    Application.get_env(:optimal_system_agent, :max_iterations) || 1_000_000
   end
 
   # `/think` — force the model's reasoning phase on or off.

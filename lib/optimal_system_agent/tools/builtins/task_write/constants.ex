@@ -14,6 +14,6 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWrite.Constants do
   def default_session, do: @default_session
 
   # All valid action atoms for the task state machine.
-  @actions ~w(add add_multiple start complete fail list clear update add_dependency remove_dependency next)
+  @actions ~w(add add_multiple start complete fail list clear update add_dependency remove_dependency next run_check)
   def actions, do: @actions
 end

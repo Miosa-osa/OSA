@@ -106,6 +106,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWrite.Tool do
         "blocker_id" => %{
           "type" => "string",
           "description" => "Blocking task ID (for add_dependency/remove_dependency)"
+        },
+        "check" => %{
+          "type" => "object",
+          "description" =>
+            "Acceptance check for this task (for add/update). Run by the HARNESS, " <>
+              "never asserted by you — `complete` refuses the transition until it " <>
+              "passes. One of: {\"type\": \"command\", \"command\": \"mix test " <>
+              "test/foo_test.exs\"}, {\"type\": \"file_exists\", \"path\": \"lib/foo.ex\"}, " <>
+              "{\"type\": \"symbol_exists\", \"path\": \"lib/foo.ex\", \"symbol\": \"def bar\"}. " <>
+              "Use `run_check` to see the current verdict before attempting `complete`.",
+          "properties" => %{
+            "type" => %{"type" => "string", "enum" => ["command", "file_exists", "symbol_exists"]},
+            "command" => %{"type" => "string"},
+            "path" => %{"type" => "string"},
+            "symbol" => %{"type" => "string"}
+          },
+          "required" => ["type"]
         }
       },
       "required" => ["action"]

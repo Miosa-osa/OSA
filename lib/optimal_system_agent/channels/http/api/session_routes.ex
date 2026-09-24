@@ -345,6 +345,35 @@ defmodule OptimalSystemAgent.Channels.HTTP.API.SessionRoutes do
 
   # ── GET /sessions/:id ──────────────────────────────────────────────
 
+  # ── GET /sessions/:id/trace ────────────────────────────────────────
+  #
+  # Where the current (or last) turn's time went - the data behind `/trace`
+  # (`Agent.TurnTrace`). `turn` is the newest turn, running or finished (its
+  # `status` says which), or null before the first turn. `?all=1` adds `turns`,
+  # every retained turn newest first. The bench harness polls this to learn a
+  # turn has finished and what it cost.
+  get "/:id/trace" do
+    session_id = conn.params["id"]
+    user_id = conn.assigns[:user_id] || "anonymous"
+
+    case SessionAccess.authorize(session_id, user_id) do
+      :ok ->
+        alias OptimalSystemAgent.Agent.TurnTrace
+
+        body = %{session_id: session_id, turn: TurnTrace.latest(session_id)}
+
+        body =
+          if conn.params["all"] in ["1", "true"],
+            do: Map.put(body, :turns, TurnTrace.turns(session_id)),
+            else: body
+
+        json(conn, 200, body)
+
+      {:error, :not_found} ->
+        json(conn, 404, %{error: "not_found", details: "Session not found"})
+    end
+  end
+
   get "/:id/health" do
     session_id = conn.params["id"]
     json(conn, 200, OptimalSystemAgent.Agent.SessionHealth.snapshot(session_id))

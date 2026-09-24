@@ -56,8 +56,17 @@ defmodule OptimalSystemAgent.Supervisors.AgentServices do
       # File Locking — region-level concurrent file editing
       OptimalSystemAgent.FileLocking.RegionLock,
 
+      # Claims Board — cross-agent visibility of files/tasks in flight, built
+      # on RegionLock (files) plus its own small task-claim table.
+      OptimalSystemAgent.FileLocking.ClaimsBoard,
+
       # Speculative Execution — agents work ahead on predicted tasks
       OptimalSystemAgent.Speculative.Executor,
+
+      # Tool-call prefetch — runs likely-next read-only tool calls ahead of
+      # the model asking for them, while the previous turn is still
+      # streaming, and caches the results (see moduledoc for the guardrails).
+      OptimalSystemAgent.Prefetch.Engine,
 
       # Security intelligence — per-session structured-notes store (ETS-backed
       # GenServer per session, keyed by session id). Started lazily by

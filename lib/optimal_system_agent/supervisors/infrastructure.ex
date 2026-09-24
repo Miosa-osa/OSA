@@ -53,6 +53,12 @@ defmodule OptimalSystemAgent.Supervisors.Infrastructure do
       # re-registers its handler on init).
       OptimalSystemAgent.Events.TuiForwarder,
 
+      # Turn regulation core — the algedonic pain channel's long-lived process
+      # (`Agent.Loop.Regulation.PainChannel`). Registers its own Bus handler
+      # for `:permission_wait` on init, same ordering requirement as
+      # `TuiForwarder` above and for the same reason.
+      OptimalSystemAgent.Agent.Loop.Regulation.PainChannel,
+
       # Persistent storage
       OptimalSystemAgent.Store.Repo,
 
@@ -64,6 +70,14 @@ defmodule OptimalSystemAgent.Supervisors.Infrastructure do
       # settings_changed event. Its init returns :ignore when
       # :settings_watcher_enabled is false (test suite).
       OptimalSystemAgent.Settings.Watcher,
+
+      # RepoMap background watcher — polls registered workspace roots on its
+      # own timer and syncs the live repo model (`RepoMap.sync_from_git/1`)
+      # from a cheap `git status` diff, so an edit made OUTSIDE OSA is not
+      # invisible until the model happens to touch that file itself. Like
+      # Settings.Watcher, its init returns :ignore when
+      # :repo_map_watcher_enabled is false (test suite).
+      OptimalSystemAgent.RepoMap.Watcher,
 
       # Provider health / circuit breaker — must start before Registry
       OptimalSystemAgent.Providers.HealthChecker,

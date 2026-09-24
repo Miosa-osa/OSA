@@ -50,6 +50,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   alias OptimalSystemAgent.Agent.AskUserMode
   alias OptimalSystemAgent.Agent.CompactionEvents
+  alias OptimalSystemAgent.Agent.TurnTrace
   alias OptimalSystemAgent.Agent.Loop.Accounting
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
   alias OptimalSystemAgent.Agent.Loop.Guardrails
@@ -64,6 +65,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
   alias OptimalSystemAgent.Agent.Loop.TerminalSource
   alias OptimalSystemAgent.Agent.Loop.ToolFilter
   alias OptimalSystemAgent.Agent.Loop.TurnPipeline
+  alias OptimalSystemAgent.Signal.SnScorer
   alias OptimalSystemAgent.Agent.Hooks
   alias OptimalSystemAgent.Agent.SessionPersistence
   alias OptimalSystemAgent.Agent.StayAwake
@@ -1684,6 +1686,12 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # turn takes — which, with tool execution unbounded by design, is unbounded.
     publish_live(state, message)
 
+    TurnTrace.begin_turn(state.session_id, %{
+      model: state.model,
+      provider: state.provider,
+      prompt: message
+    })
+
     try do
       # The per-turn pre-LLM gates (cancel-clear, overrides, turn-increment,
       # budget/turn limits, cache clears, UserPromptSubmit hook, prompt-injection
@@ -1705,6 +1713,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
       # session failed, and a dead session's next incarnation overwrites the row
       # at its own turn start.
       clear_live_key(state.session_id)
+      TurnTrace.end_turn(state.session_id)
     end
   end
 
@@ -2223,7 +2232,20 @@ defmodule OptimalSystemAgent.Agent.Loop do
               # a real turn does at this point; a synthetic turn deserves the same
               # guarantee.
               TurnPipeline.clear_message_caches()
-              {:reply, _reply, final_state} = during_turn(fn -> run_and_reply(next_state) end)
+
+              TurnTrace.begin_turn(state.session_id, %{
+                model: state.model,
+                provider: state.provider,
+                prompt: "[background task notification]"
+              })
+
+              {:reply, _reply, final_state} =
+                try do
+                  during_turn(fn -> run_and_reply(next_state) end)
+                after
+                  TurnTrace.end_turn(state.session_id)
+                end
+
               {:noreply, final_state}
 
             {:error, _reason} ->
@@ -2714,6 +2736,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
     response = maybe_scrub_prompt_leak(response)
     response = maybe_strip_dead_phrases(response)
+    response = maybe_enforce_signal_quality(response, state)
 
     # Per-turn tool telemetry: scan ONLY the messages this turn appended.
     # `turn_tool_names` is per-call (not uniq'd) so counts reflect tool USES.
@@ -2783,6 +2806,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # Turn-end lifecycle event (primitive #30) — correlated to the turn_id minted
     # at turn start, so the per-session event stream brackets each turn.
     Observability.turn_end(state, response)
+
+    # Speculative prefetch's per-turn hit-rate/time-saved summary — one
+    # telemetry event per turn, right next to the turn-end lifecycle event it
+    # is scoped the same way.
+    OptimalSystemAgent.Prefetch.Engine.end_turn(state.session_id)
 
     Bus.emit(
       :agent_response,
@@ -2923,6 +2951,80 @@ defmodule OptimalSystemAgent.Agent.Loop do
   end
 
   defp maybe_strip_dead_phrases(response), do: response
+
+  # Signal Theory applied OUTBOUND (item 13's other half — `OutputContract`
+  # above is the prompt-side contract; this is the display-side gate):
+  # trim pure-filler sentences and immediately-repeated sentences out of the
+  # final answer, and log + emit a telemetry event when what remains still
+  # scores low, so the pattern is visible without silently mangling real
+  # content. Heuristic only (`Signal.SnScorer`) — no extra model call on
+  # this hot path.
+  #
+  # ON by default for real use (`config/config.exs`,
+  # `signal_quality_enforcement_enabled: true`) — the operator wants this
+  # enforced. It is OFF only in `config/test.exs`, for the same reason
+  # `maybe_add_output_contract_directive/2` in `MessageHandler` is: this
+  # repo's test suite has many call sites that assert an LLM mock's
+  # response text verbatim, and this repo's test env keeps those
+  # deterministic assertions stable by convention.
+  #
+  # The trim itself is safe to run unconditionally on real output: it is
+  # `SnScorer.trim/1`, which — see `SnScorer.protected_sentence?/1` and
+  # `SnScorerSafetyTest` — never removes or collapses a sentence containing
+  # a backtick, a `/`, a digit, or a shell/VCS command word, so it cannot
+  # delete code, a path, a number, or a command. It only ever drops a
+  # sentence that exactly matches a fixed filler phrase, or collapses an
+  # exact immediate repeat of a non-protected sentence.
+  #
+  # Public + `@doc false` so this is directly unit-testable with the flag
+  # forced on, same rationale as `compact_and_refresh_tokens/1` and
+  # `reset_per_turn_fields/1` above.
+  @doc false
+  @spec maybe_enforce_signal_quality(term(), map()) :: term()
+  def maybe_enforce_signal_quality(response, state) when is_binary(response) do
+    if signal_quality_enforcement_enabled?() do
+      {trimmed, meta} = SnScorer.enforce(response, question: Map.get(state, :current_input))
+
+      if meta.score < low_signal_threshold() do
+        session_id = Map.get(state, :session_id)
+
+        Logger.info(
+          "[loop] Signal quality: low S/N response (score=#{meta.score}, " <>
+            "reasons=#{inspect(meta.reasons)}, session=#{session_id})"
+        )
+
+        emit_low_signal_telemetry(session_id, meta)
+      end
+
+      trimmed
+    else
+      response
+    end
+  end
+
+  def maybe_enforce_signal_quality(response, _state), do: response
+
+  defp emit_low_signal_telemetry(session_id, meta) do
+    Bus.emit(:system_event, %{
+      event: :low_signal_response,
+      session_id: session_id,
+      score: meta.score,
+      reasons: meta.reasons
+    })
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp signal_quality_enforcement_enabled? do
+    Application.get_env(:optimal_system_agent, :signal_quality_enforcement_enabled, false) ==
+      true
+  end
+
+  defp low_signal_threshold do
+    Application.get_env(:optimal_system_agent, :signal_quality_threshold, 0.5)
+  end
 
   # --- Helpers ---
 
