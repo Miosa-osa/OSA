@@ -39,6 +39,12 @@ defmodule OptimalSystemAgent.Tools.Builtins.TaskWrite.Prompt do
 
     The board renders itself: after a mutating call do NOT restate the plan, list
     the tasks or narrate the status change, just continue with the work.
+
+    A step can carry an acceptance `check` (a command to run, a file or symbol
+    that must exist, or a test that must pass) — set it on `add`/`update`. The
+    HARNESS runs it, not you: `complete` refuses the transition and returns the
+    failure output until the check actually passes. Use `run_check` any time to
+    see the current verdict without attempting completion.
     """
   end
 

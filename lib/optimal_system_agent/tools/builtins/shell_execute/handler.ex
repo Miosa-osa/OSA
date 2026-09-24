@@ -329,15 +329,22 @@ defmodule OptimalSystemAgent.Tools.Builtins.ShellExecute.Handler do
     e -> {:error, "Sandbox execution error: #{Exception.message(e)}"}
   end
 
-  # ── Private: command classification (deny / ask / allow) ──────────────
+  # ── Command classification (deny / ask / allow) ────────────────────────
   #
   # Claude-Code-aligned three-tier policy (see Constants moduledoc):
   #   catastrophic → :deny   (unrecoverable — hard block, never offered)
   #   risky        → :ask    (powerful but legitimate — inline permission prompt)
   #   safe         → :allow  (everything else — command substitution, /etc reads,
   #                           relative paths, `cd` anywhere, `env`, …)
-
-  defp classify_command(command) do
+  #
+  # Public (not just for this module's own `check_permissions/2`): a
+  # `task_write` acceptance `check` of type `"command"` runs a shell command
+  # too — `complete`/`run_check` reach `Tasks.Check.run/2`, which shells out
+  # via `OS.Shell.cmd/2` exactly like this tool does. Gating that path through
+  # a SECOND, independently-maintained classifier would drift; this is the one
+  # classifier, reused by `TaskWrite.Handler.check_permissions/2`.
+  @spec classify_command(String.t()) :: :allow | {:ask, String.t()} | {:deny, String.t()}
+  def classify_command(command) do
     cond do
       # Catastrophic (built-in defaults + operator [permissions].catastrophic_patterns
       # + [permissions].deny) is checked FIRST — an operator `allow` can never

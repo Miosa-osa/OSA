@@ -12,6 +12,7 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
   require Logger
 
   alias OptimalSystemAgent.Events.Bus
+  alias OptimalSystemAgent.Agent.Tasks.Check
   alias OptimalSystemAgent.Agent.Tasks.Persistence
 
   # ── Task struct ──────────────────────────────────────────────────────────
@@ -30,7 +31,11 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
       metadata: %{},
       created_at: nil,
       started_at: nil,
-      completed_at: nil
+      completed_at: nil,
+      # An acceptance check (`Tasks.Check`), or `nil` for a plan item with none.
+      # `complete_task/3` runs this itself before it will transition a checked
+      # task to `:completed` -- see the moduledoc.
+      check: nil
     ]
   end
 
@@ -145,11 +150,51 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
     )
   end
 
-  @doc "Transition task to :completed."
-  @spec complete_task(map(), String.t(), String.t()) :: {map(), :ok | {:error, :not_found}}
+  @doc """
+  Transition task to `:completed`.
+
+  If the task carries an acceptance `check` (`Tasks.Check`), it is RUN BY THE
+  HARNESS first -- never asserted by the model -- and the transition only
+  happens when it passes. On failure the task's status is left unchanged and
+  its `check` is updated with the failing verdict (visible to `list` /
+  `task_checklist_show`), and this returns `{:error, {:check_failed, output}}`
+  instead of `:ok`.
+  """
+  @spec complete_task(map(), String.t(), String.t()) ::
+          {map(), :ok | {:error, :not_found | {:check_failed, String.t()}}}
   def complete_task(sessions, session_id, task_id) do
     sessions = ensure_session(sessions, session_id)
+    tasks = sessions[session_id] || []
 
+    case Enum.find(tasks, &(&1.id == task_id)) do
+      nil ->
+        {sessions, {:error, :not_found}}
+
+      %Task{check: nil} ->
+        do_complete(sessions, session_id, task_id)
+
+      %Task{check: check} ->
+        result = Check.run(check)
+        sessions = put_check(sessions, session_id, task_id, result)
+
+        case result.status do
+          "passed" ->
+            do_complete(sessions, session_id, task_id)
+
+          _ ->
+            safe_emit(:system_event, %{
+              event: :task_tracker_check_failed,
+              session_id: session_id,
+              task_id: task_id,
+              output: result.output
+            })
+
+            {sessions, {:error, {:check_failed, result.output || "check failed"}}}
+        end
+    end
+  end
+
+  defp do_complete(sessions, session_id, task_id) do
     do_update_task(
       sessions,
       session_id,
@@ -179,6 +224,55 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
         })
       end
     )
+  end
+
+  @doc """
+  Run a task's acceptance check BY THE HARNESS, without completing the task.
+
+  Lets the model (or an operator) see the current verdict before attempting
+  `complete_task/3` -- useful mid-work, since a failing check should not be a
+  surprise at completion time. Returns `{:error, :no_check}` for a task with
+  none.
+  """
+  @spec run_check(map(), String.t(), String.t()) ::
+          {map(), {:ok, map()} | {:error, :not_found | :no_check}}
+  def run_check(sessions, session_id, task_id) do
+    sessions = ensure_session(sessions, session_id)
+    tasks = sessions[session_id] || []
+
+    case Enum.find(tasks, &(&1.id == task_id)) do
+      nil ->
+        {sessions, {:error, :not_found}}
+
+      %Task{check: nil} ->
+        {sessions, {:error, :no_check}}
+
+      %Task{check: check} ->
+        result = Check.run(check)
+        new_sessions = put_check(sessions, session_id, task_id, result)
+
+        safe_emit(:system_event, %{
+          event: :task_tracker_check_run,
+          session_id: session_id,
+          task_id: task_id,
+          status: result.status
+        })
+
+        {new_sessions, {:ok, result}}
+    end
+  end
+
+  defp put_check(sessions, session_id, task_id, check) do
+    {new_sessions, _} =
+      do_update_task(
+        sessions,
+        session_id,
+        task_id,
+        fn task -> %{task | check: check} end,
+        fn _task -> :ok end
+      )
+
+    new_sessions
   end
 
   @doc "Transition task to :failed."
@@ -223,7 +317,11 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
   @spec update_fields(map(), String.t(), String.t(), map()) :: {map(), :ok | {:error, :not_found}}
   def update_fields(sessions, session_id, task_id, updates) do
     sessions = ensure_session(sessions, session_id)
-    allowed = Map.take(updates, [:description, :owner, :metadata])
+
+    allowed =
+      updates
+      |> Map.take([:description, :owner, :metadata, :check])
+      |> normalize_check_update()
 
     do_update_task(
       sessions,
@@ -362,9 +460,38 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
       id: task.id,
       subject: task.title,
       status: to_string(task.status),
-      active_form: task.metadata[:active_form]
+      active_form: task.metadata[:active_form],
+      check_status: task.check && Map.get(task.check, :status)
     }
   end
+
+  @doc """
+  Progress across a session's checklist: `passed checks / items`.
+
+  An item counts as "passed" when it either has no acceptance check and is
+  `:completed` (the pre-existing, model-asserted notion of done), or has a
+  check whose last harness-run `status` is `"passed"`. Exposed so the
+  homeostat sibling (and the TUI plan view) can read real, harness-verified
+  progress instead of a raw completed-count that a check-carrying task could
+  satisfy just by being marked complete.
+  """
+  @spec plan_progress(map(), String.t()) :: %{
+          passed: non_neg_integer(),
+          total: non_neg_integer(),
+          fraction: float()
+        }
+  def plan_progress(sessions, session_id) do
+    tasks = get_tasks(sessions, session_id)
+    total = length(tasks)
+    passed = Enum.count(tasks, &item_passed?/1)
+    fraction = if total > 0, do: passed / total, else: 1.0
+
+    %{passed: passed, total: total, fraction: fraction}
+  end
+
+  defp item_passed?(%Task{check: nil, status: :completed}), do: true
+  defp item_passed?(%Task{check: %{status: "passed"}}), do: true
+  defp item_passed?(_), do: false
 
   # ── Public: Extraction ────────────────────────────────────────────────────
 
@@ -403,7 +530,8 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
       "metadata" => t.metadata || %{},
       "created_at" => if(t.created_at, do: DateTime.to_iso8601(t.created_at)),
       "started_at" => if(t.started_at, do: DateTime.to_iso8601(t.started_at)),
-      "completed_at" => if(t.completed_at, do: DateTime.to_iso8601(t.completed_at))
+      "completed_at" => if(t.completed_at, do: DateTime.to_iso8601(t.completed_at)),
+      "check" => Check.serialize(t.check)
     }
   end
 
@@ -421,7 +549,8 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
       metadata: map["metadata"] || %{},
       created_at: parse_datetime(map["created_at"]),
       started_at: parse_datetime(map["started_at"]),
-      completed_at: parse_datetime(map["completed_at"])
+      completed_at: parse_datetime(map["completed_at"]),
+      check: Check.deserialize(map["check"])
     }
   rescue
     _ ->
@@ -446,9 +575,18 @@ defmodule OptimalSystemAgent.Agent.Tasks.Tracker do
       tokens_used: 0,
       blocked_by: Map.get(opts, :blocked_by, []),
       metadata: Map.get(opts, :metadata, %{}),
-      created_at: DateTime.utc_now()
+      created_at: DateTime.utc_now(),
+      check: Check.normalize(Map.get(opts, :check))
     }
   end
+
+  # `update_fields/4` lets a check be attached (or replaced) on an existing
+  # task. Replacing one resets it to "pending" via `Check.normalize/1` -- the
+  # previous verdict describes a spec that no longer exists.
+  defp normalize_check_update(%{check: raw} = allowed),
+    do: %{allowed | check: Check.normalize(raw)}
+
+  defp normalize_check_update(allowed), do: allowed
 
   defp do_update_task(sessions, session_id, task_id, update_fn, notify_fn) do
     tasks = sessions[session_id] || []
