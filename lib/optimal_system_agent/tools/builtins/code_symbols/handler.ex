@@ -37,6 +37,20 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbols.Handler do
 
   alias OptimalSystemAgent.Tools.UseContext
 
+  @doc """
+  Public entry point for the per-language symbol extraction this module
+  already implements for the `code_symbols` tool.
+
+  Exists so other subsystems that need "what is defined in this file" —
+  `OptimalSystemAgent.RepoMap`, notably — reuse the same per-language regex
+  passes instead of re-implementing them. Returns `[{line, type, name}]`,
+  identical to the tuples `execute/2` renders.
+  """
+  @spec symbols_for(String.t(), String.t()) :: [{pos_integer(), String.t(), String.t()}]
+  def symbols_for(content, ext) when is_binary(content) and is_binary(ext) do
+    extract_symbols(content, ext)
+  end
+
   # ── Stage 1: Input validation ─────────────────────────────────────────
 
   @spec validate(map(), UseContext.t()) ::

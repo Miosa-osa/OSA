@@ -349,4 +349,23 @@ defmodule OptimalSystemAgent.Tools.Builtins.CodeSymbolsTest do
       assert out =~ "[function] alpha"
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # symbols_for/2 — public reuse seam for RepoMap
+  # ---------------------------------------------------------------------------
+
+  describe "symbols_for/2" do
+    test "returns the same tuples the outline renders, for Elixir source" do
+      content = "defmodule Foo do\n  def bar(a, b) do\n    a + b\n  end\nend\n"
+
+      assert Handler.symbols_for(content, ".ex") == [
+               {1, "module", "Foo"},
+               {2, "function", "bar/2"}
+             ]
+    end
+
+    test "returns [] for an extension with no extractor" do
+      assert Handler.symbols_for("whatever", ".unknownext") == []
+    end
+  end
 end

@@ -40,6 +40,27 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
   @default_preview_tail_lines 20
   # Orphan sweep: delete result files older than this many days.
   @orphan_max_age_days 7
+  # `expand/2` range-mode default line cap, so a handle expanded with no
+  # explicit `:limit` still returns a bounded slice rather than the whole file.
+  @default_expand_limit 200
+  # `expand/2` grep-mode: matching lines returned, capped so a pattern that
+  # matches almost everything cannot re-create the original context bloat.
+  @max_grep_matches 200
+  # Head/tail-adjacent lines that look like an error or a match, surfaced
+  # alongside the head+tail preview so the model does not have to guess an
+  # offset to see WHY a command failed. Deliberately small — this augments the
+  # preview, it does not replace `expand/2` for genuine investigation.
+  @max_key_lines 20
+  @key_line_patterns [
+    ~r/\berror\b/i,
+    ~r/\bexception\b/i,
+    ~r/\bfail(ed|ure)?\b/i,
+    ~r/\btraceback\b/i,
+    ~r/panic:/i,
+    # Compiler/linter-style `path:line:col` locations.
+    ~r/^\s*\S+:\d+:\d+/,
+    ~r/✗|✘/
+  ]
 
   @doc """
   Apply result budget to a tool result string.
@@ -154,9 +175,67 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
     _ -> :ok
   end
 
-  # No `read/1` here on purpose: offloaded results are re-read by the model
-  # itself through the `file_read` tool, using the path embedded in
-  # `reference_note/3`. A module-local reader had zero callers.
+  @doc """
+  Write `content` to the shared tool-results store and return `{:ok, path}`.
+
+  This is the ONE place that decides the filename scheme
+  (`<session>_<call_id>_<tool_name>.txt`, so `cleanup/1`'s session-scoped glob
+  and `sweep_orphans/1`'s age sweep both cover it). `apply_budget/4`'s own
+  offload goes through this too — added so `Agent.Loop.ContextReduce`'s
+  cheaper stale-tool-result clearing tier, and anything else that needs to
+  spill a result to disk, share the exact same store and naming instead of
+  inventing a second one.
+  """
+  @spec persist(String.t(), String.t(), String.t() | nil, String.t() | nil) ::
+          {:ok, String.t()} | {:error, term()}
+  def persist(content, tool_name, tool_call_id, session_id \\ nil) when is_binary(content) do
+    File.mkdir_p!(results_dir())
+    path = Path.join(results_dir(), filename(tool_name, tool_call_id, session_id))
+
+    case File.write(path, content) do
+      :ok -> {:ok, path}
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    e -> {:error, e}
+  end
+
+  @doc """
+  Read back a previously stored tool result, by handle or by its full path.
+
+  `handle_or_path` is either the bare filename `persist/4`/`apply_budget/4`
+  wrote (e.g. `sess123_call45_shell_execute.txt`) or the full path embedded in
+  their reference notes — both resolve to the same file. Any other path,
+  including one that tries to `..` its way out of the tool-results
+  directory, is refused: this is a retrieval tool the model calls with
+  untrusted-ish input, not a general file-read primitive.
+
+  ## Options
+
+    * `:grep` — a pattern (regex or literal substring); returns only matching
+      lines, each prefixed with its 1-based line number.
+    * `:offset` / `:limit` — 1-based starting line and max lines to return.
+      Ignored when `:grep` is given. Defaults to the whole file capped at
+      #{@default_expand_limit} lines.
+  """
+  @spec expand(String.t(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
+  def expand(handle_or_path, opts \\ [])
+
+  def expand(handle_or_path, opts) when is_binary(handle_or_path) do
+    with {:ok, path} <- resolve_handle(handle_or_path),
+         {:ok, content} <- read_stored(path) do
+      case Keyword.get(opts, :grep) do
+        nil -> {:ok, range_slice(content, opts)}
+        pattern -> grep_slice(content, pattern, opts)
+      end
+    end
+  end
+
+  def expand(_handle_or_path, _opts), do: {:error, "handle must be a string"}
+
+  # No `read/1` here on purpose beyond `expand/2` above: offloaded results are
+  # re-read by the model itself through `file_read`/`expand_output`, using the
+  # path or handle embedded in `reference_note/3`.
 
   # ── Private ──────────────────────────────────────────────────────────
 
@@ -168,20 +247,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
          threshold,
          line_count
        ) do
-    File.mkdir_p!(results_dir())
-
-    # Filename embeds the session so `cleanup/1`'s `<session>_*` glob matches and
-    # per-session results are actually deleted on session end (previously named
-    # `<callid>_<tool>.txt`, so the session glob never matched and offloaded
-    # results leaked into ~/.osa/tool-results forever).
-    safe_name = sanitize_component(tool_name)
-    safe_id = sanitize_component(tool_call_id)
-    safe_session = sanitize_component(session_id)
-    filename = "#{safe_session}_#{safe_id}_#{safe_name}.txt"
-    path = Path.join(results_dir(), filename)
-
-    case File.write(path, result_str) do
-      :ok ->
+    case persist(result_str, tool_name, tool_call_id, session_id) do
+      {:ok, path} ->
         size_kb = Float.round(byte_size(result_str) / 1024, 1)
 
         Logger.debug(
@@ -193,7 +260,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
         "#{preview}\n\n#{reference_note(path, size_kb, line_count)}"
 
       {:error, reason} ->
-        Logger.warning("[tool_result_storage] Failed to persist: #{reason}")
+        Logger.warning("[tool_result_storage] Failed to persist: #{inspect(reason)}")
         # Fall back to inline truncation (no file to reference). `threshold` is
         # a BYTE cap, so this must be a byte-bounded cut — String.slice/3
         # counts graphemes and would emit ~3x the advertised size on CJK and
@@ -239,8 +306,9 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
       head = lines |> Enum.take(head_n) |> Enum.join("\n")
       tail = lines |> Enum.take(-tail_n) |> Enum.join("\n")
       omitted = line_count - head_n - tail_n
+      key_section = key_lines_section(lines, line_count, head_n, tail_n)
 
-      "#{head}\n\n… #{omitted} lines omitted …\n\n#{tail}"
+      "#{head}\n\n… #{omitted} lines omitted …#{key_section}\n\n#{tail}"
     else
       # Too few lines for a meaningful head+tail split by LINE (e.g. one
       # enormous single-line blob) — fall back to a byte-based head+tail
@@ -294,13 +362,50 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
     end
   end
 
+  # Lines around (but outside) the visible head+tail window that look like an
+  # error or a match. `lines` is the SAME split `head_tail_preview/2` already
+  # computed — passed in rather than re-split so a multi-MB result is not
+  # split twice per call.
+  defp key_lines_section(lines, line_count, head_n, tail_n) do
+    tail_start = max(line_count - tail_n + 1, head_n + 1)
+
+    matches =
+      lines
+      |> Enum.with_index(1)
+      |> Enum.filter(fn {_line, n} -> n > head_n and n < tail_start end)
+      |> Enum.filter(fn {line, _n} -> matches_key_pattern?(line) end)
+      |> Enum.take(@max_key_lines)
+
+    case matches do
+      [] ->
+        ""
+
+      _ ->
+        body =
+          Enum.map_join(matches, "\n", fn {line, n} ->
+            "  L#{n}: #{String.slice(line, 0, 300)}"
+          end)
+
+        "\n\nKey lines (errors/matches):\n#{body}"
+    end
+  end
+
+  defp matches_key_pattern?(line), do: Enum.any?(@key_line_patterns, &Regex.match?(&1, line))
+
   # Capability-aware reference note: mention the `delegate` sub-agent tool as
   # an option for processing the full output only when it's actually
   # registered in this build (opencode `truncate.ts` gates its hint the same
   # way on whether the Task tool is available to the current agent).
+  #
+  # Leads with a short `Handle:` line — the bare filename `expand/2` and the
+  # `expand_output` tool resolve directly, without the model needing to
+  # extract (or worse, retype) the full absolute path.
   defp reference_note(path, size_kb, line_count) do
+    handle = Path.basename(path)
+
     base =
-      "[Full output written to #{path} (#{line_count} lines, #{size_kb}KB) — " <>
+      "Handle: #{handle}\n" <>
+        "[Full output written to #{path} (#{line_count} lines, #{size_kb}KB) — " <>
         "read it with file_read (with offset/limit) or grep_search it if needed."
 
     if delegate_available?() do
@@ -339,6 +444,103 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolResultStorage do
     case Regex.replace(~r/[^a-zA-Z0-9_\-]/, to_string(value), "_") do
       "" -> "nosession"
       s -> s
+    end
+  end
+
+  # Filename embeds the session so `cleanup/1`'s `<session>_*` glob matches and
+  # per-session results are actually deleted on session end (previously named
+  # `<callid>_<tool>.txt`, so the session glob never matched and offloaded
+  # results leaked into ~/.osa/tool-results forever).
+  defp filename(tool_name, tool_call_id, session_id) do
+    safe_name = sanitize_component(tool_name)
+    safe_id = sanitize_component(tool_call_id)
+    safe_session = sanitize_component(session_id)
+    "#{safe_session}_#{safe_id}_#{safe_name}.txt"
+  end
+
+  # ── expand/2 helpers ─────────────────────────────────────────────────
+
+  # Resolves EITHER a bare handle (a filename `persist/4` produced) OR a full
+  # path, always against the shared results directory, and refuses anything
+  # that would land outside it (a `..`-laden handle, an absolute path
+  # elsewhere on disk). `expand/2` is a retrieval tool a model calls with
+  # input it read out of its own context — never a general file-read
+  # primitive in disguise.
+  defp resolve_handle(handle_or_path) do
+    dir = results_dir()
+
+    candidate =
+      if Path.type(handle_or_path) == :absolute do
+        Path.expand(handle_or_path)
+      else
+        Path.expand(Path.join(dir, handle_or_path))
+      end
+
+    if String.starts_with?(candidate, dir <> "/") do
+      {:ok, candidate}
+    else
+      {:error,
+       "Refusing to expand #{inspect(handle_or_path)} — it resolves outside the tool-results store."}
+    end
+  end
+
+  defp read_stored(path) do
+    case File.read(path) do
+      {:ok, content} -> {:ok, content}
+      {:error, :enoent} -> {:error, "No stored output found for #{Path.basename(path)}."}
+      {:error, reason} -> {:error, "Could not read #{Path.basename(path)}: #{inspect(reason)}"}
+    end
+  end
+
+  defp range_slice(content, opts) do
+    offset = max(Keyword.get(opts, :offset, 1), 1)
+    limit = Keyword.get(opts, :limit, @default_expand_limit)
+
+    lines = String.split(content, "\n")
+    total = length(lines)
+    slice = lines |> Enum.drop(offset - 1) |> Enum.take(limit)
+
+    case slice do
+      [] ->
+        "Offset #{offset} is past the end of the stored output (#{total} lines total)."
+
+      _ ->
+        last = offset + length(slice) - 1
+        "Lines #{offset}-#{last} of #{total}:\n#{Enum.join(slice, "\n")}"
+    end
+  end
+
+  defp grep_slice(content, pattern, opts) when is_binary(pattern) do
+    limit = Keyword.get(opts, :limit, @max_grep_matches)
+    regex = compile_pattern(pattern)
+
+    matches =
+      content
+      |> String.split("\n")
+      |> Enum.with_index(1)
+      |> Enum.filter(fn {line, _n} -> Regex.match?(regex, line) end)
+      |> Enum.take(limit)
+
+    case matches do
+      [] ->
+        {:ok, "No lines matched #{inspect(pattern)}."}
+
+      _ ->
+        body = Enum.map_join(matches, "\n", fn {line, n} -> "#{n}: #{line}" end)
+        {:ok, "#{length(matches)} matching line(s):\n#{body}"}
+    end
+  end
+
+  defp grep_slice(_content, _pattern, _opts), do: {:error, "grep pattern must be a string"}
+
+  # A pattern the caller wrote as a regex (e.g. "line 42$") is honoured as
+  # one; anything that fails to compile as a regex is treated as a literal
+  # substring instead — so an unescaped user string like "foo(bar)" still
+  # matches literally rather than erroring.
+  defp compile_pattern(pattern) do
+    case Regex.compile(pattern, "i") do
+      {:ok, regex} -> regex
+      {:error, _} -> Regex.compile!(Regex.escape(pattern), "i")
     end
   end
 end

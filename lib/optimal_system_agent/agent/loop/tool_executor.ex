@@ -1562,6 +1562,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
       success: not tool_failed
     })
 
+    # Keep the live repo model (`RepoMap`) current from what this tool call
+    # just did — a write tool's touched file, a test-shaped shell command's
+    # outcome, a git-mutating command's effect — without a rewalk. Runs even
+    # on a FAILED tool call (a failed `git commit` still changed nothing, but
+    # a failed `shell_execute` test run is itself the test status worth
+    # recording). Best-effort: `observe_tool_result/4` never raises, and this
+    # is fire-and-forget so a slow/unlucky git call can never add latency to
+    # the turn.
+    repo_map_observe(tool_call.name, Map.get(tool_call, :arguments) || %{}, result_str)
+
     # Cross-cutting <system-reminder> pipeline (grok src/reminders parity):
     # surface finished background tasks / subagents, a SKILL.md near a touched
     # path, and post-edit diagnostics — deduped per session, non-fatal. Both
@@ -1812,10 +1822,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
               "\n\n#{@elision_sentinel} showing the first #{byte_size(head)} and last " <>
                 "#{byte_size(tail)} of #{byte_size(result_str)} bytes " <>
                 "(~#{max(total_lines - shown_lines, 0)} of #{total_lines} lines omitted from the " <>
-                "middle).\nThe COMPLETE output is saved at #{path}.\n" <>
+                "middle).\nThe COMPLETE output is saved at #{path} " <>
+                "(handle: #{Path.basename(path)}).\n" <>
                 "Next step: read any part with file_read " <>
                 ~s({"path": "#{path}", "offset": 1, "limit": 200}) <>
-                " (raise offset to page), or grep it for what you need.]\n\n"
+                " (raise offset to page), expand_output with that handle, or grep it for " <>
+                "what you need.]\n\n"
 
             :error ->
               "\n\n#{@elision_sentinel} #{byte_size(result_str)} bytes total, showing the first " <>
@@ -1850,6 +1862,23 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
   defp count_lines(""), do: 0
   defp count_lines(bin), do: bin |> :binary.matches("\n") |> length() |> Kernel.+(1)
+
+  # The workspace root `RepoMap` is keyed by: the OUTERMOST enclosing
+  # workspace when one exists, else the resolved cwd — the SAME default
+  # `Tools.Builtins.RepoMap` resolves to, so an observation made here lands
+  # in the exact cache entry a later `repo_map` tool call reads.
+  defp repo_map_root do
+    cwd = OptimalSystemAgent.Workspace.Cwd.get()
+    OptimalSystemAgent.Workspace.Topology.workspace_root(cwd) || cwd
+  end
+
+  defp repo_map_observe(tool_name, args, result_str) do
+    OptimalSystemAgent.RepoMap.observe_tool_result(repo_map_root(), tool_name, args, result_str)
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
 
   # Write the full result to a content-hashed file under the shared
   # tool-results directory. Returns {:ok, path, total_lines} or :error.
