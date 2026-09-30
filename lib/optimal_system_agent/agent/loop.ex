@@ -92,6 +92,16 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # nothing watching the total (P2 audit gap C). Reset each user turn in
     # `TurnPipeline.reset_per_turn_fields/1`. See `ReactLoop.spend_recovery/2`.
     recovery_attempts: 0,
+    # Reasoning-watchdog escalation stage this turn (`Agent.Loop.ReasoningWatchdog`
+    # / `ReactLoop.handle_result({:watchdog_abort, ...})`): 0 = no trip yet,
+    # 1 = one trip (retry the same model, thinking disabled), 2+ = escalated
+    # to the advisor/strong model. Cleared back to 0 the moment a generation
+    # completes cleanly (`ReactLoop.canonicalize_stop_reason/3`) and reset
+    # each user turn in `TurnPipeline.reset_per_turn_fields/1`, same as
+    # `recovery_attempts` above — every trip ALSO spends that shared budget,
+    # so this counter only decides which recovery MODE runs next, never
+    # whether one is still allowed to.
+    watchdog_trips: 0,
     recent_failure_signatures: [],
     total_tool_calls: 0,
     # Doom-loop detection counters — explicit state (formerly process-dict).
@@ -1849,7 +1859,19 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # `bounded_compaction/2` always returns, which is what makes the plain
     # sequence safe.
     messages = state.messages
-    tokens_before = OptimalSystemAgent.Agent.Compactor.estimate_tokens(messages)
+
+    # `total_and_overhead/2` - `tokens_before` is the REAL total (provider-
+    # reported `last_input_tokens` when available), and `overhead` (system
+    # prompt + tool schemas) is reapplied to `tokens_after` below so the
+    # reported pair is the TOTAL the next request will carry on both sides,
+    # not a message-only estimate that silently drops tens of thousands of
+    # tokens the moment history shrinks.
+    {tokens_before, overhead} =
+      OptimalSystemAgent.Agent.Compactor.total_and_overhead(
+        messages,
+        Map.get(state, :last_input_tokens, 0)
+      )
+
     started_at = System.monotonic_time(:millisecond)
 
     CompactionEvents.started(state.session_id, :manual, tokens_before)
@@ -1868,9 +1890,11 @@ defmodule OptimalSystemAgent.Agent.Loop do
         )
       end) || messages
 
+    tokens_after = overhead + OptimalSystemAgent.Agent.Compactor.estimate_tokens(compacted)
+
     CompactionEvents.completed(state.session_id,
       tokens_before: tokens_before,
-      tokens_after: OptimalSystemAgent.Agent.Compactor.estimate_tokens(compacted),
+      tokens_after: tokens_after,
       messages_before: length(messages),
       messages_after: length(compacted),
       duration_ms: System.monotonic_time(:millisecond) - started_at
@@ -1881,7 +1905,8 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # now that we are back in the loop process holding the state.
     state = Accounting.absorb_side_spend(state)
 
-    {:reply, :ok, republish_context(%{state | messages: compacted}, compacted != messages)}
+    {:reply, :ok,
+     republish_context(%{state | messages: compacted}, compacted != messages, overhead)}
   end
 
   # Legacy atom form kept for any pre-instructions caller.
@@ -1890,6 +1915,15 @@ defmodule OptimalSystemAgent.Agent.Loop do
 
   def handle_call({:proactive_compact, instructions}, _from, state) do
     messages = state.messages || []
+    known_tokens = Map.get(state, :last_input_tokens, 0)
+
+    # Same accounting `Agent.Compactor.maybe_compact/4` already used for the
+    # bare `:compact` path above, now shared with `ProactiveCompaction.compact/5`
+    # via its `:known_tokens` option - see that module's `total_and_overhead/2`
+    # doc for why both sides of a compaction pass must derive their totals
+    # through the SAME overhead.
+    {tokens_before, overhead} =
+      OptimalSystemAgent.Agent.Compactor.total_and_overhead(messages, known_tokens)
 
     compacted =
       TurnPipeline.bounded_compaction(messages, fn ->
@@ -1898,23 +1932,26 @@ defmodule OptimalSystemAgent.Agent.Loop do
           state.session_id,
           instructions,
           # This handler IS `/compact`. Everything else that reaches
-          # `compact/4` is the threshold path and keeps the `:auto` default.
-          :manual
+          # `compact/5` is the threshold path and keeps the `:auto` default.
+          :manual,
+          context_window: OptimalSystemAgent.Agent.Loop.ContextWindow.resolve(state),
+          known_tokens: known_tokens
         )
       end) || messages
 
     stats = %{
       messages_before: length(messages),
       messages_after: length(compacted),
-      tokens_before: OptimalSystemAgent.Agent.ContextEngine.Router.estimate_tokens(messages),
-      tokens_after: OptimalSystemAgent.Agent.ContextEngine.Router.estimate_tokens(compacted)
+      tokens_before: tokens_before,
+      tokens_after:
+        overhead + OptimalSystemAgent.Agent.ContextEngine.Router.estimate_tokens(compacted)
     }
 
     # Bill the summarizer round-trips staged by the bounded task above.
     state = Accounting.absorb_side_spend(state)
 
     {:reply, {:ok, stats},
-     republish_context(%{state | messages: compacted}, compacted != messages)}
+     republish_context(%{state | messages: compacted}, compacted != messages, overhead)}
   end
 
   def handle_call(:enter_plan_mode, _from, state) do
@@ -2048,22 +2085,33 @@ defmodule OptimalSystemAgent.Agent.Loop do
   #
   # Both loop-driven paths already do exactly this for exactly this reason —
   # `TurnPipeline.compact_and_refresh_tokens/1` at the turn boundary and
-  # `ReactLoop.refresh_tokens_after_fold/2` mid-turn. These two GenServer
+  # `ReactLoop.refresh_tokens_after_fold/3` mid-turn. These two GenServer
   # handlers are `/compact`, the form people actually type, and neither was
   # covered. Re-emitting the pressure event is the other half: without it the
   # refreshed figure would sit in state until the next turn boundary.
   #
+  # `overhead` (system prompt + tool schemas - `Agent.Compactor.
+  # total_and_overhead/2`) is added back onto the message-only estimate. The
+  # PREVIOUS fix for the stale-HIGH-reading bug documented above replaced a
+  # stale-high number with a message-only (overhead-dropped) one - correct in
+  # direction, wrong in magnitude - which is what let a `/compact` notice
+  # announce "89.4k -> 25.2k tokens", the meter read 12.6% in the very same
+  # instant, and the next real LLM call correct it to 31.8%: a 36.5k-token
+  # overhead that was always part of the request and simply went uncounted for
+  # exactly one reading. Reapplying `overhead` here is what keeps this
+  # republished figure equal to what the next request will actually send.
+  #
   # Skipped when the fold changed nothing, so a declined compaction cannot
   # replace a provider-reported count with a local estimate.
-  @spec republish_context(map(), boolean()) :: map()
-  defp republish_context(state, false), do: state
+  @spec republish_context(map(), boolean(), non_neg_integer()) :: map()
+  defp republish_context(state, false, _overhead), do: state
 
-  defp republish_context(state, true) do
+  defp republish_context(state, true, overhead) do
     state =
       state
       |> Map.put(
         :last_input_tokens,
-        OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
+        overhead + OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
       )
       |> Map.put(:last_input_message_count, length(state.messages))
 

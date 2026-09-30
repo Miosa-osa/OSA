@@ -41,9 +41,15 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
     # the window OSA actually operates in, the one every threshold is derived
     # from, and the model's true window is reported alongside it under its own
     # name rather than silently standing in for it.
+    # `model` threads into the flash/small-tier earlier ceiling (see
+    # `CompactionThresholds` moduledoc) — applied ONCE here; every downstream
+    # threshold call below reads `max_tok` (already clamped), which is
+    # idempotent against a further no-model clamp, so the status bar and the
+    # compaction decision (`ProactiveCompaction.should_compact?/2`, threaded
+    # the same way) can never drift apart.
     max_tok =
       if model_window > 0,
-        do: CompactionThresholds.operative_window(model_window),
+        do: CompactionThresholds.operative_window(model_window, Map.get(state, :model)),
         else: 0
 
     # Actual current usage: prefer the provider-reported input tokens; when the
@@ -195,7 +201,7 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
 
     max_tok =
       if model_window > 0,
-        do: CompactionThresholds.operative_window(model_window),
+        do: CompactionThresholds.operative_window(model_window, Map.get(state, :model)),
         else: 0
 
     estimated = context_occupancy(state)

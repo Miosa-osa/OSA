@@ -327,7 +327,7 @@ defmodule OptimalSystemAgent.Agent.Context do
     static_tokens = Soul.static_token_count(variant)
 
     # Match telemetry when an operator configures a smaller operating window.
-    max_tok = OptimalSystemAgent.Agent.Loop.CompactionThresholds.operative_window(max_tok)
+    max_tok = OptimalSystemAgent.Agent.Loop.CompactionThresholds.operative_window(max_tok, model)
 
     # Gather dynamic blocks for individual cost breakdown
     blocks = gather_dynamic_blocks(state)

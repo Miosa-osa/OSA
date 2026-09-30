@@ -584,7 +584,46 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           cond do
             ProactiveCompaction.should_compact?(state, cw) ->
               before_count = length(state.messages)
-              compacted = ProactiveCompaction.compact(state.messages, state.session_id)
+              known_tokens = Map.get(state, :last_input_tokens, 0)
+
+              # `overhead` - the system prompt + tool schemas the message-only
+              # estimate cannot see (`Agent.Compactor.total_and_overhead/2`) -
+              # is measured against the PRE-fold message list, then reapplied
+              # to the post-fold one in `refresh_tokens_after_fold/3` below. It
+              # stays constant across a fold, so this is what keeps the
+              # refreshed `last_input_tokens` equal to what the next request
+              # will actually carry instead of silently dropping tens of
+              # thousands of tokens for exactly one reading of the meter.
+              {_tokens_before, overhead} =
+                OptimalSystemAgent.Agent.Compactor.total_and_overhead(
+                  state.messages,
+                  known_tokens
+                )
+
+              compacted =
+                ProactiveCompaction.compact(
+                  state.messages,
+                  state.session_id,
+                  nil,
+                  :auto,
+                  # The RAW resolve, not `cw` above. `cw` already substituted
+                  # `CompactionThresholds.fallback_window/0` when the real
+                  # window is unknown, which is correct for the COMPACT
+                  # DECISION (a safety mechanism must not fail open just
+                  # because a model is unrecognised) but wrong for sizing the
+                  # kept-tail BUDGET: it would size the budget against a
+                  # guessed 200k window for a model that might have a much
+                  # smaller real one, keeping far more "verbatim" history than
+                  # such a model could afford and under-compacting exactly
+                  # the sessions this fallback exists to protect. Passing the
+                  # honest `{:ok, _} | :unknown` here — the same thing every
+                  # other `context_window:` call site in this codebase passes
+                  # (`Loop`'s `/compact` handlers, `ModelSwap`) — falls back
+                  # to the fixed-turn-count split when genuinely unknown.
+                  context_window: OptimalSystemAgent.Agent.Loop.ContextWindow.resolve(state),
+                  known_tokens: known_tokens
+                )
+
               changed? = length(compacted) != before_count
 
               if changed? do
@@ -605,7 +644,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
               # nowhere; they now stage into `Accounting`'s side ledger and are
               # billed to this session here. A no-op when nothing was staged.
               %{state | messages: compacted}
-              |> refresh_tokens_after_fold(changed?)
+              |> refresh_tokens_after_fold(changed?, overhead)
               |> Map.put(:just_compacted, changed?)
               |> Map.put(:just_compacted_overflow, false)
               |> Accounting.absorb_side_spend()
@@ -807,6 +846,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
             do: Keyword.put(llm_opts, :budget_note, budget_note),
             else: llm_opts
 
+        # A fast-routed step's answer may yet be discarded and re-asked of the
+        # strong model (`maybe_reroute_fast_final_answer/4`). Streamed live, the
+        # discarded answer was already on screen — and settled into the
+        # terminal's scrollback, where nothing can take it back — so the strong
+        # answer printed after it: the final answer twice. Hold it until the
+        # verdict; `release_fast_step_text/3` puts it out when it stands.
+        llm_opts =
+          if routing.route == :fast,
+            do: Keyword.put(llm_opts, :hold_text, true),
+            else: llm_opts
+
         LLMClient.llm_chat_stream(state, context.messages, llm_opts)
       end)
 
@@ -1006,6 +1056,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
        )
        when is_map(resp) do
     if fast_final_answer_without_tools?(resp) do
+      # The fast answer was held (`hold_text`), never shown: discarding it here
+      # leaves nothing on screen to contradict the strong model's answer.
       Logger.info(
         "[route] #{routing.provider}:#{routing.model} answered with no tool calls — " <>
           "discarding it and re-asking #{state.provider}:#{state.model} (the strong model " <>
@@ -1026,11 +1078,21 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
       {redo_result, state}
     else
+      # The fast step stands (it asked for tools, or was cut off): its held
+      # narration goes on screen now, before the tool calls it precedes.
+      release_fast_step_text(resp, state)
       {result, state}
     end
   end
 
   defp maybe_reroute_fast_final_answer(_routing, result, state, _context), do: {result, state}
+
+  defp release_fast_step_text(resp, state) do
+    case Map.get(resp, :content) do
+      text when is_binary(text) -> LLMClient.release_held_text(state.session_id, text)
+      _ -> :ok
+    end
+  end
 
   # A CLEAN final answer: real text, no tool calls, and not a cut-off stream
   # (`:stream_incomplete` responses are not "an answer" yet — the EXISTING
@@ -1107,14 +1169,30 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # Shared by both reroutes above: re-ask the SAME messages of `state`'s
   # CURRENT provider/model (the strong pair — `restore_route` already ran
   # before either reroute is checked) and bill the extra round-trip for real.
-  defp redo_on_strong_model(state, context) do
+  defp redo_on_strong_model(state, context),
+    do: redo_step_on(state, context, state.provider, state.model)
+
+  # General "re-ask the same messages on a DIFFERENT provider/model" — the
+  # same mechanics `redo_on_strong_model/2` uses (billed for real, cache-safe
+  # via `context.messages`), generalized so `watchdog_escalate/3` can send
+  # one step to the advisor pair instead of the fast->strong pair those two
+  # callers use. `state.provider`/`state.model` are restored to whatever they
+  # were on ENTRY right after the call — this redo is scoped to ONE step, not
+  # a permanent switch. For `redo_on_strong_model/2`'s own callers `provider`/
+  # `model` already equal `state.provider`/`state.model`, so the restore is a
+  # no-op there and this generalization changes nothing about their behavior.
+  defp redo_step_on(state, context, provider, model) do
+    restore_provider = state.provider
+    restore_model = state.model
+    call_state = %{state | provider: provider, model: model}
+
     redo_start = System.monotonic_time(:millisecond)
     redo_requested_at = DateTime.utc_now()
 
     redo_result =
-      with_turn_effort(state, fn ->
-        thinking_opts = LLMClient.thinking_config(state)
-        tools_for_call = ToolFilter.filter(state.tools, state)
+      with_turn_effort(call_state, fn ->
+        thinking_opts = LLMClient.thinking_config(call_state)
+        tools_for_call = ToolFilter.filter(call_state.tools, call_state)
 
         llm_opts = [
           tools: tools_for_call,
@@ -1126,10 +1204,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
         llm_opts =
           if thinking_opts, do: Keyword.put(llm_opts, :thinking, thinking_opts), else: llm_opts
 
-        # SAME messages the fast model just saw (`context.messages`, not
-        # rebuilt) — the point is that the strong model's own prefix cache
-        # still applies to this re-ask.
-        LLMClient.llm_chat_stream(state, context.messages, llm_opts)
+        # SAME messages the previous attempt just saw (`context.messages`, not
+        # rebuilt) — the point is that the new model's own prefix cache (if
+        # any) still applies to this re-ask.
+        LLMClient.llm_chat_stream(call_state, context.messages, llm_opts)
       end)
 
     redo_duration_ms = System.monotonic_time(:millisecond) - redo_start
@@ -1153,15 +1231,67 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           [requested_at: redo_requested_at]
       end
 
-    # Billed for real — the strong re-ask is a genuine second round-trip, not
-    # just a log line. `absorb_side_spend/1` mirrors the primary call's
-    # handling of a request billed on the wire before it errored.
-    state = Accounting.record(state, redo_usage, redo_billing_opts)
+    # Billed for real — the redo is a genuine second round-trip, not just a
+    # log line. `absorb_side_spend/1` mirrors the primary call's handling of
+    # a request billed on the wire before it errored.
+    state = Accounting.record(call_state, redo_usage, redo_billing_opts)
     state = Accounting.absorb_side_spend(state)
+    state = %{state | provider: restore_provider, model: restore_model}
 
-    redo_cost_usd = OptimalSystemAgent.Agent.Pricing.cost(state.model, redo_usage)
+    redo_cost_usd = OptimalSystemAgent.Agent.Pricing.cost(model, redo_usage)
 
     {redo_result, state, redo_duration_ms, redo_usage, redo_cost_usd}
+  end
+
+  # Second-trip escalation for the reasoning watchdog — resolve the advisor
+  # pair (falls back to the session's own model at high effort when no
+  # separate advisor is configured — see `Advisor.resolve_pair/1`) and redo
+  # THIS step on it, then run the redo through the SAME normalization
+  # (`canonicalize_stream_incomplete/2`, `canonicalize_stop_reason/3`) the
+  # primary call in `do_iteration/1` gets before handing the result back into
+  # `handle_result/3` — this call happens deep inside `handle_result/3`
+  # itself, past the point `do_iteration/1` would normally do that.
+  defp watchdog_escalate(state, context, cause) do
+    # Respect the SAME `advisor_enabled` toggle `Advisor.consult/3` and
+    # `maybe_auto_consult/3` already honor — an operator who turned the
+    # advisor off must not have this path reach for it anyway (`resolve_pair/1`
+    # itself does not gate on that setting; `enabled?/1` is the check).
+    pair =
+      if OptimalSystemAgent.Agent.Loop.Advisor.enabled?(state) do
+        OptimalSystemAgent.Agent.Loop.Advisor.resolve_pair(state)
+      end
+
+    {esc_provider, esc_model, source} = pair || {state.provider, state.model, :none}
+
+    if {esc_provider, esc_model} != {state.provider, state.model} do
+      Logger.warning(
+        "[loop] Escalating iteration #{state.iteration} to the advisor model " <>
+          "#{esc_provider}:#{esc_model} (#{source}) after a repeated reasoning loop (#{cause})"
+      )
+    else
+      Logger.warning(
+        "[loop] No distinct advisor model available — retrying #{state.provider}:#{state.model} " <>
+          "once more (thinking off) after a repeated reasoning loop (#{cause})"
+      )
+    end
+
+    {redo_result, state, _duration_ms, _usage, _cost_usd} =
+      redo_step_on(state, context, esc_provider, esc_model)
+
+    case canonicalize_stream_incomplete(redo_result, state) do
+      {:continue, redo_result, state} ->
+        usage =
+          case redo_result do
+            {:ok, redo_resp} -> Map.get(redo_resp, :usage, %{})
+            _ -> %{}
+          end
+
+        {redo_result, state} = canonicalize_stop_reason(redo_result, state, usage)
+        handle_result(redo_result, state, context)
+
+      {:halted, outcome} ->
+        outcome
+    end
   end
 
   defp emit_fast_reroute(state, routing, reroute_reason, duration_ms, usage, cost_usd) do
@@ -1285,6 +1415,30 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
       # configured ceiling is the right one again.
       Process.delete(:osa_bumped_max_tokens)
       Process.delete(:osa_disable_thinking)
+
+      # The reasoning watchdog's retry/escalation just landed — this
+      # generation ended on its own, with no further trip. Tell the user it
+      # resolved (`watchdog_trips` names WHICH mode got it there) and let a
+      # later, unrelated step in this same turn earn a fresh "just retry"
+      # attempt instead of jumping straight to escalation again.
+      state =
+        case Map.get(state, :watchdog_trips, 0) do
+          0 ->
+            state
+
+          trips ->
+            mode =
+              if trips == 1,
+                do: "retrying with thinking off",
+                else: "escalating to a stronger model"
+
+            OptimalSystemAgent.Agent.Loop.Regulation.Pain.reasoning_loop_recovered(
+              state.session_id,
+              "resolved: the reasoning loop cleared after #{mode}"
+            )
+
+            Map.put(state, :watchdog_trips, 0)
+        end
 
       {{:ok, resp}, Map.put(state, :turn_truncated, false)}
     end
@@ -2485,6 +2639,76 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
     run(%{state | iteration: state.iteration + 1})
   end
 
+  # Reasoning watchdog abort (`Agent.Loop.ReasoningWatchdog` /
+  # `LLMClient.llm_chat_stream/3`'s `{:llm_stream_watchdog_abort}` clause):
+  # the in-flight generation was looping on its reasoning or text channel and
+  # LLMClient already killed the stream. Unlike `:cancelled`, the turn does
+  # NOT end here — this is a RETRYABLE failure of one step with a two-stage
+  # recovery ladder, both stages spending the SAME shared per-turn recovery
+  # budget every other recovery path spends (`spend_recovery/2` — the one
+  # hard stop that keeps this from ever looping forever):
+  #
+  #   1st trip this turn → retry the SAME step, thinking disabled (reuses
+  #      `opts[:thinking_disabled]`, the exact lever the 1.0.202 reasoning
+  #      stop-loss already wired through `do_iteration`/`redo_step_on/4` —
+  #      `Process.put(:osa_disable_thinking, true)` below).
+  #   2nd+ trip this turn → the thinking-disabled retry ALSO degenerated, so
+  #      escalate this one step to the advisor pair (`Advisor.resolve_pair/1`
+  #      — the same resolution `/advisor` already trusts). Scoped to THIS
+  #      step only (`redo_step_on/4` restores `state.provider`/`state.model`
+  #      right after), so a flaky model never silently becomes the session's
+  #      model for the rest of the turn.
+  defp handle_result({:watchdog_abort, %{content: partial, cause: cause}}, state, context) do
+    Logger.warning(
+      "[loop] Reasoning watchdog aborted the stream at iteration #{state.iteration}: #{cause}"
+    )
+
+    {state, _executed_tools} =
+      commit_streamed_tool_results(state, {:watchdog_abort, %{content: partial}})
+
+    state =
+      if is_binary(partial) and String.trim(partial) != "" and
+           not last_message_is_this_assistant?(state.messages, partial) do
+        %{state | messages: state.messages ++ [%{role: "assistant", content: partial}]}
+      else
+        state
+      end
+
+    trips = Map.get(state, :watchdog_trips, 0) + 1
+    state = Map.put(state, :watchdog_trips, trips)
+
+    OptimalSystemAgent.Agent.TurnTrace.record_recovery(
+      state.session_id,
+      :reasoning_watchdog,
+      cause
+    )
+
+    if trips == 1 do
+      OptimalSystemAgent.Agent.Loop.Regulation.Pain.reasoning_loop_trip(state.session_id, cause)
+    else
+      OptimalSystemAgent.Agent.Loop.Regulation.Pain.reasoning_loop_escalated(
+        state.session_id,
+        cause
+      )
+    end
+
+    case spend_recovery(state, "a reasoning loop (#{cause})") do
+      {:exhausted, state} ->
+        halt_recovery_exhausted(state, "repeated reasoning loops (#{cause})")
+
+      {:ok, state} ->
+        LLMClient.start_new_message_segment()
+        state = Map.put(state, :iteration, state.iteration + 1)
+
+        if trips == 1 do
+          Process.put(:osa_disable_thinking, true)
+          run(state)
+        else
+          watchdog_escalate(state, context, cause)
+        end
+    end
+  end
+
   # Turn-level retry budget for a stream idle timeout. Small on purpose: each
   # attempt costs a full generation, and the committed tool results mean the
   # retry resumes rather than restarts.
@@ -3297,14 +3521,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # `TurnPipeline.compact_and_refresh_tokens/1` already does exactly this at the
   # turn boundary (finding #8) — for the same reason and against the same field.
   # This is the missing half: the mid-turn fold.
-  @spec refresh_tokens_after_fold(map(), boolean()) :: map()
-  defp refresh_tokens_after_fold(state, false), do: state
+  @spec refresh_tokens_after_fold(map(), boolean(), non_neg_integer()) :: map()
+  defp refresh_tokens_after_fold(state, false, _overhead), do: state
 
-  defp refresh_tokens_after_fold(state, true) do
+  defp refresh_tokens_after_fold(state, true, overhead) do
     state
     |> Map.put(
       :last_input_tokens,
-      OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
+      overhead + OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
     )
     |> Map.put(:last_input_message_count, length(state.messages))
   rescue
@@ -3686,6 +3910,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   defp idle_partial({:idle_timeout, %{partial: p}}) when is_binary(p), do: p
   defp idle_partial({:stream_error, reason}), do: idle_partial(reason)
   defp idle_partial({:stream_error, reason, _}), do: idle_partial(reason)
+  defp idle_partial({:watchdog_abort, %{content: p}}) when is_binary(p), do: p
   defp idle_partial(_), do: ""
 
   # Drain the streaming tool executor into message history on the ERROR path.

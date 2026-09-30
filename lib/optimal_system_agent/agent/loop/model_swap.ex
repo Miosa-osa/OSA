@@ -51,20 +51,23 @@ defmodule OptimalSystemAgent.Agent.Loop.ModelSwap do
     * `:keep`     — rewrite provider/model/window, leave the transcript
     * `:compact`  — window shrank and occupancy is already past the new compact_at
   """
-  @spec plan(term(), term(), non_neg_integer(), non_neg_integer()) :: :keep | :compact
-  def plan(old_window, new_window, occupancy, message_count)
+  @spec plan(term(), term(), non_neg_integer(), non_neg_integer(), String.t() | nil) ::
+          :keep | :compact
+  def plan(old_window, new_window, occupancy, message_count, model \\ nil)
+
+  def plan(old_window, new_window, occupancy, message_count, model)
       when is_integer(occupancy) and occupancy >= 0 and is_integer(message_count) and
              message_count >= 0 do
     cond do
       not compactable_window?(new_window) -> :keep
       occupancy <= 0 or message_count == 0 -> :keep
       not window_shrunk?(old_window, new_window) -> :keep
-      occupancy >= CompactionThresholds.compact_at(new_window) -> :compact
+      occupancy >= CompactionThresholds.compact_at(new_window, model) -> :compact
       true -> :keep
     end
   end
 
-  def plan(_, _, _, _), do: :keep
+  def plan(_, _, _, _, _), do: :keep
 
   @doc """
   Apply the swap to loop state. Returns `{new_state, info}` where `info` is
@@ -91,7 +94,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ModelSwap do
         effective_context_window: new_window
     }
 
-    decision = plan(old_window, new_window, occupancy, message_count)
+    decision = plan(old_window, new_window, occupancy, message_count, model)
 
     {state, compacted?, tokens_after, reason} =
       case decision do
@@ -153,6 +156,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ModelSwap do
 
     force? = occupancy >= new_window
 
+    # `occupancy` is already the REAL total (provider-reported when
+    # available - see `occupancy/1` above), so `overhead` here is the same
+    # system-prompt + tool-schema gap `total_and_overhead/2` measures
+    # elsewhere. Reapplying it to `tokens_after` below keeps this report and
+    # the refreshed `:last_input_tokens` equal to the TOTAL the next request
+    # will carry, not just the folded message slice.
+    {_tokens_before, overhead} = Compactor.total_and_overhead(messages, occupancy)
+
     compacted =
       TurnPipeline.bounded_compaction(messages, fn ->
         Compactor.maybe_compact(
@@ -164,7 +175,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ModelSwap do
         )
       end) || messages
 
-    tokens_after = Compactor.estimate_tokens(compacted)
+    tokens_after = overhead + Compactor.estimate_tokens(compacted)
     did? = compacted != messages
 
     CompactionEvents.completed(session_id,

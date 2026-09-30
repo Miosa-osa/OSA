@@ -333,12 +333,23 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
   @spec compact_and_refresh_tokens(map()) :: map()
   def compact_and_refresh_tokens(state) do
     original_messages = state.messages
+    known_tokens = Map.get(state, :last_input_tokens, 0)
+
+    # `overhead` (system prompt + tool schemas - see
+    # `Compactor.total_and_overhead/2`) measured against the PRE-compaction
+    # list, reapplied below to the post-compaction one. Without it the
+    # refreshed `:last_input_tokens` is a message-only estimate that silently
+    # drops the overhead for exactly one reading of the meter, until the next
+    # provider round-trip corrects it - the same defect `ReactLoop.
+    # refresh_tokens_after_fold/3` and `Loop.republish_context/3` fix for
+    # their own call sites.
+    {_tokens_before, overhead} = Compactor.total_and_overhead(original_messages, known_tokens)
 
     compacted =
       bounded_compaction(original_messages, fn ->
         Compactor.maybe_compact(
           original_messages,
-          Map.get(state, :last_input_tokens, 0),
+          known_tokens,
           state.session_id,
           # Real per-model window (`effective_context_window_info/2`). Without
           # this the compactor budgeted every model against a flat 128k and
@@ -349,7 +360,7 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
 
     state =
       if compacted != original_messages do
-        %{state | last_input_tokens: ContextEngine.estimate_tokens(compacted)}
+        %{state | last_input_tokens: overhead + ContextEngine.estimate_tokens(compacted)}
         |> Map.put(:last_input_message_count, length(compacted))
       else
         state
@@ -565,7 +576,13 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
       regulation_context_relief_iteration: nil,
       regulation_error_window: [],
       regulation_question_asked: false,
-      regulation_last_reported_severity: nil
+      regulation_last_reported_severity: nil,
+      # Reasoning watchdog (`Agent.Loop.ReasoningWatchdog` /
+      # `ReactLoop.handle_result({:watchdog_abort, ...})`) — trips this counts
+      # are per-turn escalation STAGE (1st = retry thinking off, 2nd+ =
+      # escalate to the advisor model), not a lifetime count; a fresh turn
+      # must not inherit a stuck previous turn's escalation stage.
+      watchdog_trips: 0
     })
     |> tap(fn state ->
       OptimalSystemAgent.Agent.Loop.Regulation.PainChannel.clear(Map.get(state, :session_id))

@@ -135,5 +135,6 @@ defmodule OptimalSystemAgent.Learning.PainSink do
 
   defp severity_for(:command_fix), do: :low
   defp severity_for(:slow_search), do: :low
+  defp severity_for(:reasoning_loop), do: :high
   defp severity_for(_), do: :medium
 end

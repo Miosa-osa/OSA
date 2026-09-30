@@ -274,4 +274,64 @@ defmodule OptimalSystemAgent.Agent.Loop.Regulation.PainTest do
       assert state.messages == []
     end
   end
+
+  describe "reasoning watchdog alerts (live, in-stream — not the per-iteration evaluate/3 path)" do
+    alias OptimalSystemAgent.Learning.PainSink
+
+    test "a first trip surfaces a :high pain_alert and records a :reasoning_loop pain event" do
+      session_id = sid()
+      on_exit(fn -> PainSink.clear(session_id) end)
+      Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{session_id}")
+
+      Pain.reasoning_loop_trip(session_id, "reasoning looped (\"OK.\" x14)")
+
+      [alert] = drain(session_id)
+      assert alert.severity == "high"
+      assert alert.message =~ "OK."
+      assert alert.message =~ "retrying with thinking off"
+
+      assert [event] = PainSink.events(session_id)
+      assert event.kind == :reasoning_loop
+      assert event.metadata.bus_already_emitted == true
+    end
+
+    test "a second trip (escalation) surfaces :critical" do
+      session_id = sid()
+      on_exit(fn -> PainSink.clear(session_id) end)
+      Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{session_id}")
+
+      Pain.reasoning_loop_escalated(session_id, "reasoning looped again")
+
+      [alert] = drain(session_id)
+      assert alert.severity == "critical"
+      assert alert.message =~ "escalating this step to a stronger model"
+    end
+
+    test "a severity ESCALATION always bypasses the emission rate limit" do
+      session_id = sid()
+      on_exit(fn -> PainSink.clear(session_id) end)
+      Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{session_id}")
+
+      Pain.reasoning_loop_trip(session_id, "first trip")
+      # Immediately after, with no interval elapsed — a plain repeat at the
+      # SAME severity would be rate-limited; a severity INCREASE must not be.
+      Pain.reasoning_loop_escalated(session_id, "second trip")
+
+      alerts = drain(session_id)
+      assert Enum.map(alerts, & &1.severity) == ["high", "critical"]
+    end
+
+    test "the recovered notice is NOT rate-limited — it always reaches the user" do
+      session_id = sid()
+      Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{session_id}")
+
+      Pain.reasoning_loop_trip(session_id, "looped")
+      # A plain repeat of the SAME trip would be swallowed by the interval
+      # limiter; the recovered notice must get through anyway, immediately.
+      Pain.reasoning_loop_recovered(session_id, "resolved: the reasoning loop cleared")
+
+      alerts = drain(session_id)
+      assert Enum.any?(alerts, &(&1.message =~ "resolved"))
+    end
+  end
 end

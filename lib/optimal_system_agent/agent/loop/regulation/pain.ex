@@ -83,6 +83,87 @@ defmodule OptimalSystemAgent.Agent.Loop.Regulation.Pain do
     end
   end
 
+  # ── Reasoning watchdog (live, in-stream - see `Agent.Loop.ReasoningWatchdog`) ──
+  #
+  # `evaluate/3` above scores a turn BETWEEN iterations, from signals folded
+  # onto `state`. The reasoning watchdog trips WHILE a generation is still
+  # streaming - there is no `state` for it to fold onto yet, and no iteration
+  # boundary to wait for. These three entry points ride the exact same wire
+  # shape `surface/4` above uses (`pain_alert`, rate-limited the same way via
+  # `PainChannel`) so the TUI needs no new parsing, but are called directly by
+  # `ReactLoop.handle_result/3` at the moment a trip/retry/escalation happens
+  # rather than from the per-iteration `regulate/3` pipeline.
+
+  @doc """
+  A reasoning-watchdog trip is about to be retried with thinking disabled.
+  Surfaces at `:high` (rate-limited like any other `:high` alert) and records
+  a `:reasoning_loop` learning-pain event.
+  """
+  @spec reasoning_loop_trip(String.t() | nil, String.t()) :: :ok
+  def reasoning_loop_trip(session_id, cause) when is_binary(session_id) and session_id != "" do
+    message = "stuck: #{cause} - retrying with thinking off"
+    emit_watchdog_alert(session_id, :high, message)
+
+    PainSink.record(session_id, :reasoning_loop, cause, %{
+      source: "regulation.pain.reasoning_watchdog",
+      severity: :high,
+      bus_already_emitted: true
+    })
+  end
+
+  def reasoning_loop_trip(_, _), do: :ok
+
+  @doc """
+  A SECOND reasoning-watchdog trip on the same step (the thinking-disabled
+  retry also degenerated) - this step is being escalated to a stronger/advisor
+  model. Surfaces at `:critical`.
+  """
+  @spec reasoning_loop_escalated(String.t() | nil, String.t()) :: :ok
+  def reasoning_loop_escalated(session_id, cause)
+      when is_binary(session_id) and session_id != "" do
+    message = "stuck: #{cause} again - escalating this step to a stronger model"
+    emit_watchdog_alert(session_id, :critical, message)
+
+    PainSink.record(session_id, :reasoning_loop, cause, %{
+      source: "regulation.pain.reasoning_watchdog",
+      severity: :critical,
+      bus_already_emitted: true
+    })
+  end
+
+  def reasoning_loop_escalated(_, _), do: :ok
+
+  @doc """
+  The retry/escalation landed - the next generation did not trip the
+  watchdog. NOT rate-limited (unlike the two trip alerts above): this is a
+  one-off milestone bounded by the shared per-turn recovery budget, not a
+  sustained per-iteration score, so it must never be swallowed by the
+  interval-based limiter that exists for repeated pain scores.
+  """
+  @spec reasoning_loop_recovered(String.t() | nil, String.t()) :: :ok
+  def reasoning_loop_recovered(session_id, message)
+      when is_binary(session_id) and session_id != "" do
+    broadcast(session_id, :low, 0.0, message)
+    :ok
+  end
+
+  def reasoning_loop_recovered(_, _), do: :ok
+
+  defp emit_watchdog_alert(session_id, severity, message) do
+    if PainChannel.should_emit?(session_id, severity, min_emit_interval_ms()) do
+      PainChannel.record_emit(session_id, severity)
+
+      Bus.emit_algedonic(bus_severity(severity), message,
+        source: "regulation.pain.reasoning_watchdog",
+        metadata: %{session_id: session_id}
+      )
+
+      broadcast(session_id, severity, if(severity == :critical, do: 1.0, else: 0.7), message)
+    end
+
+    :ok
+  end
+
   # ── Scoring ──────────────────────────────────────────────────────────────
 
   defp score(signals, homeostat_report) do

@@ -408,6 +408,15 @@ fn subtract_committed(final_text: &str, committed: &str) -> String {
     if let Some(cut) = common_prefix_modulo_whitespace(final_text, committed) {
         return final_text[cut..].to_string();
     }
+    // Same words, different whitespace — a paragraph break flattened to a space
+    // or the reverse. The strict matcher above refuses that on purpose (it
+    // decides BLOCK structure), but refusing it here means committing the whole
+    // final after blocks that already show every one of its words: the answer
+    // printed twice, the second copy re-flowed. What is on screen already says
+    // it; only what comes after it is owed.
+    if let Some(cut) = common_prefix_ignoring_whitespace(final_text, committed) {
+        return final_text[cut..].to_string();
+    }
     // Diverged. Retreat one settled block at a time until the final agrees.
     let mut end = committed.len();
     while end > 0 {
@@ -420,6 +429,27 @@ fn subtract_committed(final_text: &str, committed: &str) -> String {
         }
     }
     final_text.to_string()
+}
+
+/// Byte offset in `haystack` just past a prefix that spells `needle` when ALL
+/// whitespace is ignored on both sides, or `None` when the words differ.
+///
+/// Deliberately looser than `common_prefix_modulo_whitespace`, and only ever the
+/// fallback to it: every non-whitespace character must still match, in order,
+/// so this cannot mistake different text for the same text. The offset lands
+/// right after the last matched character; the whitespace that follows belongs
+/// to the remainder, where the commit path trims it.
+fn common_prefix_ignoring_whitespace(haystack: &str, needle: &str) -> Option<usize> {
+    let mut hay = haystack.char_indices().filter(|(_, c)| !c.is_whitespace());
+    let mut end = 0usize;
+    for n in needle.chars().filter(|c| !c.is_whitespace()) {
+        let (i, h) = hay.next()?;
+        if h != n {
+            return None;
+        }
+        end = i + h.len_utf8();
+    }
+    Some(end)
 }
 
 /// Commit one assistant block to the chat, honouring the "◈ OSA" header-once
@@ -865,6 +895,79 @@ mod tests {
                 .any(|b| b.contains("Fix 2?Those are the three options")),
             "a superseded generation must never be welded to its replacement"
         );
+    }
+
+    /// Mirrors `apply_assistant_text` with settling ON: every completed block
+    /// goes to scrollback while the reply is still streaming.
+    fn on_delta_settling(
+        chat: &mut Chat,
+        s: &mut AssistantStream,
+        header: &mut bool,
+        message_id: Option<&str>,
+        text: &str,
+    ) {
+        if let Some(superseded) = s.push(message_id, text) {
+            chat.clear_streaming();
+            commit_assistant_block(chat, header, &superseded, None);
+        }
+        while let Some(block) = s.settle() {
+            commit_assistant_chunk(chat, header, &block, None);
+        }
+        chat.update_streaming(s.tail());
+    }
+
+    /// The operator's report: a long answer with a table printed in full, then
+    /// the SAME answer again with its paragraphs joined together.
+    ///
+    /// The backend's signal-quality trim (`SnScorer.trim/1`, on by default)
+    /// used to rejoin every sentence with a flat space, so the final
+    /// `agent_response` was the streamed answer with its paragraph breaks
+    /// flattened. The blocks already settled into scrollback no longer matched
+    /// it modulo paragraph structure, the subtraction found no common prefix,
+    /// and the WHOLE final was committed after them.
+    ///
+    /// The backend no longer rewrites whitespace, but the client must not print
+    /// an answer twice because a final only differs from what it already
+    /// showed in whitespace, whoever changed it.
+    #[test]
+    fn a_final_that_only_differs_in_whitespace_is_rendered_exactly_once() {
+        let answer = "The audit found three duplicate worktrees.\n\n\
+                      | path | size |\n|---|---|\n| wt-a | 2G |\n| wt-b | 1G |\n\n\
+                      Removing them frees about 3G. Nothing else changed.\n\n\
+                      The watchdog is on by default. Want me to prune them?";
+        // What the old trim delivered: every sentence boundary (and the
+        // whitespace after it) collapsed to one space.
+        let flattened = "The audit found three duplicate worktrees. \
+                         | path | size |\n|---|---|\n| wt-a | 2G |\n| wt-b | 1G |\n\n\
+                         Removing them frees about 3G. Nothing else changed. \
+                         The watchdog is on by default. Want me to prune them?";
+
+        let mut chat = Chat::new();
+        let mut s = AssistantStream::new();
+        let mut header = false;
+        for chunk in answer.as_bytes().chunks(9) {
+            let part = std::str::from_utf8(chunk).unwrap();
+            on_delta_settling(&mut chat, &mut s, &mut header, Some("m1"), part);
+        }
+        assert!(
+            s.settled_bytes() > 0,
+            "the test must exercise settling, or it cannot reproduce the report"
+        );
+        on_final(&mut chat, &mut s, &mut header, Some("m1"), flattened);
+
+        let joined = chat.agent_blocks().join("");
+        for needle in [
+            "The audit found three duplicate worktrees.",
+            "| wt-a | 2G |",
+            "Removing them frees about 3G.",
+            "Want me to prune them?",
+        ] {
+            assert_eq!(
+                joined.matches(needle).count(),
+                1,
+                "{needle:?} rendered more than once:\n{joined}"
+            );
+        }
     }
 
     #[test]

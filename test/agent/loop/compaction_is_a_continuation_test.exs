@@ -93,8 +93,26 @@ defmodule OptimalSystemAgent.Agent.Loop.CompactionIsAContinuationTest do
 
   # `compact_at` for an UNKNOWN window (which is what the mock model resolves
   # to) is computed off `CompactionThresholds.fallback_window/0`.
+  #
+  # Exactly `compact_at`, not `compact_at + margin`. `last_input_tokens` now
+  # feeds `Agent.Compactor.total_and_overhead/2` (the real-provider-total
+  # fix): the gap between this value and the message-only estimate of
+  # `long_history/0` is carried across the fold as "overhead" and re-applied
+  # to the refreshed post-fold total. A fixed `+ 10_000` margin was bigger
+  # than what ONE fold reclaims from `long_history/0`, so the refreshed total
+  # stayed at/above `compact_at` and `should_compact?/2` fired again on the
+  # very next iteration, three more times, capped only by
+  # `compaction_max_continues`, instead of the single fold this suite is
+  # otherwise about.
+  #
+  # Landing exactly ON `compact_at` (still `>=`, so the first decision still
+  # fires) guarantees the refreshed total is strictly BELOW it after any fold
+  # that reclaims more than zero tokens: with `l` the pre-fold message-only
+  # estimate and `c` the post-fold one, `overhead = compact_at - l`, so the
+  # refreshed total is `overhead + c = compact_at - (l - c)`, strictly less
+  # than `compact_at` whenever `c < l`.
   defp over_threshold do
-    CompactionThresholds.compact_at(CompactionThresholds.fallback_window()) + 10_000
+    CompactionThresholds.compact_at(CompactionThresholds.fallback_window())
   end
 
   # Enough turns that `split_turns/2` (keep 4) leaves a foldable older half, and
