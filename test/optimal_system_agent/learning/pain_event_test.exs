@@ -39,6 +39,7 @@ defmodule OptimalSystemAgent.Learning.PainEventTest do
                :wrong_checkout,
                :slow_search,
                :user_correction,
+               :reasoning_loop,
                :other
              ]
     end
