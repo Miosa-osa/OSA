@@ -53,6 +53,28 @@ defmodule OptimalSystemAgent.Agent.LoopSignalQualityTest do
       assert result =~ "The build is fixed"
     end
 
+    # The operator's report: a long final answer with a table printed twice,
+    # the second copy with its paragraphs joined. This trim ran on every final
+    # answer and rejoined sentences with a flat space, so the `agent_response`
+    # no longer matched the blocks the client had already streamed, and the
+    # client committed the whole thing again.
+    test "a formatted answer with nothing to trim reaches the client byte-for-byte" do
+      response =
+        "The audit found three duplicate worktrees.\n\n" <>
+          "| path | size |\n|---|---|\n| wt-a | 2G |\n| wt-b | 1G |\n\n" <>
+          "Removing them frees about 3G. Nothing else changed.\n\n" <>
+          "1. Prune `wt-a`.\n2. Prune `wt-b`.\n\nWant me to prune them?"
+
+      assert Loop.maybe_enforce_signal_quality(response, %{}) == response
+    end
+
+    test "trimming filler out of a formatted answer keeps its paragraphs" do
+      response = "The build is fixed.\n\nLet me think about this. Tests pass."
+      result = Loop.maybe_enforce_signal_quality(response, %{})
+
+      assert result == "The build is fixed.\n\nTests pass."
+    end
+
     test "high-S/N output (code, a path, a number) passes through completely unchanged" do
       response = "The fix is in `lib/foo.ex` line 42. Run `mix test` to confirm."
       assert Loop.maybe_enforce_signal_quality(response, %{}) == response

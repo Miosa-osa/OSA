@@ -22,6 +22,17 @@ defmodule OptimalSystemAgent.Agent.Loop.Regulation.PainChannelTest do
     end
   end
 
+  defp take_until(session_id, want, taken \\ 0, attempts \\ 30) do
+    taken = taken + PainChannel.take_wait_ms(session_id)
+
+    if taken >= want or attempts <= 0 do
+      taken
+    else
+      Process.sleep(10)
+      take_until(session_id, want, taken, attempts - 1)
+    end
+  end
+
   describe "wait-time accumulation" do
     test "take_wait_ms/1 is 0 for a session with nothing recorded" do
       assert PainChannel.take_wait_ms(sid()) == 0
@@ -53,7 +64,11 @@ defmodule OptimalSystemAgent.Agent.Loop.Regulation.PainChannelTest do
         })
       end
 
-      assert eventually(fn -> PainChannel.take_wait_ms(session_id) end, &(&1 == 1_000)) == 1_000
+      # `take_wait_ms/1` READS AND RESETS, and the three events land
+      # asynchronously: a poll that runs after only the first one has landed
+      # takes 200 and zeroes it, so polling for a single read of 1_000 could
+      # never succeed. Sum what every poll takes instead.
+      assert take_until(session_id, 1_000) == 1_000
     end
 
     test "ignores unrelated system_event sub-events" do

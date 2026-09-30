@@ -97,4 +97,33 @@ defmodule OptimalSystemAgent.Agent.Loop.FastFinalAnswerRerouteTest do
     assert data.strong_model == @strong_model
     assert is_number(data.cost_usd)
   end
+
+  # What the user SEES, not just what the loop returns. The fast step used to
+  # stream its answer live, so by the time it was discarded it was already on
+  # screen (and settled into the terminal's scrollback), and the strong answer
+  # printed after it: the final answer twice in one message.
+  test "the discarded fast answer never reaches the screen; the strong one does, once" do
+    sid = "fast-reroute-screen-#{System.unique_integer([:positive])}"
+    Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{sid}")
+
+    {response, _final_state} = ReactLoop.run(base_state(sid))
+    assert response == StepRerouteProvider.strong_answer()
+
+    streamed = drain_streamed_text("")
+
+    refute streamed =~ "FAST_MODEL_ANSWER",
+           "the discarded fast answer was streamed to the client: #{inspect(streamed)}"
+
+    assert streamed |> String.split(StepRerouteProvider.strong_answer()) |> length() == 2,
+           "the strong answer must stream exactly once: #{inspect(streamed)}"
+  end
+
+  defp drain_streamed_text(acc) do
+    receive do
+      {:osa_event, %{type: :streaming_token, text: text}} -> drain_streamed_text(acc <> text)
+      {:osa_event, _} -> drain_streamed_text(acc)
+    after
+      200 -> acc
+    end
+  end
 end
