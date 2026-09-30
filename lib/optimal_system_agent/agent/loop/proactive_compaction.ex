@@ -213,7 +213,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
 
   @doc """
   Compact a message list by summarizing older turns into a structured,
-  Claude Code-style summary message, keeping a token-budgeted, turn-aware
+  summary message, keeping a token-budgeted, turn-aware
   recent tail verbatim.
 
   On success the compacted list is:
