@@ -146,10 +146,12 @@ defmodule OptimalSystemAgent.Memory.Flush do
   `CompactionThresholds.warn_at/1`, so the flush always gets a window of
   iterations in which to run before history is folded.
   """
-  @spec flush_at(pos_integer()) :: pos_integer()
-  def flush_at(context_window) when is_integer(context_window) and context_window > 0 do
-    compact_at = CompactionThresholds.compact_at(context_window)
-    warn_at = CompactionThresholds.warn_at(context_window)
+  @spec flush_at(pos_integer(), String.t() | nil) :: pos_integer()
+  def flush_at(context_window, model \\ nil)
+
+  def flush_at(context_window, model) when is_integer(context_window) and context_window > 0 do
+    compact_at = CompactionThresholds.compact_at(context_window, model)
+    warn_at = CompactionThresholds.warn_at(context_window, model)
 
     compact_at
     |> Kernel.-(margin_tokens())
@@ -174,9 +176,10 @@ defmodule OptimalSystemAgent.Memory.Flush do
   def should_flush?(state, context_window) when is_map(state) do
     if enabled?() do
       tokens = estimated_tokens(state)
+      model = Map.get(state, :model)
 
-      tokens >= flush_at(context_window) and
-        tokens < CompactionThresholds.compact_at(context_window) and
+      tokens >= flush_at(context_window, model) and
+        tokens < CompactionThresholds.compact_at(context_window, model) and
         not flushed?(session_of(state))
     else
       false

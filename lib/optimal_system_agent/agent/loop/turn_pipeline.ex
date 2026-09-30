@@ -565,7 +565,13 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
       regulation_context_relief_iteration: nil,
       regulation_error_window: [],
       regulation_question_asked: false,
-      regulation_last_reported_severity: nil
+      regulation_last_reported_severity: nil,
+      # Reasoning watchdog (`Agent.Loop.ReasoningWatchdog` /
+      # `ReactLoop.handle_result({:watchdog_abort, ...})`) — trips this counts
+      # are per-turn escalation STAGE (1st = retry thinking off, 2nd+ =
+      # escalate to the advisor model), not a lifetime count; a fresh turn
+      # must not inherit a stuck previous turn's escalation stage.
+      watchdog_trips: 0
     })
     |> tap(fn state ->
       OptimalSystemAgent.Agent.Loop.Regulation.PainChannel.clear(Map.get(state, :session_id))

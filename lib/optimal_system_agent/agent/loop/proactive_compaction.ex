@@ -123,7 +123,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
 
   def should_compact?(state, context_window) do
     if enabled?() and not breaker_open?(session_of(state)) do
-      estimated_tokens(state) >= CompactionThresholds.compact_at(context_window)
+      estimated_tokens(state) >= CompactionThresholds.compact_at(context_window, model_of(state))
     else
       false
     end
@@ -147,9 +147,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   def should_microcompact?(state, context_window) do
     if enabled?() do
       tokens = estimated_tokens(state)
+      model = model_of(state)
 
-      tokens >= CompactionThresholds.warn_at(context_window) and
-        tokens < CompactionThresholds.compact_at(context_window)
+      tokens >= CompactionThresholds.warn_at(context_window, model) and
+        tokens < CompactionThresholds.compact_at(context_window, model)
     else
       false
     end
@@ -1068,6 +1069,12 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   end
 
   defp session_of(state), do: Map.get(state, :session_id)
+
+  # Threaded into `CompactionThresholds` for the flash/small-tier earlier
+  # ceiling — see that module's moduledoc. `nil` (no model on `state`, or not
+  # a map) reproduces the pre-existing flat-ceiling behavior unchanged.
+  defp model_of(state) when is_map(state), do: Map.get(state, :model)
+  defp model_of(_), do: nil
 
   defp keep_turns do
     case Application.get_env(

@@ -92,6 +92,16 @@ defmodule OptimalSystemAgent.Agent.Loop do
     # nothing watching the total (P2 audit gap C). Reset each user turn in
     # `TurnPipeline.reset_per_turn_fields/1`. See `ReactLoop.spend_recovery/2`.
     recovery_attempts: 0,
+    # Reasoning-watchdog escalation stage this turn (`Agent.Loop.ReasoningWatchdog`
+    # / `ReactLoop.handle_result({:watchdog_abort, ...})`): 0 = no trip yet,
+    # 1 = one trip (retry the same model, thinking disabled), 2+ = escalated
+    # to the advisor/strong model. Cleared back to 0 the moment a generation
+    # completes cleanly (`ReactLoop.canonicalize_stop_reason/3`) and reset
+    # each user turn in `TurnPipeline.reset_per_turn_fields/1`, same as
+    # `recovery_attempts` above — every trip ALSO spends that shared budget,
+    # so this counter only decides which recovery MODE runs next, never
+    # whether one is still allowed to.
+    watchdog_trips: 0,
     recent_failure_signatures: [],
     total_tool_calls: 0,
     # Doom-loop detection counters — explicit state (formerly process-dict).

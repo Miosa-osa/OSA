@@ -243,21 +243,31 @@ defmodule OptimalSystemAgent.Test.MockProvider do
     record_messages(messages)
     run_after_call_once()
 
-    case forced_error(messages) do
+    case next_queued_stream_events() do
+      events when is_list(events) ->
+        # Replayed verbatim through the REAL callback — see
+        # `queue_stream_events/1`. Takes priority over everything below,
+        # exactly like `queue_final_texts/1` does for `forced_final_text/0`.
+        Enum.each(events, &callback.(&1))
+        :ok
+
       nil ->
-        case scripted_response(messages, opts) do
-          %{} = resp ->
-            content = Map.get(resp, :content) || ""
-            if content != "", do: callback.({:text_delta, content})
-            callback.({:done, Map.put_new(resp, :tool_calls, [])})
-            :ok
-
+        case forced_error(messages) do
           nil ->
-            chat_stream_unscripted(messages, callback)
-        end
+            case scripted_response(messages, opts) do
+              %{} = resp ->
+                content = Map.get(resp, :content) || ""
+                if content != "", do: callback.({:text_delta, content})
+                callback.({:done, Map.put_new(resp, :tool_calls, [])})
+                :ok
 
-      reason ->
-        {:error, reason}
+              nil ->
+                chat_stream_unscripted(messages, callback)
+            end
+
+          reason ->
+            {:error, reason}
+        end
     end
   end
 
@@ -524,6 +534,52 @@ defmodule OptimalSystemAgent.Test.MockProvider do
       [{:final_text_queue, [text | rest]}] ->
         :ets.insert(counter_table(), {:final_text_queue, rest})
         text
+
+      _ ->
+        nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  @doc """
+  Queue raw streaming-callback event lists, ONE list consumed per
+  `chat_stream/3` call (ETS-backed — cross-process for the same reason
+  `queue_final_texts/1` is: the Loop invokes the provider from a short-lived
+  Task per call, which does not inherit the test process's dictionary).
+
+  Each queued list is replayed verbatim through the REAL callback —
+  `{:thinking_delta, text}`, `{:text_delta, text}`, `{:tool_use_block, tc}`,
+  `{:done, resp}`, `{:provider_retry, info}`, … — so a test can script
+  exactly what a provider streamed, byte for byte, including a degenerate
+  reasoning loop that never reaches `:done` on its own (the caller killed
+  the stream first). Unlike `queue_final_texts/1`, entries do NOT repeat —
+  once the queue is drained, `chat_stream/3` falls through to its normal
+  scripted/unscripted behavior, so a test can script only the first N calls
+  (e.g. "call 1 loops, call 2 answers cleanly") and let the rest run as usual.
+  """
+  @spec queue_stream_events([[tuple()]]) :: :ok
+  def queue_stream_events(event_lists) when is_list(event_lists) and event_lists != [] do
+    :ets.insert(counter_table(), {:stream_event_queue, event_lists})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  @doc "Clear any queued stream events (call in test setup)."
+  @spec reset_stream_events() :: :ok
+  def reset_stream_events do
+    :ets.delete(counter_table(), :stream_event_queue)
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp next_queued_stream_events do
+    case :ets.lookup(counter_table(), :stream_event_queue) do
+      [{:stream_event_queue, [events | rest]}] ->
+        :ets.insert(counter_table(), {:stream_event_queue, rest})
+        events
 
       _ ->
         nil

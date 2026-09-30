@@ -23,7 +23,7 @@ defmodule OptimalSystemAgent.Learning.PainEvent do
   it once, at the boundary, rather than trusting every call site.
   """
 
-  @kinds ~w(repeated_probe reverification_loop command_fix wrong_checkout slow_search user_correction other)a
+  @kinds ~w(repeated_probe reverification_loop command_fix wrong_checkout slow_search user_correction reasoning_loop other)a
 
   @type kind ::
           :repeated_probe
@@ -32,6 +32,7 @@ defmodule OptimalSystemAgent.Learning.PainEvent do
           | :wrong_checkout
           | :slow_search
           | :user_correction
+          | :reasoning_loop
           | :other
 
   @type t :: %__MODULE__{
