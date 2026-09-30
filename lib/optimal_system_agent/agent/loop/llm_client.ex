@@ -15,6 +15,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   alias OptimalSystemAgent.Providers.HistorySanitizer
   alias OptimalSystemAgent.Providers.Resilience
   alias OptimalSystemAgent.Agent.Trajectory
+  alias OptimalSystemAgent.Agent.Loop.ReasoningWatchdog
   alias OptimalSystemAgent.Utils.Mojibake
 
   # If no streaming token arrives for this long, the connection is treated as
@@ -79,6 +80,14 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
   # generation must mint a NEW id rather than continue the current one. See
   # `start_new_message_segment/0`.
   @new_segment_key :osa_stream_new_segment
+
+  # Process-dictionary home for this stream's `ReasoningWatchdog.t/0` (this
+  # callback runs in the single stream-task process for the whole request,
+  # same as the moji-carry keys above) and the one-shot "already tripped"
+  # latch that keeps a degenerating stream from sending the abort message
+  # more than once while it winds down.
+  @watchdog_key :osa_reasoning_watchdog
+  @watchdog_tripped_key :osa_reasoning_watchdog_tripped
 
   # Hard ceiling on a server-directed `Retry-After` pause taken in THIS module.
   #
@@ -382,6 +391,46 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
          text: text
        }}
     )
+  end
+
+  # Fold one streamed delta into this stream's `ReasoningWatchdog` and, on a
+  # trip, abort the stream ONCE (the `@watchdog_tripped_key` latch — the
+  # provider keeps calling this callback for a few more chunks while the
+  # brutal-kill lands, and the abort message must only reach `caller` a
+  # single time). A no-op entirely when the watchdog is disabled, so the
+  # feature costs nothing when turned off.
+  #
+  # `caller` is the Loop process (bound before `Task.async/1` spawned this
+  # stream task — see `llm_chat_stream/3` — so it is safe to `send/2` to
+  # directly from here, exactly like the `:tool_use_block` / `:provider_retry`
+  # arms already do), not the idle-timeout watchdog PID of the same name in
+  # the outer function.
+  defp watchdog_observe(session_id, caller, channel, text) do
+    if ReasoningWatchdog.enabled?() and not Process.get(@watchdog_tripped_key, false) do
+      watchdog = Process.get(@watchdog_key) || ReasoningWatchdog.new()
+
+      case ReasoningWatchdog.observe(watchdog, channel, text) do
+        {:ok, watchdog} ->
+          Process.put(@watchdog_key, watchdog)
+
+        {:trip, info, watchdog} ->
+          Process.put(@watchdog_key, watchdog)
+          Process.put(@watchdog_tripped_key, true)
+
+          Logger.warning(
+            "[stream] reasoning watchdog tripped (#{info.rule}) for session:#{session_id}: " <>
+              info.cause
+          )
+
+          send(caller, {:llm_stream_watchdog_abort, info})
+      end
+    end
+
+    :ok
+  rescue
+    e ->
+      Logger.debug("[stream] reasoning watchdog observe failed: #{Exception.message(e)}")
+      :ok
   end
 
   # Cheap pre-filter for `Prefetch.Engine.observe_text/2`: only pay for the
@@ -768,6 +817,11 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     # stream accumulated.
     Process.delete({:prefetch_scan_len, session_id})
 
+    # Fresh reasoning watchdog for this generation - a reused stream-task
+    # process must not inherit a prior stream's buffers/clock/trip latch.
+    Process.put(@watchdog_key, ReasoningWatchdog.new())
+    Process.delete(@watchdog_tripped_key)
+
     # Grok phase signal: the request is going out and not one byte has come back
     # yet. Clear this stream's phase guards (mirroring the moji-carry reset above)
     # and announce the wait immediately, so the TUI can label the phase at stream
@@ -807,6 +861,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         # output the user has not actually seen yet.
         if text != "" do
           emit_text_delta(text, session_id, message_id, heartbeat)
+          watchdog_observe(session_id, caller, :text, text)
         end
 
       {:done, result} ->
@@ -910,7 +965,10 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
         Process.put({:moji_think_carry, session_id}, think_carry)
 
-        if text != "", do: emit_thinking_delta(text, session_id)
+        if text != "" do
+          emit_thinking_delta(text, session_id)
+          watchdog_observe(session_id, caller, :reasoning, text)
+        end
 
       {:tool_use_block, tool_call} ->
         # Provider detected a complete tool_use block during streaming.
@@ -922,6 +980,13 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         # a partial carrying tool_calls; this covers the provider that reports
         # the block without folding it into the error partial.)
         Resilience.mark_output_observed()
+
+        # A tool call streaming is real progress - clears the watchdog's
+        # `:stalled` backstop (rule (d)) for the rest of this generation.
+        if watchdog = Process.get(@watchdog_key) do
+          Process.put(@watchdog_key, ReasoningWatchdog.note_tool_call(watchdog))
+        end
+
         send(caller, {:streaming_tool_block, tool_call})
 
         Bus.emit(:tool_call, %{
@@ -1136,6 +1201,24 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
           flush_stream_messages()
           {:send_now, %{content: partial_text(session_id)}}
 
+        {:llm_stream_watchdog_abort, info} ->
+          # The reasoning watchdog tripped mid-generation (see
+          # `ReasoningWatchdog` / the `watchdog_observe/4` callback helper
+          # above) — kill the stream NOW, like a user interrupt, but mark it
+          # distinctly: `ReactLoop.handle_result/3` retries this SAME step
+          # (thinking disabled, then escalated) instead of ending the turn.
+          Logger.warning(
+            "[stream] Reasoning watchdog abort for session:#{session_id}: #{info.cause}"
+          )
+
+          Process.unlink(watchdog)
+          Process.exit(watchdog, :normal)
+          Task.shutdown(stream_task, :brutal_kill)
+          flush_stream_messages()
+
+          {:watchdog_abort,
+           %{content: partial_text(session_id), cause: info.cause, rule: info.rule}}
+
         {:llm_idle_timeout, elapsed_ms} ->
           # Watchdog detected idle connection — kill the stream.
           #
@@ -1209,6 +1292,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     receive do
       {:llm_stream_cancelled} -> :ok
       {:llm_stream_send_now} -> :ok
+      {:llm_stream_watchdog_abort, _} -> :ok
     after
       0 -> :ok
     end
