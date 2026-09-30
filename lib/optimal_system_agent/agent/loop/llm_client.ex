@@ -361,6 +361,25 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     # streamed answer.
     maybe_observe_text(session_id, accumulated)
 
+    broadcast_text_delta(text, session_id, message_id)
+  end
+
+  @doc """
+  Put a generation's answer text on screen after the fact — the other half of
+  `llm_chat_stream/3`'s `hold_text: true`. Called from the Loop process once
+  the caller knows the held answer stands; `text` goes out as one delta under
+  the current message id, exactly where the live deltas would have been.
+  """
+  @spec release_held_text(String.t() | nil, String.t() | nil) :: :ok
+  def release_held_text(session_id, text)
+      when is_binary(session_id) and is_binary(text) and text != "" do
+    broadcast_text_delta(text, session_id, current_message_id())
+    :ok
+  end
+
+  def release_held_text(_session_id, _text), do: :ok
+
+  defp broadcast_text_delta(text, session_id, message_id) do
     Bus.emit(:system_event, %{
       event: :streaming_token,
       session_id: session_id,
@@ -723,6 +742,14 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
     # `Providers.HistorySanitizer` moduledoc. A no-op on clean history.
     {messages, _repaired?} = HistorySanitizer.sanitize(messages)
 
+    # `hold_text: true` — the caller may still DISCARD this generation's answer
+    # (a fast-routed step whose final answer is re-asked of the strong model),
+    # so its text must not reach the screen as it streams. Everything else
+    # (reasoning, phases, the result) is unchanged; the caller releases the
+    # text with `release_held_text/2` once it knows the answer stands. Popped
+    # here so it never reaches a provider.
+    {hold_text, opts} = Keyword.pop(opts, :hold_text, false)
+
     Logger.debug(
       "[llm] stream — #{length(messages)} messages (sanitized): #{inspect(sanitize_for_log(messages))} session=#{session_id}"
     )
@@ -805,7 +832,7 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
         # this delta was entirely held back as a possibly-incomplete sequence,
         # so we neither broadcast an empty token nor burn the retry budget on
         # output the user has not actually seen yet.
-        if text != "" do
+        if text != "" and not hold_text do
           emit_text_delta(text, session_id, message_id, heartbeat)
         end
 
@@ -822,7 +849,9 @@ defmodule OptimalSystemAgent.Agent.Loop.LLMClient do
 
           carry ->
             flushed = Mojibake.flush(carry)
-            if flushed != "", do: emit_text_delta(flushed, session_id, message_id, heartbeat)
+
+            if flushed != "" and not hold_text,
+              do: emit_text_delta(flushed, session_id, message_id, heartbeat)
         end
 
         Process.delete({:moji_carry, session_id})

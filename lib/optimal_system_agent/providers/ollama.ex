@@ -18,6 +18,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   require Logger
 
   alias OptimalSystemAgent.Providers.ThinkStreamParser
+  alias OptimalSystemAgent.Providers.ToolBoundarySpace
   alias OptimalSystemAgent.Providers.ToolCallDedup
   alias OptimalSystemAgent.Providers.ToolCallParsers
   alias OptimalSystemAgent.Utils.Mojibake
@@ -489,6 +490,16 @@ defmodule OptimalSystemAgent.Providers.Ollama do
             raw_tool_calls = get_in(resp, ["message", "tool_calls"]) || []
             model = get_in(resp, ["model"]) || ""
             final_tool_calls = parse_tool_calls(%{"tool_calls" => raw_tool_calls}, model)
+
+            # Settle any prose held at a possible tool boundary BEFORE the
+            # content below is read, so the live view and the result agree.
+            acc =
+              resolve_held_content(
+                acc,
+                acc.tool_calls != [] or final_tool_calls != [],
+                callback
+              )
+
             # Merge: tool calls from mid-stream chunks + any in the final chunk.
             # Deduped by id — the done:true chunk can repeat a call already
             # delivered mid-stream (WS-dup: a cumulative rather than delta
@@ -550,6 +561,9 @@ defmodule OptimalSystemAgent.Providers.Ollama do
             tool_calls = parse_tool_calls(%{"tool_calls" => tool_calls_raw}, model)
             Logger.info("[Ollama] Cloud stream: got #{length(tool_calls)} tool calls mid-stream")
 
+            # A tool call is the boundary Ollama trims the prose in front of.
+            acc = if tool_calls == [], do: acc, else: release_at_tool_call(acc, callback)
+
             cloud_stream_loop(port, callback, %{
               acc
               | tool_calls: ToolCallDedup.append_all(acc.tool_calls, tool_calls)
@@ -564,20 +578,11 @@ defmodule OptimalSystemAgent.Providers.Ollama do
             # reasoning and silently DROPPED the content. Emit the reasoning to
             # the thinking box, then run the content through the SAME
             # ThinkStreamParser the content-only arm uses (state threaded), so
-            # the visible answer is never lost.
+            # the visible answer is never lost. Content held at a possible tool
+            # boundary predates this reasoning, so it goes out first.
+            acc = release_held_content(acc, callback)
             callback.({:thinking_delta, think_token})
-
-            {visible, thinking, think_state} =
-              ThinkStreamParser.feed(acc.think, token)
-
-            if thinking != "", do: callback.({:thinking_delta, thinking})
-            if visible != "", do: callback.({:text_delta, visible})
-
-            cloud_stream_loop(port, callback, %{
-              acc
-              | content: acc.content <> token,
-                think: think_state
-            })
+            cloud_stream_loop(port, callback, push_content(acc, token, callback))
 
           {:ok, %{"message" => %{"thinking" => think_token}}}
           when is_binary(think_token) and think_token != "" ->
@@ -587,6 +592,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
             # this arm the chunk fell to the catch-all and the reasoning was
             # dropped; the arm exists so a reasoning model shows its reasoning
             # like the `ollama` CLI does.
+            acc = release_held_content(acc, callback)
             callback.({:thinking_delta, think_token})
             cloud_stream_loop(port, callback, acc)
 
@@ -595,17 +601,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
             # (Belt-and-suspenders: with `think: true` reasoning comes on the
             # `thinking` field above, but a model that still inlines `<think>`
             # tags is handled here too.)
-            {visible, thinking, think_state} =
-              ThinkStreamParser.feed(acc.think, token)
-
-            if thinking != "", do: callback.({:thinking_delta, thinking})
-            if visible != "", do: callback.({:text_delta, visible})
-
-            cloud_stream_loop(port, callback, %{
-              acc
-              | content: acc.content <> token,
-                think: think_state
-            })
+            cloud_stream_loop(port, callback, push_content(acc, token, callback))
 
           {:ok, %{"error" => error}} ->
             # API returned an error — fail fast instead of looping forever
@@ -642,6 +638,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
         # done callback even when content is empty (tool-call-only responses
         # have no text but do have tool_calls; skipping would block the caller
         # indefinitely on its receive loop).
+        acc = resolve_held_content(acc, acc.tool_calls != [], callback)
         flush_think(acc, callback)
         content = Text.strip_thinking_tokens(acc.content)
 
@@ -1624,6 +1621,7 @@ defmodule OptimalSystemAgent.Providers.Ollama do
   # connection.
   @doc false
   def finalize_stream(acc, callback) do
+    acc = resolve_held_content(acc, acc.tool_calls != [], callback)
     flush_think(acc, callback)
     content = Text.strip_thinking_tokens(acc.content)
 
@@ -1657,6 +1655,89 @@ defmodule OptimalSystemAgent.Providers.Ollama do
     callback.({:done, result})
 
     :ok
+  end
+
+  # ── Content emission ────────────────────────────────────────────────
+  #
+  # Every raw content token from BOTH stream paths (cloud curl and local Finch)
+  # goes through `push_content/3`, never straight to the callback:
+  #
+  #   1. The raw token is appended to `acc.content` (the message as the model
+  #      sent it, reasoning tags included — the final result is derived from
+  #      it) and split by `ThinkStreamParser` into reasoning and visible text.
+  #   2. The VISIBLE text passes through `ToolBoundarySpace`. Ollama trims the
+  #      leading space off the last piece of prose before a tool call
+  #      ("the listing" + "instead."); a piece that could be that one is held
+  #      until the next stream event says whether a tool call follows. See that
+  #      module for the evidence and the rule. Everything else passes straight
+  #      through.
+  #
+  # When the holder restores a space, the same space is put back into
+  # `acc.content`, so the persisted message, the tool-call text fallback and
+  # the live view stay one string.
+  defp push_content(acc, token, callback) do
+    acc = %{acc | content: acc.content <> token}
+
+    {visible, acc} =
+      case Map.get(acc, :think) do
+        %ThinkStreamParser{} = ts ->
+          {visible, thinking, think_state} = ThinkStreamParser.feed(ts, token)
+          acc = %{acc | think: think_state}
+
+          # Held prose predates this reasoning, so it goes out first.
+          acc = if thinking != "", do: release_held_content(acc, callback), else: acc
+          if thinking != "", do: callback.({:thinking_delta, thinking})
+          {visible, acc}
+
+        _ ->
+          {token, acc}
+      end
+
+    {pieces, holder} = ToolBoundarySpace.content(space_holder(acc), visible)
+    emit_visible(acc, holder, pieces, callback)
+  end
+
+  # A tool call arrived: settle the held piece, with its space restored when
+  # the seam reads as two words.
+  defp release_at_tool_call(acc, callback) do
+    holder = space_holder(acc)
+    {pieces, next} = ToolBoundarySpace.tool_call(holder)
+
+    acc =
+      case {holder.held, pieces} do
+        {held, [" " <> held]} -> %{acc | content: restore_space(acc.content, held)}
+        _ -> acc
+      end
+
+    emit_visible(acc, next, pieces, callback)
+  end
+
+  # Anything other than a tool call follows: the held piece was fine as sent.
+  defp release_held_content(acc, callback) do
+    {pieces, holder} = ToolBoundarySpace.flush(space_holder(acc))
+    emit_visible(acc, holder, pieces, callback)
+  end
+
+  # Stream end: the message ends in a tool call iff any arrived.
+  defp resolve_held_content(acc, true, callback), do: release_at_tool_call(acc, callback)
+  defp resolve_held_content(acc, false, callback), do: release_held_content(acc, callback)
+
+  defp space_holder(acc), do: Map.get(acc, :space_fix) || ToolBoundarySpace.new()
+
+  defp emit_visible(acc, holder, pieces, callback) do
+    Enum.each(pieces, fn piece -> if piece != "", do: callback.({:text_delta, piece}) end)
+    Map.put(acc, :space_fix, holder)
+  end
+
+  # The held piece is the visible END of the message, so in the raw content it
+  # is a suffix (reasoning tags, when present, precede it). Anything else means
+  # the two diverged in a way this cannot reason about — leave the raw text.
+  defp restore_space(content, held) do
+    if String.ends_with?(content, held) do
+      binary_part(content, 0, byte_size(content) - byte_size(held)) <> " " <> held
+    else
+      content
+    end
   end
 
   # Drain any partial reasoning-tag tail the streaming splitter is holding so
@@ -1693,41 +1774,20 @@ defmodule OptimalSystemAgent.Providers.Ollama do
       {:ok, %{"message" => %{"thinking" => think_text, "content" => text}}}
       when is_binary(think_text) and think_text != "" and
              is_binary(text) and text != "" ->
+        # Content held at a possible tool boundary predates this reasoning.
+        acc = release_held_content(acc, callback)
         callback.({:thinking_delta, think_text})
-        text = Mojibake.repair(text)
-
-        case Map.get(acc, :think) do
-          %ThinkStreamParser{} = ts ->
-            {visible, thinking, think_state} = ThinkStreamParser.feed(ts, text)
-            if thinking != "", do: callback.({:thinking_delta, thinking})
-            if visible != "", do: callback.({:text_delta, visible})
-            %{acc | content: acc.content <> text, think: think_state}
-
-          _ ->
-            callback.({:text_delta, text})
-            %{acc | content: acc.content <> text}
-        end
+        push_content(acc, Mojibake.repair(text), callback)
 
       {:ok, %{"message" => %{"content" => text}}} when is_binary(text) and text != "" ->
-        text = Mojibake.repair(text)
-
         # Split inline <think>…</think> reasoning out before emitting so the
-        # tags + reasoning never leak into the visible answer.
-        case Map.get(acc, :think) do
-          %ThinkStreamParser{} = ts ->
-            {visible, thinking, think_state} = ThinkStreamParser.feed(ts, text)
-            if thinking != "", do: callback.({:thinking_delta, thinking})
-            if visible != "", do: callback.({:text_delta, visible})
-            %{acc | content: acc.content <> text, think: think_state}
-
-          _ ->
-            callback.({:text_delta, text})
-            %{acc | content: acc.content <> text}
-        end
+        # tags + reasoning never leak into the visible answer (`push_content`).
+        push_content(acc, Mojibake.repair(text), callback)
 
       # kimi-k2.5 and other thinking models send a "thinking" field during
       # extended reasoning before producing content or tool calls.
       {:ok, %{"message" => %{"thinking" => text}}} when is_binary(text) and text != "" ->
+        acc = release_held_content(acc, callback)
         callback.({:thinking_delta, text})
         acc
 
@@ -1762,6 +1822,8 @@ defmodule OptimalSystemAgent.Providers.Ollama do
             end
           end)
 
+        # A tool call is the boundary Ollama trims the prose in front of.
+        acc = if tool_calls == [], do: acc, else: release_at_tool_call(acc, callback)
         %{acc | tool_calls: ToolCallDedup.append_all(acc.tool_calls, tool_calls)}
 
       # Final chunk — capture usage stats so context pressure reports correctly.

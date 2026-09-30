@@ -113,6 +113,32 @@ defmodule OptimalSystemAgent.Signal.SnScorerTest do
     test "never returns an empty string for non-empty input" do
       refute SnScorer.trim("Great question! Thank you for your patience!") == ""
     end
+
+    # The trim runs on every final answer (enforcement is on by default). It
+    # used to rejoin sentences with a flat " ", which flattened paragraph
+    # breaks, lists and fences onto one line and made the final disagree with
+    # the blocks the client had already committed while streaming.
+    test "a response with nothing to remove comes back byte-for-byte" do
+      text =
+        "First paragraph. Still first.\n\nSecond paragraph.\n\n" <>
+          "- item one.\n- item two.\n\n```sh\nls -la\n```\nDone."
+
+      assert SnScorer.trim(text) == text
+    end
+
+    test "never glues words: every inter-word space survives" do
+      text = "Checking the audit's own progress file instead. Waiting for the sweep."
+      assert SnScorer.trim(text) == text
+    end
+
+    test "dropping a filler sentence keeps the paragraph break after it" do
+      assert SnScorer.trim("The fix is in.\n\nLet me think about this. Tests pass.") ==
+               "The fix is in.\n\nTests pass."
+    end
+
+    test "dropping a repeat keeps the line structure around it" do
+      assert SnScorer.trim("Done.\nDone.\n\nMoving on.") == "Done.\n\nMoving on."
+    end
   end
 
   describe "enforce/2" do

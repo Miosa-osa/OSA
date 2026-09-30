@@ -159,19 +159,77 @@ defmodule OptimalSystemAgent.Signal.SnScorer do
   """
   @spec trim(term()) :: term()
   def trim(text) when is_binary(text) do
-    sentences = split_sentences(text)
-
     candidate =
-      sentences
-      |> Enum.reject(&filler_sentence?/1)
-      |> dedupe_consecutive()
-      |> Enum.join(" ")
+      text
+      |> String.trim()
+      |> split_keeping_separators()
+      |> drop_noise()
+      |> rejoin()
       |> String.trim()
 
     if candidate == "", do: String.trim(text), else: candidate
   end
 
   def trim(other), do: other
+
+  # `[{sentence, whitespace_that_preceded_it}]`. The whitespace is kept VERBATIM
+  # so rejoining a response nothing was removed from reproduces it exactly.
+  # Rejoining with a flat `" "` (what this used to do) flattened every paragraph
+  # break, list and fenced block in the final answer onto one line — this runs
+  # on every final answer when enforcement is on, which is the shipped default.
+  defp split_keeping_separators(""), do: []
+
+  defp split_keeping_separators(text) do
+    parts = Regex.split(~r/(?<=[.!?])\s+/, text, include_captures: true)
+    pair_up(["" | parts], [])
+  end
+
+  defp pair_up([sep, sentence | rest], acc), do: pair_up(rest, [{sentence, sep} | acc])
+  defp pair_up(_, acc), do: Enum.reverse(acc)
+
+  # Drop pure-filler sentences and exact immediate repeats. A dropped sentence
+  # takes its separator with it, so the survivor after it inherits the
+  # STRONGER of the two breaks it sat between: dropping the filler in
+  # "A.\n\nFiller. B." keeps B on its own paragraph instead of pulling it up
+  # onto A's line.
+  defp drop_noise(pairs) do
+    {kept, _carried} =
+      Enum.reduce(pairs, {[], nil}, fn {sentence, sep}, {kept, carried} ->
+        sep = stronger_break(carried, sep)
+
+        if filler_sentence?(sentence) or repeats_last?(kept, sentence) do
+          {kept, sep}
+        else
+          {[{sentence, sep} | kept], nil}
+        end
+      end)
+
+    Enum.reverse(kept)
+  end
+
+  defp repeats_last?([{last, _} | _], sentence) do
+    not protected_sentence?(sentence) and
+      normalize_sentence(last) == normalize_sentence(sentence)
+  end
+
+  defp repeats_last?([], _sentence), do: false
+
+  defp stronger_break(nil, sep), do: sep
+
+  defp stronger_break(carried, sep) do
+    if newline_count(carried) > newline_count(sep), do: carried, else: sep
+  end
+
+  defp newline_count(s), do: s |> :binary.matches("\n") |> length()
+
+  defp rejoin([]), do: ""
+
+  defp rejoin([{first, _} | rest]) do
+    Enum.reduce(rest, first, fn {sentence, sep}, acc -> acc <> sep_or_space(sep) <> sentence end)
+  end
+
+  defp sep_or_space(""), do: " "
+  defp sep_or_space(sep), do: sep
 
   @doc """
   Trim, then score the TRIMMED text (what will actually be displayed).
@@ -290,25 +348,6 @@ defmodule OptimalSystemAgent.Signal.SnScorer do
   # above (used only for `score/2`/`reasons/2`) is NOT similarly guarded —
   # flagging a repeated command as noisy is fine; deleting one copy of it is
   # not.
-  defp dedupe_consecutive(sentences) do
-    sentences
-    |> Enum.reduce([], fn sentence, acc ->
-      case acc do
-        [last | _] ->
-          if not protected_sentence?(sentence) and
-               normalize_sentence(last) == normalize_sentence(sentence) do
-            acc
-          else
-            [sentence | acc]
-          end
-
-        [] ->
-          [sentence]
-      end
-    end)
-    |> Enum.reverse()
-  end
-
   defp split_sentences(text) do
     text
     |> String.trim()

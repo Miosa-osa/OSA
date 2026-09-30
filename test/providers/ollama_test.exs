@@ -302,7 +302,6 @@ defmodule OptimalSystemAgent.Providers.OllamaTest do
     defp make_acc, do: %{buffer: "", content: "", tool_calls: []}
 
     test "emits :text_delta for content field and accumulates" do
-      tokens = []
       cb = fn event -> send(self(), {:cb, event}) end
       acc = make_acc()
 
@@ -877,6 +876,101 @@ defmodule OptimalSystemAgent.Providers.OllamaTest do
       assert visible == "answer"
       refute visible =~ "think"
       assert thinking == "secret"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # The space Ollama trims before a tool call — both stream paths.
+  #
+  # The lines below are the shape captured from the local daemon's raw
+  # `/api/chat` NDJSON for `deepseek-v4.1-flash:cloud`: the last piece of prose
+  # before the tool call arrives with its leading space removed ("instead."),
+  # which used to reach the screen AND the persisted message as
+  # "the listinginstead.". See `Providers.ToolBoundarySpace`.
+  # ---------------------------------------------------------------------------
+
+  describe "the space trimmed before a tool call" do
+    defp glued_lines(last_chunk) do
+      [
+        Jason.encode!(%{"message" => %{"content" => "I will run ls so you"}}),
+        Jason.encode!(%{"message" => %{"content" => " can see the listing"}}),
+        Jason.encode!(%{"message" => %{"content" => last_chunk}}),
+        Jason.encode!(%{
+          "message" => %{
+            "content" => "",
+            "tool_calls" => [
+              %{"id" => "c1", "function" => %{"name" => "shell_execute", "arguments" => %{}}}
+            ]
+          }
+        }),
+        Jason.encode!(%{"done" => true, "done_reason" => "stop", "message" => %{"content" => ""}})
+      ]
+    end
+
+    defp streamed_text do
+      collect = fn collect, acc ->
+        receive do
+          {:ollama_curl_test_callback, {:text_delta, t}} -> collect.(collect, acc <> t)
+          {:cb, {:text_delta, t}} -> collect.(collect, acc <> t)
+        after
+          0 -> acc
+        end
+      end
+
+      collect.(collect, "")
+    end
+
+    test "cloud path: the live deltas and the result both get the space back" do
+      assert {:done, result} = Ollama.stream_from_curl_lines(glued_lines("instead."))
+
+      assert result.content == "I will run ls so you can see the listing instead."
+      assert streamed_text() == "I will run ls so you can see the listing instead."
+      assert length(result.tool_calls) == 1
+    end
+
+    test "local path: the live deltas and the result both get the space back" do
+      test_pid = self()
+      cb = fn event -> send(test_pid, {:cb, event}) end
+      acc = make_acc() |> Map.put(:usage, %{})
+
+      acc =
+        Enum.reduce(glued_lines("instead."), acc, &Ollama.process_ndjson_line(&1, cb, &2))
+
+      assert acc.content == "I will run ls so you can see the listing instead."
+      assert streamed_text() == "I will run ls so you can see the listing instead."
+    end
+
+    test "a word split across the last two chunks is NOT pulled apart" do
+      lines =
+        List.replace_at(
+          glued_lines("ing."),
+          1,
+          Jason.encode!(%{"message" => %{"content" => " can see the list"}})
+        )
+
+      assert {:done, result} = Ollama.stream_from_curl_lines(lines)
+      assert result.content == "I will run ls so you can see the listing."
+      assert streamed_text() == "I will run ls so you can see the listing."
+    end
+
+    test "the same chunks with no tool call are left exactly as sent" do
+      lines = glued_lines("instead.") |> List.delete_at(3)
+
+      assert {:done, result} = Ollama.stream_from_curl_lines(lines)
+      assert result.content == "I will run ls so you can see the listinginstead."
+    end
+
+    test "prose that resumes after a held chunk keeps its order" do
+      lines = [
+        Jason.encode!(%{"message" => %{"content" => "the settings"}}),
+        Jason.encode!(%{"message" => %{"content" => "read"}}),
+        Jason.encode!(%{"message" => %{"thinking" => "hmm"}}),
+        Jason.encode!(%{"message" => %{"content" => " next."}}),
+        Jason.encode!(%{"done" => true, "done_reason" => "stop", "message" => %{"content" => ""}})
+      ]
+
+      assert {:done, result} = Ollama.stream_from_curl_lines(lines)
+      assert result.content == "the settingsread next."
     end
   end
 end

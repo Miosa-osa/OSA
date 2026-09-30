@@ -807,6 +807,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
             do: Keyword.put(llm_opts, :budget_note, budget_note),
             else: llm_opts
 
+        # A fast-routed step's answer may yet be discarded and re-asked of the
+        # strong model (`maybe_reroute_fast_final_answer/4`). Streamed live, the
+        # discarded answer was already on screen — and settled into the
+        # terminal's scrollback, where nothing can take it back — so the strong
+        # answer printed after it: the final answer twice. Hold it until the
+        # verdict; `release_fast_step_text/3` puts it out when it stands.
+        llm_opts =
+          if routing.route == :fast,
+            do: Keyword.put(llm_opts, :hold_text, true),
+            else: llm_opts
+
         LLMClient.llm_chat_stream(state, context.messages, llm_opts)
       end)
 
@@ -1006,6 +1017,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
        )
        when is_map(resp) do
     if fast_final_answer_without_tools?(resp) do
+      # The fast answer was held (`hold_text`), never shown: discarding it here
+      # leaves nothing on screen to contradict the strong model's answer.
       Logger.info(
         "[route] #{routing.provider}:#{routing.model} answered with no tool calls — " <>
           "discarding it and re-asking #{state.provider}:#{state.model} (the strong model " <>
@@ -1026,11 +1039,21 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
 
       {redo_result, state}
     else
+      # The fast step stands (it asked for tools, or was cut off): its held
+      # narration goes on screen now, before the tool calls it precedes.
+      release_fast_step_text(resp, state)
       {result, state}
     end
   end
 
   defp maybe_reroute_fast_final_answer(_routing, result, state, _context), do: {result, state}
+
+  defp release_fast_step_text(resp, state) do
+    case Map.get(resp, :content) do
+      text when is_binary(text) -> LLMClient.release_held_text(state.session_id, text)
+      _ -> :ok
+    end
+  end
 
   # A CLEAN final answer: real text, no tool calls, and not a cut-off stream
   # (`:stream_incomplete` responses are not "an answer" yet — the EXISTING
