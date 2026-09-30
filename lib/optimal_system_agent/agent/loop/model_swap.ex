@@ -156,6 +156,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ModelSwap do
 
     force? = occupancy >= new_window
 
+    # `occupancy` is already the REAL total (provider-reported when
+    # available - see `occupancy/1` above), so `overhead` here is the same
+    # system-prompt + tool-schema gap `total_and_overhead/2` measures
+    # elsewhere. Reapplying it to `tokens_after` below keeps this report and
+    # the refreshed `:last_input_tokens` equal to the TOTAL the next request
+    # will carry, not just the folded message slice.
+    {_tokens_before, overhead} = Compactor.total_and_overhead(messages, occupancy)
+
     compacted =
       TurnPipeline.bounded_compaction(messages, fn ->
         Compactor.maybe_compact(
@@ -167,7 +175,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ModelSwap do
         )
       end) || messages
 
-    tokens_after = Compactor.estimate_tokens(compacted)
+    tokens_after = overhead + Compactor.estimate_tokens(compacted)
     did? = compacted != messages
 
     CompactionEvents.completed(session_id,

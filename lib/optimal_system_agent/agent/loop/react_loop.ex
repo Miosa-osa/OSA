@@ -584,7 +584,46 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
           cond do
             ProactiveCompaction.should_compact?(state, cw) ->
               before_count = length(state.messages)
-              compacted = ProactiveCompaction.compact(state.messages, state.session_id)
+              known_tokens = Map.get(state, :last_input_tokens, 0)
+
+              # `overhead` - the system prompt + tool schemas the message-only
+              # estimate cannot see (`Agent.Compactor.total_and_overhead/2`) -
+              # is measured against the PRE-fold message list, then reapplied
+              # to the post-fold one in `refresh_tokens_after_fold/3` below. It
+              # stays constant across a fold, so this is what keeps the
+              # refreshed `last_input_tokens` equal to what the next request
+              # will actually carry instead of silently dropping tens of
+              # thousands of tokens for exactly one reading of the meter.
+              {_tokens_before, overhead} =
+                OptimalSystemAgent.Agent.Compactor.total_and_overhead(
+                  state.messages,
+                  known_tokens
+                )
+
+              compacted =
+                ProactiveCompaction.compact(
+                  state.messages,
+                  state.session_id,
+                  nil,
+                  :auto,
+                  # The RAW resolve, not `cw` above. `cw` already substituted
+                  # `CompactionThresholds.fallback_window/0` when the real
+                  # window is unknown, which is correct for the COMPACT
+                  # DECISION (a safety mechanism must not fail open just
+                  # because a model is unrecognised) but wrong for sizing the
+                  # kept-tail BUDGET: it would size the budget against a
+                  # guessed 200k window for a model that might have a much
+                  # smaller real one, keeping far more "verbatim" history than
+                  # such a model could afford and under-compacting exactly
+                  # the sessions this fallback exists to protect. Passing the
+                  # honest `{:ok, _} | :unknown` here — the same thing every
+                  # other `context_window:` call site in this codebase passes
+                  # (`Loop`'s `/compact` handlers, `ModelSwap`) — falls back
+                  # to the fixed-turn-count split when genuinely unknown.
+                  context_window: OptimalSystemAgent.Agent.Loop.ContextWindow.resolve(state),
+                  known_tokens: known_tokens
+                )
+
               changed? = length(compacted) != before_count
 
               if changed? do
@@ -605,7 +644,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
               # nowhere; they now stage into `Accounting`'s side ledger and are
               # billed to this session here. A no-op when nothing was staged.
               %{state | messages: compacted}
-              |> refresh_tokens_after_fold(changed?)
+              |> refresh_tokens_after_fold(changed?, overhead)
               |> Map.put(:just_compacted, changed?)
               |> Map.put(:just_compacted_overflow, false)
               |> Accounting.absorb_side_spend()
@@ -3482,14 +3521,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # `TurnPipeline.compact_and_refresh_tokens/1` already does exactly this at the
   # turn boundary (finding #8) — for the same reason and against the same field.
   # This is the missing half: the mid-turn fold.
-  @spec refresh_tokens_after_fold(map(), boolean()) :: map()
-  defp refresh_tokens_after_fold(state, false), do: state
+  @spec refresh_tokens_after_fold(map(), boolean(), non_neg_integer()) :: map()
+  defp refresh_tokens_after_fold(state, false, _overhead), do: state
 
-  defp refresh_tokens_after_fold(state, true) do
+  defp refresh_tokens_after_fold(state, true, overhead) do
     state
     |> Map.put(
       :last_input_tokens,
-      OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
+      overhead + OptimalSystemAgent.Agent.Compactor.estimate_tokens(state.messages)
     )
     |> Map.put(:last_input_message_count, length(state.messages))
   rescue
