@@ -27,7 +27,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
         proactive_compaction_enabled: true,
         proactive_compaction_keep_turns: 4,
         proactive_compaction_min_older_tokens: 400,
-        compaction_summary_max_tokens: 8_192
+        compaction_summary_max_tokens: 8_192,
+        # Token-budgeted recent tail (used instead of `keep_turns` above
+        # whenever `compact/5` is given a resolvable `:context_window`):
+        proactive_compaction_recent_token_share: 0.15,
+        proactive_compaction_recent_tokens: nil
 
   Thresholds come from `OptimalSystemAgent.Agent.Loop.CompactionThresholds`
   (CC reserve math). After 3 consecutive summarization failures a circuit
@@ -52,6 +56,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   # name here. Provider calls now go through `AgentCompactor.bounded_chat/2`
   # rather than `Providers.Registry.chat/2` directly, so they carry a timeout.
   alias OptimalSystemAgent.Agent.Compactor, as: AgentCompactor
+  alias OptimalSystemAgent.Agent.Loop.ContextReduce
   alias OptimalSystemAgent.Memory.Flush
   alias OptimalSystemAgent.Events.Bus
 
@@ -61,6 +66,24 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   @summary_retries 2
   @default_restore_max_tokens 4_000
   @min_summary_length 200
+
+  # Token budget for the verbatim "recent" tail kept after a fold - see
+  # `split_recent/2` and `recent_token_budget/1`. A configurable SHARE of the
+  # operative window, not a fixed turn count: a fixed count let a handful of
+  # tool-heavy turns smuggle tens of thousands of tokens of "kept verbatim"
+  # history past a fold (MEASURED: 4 turns / 61 messages landed the fold at
+  # 31.8% of a 200k operative window - nowhere near the reserve math's own
+  # target of getting back under the warning band).
+  @default_recent_token_share 0.15
+  @min_recent_budget_tokens 3_000
+
+  # Inside the kept `recent` tail, stale tool-result CONTENT is cleared
+  # (`Agent.Loop.ContextReduce.clear_stale_tool_results/2`) everywhere except
+  # the last this-many turns - mirrors "the last couple of turns" from the
+  # build plan. The tool CALL that produced a cleared result, and the result
+  # message itself, both survive; only the result's payload is stubbed, with
+  # a handle (`expand_output`/`file_read`) to the persisted full text.
+  @stale_tool_keep_turns 2
 
   # Section headers the folded summary MUST retain (subset of the CC 9-section
   # contract). A summary missing these — or below @min_summary_length — has lost
@@ -190,7 +213,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
 
   @doc """
   Compact a message list by summarizing older turns into a structured,
-  Claude Code-style summary message, keeping the most recent N turns verbatim.
+  Claude Code-style summary message, keeping a token-budgeted, turn-aware
+  recent tail verbatim.
 
   On success the compacted list is:
 
@@ -208,25 +232,45 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   itself as something the user had asked for — which is precisely the
   distinction someone asking "shouldn't it just compact automatically?" needs
   to be able to see.
-  """
-  @spec compact([map()], String.t() | nil, String.t() | nil, atom()) :: [map()]
-  def compact(messages, session_id \\ nil, instructions \\ nil, trigger \\ :auto)
 
-  def compact(messages, session_id, instructions, trigger) when is_list(messages) do
-    {older, recent} = split_turns(messages, keep_turns())
+  ## Options
+
+    * `:context_window` - the model's real window, in the same shape
+      `Agent.Compactor.resolve_window/1` accepts (`{:ok, tokens}`, a bare
+      integer, or `:unknown`/omitted). Drives the recent-tail BUDGET (see
+      `split_recent/2`); with no resolvable window the tail falls back to the
+      fixed-turn-count split (`:proactive_compaction_keep_turns`).
+    * `:known_tokens` - a REAL, provider-reported input-token count for
+      `messages` (typically `state.last_input_tokens`). Threaded into
+      `Agent.Compactor.total_and_overhead/2` so the `tokens_before`/
+      `tokens_after` this function reports - and the `/compact` notice and
+      `CompactionEvents` built from them - are the TOTAL the next request
+      will actually carry (system prompt + tool schemas included), not just
+      the folded message slice. Omitting this does not break anything; it
+      just means the reported totals fall back to the message-only estimate,
+      same as before this option existed.
+  """
+  @spec compact([map()], String.t() | nil, String.t() | nil, atom(), keyword()) :: [map()]
+  def compact(messages, session_id \\ nil, instructions \\ nil, trigger \\ :auto, opts \\ [])
+
+  def compact(messages, session_id, instructions, trigger, opts)
+      when is_list(messages) and is_list(opts) do
+    {older, recent} = split_recent(messages, Keyword.get(opts, :context_window))
     older_tokens = Compactor.estimate_tokens(older)
 
     # The WHOLE conversation, which is the only thing "before" can honestly mean
-    # when "after" is also the whole conversation.
+    # when "after" is also the whole conversation - and, since `:known_tokens`
+    # was added, the TOTAL the next request will carry, not just what the
+    # message list alone accounts for. See `Agent.Compactor.total_and_overhead/2`.
     #
     # `older_tokens` measures the fold's INPUT — the turns being summarized —
     # and it is the right number for the "is this worth an LLM round-trip?"
-    # test below, which is a question about the fold. It was also being reported
-    # as `tokens_before` on every lifecycle event and hook, against a
-    # `tokens_after` computed over `[summary | restore ++ reminder] ++ recent`.
-    # Those are different SETS, so the pair was never a before/after of anything.
+    # test below, which is a question about the fold. `total_before` (and
+    # `after_tokens` below) must instead answer "what will the next request
+    # actually send", so they stay overhead-inclusive throughout.
     #
-    # REPORTED LIVE on grok-4.6, three consecutive runs:
+    # REPORTED LIVE on grok-4.6, three consecutive runs (pre-overhead-fix,
+    # message-only estimate on both sides):
     #
     #     ✓ Compacted ~135.4k → ~6.7k tokens (976 messages folded)
     #     ✓ Compacted ~4.1k → ~7.8k tokens (tool output pruned in place)
@@ -240,7 +284,16 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
     # growth was an artefact of the measurement, but a REAL net growth is also
     # reachable here (the two injections below are appended on success alone),
     # so both the accounting and the floor are fixed together.
-    total_before = Compactor.estimate_tokens(messages)
+    #
+    # SEPARATELY measured live on deepseek-v4.1-flash (200k operative window):
+    # the `/compact` notice announced "89.4k -> 25.2k tokens" - both message-only
+    # estimates - the meter read 12.6% immediately after, and the very next LLM
+    # call reported 61,667 REAL input tokens (31.8%): a 36.5k-token system
+    # prompt + tool-schema overhead that was always part of the request and was
+    # simply never counted on either side of the fold. `overhead` below is that
+    # gap, held constant across the pass.
+    {total_before, overhead} =
+      AgentCompactor.total_and_overhead(messages, Keyword.get(opts, :known_tokens))
 
     cond do
       older == [] ->
@@ -285,6 +338,32 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
             # once-per-cycle latch stays claimed and the agent never flushes
             # again for the rest of the session.
             Flush.reset_cycle(session_id)
+
+            # Mechanical, zero-LLM-call shrink of the kept-verbatim tail itself
+            # (build-plan item 2): stale tool-result CONTENT - everywhere in
+            # `recent` except the last `@stale_tool_keep_turns` turns - is
+            # replaced with a one-line stub carrying a handle
+            # (`expand_output`/`file_read`) to the full output, which
+            # `Agent.Loop.ContextReduce.clear_stale_tool_results/2` already
+            # persists before stubbing. This is what made the incident's "kept
+            # 61 recent verbatim" mean 61 messages of, among other things, full
+            # tool output rather than 61 messages most of which are a one-line
+            # pointer to it.
+            #
+            # `batch_size: 1` (opencode's cache-safety gate, normally 5): this
+            # module's caller just rewrote the head of history with a fresh
+            # summary, so the cached prefix is already broken for this pass -
+            # there is no additional cache cost to pay by also clearing
+            # everything eligible right now instead of waiting for a batch to
+            # accumulate.
+            recent =
+              recent
+              |> ContextReduce.clear_stale_tool_results(
+                keep_recent_turns: @stale_tool_keep_turns,
+                batch_size: 1,
+                session_id: session_id
+              )
+              |> elem(0)
 
             # `role: "user"`, NOT `role: "system"`.
             #
@@ -353,8 +432,15 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
             core = [summary_msg | recent]
             with_injections = [summary_msg | restore ++ reminder] ++ recent
 
-            full_tokens = Compactor.estimate_tokens(with_injections)
-            core_tokens = Compactor.estimate_tokens(core)
+            # `overhead` (system prompt + tool schemas) is added back so these
+            # are in the same unit as `total_before` - see
+            # `Agent.Compactor.total_and_overhead/2`. It is a constant across
+            # this pass, so the `< total_before` comparisons below are exactly
+            # as before (the same constant on both sides of each), but the
+            # REPORTED `after_tokens` now includes it instead of silently
+            # dropping it.
+            full_tokens = overhead + Compactor.estimate_tokens(with_injections)
+            core_tokens = overhead + Compactor.estimate_tokens(core)
 
             {compacted, after_tokens, kept} =
               cond do
@@ -431,7 +517,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
     end
   end
 
-  def compact(messages, _session_id, _instructions, _trigger), do: messages
+  def compact(messages, _session_id, _instructions, _trigger, _opts), do: messages
 
   defp restore_compact_session_id(nil), do: Process.delete(:osa_compact_session_id)
   defp restore_compact_session_id(prior), do: Process.put(:osa_compact_session_id, prior)
@@ -594,10 +680,64 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   # Turn splitting
   # ---------------------------------------------------------------------------
 
+  # Selects the verbatim "recent" tail. When a real context window is known,
+  # the tail is TOKEN-BUDGETED and turn-aware
+  # (`Agent.Compactor.turn_tail_start/2` against a share of the operative
+  # window - see `recent_token_budget/1`), so a handful of tool-heavy turns
+  # cannot smuggle tens of thousands of tokens of "kept verbatim" history
+  # past the fold the way a fixed turn COUNT did. The budgeted selector is
+  # also tool-pair safe (`CompactionSafety.select_tail/3` underneath) - a
+  # tool_use is never separated from its tool_result.
+  #
+  # Falls back to the old fixed-turn-count split (`split_turns/2`,
+  # `:proactive_compaction_keep_turns`) when the window is unknown -
+  # consistent with the rest of this codebase's "defer, don't guess" policy
+  # for an unresolvable window, and a strict no-regression for any caller
+  # that does not pass `:context_window`.
+  @spec split_recent([map()], AgentCompactor.window_input()) :: {[map()], [map()]}
+  defp split_recent(messages, context_window) do
+    case AgentCompactor.resolve_window(context_window) do
+      {:ok, cw} ->
+        split_at = AgentCompactor.turn_tail_start(messages, recent_token_budget(cw))
+        {Enum.take(messages, split_at), Enum.drop(messages, split_at)}
+
+      :unknown ->
+        split_turns(messages, keep_turns())
+    end
+  end
+
+  # Absolute override (`:proactive_compaction_recent_tokens`) wins outright;
+  # otherwise a configurable SHARE of the operative window
+  # (`:proactive_compaction_recent_token_share`, default 0.15), floored so a
+  # tiny window still keeps something.
+  defp recent_token_budget(cw) do
+    case Application.get_env(:optimal_system_agent, :proactive_compaction_recent_tokens) do
+      n when is_integer(n) and n > 0 ->
+        n
+
+      _ ->
+        share =
+          case Application.get_env(
+                 :optimal_system_agent,
+                 :proactive_compaction_recent_token_share
+               ) do
+            f when is_float(f) and f > 0.0 and f < 1.0 -> f
+            _ -> @default_recent_token_share
+          end
+
+        cw
+        |> CompactionThresholds.operative_window()
+        |> Kernel.*(share)
+        |> trunc()
+        |> max(@min_recent_budget_tokens)
+    end
+  end
+
   # Split `messages` into `{older, recent}` where `recent` holds the last
   # `keep` turns verbatim. A turn boundary starts at each `role: "user"`
   # message; leading non-user messages (e.g. a system preamble) stay with the
-  # first turn so they are never orphaned.
+  # first turn so they are never orphaned. The fixed-turn-count fallback used
+  # when `split_recent/2` has no resolvable context window.
   @spec split_turns([map()], non_neg_integer()) :: {[map()], [map()]}
   defp split_turns(messages, keep) when keep <= 0, do: {messages, []}
 

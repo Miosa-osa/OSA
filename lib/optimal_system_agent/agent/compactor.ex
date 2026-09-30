@@ -488,6 +488,66 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     end
   end
 
+  @doc """
+  Resolves the REAL total token count for `messages` - the one the next
+  provider request will actually carry - by adding back the "overhead" the
+  message-only heuristic in `estimate_tokens/1` cannot see: the system
+  prompt, tool schemas, and provider framing.
+
+  `known_tokens` is a REAL, provider-reported input-token count for THIS SAME
+  message list (typically `state.last_input_tokens`), or `nil`/`0` when none
+  is available yet. Returns `{total, overhead}`:
+
+    * `total` is `known_tokens` when positive, else the message-only
+      estimate - there is nothing to compare against, so the heuristic IS
+      the total.
+    * `overhead` is `max(total - estimate_tokens(messages), 0)`: the gap
+      between the real total and what the messages alone account for.
+
+  ## Why every before/after pair must share ONE `overhead`
+
+  Any caller reporting a token count that SPANS a compaction pass - the
+  `/compact` notice, `CompactionEvents`, `ReactLoop`'s post-fold
+  `last_input_tokens` refresh, `ModelSwap`'s post-swap refresh - must derive
+  BOTH the before and the after number through this function, applying the
+  SAME `overhead` to both message lists.
+
+  The system prompt and tool schemas do not change size because history got
+  folded, so re-applying the overhead measured before a compaction to the
+  (smaller) message list it produced is what keeps the reported total
+  honest. The bug this exists to prevent: `overhead` gets silently DROPPED
+  after compaction (the post-fold code reports `estimate_tokens(compacted)`
+  alone), the meter reads a falsely low percentage for exactly one request,
+  and the next real round-trip reports the true total and reads as a
+  "jump" - measured live: `/compact` announced 89.4k -> 25.2k tokens (message
+  estimate only), the meter read 12.6% immediately after, and the very next
+  LLM call reported 61,667 real input tokens (31.8%) - a 36.5k-token
+  overhead that was always there, just never counted after the fold.
+  """
+  @spec total_and_overhead([map()], non_neg_integer() | nil) ::
+          {non_neg_integer(), non_neg_integer()}
+  def total_and_overhead(messages, known_tokens) when is_list(messages) do
+    estimated = estimate_tokens(messages)
+
+    total =
+      case known_tokens do
+        n when is_integer(n) and n > 0 -> n
+        _ -> estimated
+      end
+
+    {total, max(total - estimated, 0)}
+  end
+
+  @doc """
+  The `total` half of `total_and_overhead/2`, for callers that only need the
+  honest total and not the overhead itself.
+  """
+  @spec total_tokens([map()], non_neg_integer() | nil) :: non_neg_integer()
+  def total_tokens(messages, known_tokens) do
+    {total, _overhead} = total_and_overhead(messages, known_tokens)
+    total
+  end
+
   # ---------------------------------------------------------------------------
   # GenServer callbacks
   # ---------------------------------------------------------------------------
@@ -531,28 +591,19 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
   @doc false
   defp do_maybe_compact(messages, known_tokens, session_id, opts) do
-    # Message-only heuristic estimate — used for the pipeline's savings math so
-    # before/after token counts stay in the same unit.
-    estimated = estimate_tokens(messages)
-
     # Decision token count: prefer the real provider-reported input tokens when
     # available (they include system prompt + tool schemas the estimate omits),
-    # else fall back to the heuristic estimate.
-    decision_tokens =
-      case known_tokens do
-        n when is_integer(n) and n > 0 -> n
-        _ -> estimated
-      end
-
-    # Everything in the real request that the message-only estimate cannot see:
-    # system prompt, tool schemas, provider framing. The DECISION is made on
-    # `decision_tokens`, but every per-step budget check inside the pipeline
-    # measures the message list — so without this the pipeline compacts until
-    # the MESSAGES fit a budget derived from the FULL request, stops short, and
-    # the next request overflows again on history it just declared small enough.
-    # Zero whenever there is no provider-reported count to compare against, so
-    # the heuristic-only path is unchanged.
-    overhead = max(decision_tokens - estimated, 0)
+    # else fall back to the heuristic estimate. `overhead` is everything in the
+    # real request the message-only estimate cannot see: system prompt, tool
+    # schemas, provider framing. The DECISION is made on `decision_tokens`, but
+    # every per-step budget check inside the pipeline measures the message
+    # list - so without threading `overhead` through, the pipeline compacts
+    # until the MESSAGES fit a budget derived from the FULL request, stops
+    # short, and the next request overflows again on history it just declared
+    # small enough. Also what `run_pipeline/6` now reports as `tokens_before`/
+    # `tokens_after` - see `total_and_overhead/2` for why both sides of a
+    # compaction pass must share this same number.
+    {decision_tokens, overhead} = total_and_overhead(messages, known_tokens)
 
     force? = Keyword.get(opts, :force, false) == true
 
@@ -577,7 +628,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
                 ") — running #{severity} pipeline"
             )
 
-            run_pipeline(messages, estimated, severity, cw, session_id, overhead)
+            run_pipeline(messages, decision_tokens, severity, cw, session_id, overhead)
         end
 
       :unknown when force? ->
@@ -588,7 +639,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
             "(provider reported overflow) — running emergency pipeline"
         )
 
-        run_pipeline(messages, estimated, :emergency, :unknown, session_id, overhead)
+        run_pipeline(messages, decision_tokens, :emergency, :unknown, session_id, overhead)
 
       :unknown ->
         # DEFER. See maybe_compact/4's "Unknown windows" section: guessing a
@@ -630,9 +681,13 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     # its history was cut. Superseding is free here: compaction rewrites
     # history wholesale, so the prompt prefix is reset by this pass regardless
     # and there is no additional cache breakage to pay for.
-    # `tokens_before` stays the caller's estimate of the ORIGINAL list, so the
-    # tokens reclaimed by dropping stale notices are counted as savings like
-    # any other step's.
+    # `tokens_before` stays the caller's total for the ORIGINAL list - now the
+    # overhead-inclusive real total from `total_and_overhead/2`, not a
+    # message-only estimate - so the tokens reclaimed by dropping stale
+    # notices are counted as savings like any other step's, and the number
+    # reported in `CompactionEvents`/the `/compact` notice is the one the next
+    # request will actually carry rather than a smaller number that omits the
+    # system prompt and tool schemas.
     messages = drop_stale_compaction_notices(messages)
 
     # PreCompact hook — SYNCHRONOUS (CC parity). Command hooks receive the
@@ -745,7 +800,17 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     # real cold-zone summary, and treating it as the first throws away genuine
     # compaction work (and the LLM call already paid for to produce it) and
     # returns a transcript that still has to be compacted next turn.
-    tokens_after_steps = estimate_tokens(final_messages)
+    #
+    # `overhead` (system prompt + tool schemas - see `total_and_overhead/2`)
+    # is added back here so `tokens_after_steps` is in the SAME unit as
+    # `tokens_before`, which is now the overhead-inclusive real total. It is a
+    # constant across this pass (folding history does not change how big the
+    # system prompt or tool schemas are), so `steps_saved` below is unaffected
+    # - it is still exactly the message-side reduction - but a REPORTED
+    # `tokens_after` that dropped this constant is what let a `/compact`
+    # notice announce a total lower than what the very next request actually
+    # sent.
+    tokens_after_steps = overhead + estimate_tokens(final_messages)
     steps_saved = tokens_before - tokens_after_steps
 
     if steps_saved <= 0 do
@@ -791,7 +856,7 @@ defmodule OptimalSystemAgent.Agent.Compactor do
       # the injections rather than the other way round — that is what keeps a
       # net-negative pass impossible without discarding real work.
       {final_messages, tokens_after} =
-        case estimate_tokens(restored) do
+        case overhead + estimate_tokens(restored) do
           t when t < tokens_before -> {restored, t}
           _ -> {final_messages, tokens_after_steps}
         end
@@ -2191,19 +2256,31 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     end
   end
 
-  # Computes the index (in `messages`) where the token-budgeted, turn-aware
-  # "hot" tail begins — everything from this index to the end is kept
-  # verbatim. Walks whole recent turns backward, keeping each in full while
-  # it fits the remaining budget; when a turn would overflow the budget, it
-  # is SPLIT to fit using `CompactionSafety.select_tail/3` (already a
-  # tool-pair-safe backward token-accumulation port of grok's select.rs)
-  # applied to just that turn's message slice. Always preserves at least the
-  # single most-recent turn, so this never keeps strictly less than the
-  # user's latest message. Falls back to the old fixed `@hot_zone_size`
-  # message-count boundary when no turn structure can be found at all (e.g.
-  # a pure tool/system message stream with no `role: "user"` messages).
-  @doc false
-  defp compute_hot_start(messages, cw) do
+  @doc """
+  Index (in `messages`) where a token-budgeted, turn-aware tail begins -
+  everything from this index to the end fits within `budget` tokens. Walks
+  whole user-delimited turns backward, keeping each in full while it fits
+  the remaining budget; when a turn would overflow the budget, it is SPLIT
+  to fit using `CompactionSafety.select_tail/3` (already a tool-pair-safe
+  backward token-accumulation port of grok's select.rs - a tool_use is never
+  separated from its tool_result) applied to just that turn's message
+  slice. Always preserves at least the single most-recent turn, so this
+  never keeps strictly less than the user's latest message. Falls back to
+  the old fixed `@hot_zone_size` message-count boundary when no turn
+  structure can be found at all (e.g. a pure tool/system message stream
+  with no `role: "user"` messages).
+
+  Public so `Agent.Loop.ProactiveCompaction` can select ITS kept-verbatim
+  tail by the SAME tool-pair-safe, turn-aware algorithm this pipeline uses
+  internally (`compute_hot_start/2` below), but against its own budget - a
+  configurable share of the operative window - rather than the pipeline's
+  narrow 2k-8k positional-prune budget. A fixed turn COUNT let a handful of
+  tool-heavy turns smuggle tens of thousands of tokens of "kept verbatim"
+  history past a fold; a token budget cannot be smuggled past.
+  """
+  @spec turn_tail_start([map()], non_neg_integer()) :: non_neg_integer()
+  def turn_tail_start(messages, budget)
+      when is_list(messages) and is_integer(budget) and budget >= 0 do
     total = length(messages)
 
     case build_turns(messages) do
@@ -2211,14 +2288,17 @@ defmodule OptimalSystemAgent.Agent.Compactor do
         max(total - @hot_zone_size, 0)
 
       turns ->
-        budget = preserve_recent_budget(cw)
-
         case select_turn_tail(messages, Enum.reverse(turns), budget) do
           nil -> max(total - @hot_zone_size, 0)
           hot_start -> CompactionSafety.safe_split_index(messages, hot_start)
         end
     end
   end
+
+  # Same algorithm, but against the pipeline's own narrow positional-prune
+  # budget (`preserve_recent_budget/1`) rather than a caller-supplied one.
+  @doc false
+  defp compute_hot_start(messages, cw), do: turn_tail_start(messages, preserve_recent_budget(cw))
 
   defp select_turn_tail(messages, turns_desc, budget) do
     {_tokens, kept} =
