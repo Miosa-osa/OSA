@@ -57,6 +57,33 @@ defmodule OptimalSystemAgent.Agent.Loop.CompactionThresholds do
 
   Override with `config :optimal_system_agent, compaction_context_ceiling: n`.
   Setting it above a model's real window disables the clamp for that model.
+
+  ## Flash/small-tier models compact earlier
+
+  A flat ceiling assumes every model degrades at the same rate per token of
+  live context. It does not: a small/flash-tier model measurably loses the
+  plot well before a 167k-token compact_at, where a strong model is still
+  coherent. Every threshold function below therefore takes an OPTIONAL
+  `model` argument (default `nil`, meaning "unknown — use the flat ceiling
+  unchanged", so every existing 1-arg call site is byte-identical to before).
+  When `model` is given, `model_ceiling/2` tightens the ceiling to
+  `compaction_flash_context_ceiling` (default 100,000) for any model whose
+  OWN catalog price (`Providers.Catalog.cost/1`, USD per 1M input tokens) is
+  at or below `compaction_flash_cost_ceiling_usd` (default $1.00).
+
+  This is deliberately CAPABILITY-driven, not name matching: `Catalog.cost/1`
+  is real, provider-published pricing (Ollama Cloud, OpenRouter, every vendor
+  API that lists a rate card), and a model priced this cheap is economically
+  a "flash" tier model on every provider regardless of what marketing calls
+  it. A model the catalog has no price for (offline, a brand-new release, a
+  local model with no rate card) never tightens — fail-open, the same rule
+  `max_output/1` and the rest of this module already follow.
+
+  Callers that already know a decision's model (`ProactiveCompaction`,
+  `Memory.Flush`, `Telemetry`'s status-bar meter) MUST pass the SAME `model`
+  to every threshold function used for that one decision — `warn_at/2` and
+  `compact_at/2` computed against different ceilings can invert the band
+  `warn_at < compact_at` this module's own `warn_at/1` moduledoc warns about.
   """
 
   # Reserve for the compact summary output (p99.99 of CC summaries ~= 17.4k).
@@ -70,16 +97,29 @@ defmodule OptimalSystemAgent.Agent.Loop.CompactionThresholds do
   # much transcript OSA will carry before it compacts, on any model.
   @context_ceiling 200_000
 
+  # Tighter ceiling for a flash/small-tier model (see moduledoc). ~100K, per
+  # the incident review: small/flash models were observed degrading well
+  # before the 167k compact_at the flat ceiling produces.
+  @flash_context_ceiling 100_000
+
+  # A model priced at or below this (USD per 1M INPUT tokens, from
+  # `Providers.Catalog.cost/1`) is economically flash/small-tier.
+  @flash_cost_ceiling_usd 1.0
+
   @doc """
   The window all threshold math runs against: `min(context_window, ceiling)`.
 
-  Idempotent, so composing it with itself (as `compact_at/1` does via
-  `effective_window/1`) is safe.
+  Idempotent, so composing it with itself (as `compact_at/2` does via
+  `effective_window/2`) is safe. `model` is optional — see the moduledoc's
+  "Flash/small-tier models compact earlier" section; omitting it (or passing
+  `nil`) reproduces the exact pre-existing flat-ceiling behavior.
   """
-  @spec operative_window(pos_integer()) :: pos_integer()
-  def operative_window(context_window)
+  @spec operative_window(pos_integer(), String.t() | nil) :: pos_integer()
+  def operative_window(context_window, model \\ nil)
+
+  def operative_window(context_window, model)
       when is_integer(context_window) and context_window > 0 do
-    min(context_window, model_ceiling(context_window))
+    min(context_window, model_ceiling(context_window, model))
   end
 
   # The ceiling scales WITH the model instead of being one constant for all of
@@ -110,16 +150,58 @@ defmodule OptimalSystemAgent.Agent.Loop.CompactionThresholds do
   # An operator who wants more of a big window live opts in explicitly:
   # `OSA_CONTEXT_CEILING_SHARE` (0.5 gives 1M -> 500k, 1.0 the whole window)
   # or `OSA_CONTEXT_CEILING` for an absolute value.
-  defp model_ceiling(context_window) do
+  #
+  # `model`, when given, can only TIGHTEN this further (flash/small-tier —
+  # see the moduledoc), and never when the operator has set an explicit
+  # `compaction_context_ceiling` — that override is "I know my model, use
+  # exactly this number", and a capability guess must not second-guess it.
+  defp model_ceiling(context_window, model) do
     case Application.get_env(:optimal_system_agent, :compaction_context_ceiling) do
       n when is_integer(n) and n > 0 ->
         n
 
       _ ->
-        case ceiling_share() do
-          nil -> @context_ceiling
-          share -> max(@context_ceiling, trunc(context_window * share))
-        end
+        base =
+          case ceiling_share() do
+            nil -> @context_ceiling
+            share -> max(@context_ceiling, trunc(context_window * share))
+          end
+
+        if flash_tier?(model), do: min(base, flash_context_ceiling()), else: base
+    end
+  end
+
+  # CAPABILITY-driven (catalog price), not name matching — see moduledoc.
+  defp flash_tier?(model) when is_binary(model) and model != "" do
+    case OptimalSystemAgent.Providers.Catalog.cost(model) do
+      %{input: input} when is_number(input) and input > 0 -> input <= flash_cost_ceiling_usd()
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp flash_tier?(_), do: false
+
+  defp flash_context_ceiling do
+    case Application.get_env(
+           :optimal_system_agent,
+           :compaction_flash_context_ceiling,
+           @flash_context_ceiling
+         ) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @flash_context_ceiling
+    end
+  end
+
+  defp flash_cost_ceiling_usd do
+    case Application.get_env(
+           :optimal_system_agent,
+           :compaction_flash_cost_ceiling_usd,
+           @flash_cost_ceiling_usd
+         ) do
+      n when is_number(n) and n > 0 -> n
+      _ -> @flash_cost_ceiling_usd
     end
   end
 
@@ -158,16 +240,20 @@ defmodule OptimalSystemAgent.Agent.Loop.CompactionThresholds do
   def fallback_window, do: context_ceiling()
 
   @doc "Context window minus the output reserve for the compact summary."
-  @spec effective_window(pos_integer()) :: integer()
-  def effective_window(context_window)
+  @spec effective_window(pos_integer(), String.t() | nil) :: integer()
+  def effective_window(context_window, model \\ nil)
+
+  def effective_window(context_window, model)
       when is_integer(context_window) and context_window > 0 do
-    operative_window(context_window) - output_reserve()
+    operative_window(context_window, model) - output_reserve()
   end
 
-  @doc "Token count at which auto-compact fires."
-  @spec compact_at(pos_integer()) :: pos_integer()
-  def compact_at(cw) when is_integer(cw) and cw > 0 do
-    cw = operative_window(cw)
+  @doc "Token count at which auto-compact fires. `model` — see moduledoc."
+  @spec compact_at(pos_integer(), String.t() | nil) :: pos_integer()
+  def compact_at(cw, model \\ nil)
+
+  def compact_at(cw, model) when is_integer(cw) and cw > 0 do
+    cw = operative_window(cw, model)
 
     # Subtract the reserve directly rather than via `effective_window/1`, which
     # would clamp a value that is already clamped. A flat ceiling made
@@ -224,10 +310,12 @@ defmodule OptimalSystemAgent.Agent.Loop.CompactionThresholds do
   which makes the ordering `warn_at < compact_at` structural rather than
   something the two formulas happen to agree on.
   """
-  @spec warn_at(pos_integer()) :: pos_integer()
-  def warn_at(cw) when is_integer(cw) and cw > 0 do
-    cw = operative_window(cw)
-    compact = compact_at(cw)
+  @spec warn_at(pos_integer(), String.t() | nil) :: pos_integer()
+  def warn_at(cw, model \\ nil)
+
+  def warn_at(cw, model) when is_integer(cw) and cw > 0 do
+    cw = operative_window(cw, model)
+    compact = compact_at(cw, model)
     reserve_based = compact - @warning_buffer
 
     preferred =
@@ -248,26 +336,30 @@ defmodule OptimalSystemAgent.Agent.Loop.CompactionThresholds do
   it: a blocking limit at or under the compaction threshold would refuse the
   very request compaction just made room for.
   """
-  @spec block_at(pos_integer()) :: pos_integer()
-  def block_at(cw) when is_integer(cw) and cw > 0 do
-    cw = operative_window(cw)
-    compact = compact_at(cw)
-    reserve_based = effective_window(cw) - @manual_compact_buffer
+  @spec block_at(pos_integer(), String.t() | nil) :: pos_integer()
+  def block_at(cw, model \\ nil)
+
+  def block_at(cw, model) when is_integer(cw) and cw > 0 do
+    cw = operative_window(cw, model)
+    compact = compact_at(cw, model)
+    reserve_based = effective_window(cw, model) - @manual_compact_buffer
     preferred = if reserve_based > compact, do: reserve_based, else: trunc(cw * 0.90)
     max(preferred, compact + 1)
   end
 
-  @doc "All thresholds as a map (telemetry / TUI warning line)."
-  @spec thresholds(pos_integer()) :: map()
-  def thresholds(cw) when is_integer(cw) and cw > 0 do
+  @doc "All thresholds as a map (telemetry / TUI warning line). `model` — see moduledoc."
+  @spec thresholds(pos_integer(), String.t() | nil) :: map()
+  def thresholds(cw, model \\ nil)
+
+  def thresholds(cw, model) when is_integer(cw) and cw > 0 do
     %{
       context_window: cw,
-      operative_window: operative_window(cw),
-      clamped?: operative_window(cw) < cw,
-      effective_window: effective_window(cw),
-      compact_at: compact_at(cw),
-      warn_at: warn_at(cw),
-      block_at: block_at(cw)
+      operative_window: operative_window(cw, model),
+      clamped?: operative_window(cw, model) < cw,
+      effective_window: effective_window(cw, model),
+      compact_at: compact_at(cw, model),
+      warn_at: warn_at(cw, model),
+      block_at: block_at(cw, model)
     }
   end
 
@@ -286,15 +378,17 @@ defmodule OptimalSystemAgent.Agent.Loop.CompactionThresholds do
   keeps the meter aligned with the ratio-based compaction fallback (compact at
   75%).
   """
-  @spec used_percent(non_neg_integer(), pos_integer()) :: float()
-  def used_percent(tokens, cw)
+  @spec used_percent(non_neg_integer(), pos_integer(), String.t() | nil) :: float()
+  def used_percent(tokens, cw, model \\ nil)
+
+  def used_percent(tokens, cw, model)
       when is_integer(tokens) and tokens >= 0 and is_integer(cw) and cw > 0 do
     # Clamped denominator, so the meter and the compaction trigger agree: on a
     # 1M-window model the bar reads ~93% when auto-compact fires, not 17%.
-    cw = operative_window(cw)
+    cw = operative_window(cw, model)
 
     denom =
-      case effective_window(cw) do
+      case effective_window(cw, model) do
         eff when eff > 0 -> eff
         _ -> cw
       end
@@ -302,7 +396,7 @@ defmodule OptimalSystemAgent.Agent.Loop.CompactionThresholds do
     Float.round(min(tokens / denom * 100, 100.0), 1)
   end
 
-  def used_percent(_, _), do: 0.0
+  def used_percent(_, _, _), do: 0.0
 
   @doc """
   Classify current token usage against the thresholds.
@@ -310,19 +404,21 @@ defmodule OptimalSystemAgent.Agent.Loop.CompactionThresholds do
   Returns `%{percent_left, above_warning, above_compact, at_blocking_limit}` —
   the fields the TUI context-low warning consumes (CC
   `calculateTokenWarningState` parity: percent_left is measured against the
-  auto-compact threshold, floored at 0).
+  auto-compact threshold, floored at 0). `model` — see moduledoc.
   """
-  @spec warning_state(non_neg_integer(), pos_integer()) :: map()
-  def warning_state(tokens, cw)
+  @spec warning_state(non_neg_integer(), pos_integer(), String.t() | nil) :: map()
+  def warning_state(tokens, cw, model \\ nil)
+
+  def warning_state(tokens, cw, model)
       when is_integer(tokens) and is_integer(cw) and cw > 0 do
-    compact = compact_at(cw)
+    compact = compact_at(cw, model)
     percent_left = max(0, round((compact - tokens) / compact * 100))
 
     %{
       percent_left: percent_left,
-      above_warning: tokens >= warn_at(cw),
+      above_warning: tokens >= warn_at(cw, model),
       above_compact: tokens >= compact,
-      at_blocking_limit: tokens >= block_at(cw)
+      at_blocking_limit: tokens >= block_at(cw, model)
     }
   end
 

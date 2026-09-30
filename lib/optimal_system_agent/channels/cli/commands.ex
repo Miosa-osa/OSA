@@ -1325,7 +1325,7 @@ defmodule OptimalSystemAgent.Channels.CLI.Commands do
     small? = Context.small_window?(tag, :ollama)
     variant = Context.static_base_variant(:ollama, small?)
     static = Soul.static_token_count(variant)
-    compact = CompactionThresholds.compact_at(window)
+    compact = CompactionThresholds.compact_at(window, tag)
     tools = if small?, do: "10 core tools + tool_search", else: "all tools"
 
     IO.puts("")
