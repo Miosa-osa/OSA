@@ -477,6 +477,17 @@ pub(crate) fn compact_tokens(tokens: u64) -> String {
     }
 }
 
+/// A configured threshold, which is exact, so no `~`: `167000` -> `167k`.
+fn threshold_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 && tokens % 1_000_000 == 0 {
+        format!("{}M", tokens / 1_000_000)
+    } else if tokens >= 1000 {
+        format!("{}k", tokens / 1000)
+    } else {
+        tokens.to_string()
+    }
+}
+
 /// Transient goal-verification indicator state, tied to the active-goal line.
 /// Set from the backend `goal_verifier_round` event and cleared on a new turn.
 /// Deliberately understated: one compact chip, never a popup.
@@ -1068,6 +1079,46 @@ impl StatusBar {
     /// Percent of usable context left before auto-compact, if reported.
     pub fn percent_left(&self) -> Option<u32> {
         self.percent_left
+    }
+
+    /// The low-context notice, in tokens.
+    ///
+    /// It used to read `Context low (N% remaining)`, a percentage of the
+    /// COMPACTION budget, printed beside a status-bar percentage of something
+    /// else. REPORTED LIVE on a 1M-window model at 159.3k tokens: the bar said
+    /// 80% and the notice said 4% remaining, on a model with 85% of its window
+    /// free. The bar now measures the model's real window, and this line names
+    /// the one thing it is about, where auto-compact fires and how far off it
+    /// is, as absolute token counts that cannot be read as "the window is
+    /// full". With no threshold reported (an older backend) it falls back to
+    /// the percentage, and with neither it shows no number at all rather than
+    /// a fabricated one.
+    pub fn context_low_notice(&self) -> String {
+        if self.context_compact_at > 0 {
+            let left = self
+                .context_compact_at
+                .saturating_sub(self.context_estimated);
+            if left == 0 {
+                format!(
+                    "Auto-compact due (at {}) \u{00b7} /compact to run it now",
+                    threshold_tokens(self.context_compact_at)
+                )
+            } else {
+                format!(
+                    "Auto-compact at {} \u{00b7} {} to go \u{00b7} /compact to run it now",
+                    threshold_tokens(self.context_compact_at),
+                    compact_tokens(left)
+                )
+            }
+        } else {
+            match self.percent_left {
+                Some(left) => format!(
+                    "Context low ({}% remaining) \u{00b7} Run /compact to compact & continue",
+                    left
+                ),
+                None => "Context low \u{00b7} Run /compact to compact & continue".to_string(),
+            }
+        }
     }
 
     pub fn set_stats(&mut self, input: u64, output: u64, elapsed: u64) {
@@ -2031,6 +2082,80 @@ mod status_bar_tests {
             left > 80,
             "percent_left still reads {left}% with 29.3k of a 167k budget in use"
         );
+    }
+
+    /// The reported screen, on `deepseek-v4.1-flash:cloud` (1,048,576-token
+    /// window) at 159.3k tokens:
+    ///
+    /// ```text
+    ///     Context low (4% remaining) · Run /compact to compact & continue
+    ///     ⟐ deepseek-v4.1-flash:cloud │ ⣿⣿⣿⣿⣿⣿⢿░ 80% ctx
+    /// ```
+    ///
+    /// Both numbers were shares of a 200k compaction budget. The backend now
+    /// sends the real window as `max_tokens` and compacts near it, so at
+    /// 159.3k the bar reads ~15% with no notice, and the notice only appears in
+    /// the band just below the compaction point, naming it in tokens.
+    #[test]
+    fn a_one_million_window_model_is_not_reported_as_nearly_full() {
+        let mut sb = StatusBar::new();
+        // What the backend sends on a 1,048,576-token window:
+        // compact_at 891,289, warn_at 871,289.
+        sb.set_context_warning(Some(82), false, 891_289, 871_289);
+        sb.set_context(0.152, 159_300, 1_048_576);
+
+        assert!(
+            sb.context_ratio() < 0.20,
+            "bar reads {:.0}% of a 1M window holding 159.3k",
+            sb.context_ratio() * 100.0
+        );
+        assert!(!sb.context_low(), "a notice is up at 159.3k of 1M");
+
+        // Near the fold point the notice appears, in tokens.
+        sb.note_input_tokens(880_000);
+        assert!(sb.context_low(), "the band is open at 880k");
+        let notice = sb.context_low_notice();
+        assert_eq!(
+            notice,
+            "Auto-compact at 891k \u{00b7} ~11.3k to go \u{00b7} /compact to run it now"
+        );
+        assert!(!notice.contains('%'), "a percentage came back: {notice}");
+    }
+
+    #[test]
+    fn the_notice_says_due_once_the_threshold_is_crossed() {
+        let mut sb = StatusBar::new();
+        sb.set_context_warning(Some(0), true, 167_000, 147_000);
+        sb.set_context(0.17, 180_000, 1_048_576);
+        assert_eq!(
+            sb.context_low_notice(),
+            "Auto-compact due (at 167k) \u{00b7} /compact to run it now"
+        );
+    }
+
+    /// An older backend that sends no thresholds keeps its percentage, and one
+    /// that sends neither gets no fabricated number.
+    #[test]
+    fn the_notice_falls_back_without_thresholds() {
+        let mut sb = StatusBar::new();
+        sb.set_context_warning(Some(6), true, 0, 0);
+        assert_eq!(
+            sb.context_low_notice(),
+            "Context low (6% remaining) \u{00b7} Run /compact to compact & continue"
+        );
+        sb.set_context_warning(None, true, 0, 0);
+        assert_eq!(
+            sb.context_low_notice(),
+            "Context low \u{00b7} Run /compact to compact & continue"
+        );
+    }
+
+    #[test]
+    fn threshold_tokens_formats_exact_counts() {
+        assert_eq!(threshold_tokens(167_000), "167k");
+        assert_eq!(threshold_tokens(1_000_000), "1M");
+        assert_eq!(threshold_tokens(1_048_576), "1048k");
+        assert_eq!(threshold_tokens(900), "900");
     }
 
     /// The banner is derived even when the window is unknown, because the
