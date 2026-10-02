@@ -2582,19 +2582,15 @@ impl App {
         }
         // WS12 — CC TokenWarning parity: once the backend's context_pressure
         // report crosses the low threshold, the passive "N% context used" hint
-        // becomes an explicit red warning showing the % LEFT until auto-compact
-        // and the action to take.
-        if self.status.context_low() {
-            // Suppress the misleading "0% remaining" when the backend flagged
-            // context_low but sent no percent_left (phantom-zero, budget-chip
-            // class): show the warning without a fabricated number.
-            let text = match self.status.percent_left() {
-                Some(left) => format!(
-                    "Context low ({}% remaining) \u{00b7} Run /compact to compact & continue",
-                    left
-                ),
-                None => "Context low \u{00b7} Run /compact to compact & continue".to_string(),
-            };
+        // becomes an explicit red notice naming where auto-compact fires, how
+        // many tokens are left before it does, and the action to take (see
+        // `StatusBar::context_low_notice`).
+        //
+        // Not while compaction is already running: the spinner row says
+        // "Compacting… chunk 12/24" and this row telling the operator to run
+        // `/compact` on top of it is an instruction to do what is being done.
+        if self.status.context_low() && !self.activity.is_compacting() {
+            let text = self.status.context_low_notice();
             let para = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(
                 ratatui::text::Span::styled(
                     text,

@@ -1869,6 +1869,13 @@ impl Activity {
         self.phase == ProcessingPhase::Waiting
     }
 
+    /// Whether a context compaction is running right now. The notice row above
+    /// the composer reads this to stop telling the operator to run `/compact`
+    /// while the spinner row already says it is happening.
+    pub fn is_compacting(&self) -> bool {
+        self.waiting_reason == Some(WaitingReason::Compacting)
+    }
+
     /// B3-stall — flip a mid-stream turn to `Waiting` once the token stream has
     /// gone silent for [`STREAM_SILENCE_FLIP`].
     ///
@@ -3355,6 +3362,19 @@ mod activity_tests {
             "{}",
             bar
         );
+    }
+
+    #[test]
+    fn is_compacting_tracks_the_compacting_wait_only() {
+        let mut act = Activity::new();
+        assert!(!act.is_compacting());
+        act.start();
+        act.set_waiting_reason(Some(WaitingReason::Compacting));
+        assert!(act.is_compacting());
+        act.set_waiting_reason(Some(WaitingReason::Model));
+        assert!(!act.is_compacting());
+        act.set_waiting_reason(None);
+        assert!(!act.is_compacting());
     }
 
     #[test]

@@ -24,32 +24,35 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
     # providers it is identical to the trained `context_window/1`.
     model_window = provider_context_window(state)
 
-    # ONE denominator. `used_percent/2` and `warning_state/2` both clamp the
-    # window internally (`operative_window/1`, which is `min(window,
-    # model_ceiling)` — a per-model share, not a flat 200k), but the raw
-    # window was ALSO emitted as `max_tokens` — which the TUI both displays and
-    # uses as its own ratio fallback (`estimated_tokens / max_tokens`). On a
-    # 500K model that is a 2.8x disagreement inside a single status line.
+    # ONE denominator, and it is the model's REAL window.
     #
-    # REPORTED LIVE on grok-4.6 (500K window) at ~104.6k occupancy:
+    # The meter used to divide by the operative window (the compaction budget,
+    # `min(window, ceiling)` = 200k on every >200k model), so a 1M model read
+    # as nearly full long before it was. REPORTED LIVE on
+    # `deepseek-v4.1-flash:cloud` (1,048,576 window) at 159.3k tokens:
     #
-    #     104_600 / 500_000              = 21%   ("it dropped to 20%")
-    #     104_600 / 180_000 (operative)  = 58%   ("then to like 50%")
+    #     ⣿⣿⣿⣿⣿⣿⢿░ 80% ctx            159,300 / 200,000 (operative)
+    #     Context low (4% remaining)   (167,000 - 159,300) / 167,000
     #
-    # Same session, same instant, two readings — which is exactly what the
-    # numbers "moving in ways they cannot interpret" was. So `max_tokens` is now
-    # the window OSA actually operates in, the one every threshold is derived
-    # from, and the model's true window is reported alongside it under its own
-    # name rather than silently standing in for it.
-    # `model` threads into the flash/small-tier earlier ceiling (see
-    # `CompactionThresholds` moduledoc) — applied ONCE here; every downstream
-    # threshold call below reads `max_tok` (already clamped), which is
-    # idempotent against a further no-model clamp, so the status bar and the
-    # compaction decision (`ProactiveCompaction.should_compact?/2`, threaded
-    # the same way) can never drift apart.
-    max_tok =
+    # Both numbers described the compaction budget, and both read as "the
+    # model is out of room" on a model with 85% of its window free. The bar
+    # now answers "how much of this model's window is in use" (15% there), and
+    # the compaction point is a separate, ABSOLUTE number (`compact_at`) the
+    # TUI renders in tokens, so the two can no longer be mistaken for one
+    # another. Every surface that sets the meter (`/health`, a model switch,
+    # `LlmResponse.input_tokens`) already used the real window; this was the
+    # one writer that did not, which is also why the bar jumped between two
+    # readings mid-session (21% vs 58% on grok-4.6, 80% vs 38% here).
+    #
+    # The thresholds themselves are unchanged: they are still derived from
+    # the operative window, with `model` threaded the same way
+    # `ProactiveCompaction.should_compact?/2` threads it, so the warning this
+    # event carries and the compaction decision cannot drift apart.
+    model = Map.get(state, :model)
+
+    operative =
       if model_window > 0,
-        do: CompactionThresholds.operative_window(model_window, Map.get(state, :model)),
+        do: CompactionThresholds.operative_window(model_window, model),
         else: 0
 
     # Actual current usage: prefer the provider-reported input tokens; when the
@@ -57,39 +60,26 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
     # estimate so the meter reflects real occupancy instead of sticking at 0.
     estimated = context_occupancy(state)
 
-    # Display occupancy against the SAME denominator emitted as max_tokens.
-    # Reserve-based warning/compaction thresholds remain independent below.
     utilization =
-      if max_tok > 0,
-        do: min(100.0, Float.round(estimated / max_tok * 100, 1)),
+      if model_window > 0,
+        do: min(100.0, Float.round(estimated / model_window * 100, 1)),
         else: 0.0
 
     warning =
-      if is_integer(max_tok) and max_tok > 0 do
-        CompactionThresholds.warning_state(estimated, max_tok)
+      if operative > 0 do
+        CompactionThresholds.warning_state(estimated, model_window, model)
       else
         %{percent_left: 100, above_warning: false, above_compact: false, at_blocking_limit: false}
       end
 
     # The two ABSOLUTE thresholds the warning above was derived from, so the TUI
-    # can re-derive it instead of caching it.
-    #
-    # `utilization`/`percent_left`/`context_low` are three renderings of one
-    # fact, but only the first has a second writer on the TUI side: the status
-    # bar self-heals its ratio from `LlmResponse.input_tokens`
-    # (`StatusBar::note_input_tokens`) because this event does not fire on every
-    # provider/turn. The banner had no such path, so the two drifted apart —
-    # REPORTED LIVE, one frame, immediately after a compaction:
-    #
-    #     Context low (6% remaining)      ← this event, pre-compaction
-    #     ⣿⢿░░░░░░ 15% ctx                ← self-healed from the next request
-    #
-    # Shipping the thresholds lets the TUI compute the banner from whatever
-    # total it currently holds, which makes the contradiction unrepresentable
-    # rather than merely fixed on this path.
+    # can re-derive it from whatever total it currently holds (the status bar
+    # self-heals its total from `LlmResponse.input_tokens`, because this event
+    # does not fire on every provider/turn) instead of caching a stale banner.
     {compact_at, warn_at} =
-      if is_integer(max_tok) and max_tok > 0 do
-        {CompactionThresholds.compact_at(max_tok), CompactionThresholds.warn_at(max_tok)}
+      if operative > 0 do
+        {CompactionThresholds.compact_at(model_window, model),
+         CompactionThresholds.warn_at(model_window, model)}
       else
         {0, 0}
       end
@@ -99,11 +89,10 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
     # window and the operative one and so could not be used to tell whether a
     # missing compaction was "not yet due" or "never going to fire".
     Logger.info(
-      "[ctx] estimated=#{estimated} operative_window=#{max_tok} " <>
-        "model_window=#{model_window}#{if max_tok < model_window, do: " (clamped)", else: ""} " <>
+      "[ctx] estimated=#{estimated} model_window=#{model_window} " <>
+        "operative_window=#{operative}#{if operative < model_window, do: " (clamped)", else: ""} " <>
         "util=#{utilization}% left=#{warning.percent_left}% " <>
-        "warn_at=#{if max_tok > 0, do: CompactionThresholds.warn_at(max_tok), else: 0} " <>
-        "compact_at=#{if max_tok > 0, do: CompactionThresholds.compact_at(max_tok), else: 0} " <>
+        "warn_at=#{warn_at} compact_at=#{compact_at} " <>
         "above_warning=#{warning.above_warning} above_compact=#{warning.above_compact}"
     )
 
@@ -131,9 +120,9 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
       event: :context_pressure,
       session_id: state.session_id,
       estimated_tokens: estimated,
-      max_tokens: max_tok,
+      max_tokens: model_window,
       model_context_window: model_window,
-      context_window_clamped: max_tok < model_window,
+      context_window_clamped: operative < model_window,
       utilization: utilization,
       percent_left: warning.percent_left,
       context_low: warning.above_warning,
@@ -157,9 +146,9 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
          event: :context_pressure,
          session_id: state.session_id,
          estimated_tokens: estimated,
-         max_tokens: max_tok,
+         max_tokens: model_window,
          model_context_window: model_window,
-         context_window_clamped: max_tok < model_window,
+         context_window_clamped: operative < model_window,
          utilization: utilization,
          # Item 10 — the session/main row's honest headline: context% of window +
          # real $ cost, so the ROOT row stops presenting a raw, cache-inflated
@@ -185,15 +174,17 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
   end
 
   @doc """
-  The SAME context-utilization percentage (0.0-100.0) `emit_context_pressure/1`
-  broadcasts, computed synchronously and returned instead of emitted.
+  Context PRESSURE (0.0-100.0): occupancy as a share of the operative window,
+  the budget compaction works against, computed synchronously.
 
-  Exists so a caller in the SAME process (the homeostat's context-utilization
-  variable, `Agent.Loop.Regulation.Homeostat`) can read the live figure without
-  a second, independently-derived denominator — see the moduledoc on
-  `utilization` above for why two derivations of "how full is the context
-  window" drift apart. Never raises; a resolution failure reads as `0.0`,
-  exactly like the emitted event's fallback.
+  Deliberately not the figure `emit_context_pressure/1` shows on the status
+  bar. The bar answers "how much of the model's window is in use" and divides
+  by the real window; this answers "how close is the session to compacting"
+  and divides by the clamped one. On a model at or below the ceiling the two
+  are identical. The homeostat (`Agent.Loop.Regulation.Homeostat`) regulates on
+  this one, because its 85% band is meant to fire ahead of compaction, which a
+  real-window percentage on a 1M model would never reach. Never raises; a
+  resolution failure reads as `0.0`.
   """
   @spec context_utilization(map()) :: float()
   def context_utilization(state) do
