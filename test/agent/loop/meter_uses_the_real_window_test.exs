@@ -1,7 +1,8 @@
 defmodule OptimalSystemAgent.Agent.Loop.MeterUsesTheRealWindowTest do
   @moduledoc """
-  The status-bar meter divides by the model's real window, and the compaction
-  point travels beside it as an absolute token count.
+  A 1M-window model gets its 1M: the status-bar meter divides by the model's
+  real window, and compaction fires near that window rather than at a 200k
+  ceiling.
 
   Reported live on `deepseek-v4.1-flash:cloud` (1,048,576-token window) at
   159.3k tokens:
@@ -9,9 +10,9 @@ defmodule OptimalSystemAgent.Agent.Loop.MeterUsesTheRealWindowTest do
       Context low (4% remaining) · Run /compact to compact & continue
       ⟐ deepseek-v4.1-flash:cloud │ ⣿⣿⣿⣿⣿⣿⢿░ 80% ctx
 
-  Both readings were shares of the 200k operative window (the compaction
-  budget): 159,300 / 200,000 = 79.7%. On the model's own window that session
-  was at 15%.
+  Both readings were shares of a 200k operative window (159,300 / 200,000 =
+  79.7%), and compaction fired at ~160k. On the model's own window that
+  session was at 15%, with ~730k tokens to go before compaction was due.
   """
   use ExUnit.Case, async: false
 
@@ -19,8 +20,9 @@ defmodule OptimalSystemAgent.Agent.Loop.MeterUsesTheRealWindowTest do
   alias OptimalSystemAgent.Agent.Loop.Telemetry
 
   @model "deepseek-v4.1-flash:cloud"
+  @window 1_048_576
 
-  defp pressure_at(tokens, provider) do
+  defp pressure_at(tokens) do
     sid = "real-window-#{System.unique_integer([:positive])}"
     Phoenix.PubSub.subscribe(OptimalSystemAgent.PubSub, "osa:session:#{sid}")
 
@@ -29,7 +31,7 @@ defmodule OptimalSystemAgent.Agent.Loop.MeterUsesTheRealWindowTest do
       messages: [%{role: "user", content: "hi"}],
       last_input_tokens: tokens,
       model: @model,
-      provider: provider
+      provider: :ollama_cloud
     })
 
     event =
@@ -44,34 +46,40 @@ defmodule OptimalSystemAgent.Agent.Loop.MeterUsesTheRealWindowTest do
   end
 
   test "a 1M-window model at 159.3k reads ~15%, not 80%" do
-    event = pressure_at(159_300, :ollama_cloud)
+    event = pressure_at(159_300)
 
-    assert event.model_context_window == 1_048_576,
+    assert event.model_context_window == @window,
            "precondition: the catalog window is 1M, got #{event.model_context_window}"
 
-    assert event.max_tokens == event.model_context_window,
-           "max_tokens is the compaction budget (#{event.max_tokens}), not the window"
+    assert event.max_tokens == @window,
+           "max_tokens is #{event.max_tokens}, not the model's window"
 
     assert event.utilization < 20.0,
            "the meter reads #{event.utilization}% of a 1M window holding 159.3k"
 
-    assert event.context_window_clamped
+    refute event.context_window_clamped
   end
 
-  test "the compaction point still comes from the operative window" do
-    event = pressure_at(159_300, :ollama_cloud)
+  test "compaction is due near the real window, not at 167k" do
+    event = pressure_at(159_300)
 
-    assert event.compact_at == CompactionThresholds.compact_at(1_048_576, @model)
-    assert event.warn_at == CompactionThresholds.warn_at(1_048_576, @model)
-    assert event.compact_at < event.max_tokens
+    assert event.compact_at == CompactionThresholds.compact_at(@window, @model)
+    assert event.compact_at > 850_000, "compact_at is #{event.compact_at} on a 1M window"
+    assert event.warn_at > 800_000
 
-    # 159.3k is inside the warning band, so the notice is up, even though the
-    # meter now reads low: the two answer different questions.
-    assert event.context_low
+    refute event.context_low, "the low-context notice is up at 159.3k of 1M"
     refute event.above_compact
   end
 
-  test "the homeostat keeps regulating on pressure toward compaction" do
+  test "the warning band opens just below the compaction point" do
+    event = pressure_at(880_000)
+
+    assert event.context_low
+    refute event.above_compact
+    assert event.compact_at - 880_000 < 20_000
+  end
+
+  test "the homeostat's pressure signal reads the same window" do
     state = %{
       session_id: "homeostat-#{System.unique_integer([:positive])}",
       messages: [],
@@ -80,8 +88,6 @@ defmodule OptimalSystemAgent.Agent.Loop.MeterUsesTheRealWindowTest do
       provider: :ollama_cloud
     }
 
-    # 159.3k of the 200k operative window, not of the 1M window: the
-    # homeostat's 85% band has to be reachable before compaction fires.
-    assert_in_delta Telemetry.context_utilization(state), 79.7, 0.1
+    assert_in_delta Telemetry.context_utilization(state), 159_300 / @window * 100, 0.1
   end
 end

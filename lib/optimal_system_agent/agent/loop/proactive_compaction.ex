@@ -77,6 +77,22 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   @default_recent_token_share 0.15
   @min_recent_budget_tokens 3_000
 
+  # Absolute cap on that share. On a 200k window 15% is 30k and the cap does
+  # not bind; on a 1M window 15% would keep ~157k of history verbatim, so a
+  # fold at ~891k would land near 200k instead of starting the next stretch
+  # of work from a small context. With the cap, a fold lands at roughly
+  # overhead (system prompt + tool schemas) + summary + restore + 40k.
+  @max_recent_budget_tokens 40_000
+
+  # Largest history slice ONE summarizer call is given. A full 1M window folds
+  # ~850k tokens of older turns; in one call that is a request most
+  # summarizer models cannot take and none can answer inside the 90s
+  # summarizer bound. Above this, older turns are summarized in segments
+  # (concurrently) and the segment summaries are merged in a final call.
+  @single_call_max_tokens 80_000
+  @segment_summary_max_tokens 2_048
+  @segment_concurrency 4
+
   # Inside the kept `recent` tail, stale tool-result CONTENT is cleared
   # (`Agent.Loop.ContextReduce.clear_stale_tool_results/2`) everywhere except
   # the last this-many turns - mirrors "the last couple of turns" from the
@@ -730,6 +746,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
         |> CompactionThresholds.operative_window()
         |> Kernel.*(share)
         |> trunc()
+        |> min(@max_recent_budget_tokens)
         |> max(@min_recent_budget_tokens)
     end
   end
@@ -803,35 +820,140 @@ defmodule OptimalSystemAgent.Agent.Loop.ProactiveCompaction do
   defp summarize([], _instructions), do: {:error, :empty}
 
   defp summarize(messages, instructions) do
-    if not llm_enabled?() do
-      # Test/offline stub — mirrors Compactor's :compactor_llm_enabled gate.
-      {:ok, "<summary>[Stub summary of #{length(messages)} messages]</summary>"}
-    else
-      prompt =
-        @compact_prompt
-        |> String.replace("%MESSAGES%", format_messages(messages))
-        |> append_user_instructions(instructions)
+    cond do
+      not llm_enabled?() ->
+        # Test/offline stub — mirrors Compactor's :compactor_llm_enabled gate.
+        {:ok, "<summary>[Stub summary of #{length(messages)} messages]</summary>"}
 
-      try do
-        # Bounded: see `Compactor.bounded_chat/2`. Unlike the Compactor's own
-        # call sites this one also runs from the *proactive* path, which fires
-        # between turns on an unattended agent — with no timeout at all a
-        # wedged provider parked the agent forever. On expiry this returns
-        # `{:error, :summarizer_timeout}` and the caller falls back to the
-        # deterministic (provider-free) compaction path.
-        case AgentCompactor.bounded_chat([%{role: "user", content: prompt}], summarizer_opts()) do
-          {:ok, %{content: content}} when is_binary(content) and content != "" ->
-            {:ok, content}
+      Compactor.estimate_tokens(messages) > @single_call_max_tokens ->
+        summarize_in_segments(messages, instructions)
 
-          {:ok, %{content: other}} ->
-            {:error, {:empty_summary, other}}
+      true ->
+        summarize_once(messages, instructions)
+    end
+  end
 
-          {:error, reason} ->
-            {:error, reason}
+  # Fold a history too large for one summarizer call: summarize segments of
+  # at most `@single_call_max_tokens` concurrently, then merge the segment
+  # summaries into the one structured summary with the same prompt a single
+  # call uses. Any segment failing fails the fold, and the caller's existing
+  # retry and fallback apply unchanged.
+  defp summarize_in_segments(messages, instructions) do
+    segments = segment_messages(messages, @single_call_max_tokens)
+    total = length(segments)
+    session_id = CompactionEvents.current_session_id()
+    inherited_sid = Process.get(:osa_compact_session_id)
+
+    results =
+      segments
+      |> Enum.with_index(1)
+      |> Task.async_stream(
+        fn {segment, n} ->
+          if inherited_sid, do: Process.put(:osa_compact_session_id, inherited_sid)
+
+          header =
+            "This is part #{n} of #{total} of one long conversation, in order. " <>
+              "Summarize this part only.\n\n"
+
+          summarize_once(segment, instructions,
+            prefix: header,
+            max_tokens: @segment_summary_max_tokens
+          )
+        end,
+        max_concurrency: @segment_concurrency,
+        ordered: true,
+        timeout: :infinity
+      )
+      |> Enum.with_index(1)
+      |> Enum.map(fn {{:ok, result}, done} ->
+        # Measured progress: one tick per finished segment, plus the merge.
+        CompactionEvents.progress(session_id, done, total + 1)
+        result
+      end)
+
+    case Enum.find(results, &match?({:error, _}, &1)) do
+      {:error, _} = err ->
+        err
+
+      nil ->
+        merged_input =
+          results
+          |> Enum.with_index(1)
+          |> Enum.map(fn {{:ok, text}, n} ->
+            %{role: "assistant", content: "Summary of part #{n} of #{total}:\n\n#{text}"}
+          end)
+
+        result =
+          summarize_once(merged_input, instructions,
+            prefix:
+              "The conversation below is a sequence of summaries of its consecutive " <>
+                "parts. Merge them into ONE summary of the whole conversation.\n\n"
+          )
+
+        CompactionEvents.progress(session_id, total + 1, total + 1)
+        result
+    end
+  end
+
+  # Token-bounded segments that break only at a user turn when one is near,
+  # so a tool call is not separated from its result where avoidable.
+  defp segment_messages(messages, limit) do
+    {segments, current, _} =
+      Enum.reduce(messages, {[], [], 0}, fn msg, {segments, current, tokens} ->
+        msg_tokens = Compactor.estimate_tokens([msg])
+        over? = tokens + msg_tokens > limit
+        at_turn? = role_of(msg) == "user"
+        hard_over? = tokens + msg_tokens > limit + div(limit, 4)
+
+        cond do
+          current == [] ->
+            {segments, [msg], msg_tokens}
+
+          (over? and at_turn?) or hard_over? ->
+            {[Enum.reverse(current) | segments], [msg], msg_tokens}
+
+          true ->
+            {segments, [msg | current], tokens + msg_tokens}
         end
-      rescue
-        e -> {:error, {:exception, Exception.message(e)}}
+      end)
+
+    segments = if current == [], do: segments, else: [Enum.reverse(current) | segments]
+    Enum.reverse(segments)
+  end
+
+  defp summarize_once(messages, instructions, opts \\ []) do
+    prefix = Keyword.get(opts, :prefix, "")
+    max_tokens = Keyword.get(opts, :max_tokens)
+
+    call_opts =
+      if is_integer(max_tokens),
+        do: Keyword.put(summarizer_opts(), :max_tokens, max_tokens),
+        else: summarizer_opts()
+
+    prompt =
+      (prefix <> @compact_prompt)
+      |> String.replace("%MESSAGES%", format_messages(messages))
+      |> append_user_instructions(instructions)
+
+    try do
+      # Bounded: see `Compactor.bounded_chat/2`. Unlike the Compactor's own
+      # call sites this one also runs from the *proactive* path, which fires
+      # between turns on an unattended agent — with no timeout at all a
+      # wedged provider parked the agent forever. On expiry this returns
+      # `{:error, :summarizer_timeout}` and the caller falls back to the
+      # deterministic (provider-free) compaction path.
+      case AgentCompactor.bounded_chat([%{role: "user", content: prompt}], call_opts) do
+        {:ok, %{content: content}} when is_binary(content) and content != "" ->
+          {:ok, content}
+
+        {:ok, %{content: other}} ->
+          {:error, {:empty_summary, other}}
+
+        {:error, reason} ->
+          {:error, reason}
       end
+    rescue
+      e -> {:error, {:exception, Exception.message(e)}}
     end
   end
 

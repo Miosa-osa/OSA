@@ -1635,7 +1635,16 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   @spec bounded_chat([map()], keyword()) :: {:ok, map()} | {:error, term()}
   def bounded_chat(messages, opts) do
     timeout = Application.get_env(:optimal_system_agent, :summarizer_timeout_ms, 90_000)
-    opts = with_resolved_model(opts)
+
+    # Thinking OFF for every summarizer call, unless a caller says otherwise.
+    # A summary needs its whole output budget for the answer. MEASURED on
+    # `deepseek-v4.1-flash:cloud` with the 600-token chunk budget: thinking on
+    # spent 583 of 600 tokens (most of them reasoning) and took 4.5s; thinking
+    # off answered in full with 187 tokens in 1.9s. A chunk only slightly larger
+    # than the measured one exhausted the budget on reasoning and returned "",
+    # which REPORTED LIVE as `Empty chunk-summary response: ""` and failed a
+    # 24-chunk compaction after 1m49s, falling through to the lossy last step.
+    opts = opts |> Keyword.put_new(:thinking_disabled, true) |> with_resolved_model()
 
     task =
       Task.Supervisor.async_nolink(OptimalSystemAgent.TaskSupervisor, fn ->
@@ -1966,8 +1975,8 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # Returns `{:ok, summary_text, strategy}` where `strategy` is `:basic` or
   # `:divide_and_conquer` (fed to `validate_cold_summary/2`).
   @doc false
-  defp call_cold_summary(cold_messages) do
-    chunks = chunk_messages_by_tokens(cold_messages, dnc_chunk_token_limit())
+  def call_cold_summary(cold_messages) do
+    chunks = chunk_messages_by_tokens(cold_messages, chunk_token_limit_for(cold_messages))
 
     if length(chunks) <= 1 do
       case call_key_facts_llm(cold_messages) do
@@ -1987,19 +1996,22 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # split mid-message.
   @doc false
   defp chunk_messages_by_tokens(messages, limit) do
-    {chunks, current} =
-      Enum.reduce(messages, {[], []}, fn msg, {chunks, current} ->
+    # Running token total for the open chunk. Re-estimating the whole open
+    # chunk for every message made this quadratic, which a full 1M-token
+    # window turns into real time.
+    {chunks, current, _current_tokens} =
+      Enum.reduce(messages, {[], [], 0}, fn msg, {chunks, current, current_tokens} ->
         msg_tokens = estimate_tokens([msg])
 
         cond do
           current == [] ->
-            {chunks, [msg]}
+            {chunks, [msg], msg_tokens}
 
-          estimate_tokens(Enum.reverse(current)) + msg_tokens > limit ->
-            {[Enum.reverse(current) | chunks], [msg]}
+          current_tokens + msg_tokens > limit ->
+            {[Enum.reverse(current) | chunks], [msg], msg_tokens}
 
           true ->
-            {chunks, [msg | current]}
+            {chunks, [msg | current], current_tokens + msg_tokens}
         end
       end)
 
@@ -2012,6 +2024,44 @@ defmodule OptimalSystemAgent.Agent.Compactor do
     Enum.reverse(chunks)
   end
 
+  # How many summarizer calls a cold span may fan out into, and the largest
+  # single call. A fixed 3k-token chunk turned a 159k-token history into 24
+  # SEQUENTIAL calls (1m49s, reported live); on a 1M window the same rule
+  # would be ~300 calls, and their summaries would add up to more text than
+  # the history being folded. The chunk grows with the span instead, so the
+  # call count stays bounded, and the per-call cap keeps a chunk well inside
+  # any window a summarizer model is likely to have.
+  @max_cold_chunks 24
+  @max_chunk_tokens 100_000
+
+  # The cold summary's total output target. Each chunk gets an equal share of
+  # it, within [600, 2_000] tokens, so many chunks cannot add up to a summary
+  # larger than the history it replaces.
+  @cold_summary_total_tokens 16_000
+
+  # Chunks summarized at once. Concurrency is what makes a large fold finish in
+  # minutes rather than tens of minutes; 4 stays inside the concurrent-request
+  # allowance of the hosted providers OSA ships for.
+  @chunk_concurrency 4
+
+  @doc false
+  def chunk_token_limit_for(messages) do
+    span = estimate_tokens(messages)
+    scaled = div(span + @max_cold_chunks - 1, @max_cold_chunks)
+
+    scaled
+    |> max(dnc_chunk_token_limit())
+    |> min(@max_chunk_tokens)
+  end
+
+  @doc false
+  def chunk_summary_max_tokens(chunk_total) when chunk_total > 0 do
+    (@cold_summary_total_tokens / chunk_total)
+    |> trunc()
+    |> max(600)
+    |> min(2_000)
+  end
+
   # Summarizes each chunk into a `<chunk_summary index="N">...</chunk_summary>`
   # block, then assembles them (plus a verbatim `index="prev"` block carrying
   # the previous structured summary, when one exists, preserving iterative
@@ -2020,43 +2070,120 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   defp call_key_facts_llm_chunked(chunks) do
     total = length(chunks)
     session_id = CompactionEvents.current_session_id()
+    max_tokens = chunk_summary_max_tokens(total)
 
-    # The ONE place in compaction with a genuine, monotonic ratio of completed
-    # to total known work: N independent summarizer calls, fixed up front by
-    # `chunk_messages_by_tokens/2`. Progress is emitted per finished chunk so
-    # the TUI's bar tracks measured work. Nothing else in compaction may emit
-    # progress — see `CompactionEvents`' moduledoc.
+    # The summarizer reads its session scope and the operator's compact
+    # instructions from the process dictionary (see `run_pipeline/6`). Each
+    # chunk runs in its own task, so carry both across.
+    inherited =
+      for key <- [:osa_compact_session_id, :osa_compact_instructions],
+          value = Process.get(key),
+          do: {key, value}
+
+    # Chunks run concurrently and results come back in chunk order. Progress
+    # is emitted as each ordered result is consumed, so the TUI's bar still
+    # counts measured, completed work and never moves backwards. This is the
+    # ONE place in compaction with a genuine, monotonic ratio of completed to
+    # total work - see `CompactionEvents`' moduledoc.
     chunk_results =
       chunks
       |> Enum.with_index()
-      |> Enum.map(fn {chunk_msgs, idx} ->
-        result = summarize_chunk(chunk_msgs, idx)
-        CompactionEvents.progress(session_id, idx + 1, total)
-        result
+      |> Task.async_stream(
+        fn {chunk_msgs, idx} ->
+          Enum.each(inherited, fn {k, v} -> Process.put(k, v) end)
+          {idx, chunk_msgs, summarize_chunk(chunk_msgs, idx, max_tokens)}
+        end,
+        max_concurrency: @chunk_concurrency,
+        ordered: true,
+        timeout: :infinity
+      )
+      |> Enum.with_index(1)
+      |> Enum.map(fn {{:ok, {idx, chunk_msgs, result}}, done} ->
+        CompactionEvents.progress(session_id, done, total)
+        {idx, chunk_msgs, result}
       end)
 
-    case Enum.find(chunk_results, &match?({:error, _}, &1)) do
-      {:error, _} = err ->
-        err
+    failed = Enum.count(chunk_results, fn {_, _, r} -> match?({:error, _}, r) end)
 
-      nil ->
-        prev_block =
-          case get_previous_summary() do
-            nil -> nil
-            previous -> "<chunk_summary index=\"prev\">\n#{previous}\n</chunk_summary>"
-          end
+    if failed == total do
+      # Nothing was summarized; the caller falls back as before.
+      {_, _, first_error} = hd(chunk_results)
+      first_error
+    else
+      if failed > 0 do
+        Logger.warning(
+          "[compactor] #{failed}/#{total} chunk summaries failed; " <>
+            "kept a digest of the user's messages for those chunks instead of discarding the fold"
+        )
+      end
 
-        body =
-          [prev_block | Enum.map(chunk_results, fn {:ok, tag} -> tag end)]
-          |> Enum.reject(&is_nil/1)
-          |> Enum.join("\n\n")
+      prev_block =
+        case get_previous_summary() do
+          nil -> nil
+          previous -> "<chunk_summary index=\"prev\">\n#{previous}\n</chunk_summary>"
+        end
 
-        {:ok, body}
+      body =
+        [
+          prev_block
+          | Enum.map(chunk_results, fn
+              {_idx, _msgs, {:ok, tag}} -> tag
+              {idx, msgs, {:error, _}} -> chunk_digest(msgs, idx)
+            end)
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join("\n\n")
+
+      {:ok, body}
     end
   end
 
+  # A provider-free stand-in for ONE chunk whose summary failed: what the user
+  # asked, verbatim and bounded. One failed chunk used to discard every other
+  # chunk's finished summary and send the whole fold to the pipeline's last,
+  # lossy step, which drops history outright. The user's own messages are the
+  # part of a chunk least recoverable from anywhere else.
   @doc false
-  defp summarize_chunk(chunk_msgs, idx) do
+  def chunk_digest(chunk_msgs, idx) do
+    lines =
+      chunk_msgs
+      |> Enum.filter(&(Map.get(&1, :role) in ["user", :user]))
+      |> Enum.map(fn msg ->
+        msg
+        |> Map.get(:content)
+        |> content_text_for_digest()
+        |> String.replace(~r/\s+/, " ")
+        |> String.trim()
+        |> String.slice(0, 300)
+      end)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.map(&("- user: " <> &1))
+
+    body =
+      case lines do
+        [] -> "- (#{length(chunk_msgs)} messages; summary unavailable)"
+        _ -> Enum.join(lines, "\n")
+      end
+
+    "<chunk_summary index=\"#{idx}\">\n#{body}\n</chunk_summary>"
+  end
+
+  defp content_text_for_digest(content) when is_binary(content), do: content
+
+  defp content_text_for_digest(content) when is_list(content) do
+    content
+    |> Enum.map(fn
+      %{type: "text", text: t} when is_binary(t) -> t
+      %{"type" => "text", "text" => t} when is_binary(t) -> t
+      _ -> ""
+    end)
+    |> Enum.join(" ")
+  end
+
+  defp content_text_for_digest(_), do: ""
+
+  @doc false
+  defp summarize_chunk(chunk_msgs, idx, max_tokens) do
     if not compactor_llm_enabled?() do
       {:ok,
        "<chunk_summary index=\"#{idx}\">\n[Key facts from #{length(chunk_msgs)} messages]\n</chunk_summary>"}
@@ -2075,7 +2202,10 @@ defmodule OptimalSystemAgent.Agent.Compactor do
 
       sampler = fn ->
         try do
-          bounded_chat([%{role: "user", content: prompt}], temperature: 0.1, max_tokens: 600)
+          bounded_chat([%{role: "user", content: prompt}],
+            temperature: 0.1,
+            max_tokens: max_tokens
+          )
           |> case do
             {:ok, %{content: content}} when is_binary(content) and content != "" ->
               {:ok, content}

@@ -175,16 +175,15 @@ defmodule OptimalSystemAgent.Agent.Loop.Telemetry do
 
   @doc """
   Context PRESSURE (0.0-100.0): occupancy as a share of the operative window,
-  the budget compaction works against, computed synchronously.
+  the window compaction works against, computed synchronously for the
+  homeostat (`Agent.Loop.Regulation.Homeostat`).
 
-  Deliberately not the figure `emit_context_pressure/1` shows on the status
-  bar. The bar answers "how much of the model's window is in use" and divides
-  by the real window; this answers "how close is the session to compacting"
-  and divides by the clamped one. On a model at or below the ceiling the two
-  are identical. The homeostat (`Agent.Loop.Regulation.Homeostat`) regulates on
-  this one, because its 85% band is meant to fire ahead of compaction, which a
-  real-window percentage on a 1M model would never reach. Never raises; a
-  resolution failure reads as `0.0`.
+  By default the operative window IS the model's window, so this equals the
+  status-bar figure. They differ only when the operator caps the live window
+  (`OSA_CONTEXT_CEILING`): the bar still answers "how much of the model's
+  window is in use", while this answers "how close is the session to
+  compacting", which is what the homeostat's 85% band has to track to fire
+  ahead of compaction. Never raises; a resolution failure reads as `0.0`.
   """
   @spec context_utilization(map()) :: float()
   def context_utilization(state) do

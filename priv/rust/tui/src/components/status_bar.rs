@@ -2092,16 +2092,16 @@ mod status_bar_tests {
     ///     ⟐ deepseek-v4.1-flash:cloud │ ⣿⣿⣿⣿⣿⣿⢿░ 80% ctx
     /// ```
     ///
-    /// Both numbers were shares of the 200k compaction budget. The backend now
-    /// sends the real window as `max_tokens`, so the bar reads ~15%, and the
-    /// notice names the compaction point in tokens instead of a second,
-    /// differently-based percentage.
+    /// Both numbers were shares of a 200k compaction budget. The backend now
+    /// sends the real window as `max_tokens` and compacts near it, so at
+    /// 159.3k the bar reads ~15% with no notice, and the notice only appears in
+    /// the band just below the compaction point, naming it in tokens.
     #[test]
     fn a_one_million_window_model_is_not_reported_as_nearly_full() {
         let mut sb = StatusBar::new();
-        // What the fixed backend sends at 159.3k: utilization against the real
-        // window, thresholds from the 200k operative window.
-        sb.set_context_warning(Some(5), true, 167_000, 147_000);
+        // What the backend sends on a 1,048,576-token window:
+        // compact_at 891,289, warn_at 871,289.
+        sb.set_context_warning(Some(82), false, 891_289, 871_289);
         sb.set_context(0.152, 159_300, 1_048_576);
 
         assert!(
@@ -2109,11 +2109,15 @@ mod status_bar_tests {
             "bar reads {:.0}% of a 1M window holding 159.3k",
             sb.context_ratio() * 100.0
         );
-        assert!(sb.context_low(), "the compaction band is open at 159.3k");
+        assert!(!sb.context_low(), "a notice is up at 159.3k of 1M");
+
+        // Near the fold point the notice appears, in tokens.
+        sb.note_input_tokens(880_000);
+        assert!(sb.context_low(), "the band is open at 880k");
         let notice = sb.context_low_notice();
         assert_eq!(
             notice,
-            "Auto-compact at 167k \u{00b7} ~7.7k to go \u{00b7} /compact to run it now"
+            "Auto-compact at 891k \u{00b7} ~11.3k to go \u{00b7} /compact to run it now"
         );
         assert!(!notice.contains('%'), "a percentage came back: {notice}");
     }

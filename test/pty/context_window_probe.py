@@ -31,21 +31,27 @@ from osa_pty import PtySession  # noqa: E402
 
 emit = compaction_probe.emit
 
-# What the fixed backend sends at 159.3k on a 1M model.
-PRESSURE = {
-    "estimated_tokens": 159_300,
-    "max_tokens": 1_048_576,
-    "model_context_window": 1_048_576,
-    "context_window_clamped": True,
-    "utilization": 15.2,
-    "context_percent": 15,
-    "percent_left": 5,
-    "context_low": True,
-    "above_compact": False,
-    "at_blocking_limit": False,
-    "compact_at": 167_000,
-    "warn_at": 147_000,
-}
+# What the backend sends on a 1,048,576-token model.
+WINDOW = 1_048_576
+COMPACT_AT = 891_289
+WARN_AT = 871_289
+
+
+def pressure(tokens: int) -> dict:
+    return {
+        "estimated_tokens": tokens,
+        "max_tokens": WINDOW,
+        "model_context_window": WINDOW,
+        "context_window_clamped": False,
+        "utilization": round(tokens / WINDOW * 100, 1),
+        "context_percent": round(tokens / WINDOW * 100),
+        "percent_left": max(0, round((COMPACT_AT - tokens) / COMPACT_AT * 100)),
+        "context_low": tokens >= WARN_AT,
+        "above_compact": tokens >= COMPACT_AT,
+        "at_blocking_limit": False,
+        "compact_at": COMPACT_AT,
+        "warn_at": WARN_AT,
+    }
 
 
 def main() -> int:
@@ -61,24 +67,37 @@ def main() -> int:
         with PtySession(stub.base_url, cols=110, rows=24) as term:
             term.boot()
 
-            emit("context_pressure", PRESSURE)
+            # The reported session: 159.3k of a 1M window.
+            emit("context_pressure", pressure(159_300))
+            term.pump(1.2)
+            early = term.dump()
+            if opts.keep:
+                print(early)
+
+            if "80% ctx" in early or "79% ctx" in early:
+                problems.append("159.3k: the bar reads a 200k budget (80%)")
+            if "15% ctx" not in early:
+                problems.append("159.3k: the bar does not read 15% of the 1M window")
+            if "/compact" in early or "Context low" in early:
+                problems.append("159.3k: a low-context notice is up at 15% of the window")
+
+            # Just below the fold point: the notice appears, in tokens.
+            emit("context_pressure", pressure(880_000))
             term.pump(1.2)
             idle = term.dump()
             if opts.keep:
                 print(idle)
 
-            if "80% ctx" in idle or "79% ctx" in idle:
-                problems.append("idle: the bar still reads the 200k budget (80%)")
-            if "15% ctx" not in idle:
-                problems.append("idle: the bar does not read 15% of the 1M window")
-            if "Auto-compact at 167k" not in idle:
-                problems.append("idle: the notice does not name the compaction point")
+            if "84% ctx" not in idle:
+                problems.append("880k: the bar does not read 84% of the 1M window")
+            if "Auto-compact at 891k" not in idle:
+                problems.append("880k: the notice does not name the compaction point")
             if "% remaining" in idle:
-                problems.append("idle: the notice is still a budget percentage")
+                problems.append("880k: the notice is still a budget percentage")
 
             emit("processing_started", {})
             term.pump(0.4)
-            emit("compaction_started", {"trigger": "auto", "tokens_before": 159_300})
+            emit("compaction_started", {"trigger": "auto", "tokens_before": 880_000})
             emit("compaction_progress", {"chunk_index": 12, "chunk_total": 24})
             term.pump(1.2)
             running = term.dump()
@@ -95,7 +114,7 @@ def main() -> int:
         for p in problems:
             print("  -", p)
         return 1
-    print("PASS: 1M window reads 15%, notice names 167k, hidden while compacting")
+    print("PASS: 1M window reads 15% at 159.3k, notice names 891k near the fold, hidden while compacting")
     return 0
 
 
