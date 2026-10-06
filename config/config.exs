@@ -130,6 +130,14 @@ config :optimal_system_agent,
   wallet_rpc_url: nil,
 
   # ---------------------------------------------------------------------------
+  # SORX — execution engine backbone (skills, routing, reservoir, carrier)
+  # ---------------------------------------------------------------------------
+  sorx_url: System.get_env("SORX_URL", "http://localhost:4000"),
+  sorx_mcp_endpoint: System.get_env("SORX_MCP_ENDPOINT", "http://localhost:4000/mcp/sse"),
+  sorx_api_key: System.get_env("SORX_API_KEY"),
+  sorx_auto_connect: true,
+
+  # ---------------------------------------------------------------------------
   # OTA Updater — secure updates with TUF verification
   # ---------------------------------------------------------------------------
   update_enabled: false,

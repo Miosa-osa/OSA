@@ -28,6 +28,10 @@ defmodule OptimalSystemAgent.Channels.Starter do
   def handle_continue(:start_channels, state) do
     Logger.info("Channels.Starter: starting configured channel adapters")
     OptimalSystemAgent.Channels.Manager.start_configured_channels()
+
+    # Connect to configured MCP servers (SORX, etc.) after channels are up
+    OptimalSystemAgent.MCP.Startup.start_configured_servers()
+
     {:noreply, state}
   end
 end
