@@ -11,6 +11,9 @@ defmodule OptimalSystemAgent.Agent.Loop.TransientNotes do
     * `:output_contract`  - `Signal.OutputContract.directive_for/1`, every turn
     * `:no_progress`      - the homeostat's reorientation note
     * `:ledger_recap`     - the progress-ledger recap, every turn
+    * `:screen_question`  - the "user is asking about the screen" directive
+    * `:task_list`        - the "create a task list" directive
+    * `:team_dispatch`    - the "team dispatch recommended" directive
 
   They used to be appended and never removed. MEASURED on a resumed
   `deepseek-v4.1-flash:cloud` session: 363 messages, 153 of them notes (91
@@ -26,12 +29,22 @@ defmodule OptimalSystemAgent.Agent.Loop.TransientNotes do
   rides in every request for the rest of the session.
   """
 
-  @type kind :: :advisor | :output_contract | :no_progress | :ledger_recap
+  @type kind ::
+          :advisor
+          | :output_contract
+          | :no_progress
+          | :ledger_recap
+          | :screen_question
+          | :task_list
+          | :team_dispatch
 
   @headers %{
     advisor: "[ADVISOR RECOMMENDATION",
     output_contract: "[Output contract",
-    ledger_recap: "[System: Progress ledger recap]"
+    ledger_recap: "[System: Progress ledger recap]",
+    screen_question: "[System: The user is asking about what is visible on the screen",
+    task_list: "[System: This task has multiple steps.",
+    team_dispatch: "[System: TEAM DISPATCH recommended."
   }
 
   # The homeostat's header carries a count ("[System: 6 tool calls with no

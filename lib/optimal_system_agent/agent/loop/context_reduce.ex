@@ -67,6 +67,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ContextReduce do
   alias OptimalSystemAgent.Utils.Text
 
   @default_keep_recent_turns 6
+  @default_keep_recent_results 20
   @default_batch_size 5
   @default_min_bytes 300
 
@@ -97,6 +98,13 @@ defmodule OptimalSystemAgent.Agent.Loop.ContextReduce do
 
     * `:keep_recent_turns` — user-delimited turns (from the end) that are
       NEVER touched, regardless of size. Default #{@default_keep_recent_turns}.
+    * `:keep_recent_results` — the most recent tool results that are never
+      touched, counted across turns. The hot zone ends at whichever of the
+      two boundaries comes LATER, so a short recent history keeps its whole
+      `:keep_recent_turns`, and one long autonomous turn (a single user
+      message followed by 100+ tool calls, as overdrive produces) keeps only
+      its last #{@default_keep_recent_results} results verbatim instead of all
+      of them. Default #{@default_keep_recent_results}.
     * `:batch_size` — minimum number of stale, not-yet-cleared candidates
       required before ANY clearing happens. Default #{@default_batch_size}.
     * `:min_bytes` — tool results smaller than this are left alone; there is
@@ -114,11 +122,14 @@ defmodule OptimalSystemAgent.Agent.Loop.ContextReduce do
 
   def clear_stale_tool_results(messages, opts) when is_list(messages) do
     keep_turns = Keyword.get(opts, :keep_recent_turns, @default_keep_recent_turns)
+    keep_results = Keyword.get(opts, :keep_recent_results, @default_keep_recent_results)
     batch_size = Keyword.get(opts, :batch_size, @default_batch_size)
     min_bytes = Keyword.get(opts, :min_bytes, @default_min_bytes)
     session_id = Keyword.get(opts, :session_id)
 
-    hot_start = hot_boundary(messages, keep_turns)
+    hot_start =
+      max(hot_boundary(messages, keep_turns), result_boundary(messages, keep_results))
+
     candidates = find_candidates(messages, hot_start, min_bytes)
 
     if candidates == [] or length(candidates) < batch_size do
@@ -147,6 +158,19 @@ defmodule OptimalSystemAgent.Agent.Loop.ContextReduce do
     case Enum.take(starts, -keep_turns) do
       [first | _] -> first
       [] -> length(messages)
+    end
+  end
+
+  # Index of the `keep`-th most recent tool result: everything from there on
+  # is hot. With fewer results than that, nothing is (index 0).
+  defp result_boundary(messages, keep) do
+    messages
+    |> Enum.with_index()
+    |> Enum.filter(fn {msg, _i} -> tool_result?(msg) end)
+    |> Enum.take(-keep)
+    |> case do
+      [{_msg, first} | _] -> first
+      [] -> 0
     end
   end
 

@@ -253,4 +253,40 @@ defmodule OptimalSystemAgent.Agent.Loop.ContextReduceTest do
       assert messages == [user("hi")]
     end
   end
+
+  describe "keep_recent_results — one long autonomous turn" do
+    # Overdrive: one user message, then a long run of tool calls. Counting
+    # user turns alone kept every one of them verbatim.
+    test "only the last N results of a single long turn stay verbatim" do
+      calls =
+        Enum.flat_map(1..60, fn n ->
+          id = "c#{n}"
+
+          [
+            assistant_with_call(id, "file_read", %{"path" => "f#{n}.ex"}),
+            tool_result(id, "file_read", String.duplicate("y", 2_000))
+          ]
+        end)
+
+      messages = [user("do the whole migration") | calls]
+
+      {result, stats} =
+        ContextReduce.clear_stale_tool_results(messages, session_id: sid())
+
+      assert stats.cleared == 40
+      verbatim = Enum.filter(result, &(&1.role == "tool" and &1.content =~ ~r/^y+$/))
+      assert length(verbatim) == 20
+      assert List.last(result).content == String.duplicate("y", 2_000)
+    end
+
+    test "a short recent history still keeps its whole turn window" do
+      messages = many_turns(8)
+
+      {_result, stats} =
+        ContextReduce.clear_stale_tool_results(messages, session_id: sid(), batch_size: 1)
+
+      # 8 turns, one result each: the last 6 turns are hot, so 2 are stale.
+      assert stats.cleared == 2
+    end
+  end
 end

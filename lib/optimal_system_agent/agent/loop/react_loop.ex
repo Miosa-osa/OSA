@@ -33,6 +33,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   alias OptimalSystemAgent.Agent.Loop.Guardrails
   alias OptimalSystemAgent.Agent.Loop.LLMClient
   alias OptimalSystemAgent.Agent.Loop.Checkpoint
+  alias OptimalSystemAgent.Agent.Loop.ContextReduce
   alias OptimalSystemAgent.Agent.Loop.ToolDiscovery
   alias OptimalSystemAgent.Agent.Loop.ToolError
   alias OptimalSystemAgent.Agent.Loop.ToolExecutor
@@ -666,7 +667,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
               )
 
             true ->
-              state
+              clear_stale_tool_results(state)
           end
 
         _ ->
@@ -3522,6 +3523,36 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # turn boundary (finding #8) — for the same reason and against the same field.
   # This is the missing half: the mid-turn fold.
   @spec refresh_tokens_after_fold(map(), boolean(), non_neg_integer()) :: map()
+  # Stale tool output, cleared every step rather than only inside a fold.
+  #
+  # `ContextReduce` stubs tool results the model has already acted on (the
+  # full text stays retrievable with `expand_output`), in prompt-cache-safe
+  # batches. It used to run only as part of a compaction, which on a full 1M
+  # window means almost never. MEASURED on a resumed session: 140 tool results
+  # held 183k characters, 15 of them over 3k characters each (94k), all
+  # carried verbatim in every request.
+  defp clear_stale_tool_results(state) do
+    {messages, stats} =
+      ContextReduce.clear_stale_tool_results(state.messages, session_id: state.session_id)
+
+    if stats.cleared > 0 do
+      {_tokens, overhead} =
+        OptimalSystemAgent.Agent.Compactor.total_and_overhead(
+          state.messages,
+          Map.get(state, :last_input_tokens, 0)
+        )
+
+      Logger.info(
+        "[context_reduce] cleared #{stats.cleared} stale tool results " <>
+          "(#{stats.bytes_saved} bytes) session=#{state.session_id}"
+      )
+
+      refresh_tokens_after_fold(%{state | messages: messages}, true, overhead)
+    else
+      state
+    end
+  end
+
   defp refresh_tokens_after_fold(state, false, _overhead), do: state
 
   defp refresh_tokens_after_fold(state, true, overhead) do
