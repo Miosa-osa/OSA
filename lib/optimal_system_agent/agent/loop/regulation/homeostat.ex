@@ -247,7 +247,11 @@ defmodule OptimalSystemAgent.Agent.Loop.Regulation.Homeostat do
           "call is expected to show, and why the last few did not show it.]"
     }
 
-    Map.put(state, :messages, Map.get(state, :messages, []) ++ [note])
+    Map.put(
+      state,
+      :messages,
+      OptimalSystemAgent.Agent.Loop.TransientNotes.append(Map.get(state, :messages, []), [note])
+    )
   end
 
   # ── Error rate ──────────────────────────────────────────────────────────

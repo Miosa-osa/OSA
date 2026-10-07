@@ -65,7 +65,7 @@ defmodule OptimalSystemAgent.Verification.Checkpoint do
 
     case Jason.encode(payload) do
       {:ok, json} ->
-        case File.write(path, json, [:utf8]) do
+        case File.write(path, json) do
           :ok ->
             Logger.debug("[Verification.Checkpoint] Saved #{loop_id} at #{path}")
             prune()

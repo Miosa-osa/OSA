@@ -2533,8 +2533,20 @@ defmodule OptimalSystemAgent.Agent.Compactor do
   # ---------------------------------------------------------------------------
 
   @doc false
+  # Only the LEADING run of system messages is protected: the system prompt
+  # and any earlier `[Context Summary]`, which a fold always places first.
+  #
+  # This used to take EVERY system message, wherever it sat. The loop also
+  # writes per-step notes as `role: "system"` (advisor recommendations,
+  # output contracts, progress nudges, background-task notifications), so each
+  # pass lifted all of them to the top of the transcript, out of the order
+  # they were written in, and exempted them from every step. MEASURED on a
+  # resumed session: 153 such notes held 164k of 329k characters, and a
+  # background pass reclaimed 8k of a 149k context because half of it was
+  # untouchable. Notes after the first non-system message are history like any
+  # other, and stay where they were written.
   defp split_system(messages) do
-    Enum.split_with(messages, fn msg ->
+    Enum.split_while(messages, fn msg ->
       safe_to_string(Map.get(msg, :role)) == "system"
     end)
   end

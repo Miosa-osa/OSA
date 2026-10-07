@@ -311,7 +311,13 @@ defmodule OptimalSystemAgent.Agent.Loop.TurnPipeline do
     image_source = Keyword.get(opts, :image_source, :model)
     messages_to_append = MessageHandler.build_messages(message, state, images, image_source)
 
-    %{state | messages: state.messages ++ messages_to_append, current_input: message}
+    # The turn's pre-directives include per-turn notes (output contract,
+    # ledger recap) that replace the previous turn's copies; see
+    # `TransientNotes`.
+    messages =
+      OptimalSystemAgent.Agent.Loop.TransientNotes.append(state.messages, messages_to_append)
+
+    %{state | messages: messages, current_input: message}
     |> reset_per_turn_fields()
   end
 

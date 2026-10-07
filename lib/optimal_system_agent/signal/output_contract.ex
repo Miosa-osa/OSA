@@ -70,6 +70,8 @@ defmodule OptimalSystemAgent.Signal.OutputContract do
   @spec directive_for(term()) :: String.t()
   def directive_for(message) do
     genre = genre_for(message)
-    "[Output contract — #{genre}] #{contract_for(genre)}"
+
+    OptimalSystemAgent.Agent.Loop.TransientNotes.header(:output_contract) <>
+      " — #{genre}] #{contract_for(genre)}"
   end
 end

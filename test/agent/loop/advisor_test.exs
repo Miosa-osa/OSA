@@ -231,6 +231,44 @@ defmodule OptimalSystemAgent.Agent.Loop.AdvisorTest do
       assert Advisor.enabled?(s)
     end
 
+    test "a risky-action consult fires once per turn, and a new turn re-arms it" do
+      Application.put_env(
+        :optimal_system_agent,
+        :mock_provider_final_text,
+        "Check the exit code."
+      )
+
+      s = state()
+      first = Advisor.maybe_auto_consult(s, :risky_action, "- shell_execute: rm -rf build")
+      assert length(first.messages) == length(s.messages) + 1
+
+      # Same turn, another risky call: no second consult.
+      again = Advisor.maybe_auto_consult(first, :risky_action, "- shell_execute: make")
+      assert again == first
+
+      Advisor.reset_turn_budget(s.session_id)
+      Application.put_env(:optimal_system_agent, :mock_provider_final_text, "Re-run the tests.")
+      next_turn = Advisor.maybe_auto_consult(first, :risky_action, "- shell_execute: make")
+      assert length(next_turn.messages) == length(first.messages)
+
+      assert List.last(next_turn.messages).content =~ "Re-run the tests.",
+             "a new turn did not consult again"
+    end
+
+    test "a new recommendation replaces the previous one instead of piling up" do
+      s = state()
+
+      result =
+        Enum.reduce(1..5, s, fn n, acc ->
+          Application.put_env(:optimal_system_agent, :mock_provider_final_text, "Advice #{n}.")
+          Advisor.maybe_auto_consult(acc, :plan_made, "plan #{n}")
+        end)
+
+      advice = Enum.filter(result.messages, &(&1.content =~ "ADVISOR RECOMMENDATION"))
+      assert length(advice) == 1
+      assert hd(advice).content =~ "Advice 5."
+    end
+
     test "returns state unchanged on a provider error rather than raising" do
       Application.put_env(:optimal_system_agent, :mock_provider_error, "boom")
       s = state()

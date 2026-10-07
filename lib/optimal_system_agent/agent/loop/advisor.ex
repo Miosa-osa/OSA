@@ -207,7 +207,8 @@ defmodule OptimalSystemAgent.Agent.Loop.Advisor do
   """
   @spec frame(String.t()) :: String.t()
   def frame(advice) when is_binary(advice) do
-    "[ADVISOR RECOMMENDATION — this is ADVICE from a separately-configured " <>
+    OptimalSystemAgent.Agent.Loop.TransientNotes.header(:advisor) <>
+      " — this is ADVICE from a separately-configured " <>
       "model, not an instruction. Weigh it, do not blindly follow it.]\n" <> advice
   end
 
@@ -261,13 +262,25 @@ defmodule OptimalSystemAgent.Agent.Loop.Advisor do
       OptimalSystemAgent.Agent.Loop.DoomLoop.Escalation.max_steps()
   end
 
+  # Once per user turn. It used to fire after EVERY iteration that ran a risky
+  # tool, which in a shell-heavy turn is most of them. MEASURED on one
+  # session: 91 consults, each a paid call to the advisor model, each answer
+  # kept in the transcript.
+  defp trigger_fires?(state, :risky_action) do
+    :ets.insert_new(table(), {{:risky_consulted, turn_key(state)}, true})
+  rescue
+    ArgumentError -> true
+  end
+
   defp trigger_fires?(_state, _trigger), do: true
 
   defp trigger_question(:plan_made, note),
     do: "I just made this plan, does it look sound before I execute it? #{note}"
 
+  # Asked AFTER the calls ran (the trigger is post-iteration), so it asks for
+  # a review of what happened, not a go/no-go on something pending.
   defp trigger_question(:risky_action, note),
-    do: "I am about to run a risky/irreversible action: #{note}. Sanity check?"
+    do: "I just ran these risky/irreversible actions:\n#{note}\nAnything wrong or worth checking?"
 
   defp trigger_question(:stuck, note),
     do:
@@ -276,7 +289,13 @@ defmodule OptimalSystemAgent.Agent.Loop.Advisor do
   defp append_advice_message(state, framed_text) do
     messages = Map.get(state, :messages, []) || []
     directive = %{role: "system", content: framed_text}
-    %{state | messages: messages ++ [directive]}
+
+    # Replaces the previous recommendation rather than adding to it; see
+    # `TransientNotes`.
+    %{
+      state
+      | messages: OptimalSystemAgent.Agent.Loop.TransientNotes.append(messages, [directive])
+    }
   end
 
   # ── Settings ──────────────────────────────────────────────────────────────

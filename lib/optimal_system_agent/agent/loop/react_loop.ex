@@ -3839,22 +3839,38 @@ defmodule OptimalSystemAgent.Agent.Loop.ReactLoop do
   # Advisor auto-trigger #2: at least one KNOWN risky/write/execute tool
   # (`StepRouter.risky?/1` — same deny-list `StepRouter` uses to decide
   # per-step model routing, not a second copy of it) ran this iteration.
+  #
+  # The advisor is given the calls themselves, not just their names. With the
+  # names alone every answer was some form of "I can't sanity-check a command
+  # I haven't seen" (91 of 91 on one measured session).
   defp maybe_advise_risky_action(state, tool_calls) do
-    risky_names =
-      tool_calls
-      |> Enum.map(& &1.name)
-      |> Enum.filter(&OptimalSystemAgent.Providers.StepRouter.risky?/1)
-      |> Enum.uniq()
+    risky_calls =
+      Enum.filter(tool_calls, &OptimalSystemAgent.Providers.StepRouter.risky?(&1.name))
 
-    if risky_names != [] do
+    if risky_calls != [] do
       OptimalSystemAgent.Agent.Loop.Advisor.maybe_auto_consult(
         state,
         :risky_action,
-        "just ran risky tool(s): #{Enum.join(risky_names, ", ")}"
+        Enum.map_join(risky_calls, "\n", &describe_call_for_advisor/1)
       )
     else
       state
     end
+  end
+
+  @advisor_call_args_max_chars 600
+
+  defp describe_call_for_advisor(tc) do
+    args =
+      case Map.get(tc, :arguments) do
+        a when is_binary(a) -> a
+        a when is_map(a) -> Jason.encode!(a)
+        _ -> ""
+      end
+
+    "- #{tc.name}: " <> String.slice(args, 0, @advisor_call_args_max_chars)
+  rescue
+    _ -> "- #{Map.get(tc, :name)}"
   end
 
   # The "normal" continuation once `continue_after_tools/4` has decided this

@@ -472,7 +472,8 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
   defp maybe_add_progress_ledger_directive(acc, %{session_id: sid}) when is_binary(sid) do
     case OptimalSystemAgent.Agent.ProgressLedger.summarize(sid) do
       {:ok, summary} ->
-        [%{role: "system", content: "[System: Progress ledger recap]\n" <> summary} | acc]
+        header = OptimalSystemAgent.Agent.Loop.TransientNotes.header(:ledger_recap)
+        [%{role: "system", content: header <> "\n" <> summary} | acc]
 
       _ ->
         acc
