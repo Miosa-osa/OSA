@@ -228,7 +228,7 @@ defmodule OptimalSystemAgent.Agent.Trajectory do
       # trailing chmod, and this file is a transcript that holds credentials.
       ensure_owner_only(path)
 
-      :ok = File.write(path, line <> "\n", [:append, :utf8])
+      :ok = File.write(path, line <> "\n", [:append])
       :ok
     rescue
       e ->

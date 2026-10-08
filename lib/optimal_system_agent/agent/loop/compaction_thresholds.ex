@@ -1,212 +1,94 @@
 defmodule OptimalSystemAgent.Agent.Loop.CompactionThresholds do
   @moduledoc """
-  Claude Code-style compaction threshold math (reserve-based, not ratio-based).
+  Compaction threshold math (reserve-based, not ratio-based).
 
   Instead of compacting at a fixed fraction of the context window, thresholds
   are derived by reserving room for the summary output plus fixed safety
-  buffers (ported from `services/compact/autoCompact.ts`):
+  buffers:
 
       effective   = context_window - min(output_reserve, 20_000)
-      compact_at  = effective - 13_000     # auto-compact fires here
-      warn_at     = compact_at - 20_000    # context-low warning band starts
-      block_at    = effective - 3_000      # hard blocking limit
+      compact_at  = min(effective - 13_000, 0.85 * window)  # auto-compact fires here
+      warn_at     = compact_at - 20_000                      # context-low band starts
+      block_at    = effective - 3_000                        # hard blocking limit
 
   For small local-model windows where the reserve math would collapse
   (compact_at <= 50% of the window), a ratio fallback is used instead:
   compact at 75%, warn at 60%, block at 90%.
 
-  ## The absolute ceiling
+  ## The model's whole window is live
 
-  Every threshold above is a function of the model's window with no upper
-  bound, so a bigger window buys a proportionally bigger uncompacted history.
-  MEASURED on `glm-5.2:cloud` (1M window): `compact_at` came out at **967,000**
-  and `warn_at` at **947,000**. Nothing — not full compaction, not
-  microcompaction, not `Memory.Flush` — could engage below 947k, and a 15-turn
-  working session peaked at 37,750 tokens, 3.9% of the trigger. Compaction was
-  not merely late on large-context models; it was unreachable.
+  Every threshold is computed from `operative_window/2`, which is the model's
+  real window unless the operator caps it. A 1,048,576-token model compacts at
+  ~891k (85%), a 200k model at 167k, a 128k model at 95k.
 
-  That is not a cosmetic bound. The request grows LINEARLY with the transcript
-  (measured: +754 tokens/turn) and every request re-sends the whole thing, so
-  cumulative session input is quadratic in turn count. Compaction is the only
-  brake on that term, and against a harness that compacts near 170k the
-  accumulated cost runs roughly `(967/167)^2` ≈ 33x higher.
+  The 85% share is what keeps compaction reachable on a big window. The reserve
+  subtraction alone is absolute, so on 1M it would put `compact_at` at 96.7% of
+  the window (MEASURED earlier on `glm-5.2:cloud`: 967,000), leaving almost no
+  room for the summarization round-trip. 15% of the window is that room, and it
+  grows with the window instead of staying a fixed 33k.
 
-  So `operative_window/1` clamps the window every threshold is computed from:
+  ### History: the 200k ceiling, and why it is gone
 
-      operative = min(context_window, @context_ceiling)
+  From v1.0.201 to v1.0.205 every model was clamped to a 200k operative window
+  (compact at 167k), on measured latency: on `glm-5.2:cloud` provider
+  time-to-first-byte grew from ~1-2s at ~23k tokens to 4.4-13.9s at ~300k,
+  because the whole history is re-read on every turn. The clamp also made the
+  status bar divide by 200k, so a 1M model at 159k read "80% ctx" with "4%
+  remaining" (reported live on `deepseek-v4.1-flash:cloud`). The operator
+  chose the full window: a 1M model is selected for its 1M. Latency still grows
+  with history, so the cap remains one setting away:
 
-  Clamping the WINDOW rather than each threshold keeps the whole ladder
-  internally consistent — `warn_at < compact_at < block_at` still hold by the
-  same construction, and `used_percent/2` still reads ~93% exactly when
-  auto-compact fires, because its denominator is clamped too.
+    * `OSA_CONTEXT_CEILING` / `config :optimal_system_agent,
+      compaction_context_ceiling: n` - an absolute cap for every model.
+    * `OSA_CONTEXT_CEILING_SHARE` / `compaction_context_ceiling_share: f` - a
+      share of each model's window (floored at 200k).
 
-  ### Why 200,000
-
-  * `compact_at(200_000)` = **167,000**, which sits in the 170k band
-    `docs/research/what-harnesses-benchmark.md` records for competing harnesses,
-    and comfortably above the 100K OpenAI uses — we are not adopting the most
-    aggressive number in the field, we are rejoining it.
-  * It is a no-op for every model at or below a 200k window. Claude's 200k,
-    `glm-4.7:cloud`'s 202,752 and every 128k model keep their current
-    thresholds exactly. The clamp only binds on the >200k models where the
-    measurement showed it was needed, so this cannot regress a configuration
-    that was working.
-  * It leaves 33,000 tokens of headroom between `compact_at` and the clamped
-    window for the summarization round-trip, which is the same headroom the
-    reserve math already assumed.
-
-  Override with `config :optimal_system_agent, compaction_context_ceiling: n`.
-  Setting it above a model's real window disables the clamp for that model.
-
-  ## Flash/small-tier models compact earlier
-
-  A flat ceiling assumes every model degrades at the same rate per token of
-  live context. It does not: a small/flash-tier model measurably loses the
-  plot well before a 167k-token compact_at, where a strong model is still
-  coherent. Every threshold function below therefore takes an OPTIONAL
-  `model` argument (default `nil`, meaning "unknown — use the flat ceiling
-  unchanged", so every existing 1-arg call site is byte-identical to before).
-  When `model` is given, `model_ceiling/2` tightens the ceiling to
-  `compaction_flash_context_ceiling` (default 100,000) for any model whose
-  OWN catalog price (`Providers.Catalog.cost/1`, USD per 1M input tokens) is
-  at or below `compaction_flash_cost_ceiling_usd` (default $1.00).
-
-  This is deliberately CAPABILITY-driven, not name matching: `Catalog.cost/1`
-  is real, provider-published pricing (Ollama Cloud, OpenRouter, every vendor
-  API that lists a rate card), and a model priced this cheap is economically
-  a "flash" tier model on every provider regardless of what marketing calls
-  it. A model the catalog has no price for (offline, a brand-new release, a
-  local model with no rate card) never tightens — fail-open, the same rule
-  `max_output/1` and the rest of this module already follow.
-
-  Callers that already know a decision's model (`ProactiveCompaction`,
-  `Memory.Flush`, `Telemetry`'s status-bar meter) MUST pass the SAME `model`
-  to every threshold function used for that one decision — `warn_at/2` and
-  `compact_at/2` computed against different ceilings can invert the band
-  `warn_at < compact_at` this module's own `warn_at/1` moduledoc warns about.
+  v1.0.205 also tightened the ceiling to 100k for any model whose catalog input
+  price was at or below $1/M, as a proxy for "small model". Price is not size:
+  it would have put a 763B, 1M-window model on a 100k budget. It is removed.
   """
 
-  # Reserve for the compact summary output (p99.99 of CC summaries ~= 17.4k).
+  # Reserve for the compact summary output (p99.99 of summaries ~= 17.4k).
   @max_output_reserve 20_000
   @autocompact_buffer 13_000
   @warning_buffer 20_000
   @manual_compact_buffer 3_000
 
-  # Absolute ceiling on the window every threshold is derived from. See the
-  # "Why 200,000" section above; this is the single number that decides how
-  # much transcript OSA will carry before it compacts, on any model.
+  # The window assumed when a model's real window is unknown (see
+  # `fallback_window/0`), and the floor under a configured ceiling share.
   @context_ceiling 200_000
 
-  # Tighter ceiling for a flash/small-tier model (see moduledoc). ~100K, per
-  # the incident review: small/flash models were observed degrading well
-  # before the 167k compact_at the flat ceiling produces.
-  @flash_context_ceiling 100_000
-
-  # A model priced at or below this (USD per 1M INPUT tokens, from
-  # `Providers.Catalog.cost/1`) is economically flash/small-tier.
-  @flash_cost_ceiling_usd 1.0
-
   @doc """
-  The window all threshold math runs against: `min(context_window, ceiling)`.
+  The window all threshold math runs against: the model's real window, unless
+  the operator configured a cap (see the moduledoc).
 
-  Idempotent, so composing it with itself (as `compact_at/2` does via
-  `effective_window/2`) is safe. `model` is optional — see the moduledoc's
-  "Flash/small-tier models compact earlier" section; omitting it (or passing
-  `nil`) reproduces the exact pre-existing flat-ceiling behavior.
+  `model` is accepted for call-site symmetry with every other threshold
+  function and is not currently consulted. Idempotent, so composing it with
+  itself (as `compact_at/2` does via `effective_window/2`) is safe.
   """
   @spec operative_window(pos_integer(), String.t() | nil) :: pos_integer()
   def operative_window(context_window, model \\ nil)
 
-  def operative_window(context_window, model)
+  def operative_window(context_window, _model)
       when is_integer(context_window) and context_window > 0 do
-    min(context_window, model_ceiling(context_window, model))
+    min(context_window, configured_ceiling(context_window))
   end
 
-  # The ceiling scales WITH the model instead of being one constant for all of
-  # them. A flat 200,000 gave a 500k model and a 1M model the same live window,
-  # which is not a property of either model — an operator who selects a 500k
-  # model is paying for 500k and gets 40% of it.
-  #
-  # The brake the flat number existed for is still here and still binds: the
-  # measured failure was `compact_at` = 967,000 on a 1M window, i.e. compaction
-  # unreachable, with cumulative input quadratic in turn count. A share of the
-  # window bounds that the same way a constant does, because the share is < 1.
-  #
-  #   window     flat 200k (default)   share 1.0 (opt-in)   compact_at
-  #   128,000    128,000               128,000              95,000   (unchanged)
-  #   200,000    200,000               200,000              167,000  (unchanged)
-  #   500,000    200,000               500,000              167,000 (opt-in: 425,000)
-  #   1,000,000  200,000               1,000,000            167,000 (opt-in: 850,000)
-  #
-  # The DEFAULT is the flat 200k ceiling again (v1.0.201). A share of 1.0
-  # (whole window live) was tried and reverted on measured latency, not just
-  # cost: on `glm-5.2:cloud` (Ollama Cloud, 1M window) a live session reached
-  # 350-390k input tokens and provider time-to-first-byte grew from ~1-2s at
-  # ~23k tokens to 4.4-13.9s at ~300k. Prefill time is paid on EVERY turn, so
-  # an uncompacted large window makes every reply slow long before it makes
-  # the context full. On top of that, cumulative session input is quadratic in
-  # turn count, (967/167)^2 ~= 33x against a 167k trigger.
-  #
-  # An operator who wants more of a big window live opts in explicitly:
-  # `OSA_CONTEXT_CEILING_SHARE` (0.5 gives 1M -> 500k, 1.0 the whole window)
-  # or `OSA_CONTEXT_CEILING` for an absolute value.
-  #
-  # `model`, when given, can only TIGHTEN this further (flash/small-tier —
-  # see the moduledoc), and never when the operator has set an explicit
-  # `compaction_context_ceiling` — that override is "I know my model, use
-  # exactly this number", and a capability guess must not second-guess it.
-  defp model_ceiling(context_window, model) do
+  defp configured_ceiling(context_window) do
     case Application.get_env(:optimal_system_agent, :compaction_context_ceiling) do
       n when is_integer(n) and n > 0 ->
         n
 
       _ ->
-        base =
-          case ceiling_share() do
-            nil -> @context_ceiling
-            share -> max(@context_ceiling, trunc(context_window * share))
-          end
-
-        if flash_tier?(model), do: min(base, flash_context_ceiling()), else: base
-    end
-  end
-
-  # CAPABILITY-driven (catalog price), not name matching — see moduledoc.
-  defp flash_tier?(model) when is_binary(model) and model != "" do
-    case OptimalSystemAgent.Providers.Catalog.cost(model) do
-      %{input: input} when is_number(input) and input > 0 -> input <= flash_cost_ceiling_usd()
-      _ -> false
-    end
-  rescue
-    _ -> false
-  end
-
-  defp flash_tier?(_), do: false
-
-  defp flash_context_ceiling do
-    case Application.get_env(
-           :optimal_system_agent,
-           :compaction_flash_context_ceiling,
-           @flash_context_ceiling
-         ) do
-      n when is_integer(n) and n > 0 -> n
-      _ -> @flash_context_ceiling
-    end
-  end
-
-  defp flash_cost_ceiling_usd do
-    case Application.get_env(
-           :optimal_system_agent,
-           :compaction_flash_cost_ceiling_usd,
-           @flash_cost_ceiling_usd
-         ) do
-      n when is_number(n) and n > 0 -> n
-      _ -> @flash_cost_ceiling_usd
+        case ceiling_share() do
+          nil -> context_window
+          share -> max(@context_ceiling, trunc(context_window * share))
+        end
     end
   end
 
   # Share of the operative window at which auto-compact fires. 0.85 leaves 15%
-  # for the summarization round-trip and the model's output — proportional, so
+  # for the summarization round-trip and the model's output - proportional, so
   # the headroom grows with the window instead of staying a fixed 33k that is
   # 26% of a 128k model and 3.3% of a 1M one.
   @compact_at_share 0.85
@@ -218,7 +100,7 @@ defmodule OptimalSystemAgent.Agent.Loop.CompactionThresholds do
     end
   end
 
-  # nil when unset: the flat `@context_ceiling` applies.
+  # nil when unset: the model's whole window is operative.
   defp ceiling_share do
     case Application.get_env(:optimal_system_agent, :compaction_context_ceiling_share) do
       f when is_float(f) and f > 0.0 and f <= 1.0 -> f

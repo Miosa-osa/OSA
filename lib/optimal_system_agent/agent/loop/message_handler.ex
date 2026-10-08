@@ -472,7 +472,8 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
   defp maybe_add_progress_ledger_directive(acc, %{session_id: sid}) when is_binary(sid) do
     case OptimalSystemAgent.Agent.ProgressLedger.summarize(sid) do
       {:ok, summary} ->
-        [%{role: "system", content: "[System: Progress ledger recap]\n" <> summary} | acc]
+        header = OptimalSystemAgent.Agent.Loop.TransientNotes.header(:ledger_recap)
+        [%{role: "system", content: header <> "\n" <> summary} | acc]
 
       _ ->
         acc
@@ -489,7 +490,8 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
       directive = %{
         role: "system",
         content:
-          "[System: This task has multiple steps. Create a task list with task_write BEFORE " <>
+          OptimalSystemAgent.Agent.Loop.TransientNotes.header(:task_list) <>
+            " Create a task list with task_write BEFORE " <>
             "starting work. Create one task per step, then mark each in_progress as you start " <>
             "and completed as you finish. The user sees your progress in real-time.]"
       }
@@ -549,7 +551,8 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
       directive = %{
         role: "system",
         content:
-          "[System: The user is asking about what is visible on the screen or desktop. " <>
+          OptimalSystemAgent.Agent.Loop.TransientNotes.header(:screen_question) <>
+            " or desktop. " <>
             "Do not guess from conversation text. First call computer_use with action " <>
             "`snapshot` when available, otherwise `screenshot`. After the observation, answer " <>
             "the user normally. If the observation tool fails, briefly report the concrete failure " <>
@@ -612,7 +615,8 @@ defmodule OptimalSystemAgent.Agent.Loop.MessageHandler do
       directive = %{
         role: "system",
         content:
-          "[System: TEAM DISPATCH recommended. This task has multiple independent " <>
+          OptimalSystemAgent.Agent.Loop.TransientNotes.header(:team_dispatch) <>
+            " This task has multiple independent " <>
             "deliverables. Consider assembling a team using `delegate`: " <>
             "1. Dispatch `explorer` first if you need codebase context " <>
             "2. Dispatch `planner` if the architecture is complex " <>
