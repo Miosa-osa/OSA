@@ -491,7 +491,16 @@ defmodule OptimalSystemAgent.Memory.SessionTitler do
   def small_model_opts do
     provider = OptimalSystemAgent.Runtime.Identity.provider()
 
-    case Catalog.small_model(to_string(provider)) do
+    # Through the MIOSA AI Gateway, `:openai` is not OpenAI: the vendor
+    # catalog's small model (e.g. gpt-4o-mini) may not exist behind the
+    # gateway, and a run-scoped key should spend only on the model the run
+    # asked for. Use the session's own model.
+    catalog_provider =
+      if provider == :openai and OptimalSystemAgent.Providers.MiosaGateway.routes_openai?(),
+        do: nil,
+        else: provider
+
+    case catalog_provider && Catalog.small_model(to_string(catalog_provider)) do
       %{model_id: model_id} when is_binary(model_id) and model_id != "" ->
         if Providers.known_model?(provider, model_id) do
           [provider: provider, model: model_id]

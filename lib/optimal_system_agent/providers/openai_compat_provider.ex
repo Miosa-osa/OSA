@@ -233,8 +233,14 @@ defmodule OptimalSystemAgent.Providers.OpenAICompatProvider do
   def providers, do: Map.keys(@provider_configs)
 
   @doc false
-  def transport(:openai, "gpt-6-astra"),
-    do: OptimalSystemAgent.Providers.OpenAIResponses
+  # The MIOSA AI Gateway speaks Chat Completions only (it has no `/responses`
+  # route), so a Responses-only model reached through it must stay on the
+  # Chat Completions transport; the gateway does any translation upstream.
+  def transport(:openai, "gpt-6-astra") do
+    if OptimalSystemAgent.Providers.MiosaGateway.routes_openai?(),
+      do: OpenAICompat,
+      else: OptimalSystemAgent.Providers.OpenAIResponses
+  end
 
   def transport(_provider, _model), do: OpenAICompat
 

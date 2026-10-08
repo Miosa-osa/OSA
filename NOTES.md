@@ -43,3 +43,17 @@ The native desktop job and controller paths now accept input authority only from
 MIOSA's owner ticket producer and dispatcher counterpart live in the shared enrollment integration worktree; generic desktop job scopes cannot mint control approval.
 See docs/native-desktop-permissions.md for exact contracts, expiry/revocation limits, verification evidence, and remaining full-stack/native QA.
 OSA PR 274 was already merged before these local changes; main owns preserving this shared worktree and creating the replacement branch/PR.
+
+## 2026-10-08: MIOSA AI Gateway platform mode
+
+A MIOSA sandbox run sets MIOSA_AI_GATEWAY_URL and MIOSA_AI_GATEWAY_KEY, plus OSA_DEFAULT_PROVIDER=openai, OPENAI_BASE_URL and OPENAI_API_KEY carrying the same values (miosa-compute `Engine.AgentAccounts.Injection.osa_payload/2`).
+OSA already honored OPENAI_BASE_URL before this change, so the full platform contract worked; the gap was that MIOSA_AI_GATEWAY_* alone did nothing.
+Worse, the sandbox identity layer also sets MIOSA_API_KEY to the sandbox's platform identity token, so a gateway-only environment auto-selected `:miosa` and sent that token to optimal.miosa.ai.
+config/runtime.exs now resolves the OpenAI-compatible URL and key as one pair: OPENAI_BASE_URL first, else the gateway pair, and the gateway outranks MIOSA_API_KEY in provider auto-detection.
+An explicit OSA_DEFAULT_PROVIDER still wins.
+The gateway serves Chat Completions only, so `OpenAICompatProvider.transport/2` keeps Responses-only models (gpt-6-astra) on Chat Completions when `:openai` dials the gateway.
+Onboarding.first_run?/0 and bin/osa skip the setup wizard when the gateway pair is present, because a platform-managed run has nothing to configure and must not block on stdin.
+config.exs gives openai/anthropic/openrouter/surplus a compiled `:<provider>_model`, which outranks `:default_model`, so OPENAI_MODEL and OSA_MODEL were silently ignored for them; runtime.exs now sets `:<provider>_model` from `<PROVIDER>_MODEL`, else from OSA_MODEL for the selected provider.
+SessionTitler no longer picks OpenAI's catalog small model (gpt-4o-mini) when `:openai` dials the gateway; titles use the session's own model.
+Verified end to end with a locally built release (`osagent serve`) against a stub gateway: requests hit `<gateway>/chat/completions` with `Bearer <run key>` and the OSA_MODEL model.
+Tests that read runtime.exs as :prod must neutralize the ~/.osa/.env loader, because HOME is fixed at VM start and a developer's OSA_DEFAULT_PROVIDER would leak in; see test/providers/miosa_gateway_test.exs.

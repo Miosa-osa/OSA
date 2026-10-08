@@ -65,13 +65,21 @@ defmodule OptimalSystemAgent.Onboarding do
   exists in the environment (user may have exported it in .zshrc).
   """
   def first_run? do
+    # A MIOSA sandbox in platform mode is configured by the platform (gateway
+    # URL + run-scoped key in the environment) and usually has no ~/.osa/.env
+    # at all. There is nothing for the wizard to ask, and a wizard blocking on
+    # stdin would hang a non-interactive run.
+    not OptimalSystemAgent.Providers.MiosaGateway.active?() and not onboarded_on_disk?()
+  end
+
+  defp onboarded_on_disk? do
     env_file = Path.join(osa_dir(), ".env")
 
     # Simple: if ~/.osa/.env exists with a valid provider, onboarding is done.
     # Even if the user has API keys in their shell, they still need to go
     # through the wizard once so workspace files get seeded and they confirm
     # their setup. The wizard shows detected keys so they can just confirm.
-    not (File.exists?(env_file) and env_has_provider?(env_file))
+    File.exists?(env_file) and env_has_provider?(env_file)
   end
 
   @doc """
