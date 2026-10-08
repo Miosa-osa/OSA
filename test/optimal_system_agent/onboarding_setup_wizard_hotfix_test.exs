@@ -21,8 +21,9 @@ defmodule OptimalSystemAgent.OnboardingSetupWizardHotfixTest do
   those calls are just as global and just as much this test's responsibility
   to undo as OSA_HOME — every `write_setup` call below runs with
   `"provider" => "ollama_cloud"`, which pins `:default_provider`,
-  `:default_model` and `:ollama_model` to `:ollama` / `"glm-5.2:cloud"` for
-  every OTHER test in the suite once this module returns them.
+  `:default_model` and `:ollama_model` to `:ollama` /
+  `"deepseek-v4.1-flash:cloud"` for every OTHER test in the suite once this
+  module returns them.
   """
   use ExUnit.Case, async: false
 
@@ -160,16 +161,16 @@ defmodule OptimalSystemAgent.OnboardingSetupWizardHotfixTest do
     end
   end
 
-  describe "m6: ollama_cloud model default is glm-5.2:cloud everywhere" do
-    test "the provider catalog's default_model is glm-5.2:cloud" do
+  describe "m6: ollama_cloud model default is deepseek-v4.1-flash:cloud everywhere" do
+    test "the provider catalog's default_model is deepseek-v4.1-flash:cloud" do
       catalog = Enum.find(Onboarding.providers_list(), &(&1.id == "ollama_cloud"))
-      assert catalog.default_model == "glm-5.2:cloud"
+      assert catalog.default_model == "deepseek-v4.1-flash:cloud"
     end
 
-    test "the recommended catalog model entry is glm-5.2:cloud" do
+    test "the recommended catalog model entry is deepseek-v4.1-flash:cloud" do
       catalog = Enum.find(Onboarding.providers_list(), &(&1.id == "ollama_cloud"))
       recommended = Enum.find(catalog.models, & &1[:recommended])
-      assert recommended.id == "glm-5.2:cloud"
+      assert recommended.id == "deepseek-v4.1-flash:cloud"
     end
   end
 

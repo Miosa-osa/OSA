@@ -112,9 +112,10 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       audio: false,
       pricing: {3.00, 15.00},
       # Listed FIRST (it is the most capable tag OSA offers) but deliberately
-      # NOT `recommended` — `recommended` is the flag the picker pairs with
-      # `default_model`, and defaulting every new install onto a tag that
-      # requires a paid Ollama plan would break free-plan users on turn one.
+      # NOT `recommended` - `recommended` is the flag the picker pairs with
+      # `default_model` (since 2026-10-08 that is `deepseek-v4.1-flash:cloud`),
+      # and defaulting every new install onto a tag that requires a paid Ollama
+      # plan would break free-plan users on turn one.
       recommended: false,
       requires_subscription: "Ollama Pro or Max",
       note: "1M ctx, 2.8T MoE — vision + thinking, frontier agentic"
@@ -137,13 +138,17 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       # Z.AI first-party endpoint behind OpenRouter.
       #
       # This is the single worst number this catalog has carried: `glm-5.2:cloud`
-      # is OSA's DEFAULT model, so every install accounted its own default at
-      # 43% of input and 50% of output cost, and `Pricing.confidence/1`
+      # was OSA's DEFAULT model at the time, so every install accounted its own
+      # default at 43% of input and 50% of output cost, and `Pricing.confidence/1`
       # returned `:exact` throughout because the wrong figure sat in an
       # exact-match table rather than falling to the family guess. Expect
       # reported spend on this tag to roughly double.
+      #
+      # NOT `recommended` since 2026-10-08: the default moved to
+      # `deepseek-v4.1-flash:cloud` (see the flag comment at the top of
+      # @models). The tag is unchanged and still fully servable.
       pricing: {1.40, 4.40},
-      recommended: true,
+      recommended: false,
       requires_subscription: nil,
       note: "Z.ai flagship — long-horizon agentic + coding"
     },
@@ -196,7 +201,10 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       # ($0.075 / $0.25) runs through 2026-09-09; the LIST rate is recorded so
       # spend is not under-counted once the promo lapses.
       pricing: {0.15, 0.50},
-      recommended: true,
+      # NOT `recommended` since 2026-10-08 - only ONE tag carries that flag
+      # (it is the one paired with the provider's `default_model`), and that is
+      # now `deepseek-v4.1-flash:cloud`.
+      recommended: false,
       requires_subscription: nil,
       note: "1M ctx, 320B/18B MoE - multimodal (image+video), flash-priced agentic"
     },
@@ -355,7 +363,15 @@ defmodule OptimalSystemAgent.Providers.OllamaCloud do
       vision: true,
       audio: false,
       pricing: {0.30, 1.20},
-      recommended: false,
+      # THE DEFAULT since 2026-10-08. `recommended` is the flag the picker
+      # pairs with the provider's `default_model` (`onboarding.ex`'s
+      # ollama_cloud entry), so this is the one tag a fresh install runs and
+      # the ONLY `recommended: true` in this catalog. It leads on both
+      # capabilities and price: 1M ctx with vision + thinking, and at
+      # {0.30, 1.20} it is far cheaper than the Z.ai flagship it replaces
+      # while keeping the multimodal coverage a free-plan-friendly default
+      # needs. Unlike `kimi-k3:cloud`, it carries no `requires_subscription`.
+      recommended: true,
       requires_subscription: nil,
       # Says what it IS, not that it is cheap: at {0.30, 1.20} this tag costs
       # more than twice its own sibling `deepseek-v4-flash:cloud` and more per

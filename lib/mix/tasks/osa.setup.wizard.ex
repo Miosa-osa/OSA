@@ -706,8 +706,10 @@ defmodule Mix.Tasks.Osa.Setup.Wizard do
   end
 
   # m6 fix: ollama_cloud's default model must match the catalog
-  # (onboarding.ex ~L180) and docs — glm-5.2:cloud, not the stale
-  # nemotron-3-super:cloud that was drifting from the rest of the codebase.
+  # (onboarding.ex ~L180) and docs - deepseek-v4.1-flash:cloud (was
+  # glm-5.2:cloud before the 2026-10-08 default change; earlier still it was
+  # the stale nemotron-3-super:cloud that had drifted from the rest of the
+  # codebase).
   #
   # M5 fix: providers with no single sensible hardcoded default (ollama_local,
   # custom, and anything unrecognized) return `nil` instead of the literal

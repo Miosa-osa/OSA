@@ -20,7 +20,13 @@
     description: "No GPU needed — recommended",
     group: "recommended",
     base_url: "https://ollama.com",
-    default_model: "glm-5.2:cloud",
+    # DELIBERATE post-snapshot change, not drift. 2026-10-08: the Ollama Cloud
+    # default moved from `glm-5.2:cloud` to `deepseek-v4.1-flash:cloud` (and
+    # that tag became the catalog's single `recommended: true`). Both the
+    # provider-level `default_model` and the model list's flag move together;
+    # the auth-modes baseline diff compares both fields exactly, so the frozen
+    # snapshot has to carry the intended new values or it reports a false diff.
+    default_model: "deepseek-v4.1-flash:cloud",
     models: [
       %{
         id: "kimi-k3:cloud",
@@ -37,7 +43,7 @@
         tools: true,
         note: "Z.ai flagship — long-horizon agentic + coding",
         ctx: 1_000_000,
-        recommended: true
+        recommended: false
       },
       # DELIBERATE post-snapshot addition, not drift. The bare GLM-5.3 flagship
       # (glm-5.3:cloud) went live on Ollama (2026-08-30, no longer a 404) and was
@@ -62,7 +68,7 @@
         tools: true,
         note: "1M ctx, 320B/18B MoE - multimodal (image+video), flash-priced agentic",
         ctx: 1_048_576,
-        recommended: true
+        recommended: false
       },
       # DELIBERATE post-snapshot addition, not drift. `glm-4.7:cloud` carries no
       # `context_length` in Ollama's /api/show model_info, so the probe could
@@ -138,7 +144,7 @@
         tools: true,
         note: "1M ctx, 763B MoE - vision + thinking, newer sibling of V4 Flash",
         ctx: 1_048_576,
-        recommended: false
+        recommended: true
       },
       %{
         id: "deepseek-v4-flash:cloud",

@@ -4,9 +4,10 @@ defmodule OptimalSystemAgent.Providers.ZaiModels do
 
   ## Why this module did not exist, and what that cost
 
-  GLM is OSA's *default model family* — a fresh install runs `glm-5.2:cloud` —
-  and it was the only major family with no catalog of its own. Its facts were
-  scattered across three places that each knew a fragment:
+  GLM *was* OSA's default model family - a fresh install ran `glm-5.2:cloud`
+  until 2026-10-08, when the default moved to `deepseek-v4.1-flash:cloud` - and
+  at the time it was the only major family with no catalog of its own. Its
+  facts were scattered across three places that each knew a fragment:
 
     * `Agent.Pricing.@static_pricing` — four hand-written rows
       (`glm-4.7:cloud`, `glm-4.6:cloud`, `glm-4.6`, `glm-4.5`), all at

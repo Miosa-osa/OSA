@@ -13,7 +13,8 @@ defmodule Mix.Tasks.Osa.Setup.WizardTest do
       OLLAMA_URL=https://ollama.com, breaking the documented keyless
       "signed-in local Ollama" path.
     * m6 — ollama_cloud's default model had drifted to nemotron-3-super:cloud
-      instead of the catalog's glm-5.2:cloud.
+      instead of the catalog's then-default glm-5.2:cloud (the default is now
+      deepseek-v4.1-flash:cloud; this suite pins whatever the catalog says).
     * M5 — ollama_local could resolve to the literal model name "default".
   """
   use ExUnit.Case, async: true
@@ -56,8 +57,8 @@ defmodule Mix.Tasks.Osa.Setup.WizardTest do
   end
 
   describe "provider_default_model/1 (m6 + M5)" do
-    test "ollama_cloud default model is glm-5.2:cloud, matching the catalog" do
-      assert Wizard.provider_default_model("ollama_cloud") == "glm-5.2:cloud"
+    test "ollama_cloud default model is deepseek-v4.1-flash:cloud, matching the catalog" do
+      assert Wizard.provider_default_model("ollama_cloud") == "deepseek-v4.1-flash:cloud"
     end
 
     test "ollama_local has NO hardcoded default — never the literal string 'default'" do

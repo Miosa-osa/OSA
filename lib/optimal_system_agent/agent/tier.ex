@@ -151,8 +151,8 @@ defmodule OptimalSystemAgent.Agent.Tier do
     # --- Ollama Cloud (all models must support tool calling) ---
     # Updated 2026-07-20 — verified live against ollama.com/api/show per model.
     ollama_cloud: %{
-      # Z.ai flagship — long-horizon agentic + coding (1M ctx)
-      elite: "glm-5.2:cloud",
+      # 1M ctx, vision + thinking - OSA's default Ollama Cloud tag
+      elite: "deepseek-v4.1-flash:cloud",
       # native multimodal agentic (512K ctx)
       specialist: "minimax-m3:cloud",
       # OpenAI open-weight, fast (131K ctx). Replaced gemini-3-flash-preview,
