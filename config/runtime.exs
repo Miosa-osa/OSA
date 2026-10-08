@@ -417,7 +417,8 @@ config :optimal_system_agent,
   ],
 
   # Ollama overrides (OLLAMA_API_KEY required for cloud instances)
-  # Falls back to config.exs values (Ollama Cloud + glm-5.2:cloud) when no env var set.
+  # Falls back to config.exs values (Ollama Cloud + deepseek-v4.1-flash:cloud)
+  # when no env var set.
   # When an Ollama Cloud key is present but no explicit URL, pin to the
   # cloud endpoint (no GPU needed). Otherwise use the local default.
   ollama_url:

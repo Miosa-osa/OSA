@@ -2795,7 +2795,7 @@ defmodule OptimalSystemAgent.Providers.Registry do
     # win over the catalog default so a new session picks up what the user last
     # selected. Ollama already reads :ollama_model; this extends the same
     # courtesy to every provider. Falls back to the provider's catalog default
-    # (e.g. glm-5.2:cloud) when nothing has been persisted.
+    # (e.g. deepseek-v4.1-flash:cloud) when nothing has been persisted.
     case Application.get_env(:optimal_system_agent, :"#{provider}_model") do
       model when is_binary(model) and model != "" ->
         model

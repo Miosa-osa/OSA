@@ -137,7 +137,8 @@ defmodule OptimalSystemAgent.CLI.Setup do
         # Step 4: Model selection (item 1 audit fix — this wizard used to
         # have NO model-selection step at all; the config it wrote always
         # fell back to the provider's runtime default with no way to pick a
-        # specific model, e.g. the recommended glm-5.2:cloud on Ollama Cloud).
+        # specific model, e.g. the recommended deepseek-v4.1-flash:cloud on
+        # Ollama Cloud).
         model = select_model(provider, api_key, base_url)
 
         # Step 5: Channel setup (optional)

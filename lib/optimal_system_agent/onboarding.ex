@@ -233,7 +233,7 @@ defmodule OptimalSystemAgent.Onboarding do
         # as ready when either an OLLAMA_API_KEY exists OR local Ollama is up.
         key_optional: true,
         env_var: "OLLAMA_API_KEY",
-        default_model: "glm-5.2:cloud",
+        default_model: "deepseek-v4.1-flash:cloud",
         base_url: "https://ollama.com",
         signup_url: "https://ollama.com/account/keys",
         # The only entry with BOTH modes, and the only one where `:oauth` is a
@@ -2908,7 +2908,7 @@ defmodule OptimalSystemAgent.Onboarding do
         ]
 
         body = %{
-          model: model || "glm-5.2:cloud",
+          model: model || "deepseek-v4.1-flash:cloud",
           messages: [%{role: "user", content: "hi"}],
           stream: false,
           options: %{num_predict: 5}
