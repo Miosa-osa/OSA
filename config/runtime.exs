@@ -164,6 +164,66 @@ if config_env() != :test do
   end
 end
 
+# ── MIOSA AI Gateway (platform mode) ──────────────────────────────────
+# A MIOSA sandbox run hands OSA a run-scoped, OpenAI-compatible gateway
+# endpoint instead of a vendor key:
+#
+#   MIOSA_AI_GATEWAY_URL  base URL; requests go to <url>/chat/completions
+#   MIOSA_AI_GATEWAY_KEY  run-scoped bearer key the gateway accepts
+#
+# The gateway holds the vendor credentials and routes by model name, so every
+# gateway model (Ollama Cloud models included) works with no key of OSA's own.
+# Both variables must be present; one without the other is ignored and OSA
+# keeps its existing behavior. Mirrors `Providers.MiosaGateway.from_env/1`,
+# inlined because runtime.exs must not depend on application modules.
+miosa_ai_gateway =
+  case {System.get_env("MIOSA_AI_GATEWAY_URL"), System.get_env("MIOSA_AI_GATEWAY_KEY")} do
+    {url, key} when is_binary(url) and is_binary(key) ->
+      url = url |> String.trim() |> String.trim_trailing("/")
+      key = String.trim(key)
+      if url != "" and key != "", do: %{url: url, key: key}
+
+    _ ->
+      nil
+  end
+
+# The OpenAI-compatible endpoint and its key are resolved as ONE pair, so a key
+# is never sent to a host it was not issued for:
+#
+#   1. OPENAI_BASE_URL set: that URL with OPENAI_API_KEY (existing behavior).
+#      When it names the gateway itself and OPENAI_API_KEY is absent, the
+#      gateway key is the key for that URL.
+#   2. Otherwise, with the gateway configured: the gateway URL and its key. A
+#      stray OPENAI_API_KEY (issued for api.openai.com) is not paired with it.
+#   3. Otherwise: no URL override, OPENAI_API_KEY as before.
+openai_base_url =
+  case System.get_env("OPENAI_BASE_URL") do
+    url when is_binary(url) -> if String.trim(url) != "", do: String.trim(url)
+    _ -> nil
+  end
+
+openai_env_key =
+  case System.get_env("OPENAI_API_KEY") do
+    key when is_binary(key) and key != "" -> key
+    _ -> nil
+  end
+
+{openai_url_override, openai_api_key} =
+  cond do
+    openai_base_url ->
+      gateway_key =
+        if miosa_ai_gateway && String.trim_trailing(openai_base_url, "/") == miosa_ai_gateway.url,
+          do: miosa_ai_gateway.key
+
+      {openai_base_url, openai_env_key || gateway_key}
+
+    miosa_ai_gateway ->
+      {miosa_ai_gateway.url, miosa_ai_gateway.key}
+
+    true ->
+      {nil, openai_env_key}
+  end
+
 # Smart provider auto-detection: explicit override > API key presence > ollama fallback
 provider_map = %{
   "ollama" => :ollama,
@@ -216,6 +276,10 @@ provider_map = %{
 default_provider =
   cond do
     env = System.get_env("OSA_DEFAULT_PROVIDER") -> Map.get(provider_map, env, :ollama)
+    # Platform mode outranks every key-presence guess below. In particular a
+    # sandbox also carries MIOSA_API_KEY, but that is its platform identity
+    # token, not an inference key, so it must not select :miosa here.
+    miosa_ai_gateway -> :openai
     System.get_env("MIOSA_API_KEY") -> :miosa
     # Ollama Cloud is the MAIN recommended path (no local GPU needed). An
     # OLLAMA_API_KEY (or an ollama.com OLLAMA_URL) routes through the native
@@ -233,7 +297,7 @@ default_provider =
 config :optimal_system_agent,
   # LLM Providers — API keys
   anthropic_api_key: System.get_env("ANTHROPIC_API_KEY"),
-  openai_api_key: System.get_env("OPENAI_API_KEY"),
+  openai_api_key: openai_api_key,
   groq_api_key: System.get_env("GROQ_API_KEY"),
   openrouter_api_key: System.get_env("OPENROUTER_API_KEY"),
   surplus_api_key: System.get_env("SURPLUS_API_KEY"),
@@ -635,7 +699,7 @@ config :optimal_system_agent,
        nil ->
          candidates = [
            {:anthropic, System.get_env("ANTHROPIC_API_KEY")},
-           {:openai, System.get_env("OPENAI_API_KEY")},
+           {:openai, openai_api_key},
            {:groq, System.get_env("GROQ_API_KEY")},
            {:openrouter, System.get_env("OPENROUTER_API_KEY")},
            {:surplus, System.get_env("SURPLUS_API_KEY")},
@@ -766,11 +830,15 @@ config :optimal_system_agent,
 # api.openai.com. That is a silent wrong-destination credential transmission,
 # and it also meant the custom endpoint never actually worked. Applied last so
 # it wins over the defaults set above.
-openai_base_url = System.get_env("OPENAI_BASE_URL")
-
-if is_binary(openai_base_url) and openai_base_url != "" do
-  config :optimal_system_agent, openai_url: openai_base_url
+# `openai_url_override` is OPENAI_BASE_URL, or the MIOSA AI Gateway URL when
+# only the gateway is configured (see the platform-mode block above).
+if openai_url_override do
+  config :optimal_system_agent, openai_url: openai_url_override
 end
+
+# Recorded so request-time code can tell the gateway apart from api.openai.com
+# (`Providers.MiosaGateway.routes_openai?/0`). The key is never stored here.
+config :optimal_system_agent, miosa_ai_gateway_url: miosa_ai_gateway && miosa_ai_gateway.url
 
 # Symmetric support for an Anthropic-compatible gateway/proxy.
 anthropic_base_url = System.get_env("ANTHROPIC_BASE_URL")

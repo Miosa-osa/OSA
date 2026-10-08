@@ -243,6 +243,17 @@ env_has_provider() {
   grep -qE '^[^#]*OSA_DEFAULT_PROVIDER=' "$env_file" 2>/dev/null
 }
 
+# MIOSA platform mode: a sandbox run carries a MIOSA AI Gateway URL and a
+# run-scoped key in its environment and usually has no ~/.osa/.env. Same rule
+# as Providers.MiosaGateway.active?/0, which makes Onboarding.first_run?/0
+# false: both variables present and non-blank. There is nothing to set up.
+platform_gateway_configured() {
+  local url key
+  url="$(printf '%s' "${MIOSA_AI_GATEWAY_URL:-}" | tr -d '[:space:]')"
+  key="$(printf '%s' "${MIOSA_AI_GATEWAY_KEY:-}" | tr -d '[:space:]')"
+  [ -n "$url" ] && [ -n "$key" ]
+}
+
 # Direct invocation of a source checkout (`./bin/osa` from a dev tree, or an
 # entrypoint symlink resolved via readlink -f to such a tree) always wins: a
 # developer iterating on their own checkout must never be silently redirected
@@ -1985,7 +1996,7 @@ fi
 # *_api_key=nil) — the first turn then fails despite a valid key just having
 # been entered. Restart the daemon here so config/runtime.exs re-reads the
 # freshly written .env before the TUI ever attaches.
-if ! env_has_provider "$OSA_HOME/.env"; then
+if ! env_has_provider "$OSA_HOME/.env" && ! platform_gateway_configured; then
   echo -e "${CYAN}→${RESET} First-time setup..."
   if (cd "$ROOT" && mix osa.setup.wizard); then
     if env_has_provider "$OSA_HOME/.env"; then
