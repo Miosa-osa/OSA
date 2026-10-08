@@ -34,9 +34,16 @@ defmodule OptimalSystemAgent.Providers.MiosaGatewayTest do
     MIOSA_AI_GATEWAY_URL MIOSA_AI_GATEWAY_KEY OSA_DEFAULT_PROVIDER OPENAI_BASE_URL
     OPENAI_API_KEY MIOSA_API_KEY ANTHROPIC_API_KEY GROQ_API_KEY OPENROUTER_API_KEY
     SURPLUS_API_KEY OLLAMA_API_KEY OLLAMA_URL OSA_FALLBACK_CHAIN OSA_MODEL OPENAI_MODEL
+    ANTHROPIC_MODEL OPENROUTER_MODEL SURPLUS_MODEL
   )
 
-  @app_keys [:openai_url, :openai_api_key, :miosa_ai_gateway_url]
+  @app_keys [
+    :openai_url,
+    :openai_api_key,
+    :openai_model,
+    :miosa_ai_gateway_url,
+    :default_provider
+  ]
 
   # Run `fun` with exactly `overrides` set among the provider-selection
   # variables, then restore the real process environment.
@@ -196,6 +203,43 @@ defmodule OptimalSystemAgent.Providers.MiosaGatewayTest do
       assert cfg[:openai_api_key] == nil
     end
 
+    test "OSA_MODEL picks the gateway model for the selected provider" do
+      cfg = runtime_config(Map.put(gateway_env(), "OSA_MODEL", "glm-5.2:cloud"))
+
+      assert cfg[:openai_model] == "glm-5.2:cloud"
+      assert cfg[:default_model] == "glm-5.2:cloud"
+    end
+
+    test "the provider's own <PROVIDER>_MODEL outranks OSA_MODEL" do
+      cfg =
+        runtime_config(
+          Map.merge(gateway_env(), %{"OSA_MODEL" => "glm-5.2:cloud", "OPENAI_MODEL" => "kimi-k3"})
+        )
+
+      assert cfg[:openai_model] == "kimi-k3"
+    end
+
+    test "OSA_MODEL only applies to the provider OSA selected" do
+      cfg =
+        runtime_config(
+          Map.merge(gateway_env(), %{
+            "OSA_DEFAULT_PROVIDER" => "anthropic",
+            "OSA_MODEL" => "claude-opus-5"
+          })
+        )
+
+      assert cfg[:anthropic_model] == "claude-opus-5"
+      refute Keyword.has_key?(cfg, :openai_model)
+    end
+
+    test "with no model env the compiled default model is left alone" do
+      cfg = runtime_config(gateway_env())
+
+      for key <- [:openai_model, :anthropic_model, :openrouter_model, :surplus_model] do
+        refute Keyword.has_key?(cfg, key), inspect(key)
+      end
+    end
+
     test "half a gateway configuration is ignored" do
       cfg = runtime_config(%{"MIOSA_AI_GATEWAY_URL" => @gateway_url})
 
@@ -222,6 +266,16 @@ defmodule OptimalSystemAgent.Providers.MiosaGatewayTest do
 
       assert OpenAICompatProvider.transport(:openai, "gpt-6-astra") ==
                OptimalSystemAgent.Providers.OpenAIResponses
+    end
+  end
+
+  describe "SessionTitler.small_model_opts/0" do
+    test "uses the session's own model through the gateway, never OpenAI's catalog pick" do
+      Application.put_env(:optimal_system_agent, :default_provider, :openai)
+      Application.put_env(:optimal_system_agent, :miosa_ai_gateway_url, @gateway_url)
+      Application.put_env(:optimal_system_agent, :openai_url, @gateway_url)
+
+      assert OptimalSystemAgent.Memory.SessionTitler.small_model_opts() == []
     end
   end
 
@@ -295,6 +349,9 @@ defmodule OptimalSystemAgent.Providers.MiosaGatewayTest do
       %{gateway_url: "http://127.0.0.1:#{port}/api/v1/intelligence"}
     end
 
+    # The model arrives the way a run would name it: OSA_MODEL, with no
+    # explicit per-request model, so the env -> runtime.exs -> provider model
+    # resolution is part of what is exercised.
     for model <- ["glm-5.2:cloud", "gpt-6-astra"] do
       test "a #{model} turn reaches <gateway>/chat/completions with the run key", %{
         gateway_url: url
@@ -303,16 +360,15 @@ defmodule OptimalSystemAgent.Providers.MiosaGatewayTest do
           runtime_config(%{
             "MIOSA_AI_GATEWAY_URL" => url,
             "MIOSA_AI_GATEWAY_KEY" => @gateway_key,
-            "MIOSA_API_KEY" => @identity_token
+            "MIOSA_API_KEY" => @identity_token,
+            "OSA_MODEL" => unquote(model)
           })
 
         assert cfg[:default_provider] == :openai
         Enum.each(@app_keys, &Application.put_env(:optimal_system_agent, &1, cfg[&1]))
 
         assert {:ok, %{content: "pong"}} =
-                 OpenAICompatProvider.chat(:openai, [%{role: "user", content: "ping"}],
-                   model: unquote(model)
-                 )
+                 OpenAICompatProvider.chat(:openai, [%{role: "user", content: "ping"}])
 
         assert_receive {:gateway_request, request}
         assert request.method == "POST"

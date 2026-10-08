@@ -840,6 +840,37 @@ end
 # (`Providers.MiosaGateway.routes_openai?/0`). The key is never stored here.
 config :optimal_system_agent, miosa_ai_gateway_url: miosa_ai_gateway && miosa_ai_gateway.url
 
+# ── Model env for providers with a compiled-in default model ─────────────
+# config.exs gives these providers a `:<provider>_model`, and that key outranks
+# `:default_model` everywhere a model is resolved (`Application` boot,
+# `ConfiguredModel`, `Registry.resolved_default_model/1`). Nothing above set it
+# from the environment, so OPENAI_MODEL and OSA_MODEL were silently ignored for
+# them: a gateway run asking for an Ollama Cloud model still sent
+# `gpt-5.6-terra`. The provider's own <PROVIDER>_MODEL wins; OSA_MODEL applies
+# to the provider OSA actually selected; with neither, the compiled default
+# stays.
+nonblank_env = fn name ->
+  case System.get_env(name) do
+    value when is_binary(value) -> if String.trim(value) != "", do: String.trim(value)
+    _ -> nil
+  end
+end
+
+for {provider, env_var} <- [
+      openai: "OPENAI_MODEL",
+      anthropic: "ANTHROPIC_MODEL",
+      openrouter: "OPENROUTER_MODEL",
+      surplus: "SURPLUS_MODEL"
+    ] do
+  model =
+    nonblank_env.(env_var) ||
+      if(provider == default_provider, do: nonblank_env.("OSA_MODEL"))
+
+  if model do
+    config :optimal_system_agent, [{:"#{provider}_model", model}]
+  end
+end
+
 # Symmetric support for an Anthropic-compatible gateway/proxy.
 anthropic_base_url = System.get_env("ANTHROPIC_BASE_URL")
 

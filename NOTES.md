@@ -53,4 +53,7 @@ config/runtime.exs now resolves the OpenAI-compatible URL and key as one pair: O
 An explicit OSA_DEFAULT_PROVIDER still wins.
 The gateway serves Chat Completions only, so `OpenAICompatProvider.transport/2` keeps Responses-only models (gpt-6-astra) on Chat Completions when `:openai` dials the gateway.
 Onboarding.first_run?/0 and bin/osa skip the setup wizard when the gateway pair is present, because a platform-managed run has nothing to configure and must not block on stdin.
+config.exs gives openai/anthropic/openrouter/surplus a compiled `:<provider>_model`, which outranks `:default_model`, so OPENAI_MODEL and OSA_MODEL were silently ignored for them; runtime.exs now sets `:<provider>_model` from `<PROVIDER>_MODEL`, else from OSA_MODEL for the selected provider.
+SessionTitler no longer picks OpenAI's catalog small model (gpt-4o-mini) when `:openai` dials the gateway; titles use the session's own model.
+Verified end to end with a locally built release (`osagent serve`) against a stub gateway: requests hit `<gateway>/chat/completions` with `Bearer <run key>` and the OSA_MODEL model.
 Tests that read runtime.exs as :prod must neutralize the ~/.osa/.env loader, because HOME is fixed at VM start and a developer's OSA_DEFAULT_PROVIDER would leak in; see test/providers/miosa_gateway_test.exs.
