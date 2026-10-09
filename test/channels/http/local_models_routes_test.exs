@@ -10,6 +10,9 @@ defmodule OptimalSystemAgent.Channels.HTTP.LocalModelsRoutesTest do
   # overview deterministic (installed: [], error set) while the catalog and
   # hardware still come back.
   setup do
+    # First-run also means no provider configured by the environment (see
+    # `Onboarding.Provisioned`); another test's leftover key must not count.
+    OptimalSystemAgent.Test.ProviderEnv.isolate()
     dir = Path.join(System.tmp_dir!(), "osa-home-#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
     prev_home = System.get_env("OSA_HOME")

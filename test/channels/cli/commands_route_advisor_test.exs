@@ -21,6 +21,9 @@ defmodule OptimalSystemAgent.Channels.CLI.CommandsRouteAdvisorTest do
   @sid "route-advisor-cmd-test"
 
   setup do
+    # "No credential reachable" must not depend on a provider key another test
+    # (or the developer's shell) left in the process environment.
+    OptimalSystemAgent.Test.ProviderEnv.isolate()
     prev_config_dir = Application.get_env(:optimal_system_agent, :config_dir)
     prev_default_provider = Application.get_env(:optimal_system_agent, :default_provider)
     prev_step_routing_enabled = Application.get_env(:optimal_system_agent, :step_routing_enabled)
