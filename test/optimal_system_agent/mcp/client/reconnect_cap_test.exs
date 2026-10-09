@@ -138,6 +138,30 @@ defmodule OptimalSystemAgent.MCP.Client.ReconnectCapTest do
     refute ServerSession.status(name) == :dormant
   end
 
+  test "a server that died is reported :failed while it waits to retry, not :connecting" do
+    # Reported live: a stdio server crashing on startup (an ImportError) read as
+    # `:connecting` through every retry, and `osa run` waited its full 30s MCP
+    # timeout on every invocation.
+    Application.put_env(:optimal_system_agent, :mcp_stdio_transport, SilentTransport)
+    Application.put_env(:optimal_system_agent, :mcp_max_connect_failures, 5)
+    Application.put_env(:optimal_system_agent, :mcp_initial_backoff_ms, 60_000)
+    Application.put_env(:optimal_system_agent, :mcp_max_backoff_ms, 60_000)
+
+    name = "died_#{System.unique_integer([:positive])}"
+    server = %Server{name: name, transport: :stdio, command: "irrelevant"}
+
+    {:ok, pid} = ServerSession.start_link(server)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+
+    assert wait_until(fn -> is_pid(:sys.get_state(pid).transport) end)
+    assert ServerSession.status(name) == :connecting
+
+    Process.exit(:sys.get_state(pid).transport, :kill)
+
+    assert wait_until(fn -> ServerSession.status(name) == :failed end),
+           "status is #{inspect(ServerSession.status(name))} after the transport died"
+  end
+
   test "a stability mark resets the failure count so a recovered server is not penalized" do
     Application.put_env(:optimal_system_agent, :mcp_stdio_transport, SilentTransport)
     Application.put_env(:optimal_system_agent, :mcp_max_connect_failures, 5)

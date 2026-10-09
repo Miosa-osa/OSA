@@ -621,9 +621,16 @@ defmodule OptimalSystemAgent.MCP.Client.ServerSession do
       {delay, throttle} = SSEBackoff.observe_death(state.throttle, state.stable?)
       Process.send_after(self(), :reconnect, delay)
 
+      # `:failed` while waiting to retry: nothing is connected, and `connect/1`
+      # sets `:connecting` again when the retry starts. The status used to stay
+      # whatever it was, so a server that crashed on startup read as
+      # `:connecting` through every retry until it went dormant. MEASURED: a
+      # stdio server dying on an ImportError held `osa run` at its 30s MCP
+      # wait on every invocation.
       %{
         state
-        | transport: nil,
+        | status: :failed,
+          transport: nil,
           ref: nil,
           throttle: throttle,
           fail_count: fail_count,
