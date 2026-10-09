@@ -620,19 +620,30 @@ defmodule OptimalSystemAgent.CLI.Headless do
   # the session's tool list is built, or the first turn runs without them.
   # Bounded by OSA_MCP_STARTUP_TIMEOUT_MS (default 30s): a server still
   # connecting then is reported in `init` as such and the run goes on.
+  #
+  # Each server gets ONE attempt. A server seen in any state other than
+  # `:connecting` (ready, failed, dormant) is not waited on again, so a server
+  # that crashes on startup and retries in the background does not hold the
+  # run for its whole backoff. MEASURED: a stdio server failing on an
+  # ImportError added the full 30s to every `osa run` (34.3s total against
+  # 4.4s with `--strict-mcp-config`).
   defp wait_for_mcp do
     deadline = System.monotonic_time(:millisecond) + mcp_wait_ms()
-    wait_for_mcp(deadline)
+    wait_for_mcp(deadline, MapSet.new())
   end
 
-  defp wait_for_mcp(deadline) do
-    connecting? =
-      Enum.any?(mcp_status_list(), fn %{status: status} ->
-        status in [:connecting, "connecting"]
-      end)
+  defp wait_for_mcp(deadline, settled) do
+    servers = mcp_status_list()
+
+    settled =
+      servers
+      |> Enum.reject(&connecting?/1)
+      |> Enum.reduce(settled, &MapSet.put(&2, &1.name))
+
+    waiting? = Enum.any?(servers, &(connecting?(&1) and not MapSet.member?(settled, &1.name)))
 
     cond do
-      not connecting? ->
+      not waiting? ->
         :ok
 
       System.monotonic_time(:millisecond) >= deadline ->
@@ -640,9 +651,12 @@ defmodule OptimalSystemAgent.CLI.Headless do
 
       true ->
         Process.sleep(100)
-        wait_for_mcp(deadline)
+        wait_for_mcp(deadline, settled)
     end
   end
+
+  defp connecting?(%{status: status}), do: status in [:connecting, "connecting"]
+  defp connecting?(_), do: false
 
   defp mcp_status_list do
     OptimalSystemAgent.MCP.Client.Manager.list_servers()
