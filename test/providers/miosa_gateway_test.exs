@@ -30,12 +30,16 @@ defmodule OptimalSystemAgent.Providers.MiosaGatewayTest do
   @gateway_key "mgk_run_scoped_test_key"
   @identity_token "sandbox-identity-token-not-an-inference-key"
 
-  @scrubbed ~w(
-    MIOSA_AI_GATEWAY_URL MIOSA_AI_GATEWAY_KEY OSA_DEFAULT_PROVIDER OPENAI_BASE_URL
-    OPENAI_API_KEY MIOSA_API_KEY ANTHROPIC_API_KEY GROQ_API_KEY OPENROUTER_API_KEY
-    SURPLUS_API_KEY OLLAMA_API_KEY OLLAMA_URL OSA_FALLBACK_CHAIN OSA_MODEL OPENAI_MODEL
-    ANTHROPIC_MODEL OPENROUTER_MODEL SURPLUS_MODEL
-  )
+  # Plus every variable `Onboarding.Provisioned` treats as a configured
+  # provider, so a key in the developer's or CI's own environment cannot decide
+  # the first-run assertions below.
+  @scrubbed Enum.uniq(~w(
+                MIOSA_AI_GATEWAY_URL MIOSA_AI_GATEWAY_KEY OSA_DEFAULT_PROVIDER OPENAI_BASE_URL
+                OPENAI_API_KEY MIOSA_API_KEY ANTHROPIC_API_KEY GROQ_API_KEY OPENROUTER_API_KEY
+                SURPLUS_API_KEY OLLAMA_API_KEY OLLAMA_URL OSA_FALLBACK_CHAIN OSA_MODEL OPENAI_MODEL
+                ANTHROPIC_MODEL OPENROUTER_MODEL SURPLUS_MODEL OSA_SKIP_ONBOARDING
+                OSA_PLATFORM_ENV_FILE
+              ) ++ OptimalSystemAgent.Onboarding.Provisioned.provider_keys())
 
   @app_keys [
     :openai_url,
@@ -50,6 +54,9 @@ defmodule OptimalSystemAgent.Providers.MiosaGatewayTest do
   defp with_env(overrides, fun) do
     snapshot = System.get_env()
     Enum.each(@scrubbed, &System.delete_env/1)
+    # A real /opt/osagent/env.sh on the machine running the suite must not
+    # decide first-run either.
+    System.put_env("OSA_PLATFORM_ENV_FILE", "/nonexistent/osa-gateway-test/env.sh")
     Enum.each(overrides, fn {k, v} -> System.put_env(k, v) end)
 
     try do
@@ -327,9 +334,9 @@ defmodule OptimalSystemAgent.Providers.MiosaGatewayTest do
       end
     end
 
-    test "the wizard runs only when neither ~/.osa/.env nor the gateway configures OSA" do
+    test "the wizard runs only when neither ~/.osa/.env, the gateway nor any provider env configures OSA" do
       assert File.read!(@launcher) =~
-               ~s(if ! env_has_provider "$OSA_HOME/.env" && ! platform_gateway_configured; then)
+               ~s(if ! env_has_provider "$OSA_HOME/.env" && ! platform_gateway_configured && ! onboarding_provisioned; then)
     end
   end
 

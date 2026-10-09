@@ -57,3 +57,18 @@ config.exs gives openai/anthropic/openrouter/surplus a compiled `:<provider>_mod
 SessionTitler no longer picks OpenAI's catalog small model (gpt-4o-mini) when `:openai` dials the gateway; titles use the session's own model.
 Verified end to end with a locally built release (`osagent serve`) against a stub gateway: requests hit `<gateway>/chat/completions` with `Bearer <run key>` and the OSA_MODEL model.
 Tests that read runtime.exs as :prod must neutralize the ~/.osa/.env loader, because HOME is fixed at VM start and a developer's OSA_DEFAULT_PROVIDER would leak in; see test/providers/miosa_gateway_test.exs.
+
+## 2026-10-08: `osa run`, the headless agent
+
+v1.0.208's installed launcher had no `run` verb and handed `osa run` to the TUI, which rejected it, so every MIOSA OSA run failed.
+`osa run` (lib/optimal_system_agent/cli/headless.ex, docs/headless.md) now runs the same `SessionManager`/`Agent.Loop` engine as the TUI, with text, json and stream-json output, `--resume`/`--continue`/`--session-id`, and one-process multi-turn via `--input-format stream-json`.
+A headless process sets `RunProfile` to `:headless` before boot: no HTTP port, no channels, no OpenComputers or updater, no scheduler timers, no dream, no fleet re-dispatch, because a daemon (MIOSA desktops run `osagent serve`) is usually beside it.
+The loop answers `{:ok, text}` even when a turn died on a provider outage; the run reads `turn_error` from the final `agent_response` event to report `is_error`.
+Bus handlers run in spawned tasks, so their order is not the emit order; the run consumes PubSub on the session topic instead, where one sender's messages arrive in order and the turn's reply arrives last.
+Faithful tool arguments and results travel on a separate `osa:tool_stream:<id>` topic (`Agent.ToolStream`) so the TUI's display events are unchanged.
+`OSA_PRE_TOOL_HOOK` is a fail-closed Claude Code `PreToolUse` command hook; on an unattended session an ordinary approval is deferred to it when it covers the tool, while safety asks stay refused.
+The release writes its runtime config to `$RELEASE_ROOT/tmp` on every boot, `eval` included, so a release run by another user (MIOSA's `sandbox`) died; rel/env.sh.eex falls back to `$OSA_HOME/run/release-tmp`.
+The installed launcher resolves the release next to its own real path when `$OSA_HOME/release` is missing (a symlinked launcher run by another user).
+Onboarding is skipped when any provider is configured by env, by `/opt/osagent/env.sh`, by `~/.osa/.env`, or by `OSA_SKIP_ONBOARDING`/`--no-onboarding` (`Onboarding.Provisioned`); the TUI honours `OSA_SKIP_ONBOARDING` itself for an already-warm backend.
+test/headless/e2e_release_test.py drives the built release against test/headless/stub_provider.py (OpenAI-compatible and Ollama-native) and runs in CI as `headless-e2e`.
+

@@ -30,12 +30,16 @@ defmodule OptimalSystemAgent.Agent.Hooks.ShellHook do
       `hookSpecificOutput` (`permissionDecision`, `permissionDecisionReason`,
       `updatedInput`, `additionalContext`). Plain stdout becomes injected
       context for UserPromptSubmit / SessionStart.
-    * **exit 2** — BLOCKING: stderr is the reason. Blocking-capable events
+    * **exit 2** - BLOCKING: stderr is the reason (stdout when stderr is
+      empty; `reason_from: :stdout` reverses that). Blocking-capable events
       (PreToolUse, UserPromptSubmit, Stop, SubagentStop, PermissionRequest)
       deny the action; post events feed stderr back to the model as context.
     * **any other exit code** — non-blocking error, logged only.
     * Per-hook timeout: `"timeout"` (seconds) in the hook config; default 600s
       (CC `TOOL_HOOK_EXECUTION_TIMEOUT_MS`). Timeout is non-blocking.
+    * `fail_closed: true` (the approval hook, `Hooks.ApprovalHook`): a timeout,
+      a crash, an exit code other than 0/2, and a `permissionDecision: "ask"`
+      all BLOCK instead of proceeding.
 
   Results are translated into the `Dispatch` handler protocol: `{:block,
   reason}` denies, `{:ok, payload}` continues — with `:arguments` rewritten by
@@ -213,16 +217,24 @@ defmodule OptimalSystemAgent.Agent.Hooks.ShellHook do
   Run one CC-protocol command hook synchronously in the caller's process.
   Returns the `Dispatch` handler protocol (`{:ok, payload}` / `{:block, reason}`).
   """
-  def run_command_hook(command, event, payload, timeout_ms \\ @default_timeout_ms) do
+  def run_command_hook(command, event, payload, timeout_ms \\ @default_timeout_ms, opts \\ []) do
     input_json = encode_input(event, payload)
+    fail_closed? = Keyword.get(opts, :fail_closed, false)
 
     case spawn_hook(command, input_json, payload, timeout_ms) do
       :timeout ->
         Logger.warning("[hooks] Command hook timed out after #{timeout_ms}ms: #{command}")
-        {:ok, payload}
+
+        if fail_closed? do
+          {:block,
+           "The approval hook did not answer within #{div(timeout_ms, 1000)}s, so this " <>
+             "action did not run."}
+        else
+          {:ok, payload}
+        end
 
       {stdout, stderr, code} ->
-        interpret(event, payload, command, stdout, stderr, code)
+        interpret(event, payload, command, stdout, stderr, code, opts)
     end
   end
 
@@ -249,10 +261,17 @@ defmodule OptimalSystemAgent.Agent.Hooks.ShellHook do
 
   defp event_fields(event, payload)
        when event in [:pre_tool_use, :permission_request, :permission_denied] do
-    %{
+    fields = %{
       "tool_name" => to_string(Map.get(payload, :tool_name, "")),
       "tool_input" => Map.get(payload, :arguments) || %{}
     }
+
+    # Claude Code sends `tool_use_id` with every tool event; an approval
+    # service keys its request (and its idempotency) on it.
+    case Map.get(payload, :tool_use_id) do
+      id when is_binary(id) and id != "" -> Map.put(fields, "tool_use_id", id)
+      _ -> fields
+    end
   end
 
   defp event_fields(event, payload) when event in [:post_tool_use, :post_tool_use_failure] do
@@ -357,23 +376,18 @@ defmodule OptimalSystemAgent.Agent.Hooks.ShellHook do
 
   # ── Result interpretation (CC exit 0/2/other + JSON stdout schema) ──
 
-  defp interpret(event, payload, command, stdout, stderr, code) do
+  defp interpret(event, payload, command, stdout, stderr, code, opts) do
     trimmed = String.trim(stdout)
+    fail_closed? = Keyword.get(opts, :fail_closed, false)
 
     cond do
       code == 2 ->
-        reason =
-          case String.trim(stderr) do
-            "" -> "Blocked by hook: #{command}"
-            s -> s
-          end
-
-        blocking_result(event, payload, reason)
+        blocking_result(event, payload, exit2_reason(command, trimmed, stderr, opts))
 
       code == 0 and String.starts_with?(trimmed, "{") ->
         case Jason.decode(trimmed) do
           {:ok, json} when is_map(json) ->
-            apply_json(event, payload, command, json)
+            apply_json(event, payload, command, json, opts)
 
           _ ->
             Logger.warning("[hooks] Hook stdout is not valid JSON (treated as text): #{command}")
@@ -382,6 +396,15 @@ defmodule OptimalSystemAgent.Agent.Hooks.ShellHook do
 
       code == 0 ->
         plain_stdout(event, payload, trimmed)
+
+      fail_closed? ->
+        detail = String.slice(String.trim(stderr), 0, 300)
+
+        Logger.warning("[hooks] approval hook #{command} failed with status #{code}: #{detail}")
+
+        {:block,
+         "The approval hook failed (exit #{code}#{if detail != "", do: ": " <> detail, else: ""}), " <>
+           "so this action did not run."}
 
       true ->
         Logger.warning(
@@ -392,6 +415,41 @@ defmodule OptimalSystemAgent.Agent.Hooks.ShellHook do
         {:ok, payload}
     end
   end
+
+  # The reason an exit-2 hook gives for blocking. Claude Code reads stderr; an
+  # approval hook (`OSA_PRE_TOOL_HOOK`) is documented to answer on stdout, so it
+  # passes `reason_from: :stdout`. Either way the other stream is the fallback,
+  # and a JSON body on stdout contributes its `permissionDecisionReason` /
+  # `reason` / `stopReason` rather than its raw text.
+  defp exit2_reason(command, stdout, stderr, opts) do
+    out = stdout_reason(stdout)
+    err = String.trim(stderr)
+
+    ordered =
+      case Keyword.get(opts, :reason_from, :stderr) do
+        :stdout -> [out, err]
+        _ -> [err, out]
+      end
+
+    Enum.find(ordered, "Blocked by hook: #{command}", &(&1 != ""))
+  end
+
+  defp stdout_reason(""), do: ""
+
+  defp stdout_reason("{" <> _ = text) do
+    case Jason.decode(text) do
+      {:ok, %{} = json} ->
+        hso = if is_map(json["hookSpecificOutput"]), do: json["hookSpecificOutput"], else: %{}
+
+        [hso["permissionDecisionReason"], json["reason"], json["stopReason"]]
+        |> Enum.find("", &(is_binary(&1) and &1 != ""))
+
+      _ ->
+        text
+    end
+  end
+
+  defp stdout_reason(text), do: text
 
   # Blocking-capable events deny; post events feed the reason back as context.
   defp blocking_result(event, _payload, reason) when event in @blocking_events,
@@ -414,7 +472,7 @@ defmodule OptimalSystemAgent.Agent.Hooks.ShellHook do
     {:ok, payload}
   end
 
-  defp apply_json(event, payload, command, json) do
+  defp apply_json(event, payload, command, json, opts) do
     payload =
       case Map.get(json, "systemMessage") do
         msg when is_binary(msg) and msg != "" -> add_system_message(payload, msg)
@@ -438,11 +496,18 @@ defmodule OptimalSystemAgent.Agent.Hooks.ShellHook do
             payload
           end
 
-        apply_hook_specific(event, payload, command, json, Map.get(json, "hookSpecificOutput"))
+        apply_hook_specific(
+          event,
+          payload,
+          command,
+          json,
+          Map.get(json, "hookSpecificOutput"),
+          opts
+        )
     end
   end
 
-  defp apply_hook_specific(event, payload, command, json, %{} = hso) do
+  defp apply_hook_specific(event, payload, command, json, %{} = hso, opts) do
     payload =
       case Map.get(hso, "additionalContext") do
         ctx when is_binary(ctx) and ctx != "" -> add_context(payload, ctx)
@@ -467,14 +532,25 @@ defmodule OptimalSystemAgent.Agent.Hooks.ShellHook do
         {:ok, Map.put(payload, :permission_decision, :allow)}
 
       "ask" ->
-        {:ok, Map.put(payload, :permission_decision, :ask)}
+        if Keyword.get(opts, :fail_closed, false) do
+          # An approval hook that wants a person to decide, in a run where no
+          # person can answer: the call does not run (Claude Code `-p` parity).
+          reason =
+            Map.get(hso, "permissionDecisionReason") ||
+              "The approval hook asked for a person to approve this action, and nobody " <>
+                "can answer in this run"
+
+          blocking_result(event, payload, reason)
+        else
+          {:ok, Map.put(payload, :permission_decision, :ask)}
+        end
 
       _ ->
         {:ok, payload}
     end
   end
 
-  defp apply_hook_specific(_event, payload, _command, _json, _hso), do: {:ok, payload}
+  defp apply_hook_specific(_event, payload, _command, _json, _hso, _opts), do: {:ok, payload}
 
   defp add_context(payload, ctx) do
     Map.update(payload, :injected_context, [ctx], &(&1 ++ [ctx]))

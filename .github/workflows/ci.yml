@@ -304,12 +304,54 @@ jobs:
         working-directory: priv/rust/tui
         run: cargo check --locked --bins
 
+  # `osa run` end to end: the BUILT release (the artifact users and MIOSA get),
+  # driven through its own `bin/osagent run` and through the installed
+  # launcher, against a local stub model provider. Unit tests cannot see what
+  # broke v1.0.208 (the launcher handed `run` to the TUI), or a release that
+  # cannot boot as another user; only the shipped shape can.
+  headless-e2e:
+    name: Headless run (release e2e)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      MIX_ENV: prod
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+          version-type: strict
+
+      - name: Cache deps and _build
+        uses: actions/cache@v6
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-ubuntu-24.04-release-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-ubuntu-24.04-release-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - name: Build the release
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get --only prod
+          mix release osagent --overwrite
+
+      - name: Run the end-to-end suite
+        run: python3 test/headless/e2e_release_test.py
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+
   # A single required-status target, so branch protection has one check to
   # point at instead of a list that must be edited whenever a job is added.
   ci:
     name: CI
     runs-on: ubuntu-24.04
-    needs: [elixir, rust, rust-windows]
+    needs: [elixir, rust, rust-windows, headless-e2e]
     if: always()
     steps:
       - name: Verify every suite passed
@@ -317,9 +359,11 @@ jobs:
           echo "elixir:       ${{ needs.elixir.result }}"
           echo "rust:         ${{ needs.rust.result }}"
           echo "rust-windows: ${{ needs.rust-windows.result }}"
+          echo "headless-e2e: ${{ needs.headless-e2e.result }}"
           if [ "${{ needs.elixir.result }}" != "success" ] || \
              [ "${{ needs.rust.result }}" != "success" ] || \
-             [ "${{ needs.rust-windows.result }}" != "success" ]; then
+             [ "${{ needs.rust-windows.result }}" != "success" ] || \
+             [ "${{ needs.headless-e2e.result }}" != "success" ]; then
             echo "::error::a test suite did not pass"
             exit 1
           fi

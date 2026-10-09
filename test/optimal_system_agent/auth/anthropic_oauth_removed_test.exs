@@ -31,6 +31,9 @@ defmodule OptimalSystemAgent.Auth.AnthropicOAuthRemovedTest do
   @http_opts HTTP.init([])
 
   setup do
+    # These routes are open only during first-run, which also requires that no
+    # provider is configured by the environment (`Onboarding.Provisioned`).
+    OptimalSystemAgent.Test.ProviderEnv.isolate()
     tmp = Path.join(System.tmp_dir!(), "osa_oauth_removed_#{System.unique_integer([:positive])}")
     File.mkdir_p!(tmp)
     prev_home = System.get_env("OSA_HOME")

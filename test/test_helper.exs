@@ -13,6 +13,18 @@ exclude_tags =
     if(os_darwin?, do: [], else: [:macos]) ++
     if(os_windows?, do: [], else: [:windows_only])
 
+# A provider configured in the developer's own shell (Claude Code exports
+# ANTHROPIC_BASE_URL, many people export OPENAI_API_KEY), or a MIOSA platform
+# env file on the machine, means "OSA is provisioned" to
+# `Onboarding.Provisioned`, which turns first-run off and with it the open
+# onboarding routes the HTTP tests exercise. The suite must not depend on whose
+# shell runs it: CI has none of these, so neither does a local run. Tests that
+# need one set it themselves.
+for key <- ["OSA_SKIP_ONBOARDING" | OptimalSystemAgent.Onboarding.Provisioned.provider_keys()],
+    do: System.delete_env(key)
+
+System.put_env("OSA_PLATFORM_ENV_FILE", "")
+
 # Start each suite run from a clean sticky-permission-mode store. The file is
 # already isolated to a tmp path (config/test.exs), but unique() session ids
 # reset per VM start and the tmp file persists across runs, so a stale

@@ -12,6 +12,8 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   alias OptimalSystemAgent.Agent.Loop.DurableLog
   alias OptimalSystemAgent.Agent.Loop.PermissionBroker
   alias OptimalSystemAgent.Agent.RunStore
+  alias OptimalSystemAgent.Agent.ToolStream
+  alias OptimalSystemAgent.Agent.Hooks.ApprovalHook
   alias OptimalSystemAgent.Agent.Loop.RenderBridge
   alias OptimalSystemAgent.Agent.Loop.ToolArgMetrics
   alias OptimalSystemAgent.Agent.Loop.ToolArgValidator
@@ -295,6 +297,10 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   # orchestrator before approval/execution, so it always precedes the paired
   # :end / :tool_result events emitted from finalize_result/5.
   defp emit_tool_call_start(tool_call, arg_hint, state) do
+    # Faithful arguments for headless consumers, on their own topic (see
+    # `Agent.ToolStream`); the display events below stay as they were.
+    ToolStream.publish_use(state.session_id, tool_call)
+
     arg_bytes = tool_call_arg_bytes(tool_call.arguments)
     arg_hash = tool_call_arg_hash(tool_call.arguments)
     assertions = tool_call_assertions(tool_call.arguments)
@@ -507,7 +513,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         if attended?(state) do
           {:ask, PermissionBroker.new_request_id(), permission_summary(tool_call, reason)}
         else
-          non_interactive_decision(tool_call, state)
+          non_interactive_decision(tool_call, state, :deferrable)
         end
 
       explicit_ask_rule? ->
@@ -516,7 +522,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
         if attended?(state) do
           {:ask, PermissionBroker.new_request_id(), permission_summary(tool_call, reason)}
         else
-          non_interactive_decision(tool_call, state)
+          non_interactive_decision(tool_call, state, :deferrable)
         end
 
       true ->
@@ -741,7 +747,7 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
           cond do
             not attended?(state) ->
-              non_interactive_decision(tool_call, state)
+              non_interactive_decision(tool_call, state, :deferrable)
 
             explicit_ask_rule? or oos_path != nil ->
               {:ask, PermissionBroker.new_request_id(), permission_summary(tool_call, reason)}
@@ -864,6 +870,30 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
   end
 
   defp budget_policy_allows?(_), do: false
+
+  # An ORDINARY ask on an unattended session (a mutating tool with no saved
+  # rule, an out-of-scope write, an explicit ask rule) is the one question an
+  # external approval hook (`OSA_PRE_TOOL_HOOK`, see `Hooks.ApprovalHook`) is
+  # configured to answer. When that hook covers this tool, the call proceeds to
+  # the `pre_tool_use` stage, where the hook runs and decides; a hook that
+  # fails, times out or asks for a person denies it there. Safety asks
+  # (bypass-immune paths, unresolvable deletes) never come through here: they
+  # stay fail-closed whatever hook is configured.
+  defp non_interactive_decision(tool_call, state, :deferrable) do
+    if ApprovalHook.covers?(tool_call.name) do
+      sid = if is_map(state), do: Map.get(state, :session_id), else: nil
+
+      Logger.info(
+        "[permissions] #{tool_call.name} needs approval on an unattended session; " <>
+          "deferring the decision to the approval hook"
+      )
+
+      emit_non_interactive(:deferred, tool_call.name, sid, Attendance.reason(state))
+      :allow
+    else
+      non_interactive_decision(tool_call, state)
+    end
+  end
 
   defp non_interactive_decision(tool_call, state) do
     sid = if is_map(state), do: Map.get(state, :session_id), else: nil
@@ -1416,10 +1446,17 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
 
   defp run_validated_tool(tool_call, state) do
     # Run pre_tool_use hooks sync (security_check/spend_guard can block)
+    # `tool_use_id`, `working_dir` and `permission_mode` complete the Claude
+    # Code `PreToolUse` input a command hook receives (`ShellHook`), so an
+    # external approval gate can key a request to one call, and see whether
+    # the session is running in overdrive.
     pre_payload = %{
       tool_name: tool_call.name,
       arguments: tool_call.arguments,
-      session_id: state.session_id
+      session_id: state.session_id,
+      tool_use_id: tool_call.id,
+      working_dir: Map.get(state, :working_dir),
+      permission_mode: hook_permission_mode(state)
     }
 
     case run_hooks(:pre_tool_use, pre_payload) do
@@ -1458,6 +1495,24 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
           |> Map.put("__surface__", authority_surface(state))
 
         execute_tool(tool_call.name, enriched_args)
+    end
+  end
+
+  # The session's permission mode in Claude Code's `permission_mode` vocabulary,
+  # as a `PreToolUse` hook receives it. Resolved the same way
+  # `approve_tool_call/2` resolves it: the sticky store first, then the state.
+  @doc false
+  @spec hook_permission_mode(map()) :: String.t()
+  def hook_permission_mode(state) do
+    mode =
+      OptimalSystemAgent.Agent.PermissionMode.get(Map.get(state, :session_id)) ||
+        Map.get(state, :permission_mode, :ask)
+
+    case mode do
+      m when m in [:overdrive, :bypass] -> "bypassPermissions"
+      :accept_edits -> "acceptEdits"
+      :plan -> "plan"
+      _ -> "default"
     end
   end
 
@@ -1541,6 +1596,11 @@ defmodule OptimalSystemAgent.Agent.Loop.ToolExecutor do
     # test or the grounded-verification success signal below.
     tool_failed =
       String.starts_with?(result_str, "Error:") or String.starts_with?(result_str, "Blocked:")
+
+    # Faithful result for headless consumers (`osa run --format stream-json`),
+    # on its own topic so the TUI stream is unchanged. The clean post-hook text,
+    # before cross-cutting reminders are appended.
+    ToolStream.publish_result(state.session_id, tool_call, result_str, tool_failed)
 
     # P1-3: record this call in the grounded-verification evidence ledger. A
     # successful write marks a changed file; a successful check (shell build/

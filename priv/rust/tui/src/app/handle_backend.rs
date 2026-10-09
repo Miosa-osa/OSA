@@ -2963,7 +2963,10 @@ impl App {
             }
             BackendEvent::OnboardingStatus(result) => match result {
                 Ok(resp) => {
-                    if resp.needs_onboarding {
+                    if resp.needs_onboarding && crate::config::onboarding_skipped() {
+                        info!("Onboarding needed but OSA_SKIP_ONBOARDING is set, skipping the wizard");
+                    }
+                    if resp.needs_onboarding && !crate::config::onboarding_skipped() {
                         info!("Onboarding needed — showing setup wizard");
                         let data = crate::dialogs::onboarding::OnboardingData {
                             providers: resp.providers,

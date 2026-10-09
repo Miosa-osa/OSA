@@ -19,9 +19,9 @@ defmodule OptimalSystemAgent.Supervisors.Extensions do
   def init(_init_arg) do
     children =
       treasury_children() ++
-        updater_children() ++
-        update_checker_children() ++
-        open_computers_children() ++
+        daemon_only(updater_children()) ++
+        daemon_only(update_checker_children()) ++
+        daemon_only(open_computers_children()) ++
         context_refs_children() ++
         fs_checkpoint_children() ++
         skin_engine_children() ++
@@ -33,6 +33,13 @@ defmodule OptimalSystemAgent.Supervisors.Extensions do
   end
 
   # Treasury — opt-in via OSA_TREASURY_ENABLED=true
+  # The updater, the update checker and the OpenComputers host connection
+  # belong to the long-lived daemon. A headless `osa run` beside it must not
+  # open a second control-plane connection or race it to an update.
+  defp daemon_only(children) do
+    if OptimalSystemAgent.RunProfile.headless?(), do: [], else: children
+  end
+
   defp treasury_children do
     if Application.get_env(:optimal_system_agent, :treasury_enabled, false) do
       Logger.info("[Extensions] Treasury enabled — starting OptimalSystemAgent.Budget.Treasury")

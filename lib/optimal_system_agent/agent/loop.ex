@@ -139,6 +139,9 @@ defmodule OptimalSystemAgent.Agent.Loop do
     allowed_tools: nil,
     blocked_tools: [],
     system_prompt_override: nil,
+    # Operator text appended to the system prompt for this session only
+    # (`osa run --append-system-prompt`). See `Agent.Context`.
+    system_prompt_append: nil,
     # Reasoning strategy — removed, kept for struct compat
     strategy: nil,
     strategy_state: %{},
@@ -1475,6 +1478,7 @@ defmodule OptimalSystemAgent.Agent.Loop do
       allowed_tools: Keyword.get(opts, :allowed_tools),
       blocked_tools: Keyword.get(opts, :blocked_tools, []),
       system_prompt_override: Keyword.get(opts, :system_prompt_override),
+      system_prompt_append: Keyword.get(opts, :system_prompt_append),
       working_dir:
         Keyword.get(opts, :working_dir) ||
           OptimalSystemAgent.Workspace.Cwd.get(),

@@ -131,7 +131,9 @@ defmodule OptimalSystemAgent.Memory.Dream do
       stats: %{cycles: 0, dreams: 0, neutral: 0, errors: 0, saved: 0}
     }
 
-    if cfg[:enabled] do
+    # Dreaming is idle-time background work for the long-lived daemon; a
+    # headless `osa run` exits long before it would be idle (see `RunProfile`).
+    if cfg[:enabled] and not OptimalSystemAgent.RunProfile.headless?() do
       schedule_check(cfg[:check_interval_ms])
       Logger.info("[Dream] enabled — check every #{cfg[:check_interval_ms]}ms")
     else

@@ -169,6 +169,8 @@ defmodule OptimalSystemAgent.Runtime.SessionManager do
   # budget cap into the spawned Loop without a bespoke start path.
   @passthrough_opts [
     :system_prompt_override,
+    :system_prompt_append,
+    :ask_user,
     :allowed_tools,
     :blocked_tools,
     :role,

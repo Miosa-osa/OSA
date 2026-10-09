@@ -69,7 +69,14 @@ defmodule OptimalSystemAgent.Onboarding do
     # URL + run-scoped key in the environment) and usually has no ~/.osa/.env
     # at all. There is nothing for the wizard to ask, and a wizard blocking on
     # stdin would hang a non-interactive run.
-    not OptimalSystemAgent.Providers.MiosaGateway.active?() and not onboarded_on_disk?()
+    #
+    # The same holds for ANY provider configured by environment, by a
+    # platform-written env file, or by an explicit OSA_SKIP_ONBOARDING /
+    # `--no-onboarding` (see `Onboarding.Provisioned`): onboarding is only for a
+    # genuinely unconfigured local user.
+    not OptimalSystemAgent.Providers.MiosaGateway.active?() and
+      not OptimalSystemAgent.Onboarding.Provisioned.provisioned?(Path.join(osa_dir(), ".env")) and
+      not onboarded_on_disk?()
   end
 
   defp onboarded_on_disk? do

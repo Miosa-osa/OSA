@@ -130,6 +130,77 @@ defmodule OptimalSystemAgent.MCP.Config do
   """
   @spec load_startup() :: [Server.t()]
   def load_startup do
+    flag = flag_servers()
+
+    if Application.get_env(:optimal_system_agent, :mcp_strict, false) do
+      flag
+    else
+      flag_names = MapSet.new(flag, & &1.name)
+
+      load_startup_configured()
+      |> Enum.reject(&MapSet.member?(flag_names, &1.name))
+      |> Kernel.++(flag)
+    end
+  end
+
+  @doc """
+  Servers named on the command line: `osa run --mcp-config <file-or-json>`
+  (repeatable), Claude Code's flag of the same name. Each value is a path to
+  an `mcpServers` JSON file, or that JSON inline. The operator typed them, so
+  they are trusted like `~/.osa/mcp.json`, and they win a name collision with
+  every configured source. With `--strict-mcp-config` they are the only
+  servers started. Values were validated before boot (`parse_flag_config/1`).
+  """
+  @spec flag_servers() :: [Server.t()]
+  def flag_servers do
+    :optimal_system_agent
+    |> Application.get_env(:mcp_flag_configs, [])
+    |> List.wrap()
+    |> Enum.flat_map(fn spec ->
+      case parse_flag_config(spec) do
+        {:ok, servers} -> servers
+        {:error, _} -> []
+      end
+    end)
+  end
+
+  @doc "Parse one `--mcp-config` value: a JSON object, or a path to a JSON file."
+  @spec parse_flag_config(String.t()) :: {:ok, [Server.t()]} | {:error, String.t()}
+  def parse_flag_config(spec) when is_binary(spec) do
+    trimmed = String.trim(spec)
+
+    raw =
+      if String.starts_with?(trimmed, "{") do
+        {:ok, trimmed}
+      else
+        case File.read(Path.expand(trimmed)) do
+          {:ok, body} ->
+            {:ok, body}
+
+          {:error, reason} ->
+            {:error, "cannot read MCP config #{trimmed}: #{:file.format_error(reason)}"}
+        end
+      end
+
+    with {:ok, body} <- raw,
+         {:ok, %{"mcpServers" => servers} = decoded} when is_map(servers) <- decode(body) do
+      {:ok, Enum.map(parse(decoded), &%{&1 | scope: :user, source: :flag})}
+    else
+      {:error, reason} when is_binary(reason) -> {:error, reason}
+      _ -> {:error, "MCP config #{trimmed} is not a JSON object with an \"mcpServers\" map"}
+    end
+  end
+
+  def parse_flag_config(_), do: {:error, "MCP config must be a string"}
+
+  defp decode(body) do
+    case Jason.decode(body) do
+      {:ok, decoded} -> {:ok, decoded}
+      {:error, _} -> :invalid
+    end
+  end
+
+  defp load_startup_configured do
     workspace_trusted = OptimalSystemAgent.Settings.project_trusted?()
 
     native =
