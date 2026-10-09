@@ -233,6 +233,7 @@ defmodule OptimalSystemAgent.MCP.Discovery do
   def source_label(:cursor), do: "inherited from cursor"
   def source_label(:codex), do: "inherited from codex"
   def source_label(:plugin), do: "declared by a plugin bundle"
+  def source_label(:flag), do: "--mcp-config on the command line"
   def source_label(other), do: "inherited from #{other}"
 
   @doc """

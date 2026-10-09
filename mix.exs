@@ -311,6 +311,7 @@ defmodule OptimalSystemAgent.MixProject do
     #   osagent setup                  configure provider + API keys
     #   osagent version                print version
     #   osagent serve                  headless HTTP API mode
+    #   osagent run [options] [prompt] headless agent run (see docs/headless.md)
     #   osagent opencomputers <verb>   manage OpenComputers extension
 
     set -e
@@ -334,6 +335,16 @@ defmodule OptimalSystemAgent.MixProject do
         ;;
       serve)
         exec "$RELEASE_BIN" eval "OptimalSystemAgent.CLI.serve()"
+        ;;
+      run)
+        shift
+        # The headless agent. Arguments travel as argv (System.argv/0), never
+        # interpolated into the expression, so a prompt can hold any bytes.
+        # The event stream gets the real stdout to itself on fd 3; anything
+        # else the VM writes (boot noise, a crash report) goes to stderr.
+        exec 3>&1 1>&2
+        export OSA_EVENT_FD=3
+        exec "$RELEASE_BIN" eval "OptimalSystemAgent.CLI.Headless.main(System.argv())" "$@"
         ;;
       doctor)
         shift

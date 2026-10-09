@@ -190,6 +190,18 @@ defmodule OptimalSystemAgent.Agent.Context do
           {override, estimate_tokens(override)}
       end
 
+    # Per-session appended instructions (`osa run --append-system-prompt`,
+    # Claude Code's flag of the same name). After the base and any `/system`
+    # override, so it extends whichever prompt this session runs on.
+    {static_base, static_tokens} =
+      case Map.get(state, :system_prompt_append) do
+        text when is_binary(text) and text != "" ->
+          {static_base <> "\n\n" <> text, static_tokens + estimate_tokens(text)}
+
+        _ ->
+          {static_base, static_tokens}
+      end
+
     # /jailbreak layer: operator text PREPENDED BEFORE everything else, for
     # every model/provider. `""` when disarmed — the common case — so a fresh
     # node's prompt is byte-identical to before this feature existed.

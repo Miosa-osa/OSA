@@ -346,6 +346,29 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
     _ -> []
   end
 
+  @doc """
+  True when a resumable transcript exists for `session_id`: the `<id>.json`
+  record, or the immutable `<id>.updates.jsonl` log `load/1` rebuilds from.
+  A spend or metadata sidecar alone is not a conversation to resume.
+  """
+  @spec transcript_exists?(String.t()) :: boolean()
+  def transcript_exists?(session_id) when is_binary(session_id) do
+    File.exists?(session_path(session_id)) or File.exists?(updates_path(session_id))
+  end
+
+  def transcript_exists?(_), do: false
+
+  @doc "The working directory a saved session was tagged with, or nil."
+  @spec working_dir_of(String.t()) :: String.t() | nil
+  def working_dir_of(session_id) when is_binary(session_id) do
+    case read_meta(session_path(session_id), session_id) do
+      %{working_dir: dir} when is_binary(dir) and dir != "" -> dir
+      _ -> nil
+    end
+  end
+
+  def working_dir_of(_), do: nil
+
   @doc "Return the most recently saved session_id for a folder, or nil. Powers per-directory resume."
   def find_latest_for_dir(working_dir) do
     case list(working_dir: working_dir, limit: 1) do
@@ -588,6 +611,25 @@ defmodule OptimalSystemAgent.Agent.SessionPersistence do
   rescue
     e -> {:error, Exception.message(e)}
   end
+
+  @doc """
+  The `{provider, model}` a session last ran on, as `osa run` records it in the
+  metadata sidecar, or nil. A resumed headless run that names no model keeps
+  the conversation on this one (when the provider is the same).
+  """
+  @spec last_model(String.t()) :: {String.t(), String.t()} | nil
+  def last_model(session_id) when is_binary(session_id) do
+    case read_json(meta_path(session_id)) do
+      %{"provider" => provider, "model" => model}
+      when is_binary(provider) and is_binary(model) and model != "" ->
+        {provider, model}
+
+      _ ->
+        nil
+    end
+  end
+
+  def last_model(_), do: nil
 
   @doc "Read a single session's metadata (title, tags, working_dir)."
   def get_metadata(session_id) do

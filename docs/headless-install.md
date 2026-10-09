@@ -32,7 +32,7 @@ The retained TUI is disabled and no longer updated in headless mode.
 To resume using and updating it, rerun the installer with `OSA_INSTALL_MODE=full`.
 Fresh headless installations do not edit shell profiles; use the absolute launcher path in a service.
 
-`osa serve`, `osa opencomputers`, `osa doctor`, `osa setup`, and `osa version` work without the TUI.
+`osa serve`, `osa run`, `osa opencomputers`, `osa doctor`, `osa setup`, and `osa version` work without the TUI (`osa run` is the headless agent, see [headless.md](headless.md)).
 An interactive invocation such as bare `osa`, `osa resume`, or `osa overdrive` exits with an explanation before warming a background daemon.
 Headless `osa update` updates the backend and launcher, preserves the mode, and exits without launching a TUI or prompting to do so.
 The updater refuses a target launcher without headless support, including historical release launchers, before an upgrade stops the service or swaps its runtime.

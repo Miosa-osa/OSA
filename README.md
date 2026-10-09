@@ -206,6 +206,7 @@ it out from under you.)
 | `osa update` | Update in place, show what's new, then relaunch |
 | `osa doctor` | Health checks |
 | `osa serve` | Backend only, no TUI (HTTP API on :9089) |
+| `osa run` | Run the agent headless, no TUI: `claude -p` / `codex exec` style, text or stream-json output, multi-turn with `--resume` ([docs/headless.md](docs/headless.md)) |
 | `osa version` | Print version (backend, TUI, and the installed release stamp) |
 | `osa stop` | Stop the background backend daemon (rarely needed) |
 | `osa help` | Full command + flag reference |

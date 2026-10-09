@@ -164,6 +164,48 @@ if config_env() != :test do
   end
 end
 
+# ── Platform environment file (lowest precedence) ─────────────────────
+# MIOSA's envd writes the provider it provisions for this machine to
+# /opt/osagent/env.sh (`export KEY='value'` lines) on `/osa/configure`. The
+# `osagent serve` service sources it, but an `osa` started by hand from a
+# desktop terminal does not, and that user would land in onboarding for a
+# provider the platform already set up. Read it here as DEFAULTS: anything in
+# the environment or in the .env files above wins. OSA_HOME is never taken from
+# it (the config dir was resolved above from the real environment). An
+# unreadable file (it is 0600, owned by the desktop user) is simply skipped.
+# `OSA_PLATFORM_ENV_FILE` points elsewhere; empty disables. Same parse as
+# `Onboarding.Provisioned.parse_env/1`.
+if config_env() != :test do
+  platform_env_file =
+    case System.get_env("OSA_PLATFORM_ENV_FILE") do
+      nil -> "/opt/osagent/env.sh"
+      path -> path
+    end
+
+  with true <- platform_env_file != "",
+       {:ok, content} <- File.read(platform_env_file) do
+    content
+    |> String.split(~r/\r?\n/)
+    |> Enum.each(fn line ->
+      line = line |> String.trim() |> String.replace_prefix("export ", "") |> String.trim()
+
+      with false <- line == "" or String.starts_with?(line, "#"),
+           [key, value] <- String.split(line, "=", parts: 2),
+           key = String.trim(key),
+           true <- Regex.match?(~r/^[A-Za-z_][A-Za-z0-9_]*$/, key) and key != "OSA_HOME" do
+        value =
+          case String.trim(value) do
+            "'" <> rest -> rest |> String.trim_trailing("'") |> String.replace("'\\''", "'")
+            "\"" <> rest -> String.trim_trailing(rest, "\"")
+            other -> other
+          end
+
+        if value != "" and is_nil(System.get_env(key)), do: System.put_env(key, value)
+      end
+    end)
+  end
+end
+
 # ── MIOSA AI Gateway (platform mode) ──────────────────────────────────
 # A MIOSA sandbox run hands OSA a run-scoped, OpenAI-compatible gateway
 # endpoint instead of a vendor key:

@@ -410,7 +410,8 @@ defmodule OptimalSystemAgent.Application do
     # a cryptic OTP crash dump. Detect it here and exit cleanly with an
     # actionable message instead. (No silent auto-pick: the TUI reads the SAME
     # configured port, so a different port would break the TUI↔backend contract.)
-    preflight_http_port!()
+    # A headless run (`osa run`) binds no port at all - see `RunProfile`.
+    unless OptimalSystemAgent.RunProfile.headless?(), do: preflight_http_port!()
 
     # ── Phase 3: Supervision Tree ────────────────────────────────────────
     children =
@@ -439,12 +440,8 @@ defmodule OptimalSystemAgent.Application do
           OptimalSystemAgent.Supervisors.Extensions,
 
           # Deferred channel startup — starts configured channels in handle_continue
-          OptimalSystemAgent.Channels.Starter,
-
-          # HTTP channel — Plug/Bandit on configured port (SDK API surface)
-          # Started LAST so all agent processes are ready before accepting requests
-          {Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port(), ip: http_ip()}
-        ]
+          OptimalSystemAgent.Channels.Starter
+        ] ++ http_children()
 
     # Time every top-level child too, so the four subsystem supervisors show up
     # as roll-ups next to Bandit / Channels.Starter in the boot budget.
@@ -518,7 +515,11 @@ defmodule OptimalSystemAgent.Application do
         # ghosts - and, unless disabled via `:fleet_resume_on_boot`,
         # re-dispatches qualifying orphaned autonomous runs under their original
         # ids from the durable per-node snapshots. Budget-capped, best-effort.
-        OptimalSystemAgent.Agent.FleetResumer.resume_on_boot()
+        # Not in a headless run: re-dispatching orphaned autonomous runs is the
+        # daemon's job, and doing it from a one-shot process would run them twice.
+        unless OptimalSystemAgent.RunProfile.headless?() do
+          OptimalSystemAgent.Agent.FleetResumer.resume_on_boot()
+        end
 
         # Signal boot complete
         Application.put_env(:optimal_system_agent, :boot_complete, true)
@@ -541,6 +542,17 @@ defmodule OptimalSystemAgent.Application do
 
   defp platform_repo_children do
     []
+  end
+
+  # HTTP channel: Plug/Bandit on the configured port (SDK API surface), started
+  # LAST so all agent processes are ready before accepting requests. A headless
+  # run serves no API (see `RunProfile`): a daemon may own the port beside it.
+  defp http_children do
+    if OptimalSystemAgent.RunProfile.headless?() do
+      []
+    else
+      [{Bandit, plug: OptimalSystemAgent.Channels.HTTP, port: http_port(), ip: http_ip()}]
+    end
   end
 
   defp http_port do

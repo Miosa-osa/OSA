@@ -1095,6 +1095,13 @@ defmodule OptimalSystemAgent.Permissions do
 
   defp normalize_tool(name), do: Map.get(@tool_aliases, name, name)
 
+  @doc """
+  The OSA tool name for `name`, accepting Claude Code's names (`Bash` is
+  `shell_execute`, `Read` is `file_read`, ...). Unknown names pass through.
+  """
+  @spec canonical_tool_name(String.t()) :: String.t()
+  def canonical_tool_name(name) when is_binary(name), do: normalize_tool(name)
+
   defp shell_tool?(name),
     do: name in OptimalSystemAgent.Agent.Safety.DangerousCommands.shell_tools()
 

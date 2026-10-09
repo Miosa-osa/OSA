@@ -195,8 +195,17 @@ defmodule OptimalSystemAgent.Agent.Scheduler do
     Heartbeat.ensure_heartbeat_file()
 
     state = %{state | heartbeat_started_at: DateTime.utc_now()}
-    state = schedule_heartbeat(state)
-    state = schedule_cron_check(state)
+
+    # A headless `osa run` shares `~/.osa` with the daemon beside it, so it
+    # sees the same cron jobs and HEARTBEAT.md. Arming the timers here would
+    # run every job twice; the daemon owns them (see `RunProfile`).
+    state =
+      if OptimalSystemAgent.RunProfile.headless?() do
+        state
+      else
+        state |> schedule_heartbeat() |> schedule_cron_check()
+      end
+
     state = load_crons(state)
     state = load_trigger_state(state)
 

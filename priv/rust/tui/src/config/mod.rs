@@ -271,6 +271,23 @@ fn default_base_url() -> String {
     std::env::var("OSA_URL").unwrap_or_else(|_| "http://localhost:9089".to_string())
 }
 
+/// True when `OSA_SKIP_ONBOARDING` asks to skip the first-run wizard (the
+/// launchers set it for `osa --no-onboarding`). The backend makes the same
+/// call (`Onboarding.Provisioned`), but a backend that was already warm when
+/// this TUI started may not have the variable, so the TUI honours it too.
+pub fn onboarding_skipped() -> bool {
+    skip_onboarding_value(std::env::var("OSA_SKIP_ONBOARDING").ok().as_deref())
+}
+
+/// The `OSA_SKIP_ONBOARDING` truth table: `1`, `true`, `yes`, `on`
+/// (any case, surrounding spaces ignored) skip; anything else does not.
+pub fn skip_onboarding_value(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
 impl Config {
     pub fn load(cli: &Cli) -> Result<Self> {
         let profile_dir = if let Some(ref profile) = cli.profile {
@@ -383,5 +400,21 @@ mod version_source_tests {
             v.split('.').count() >= 3,
             "osa_version() must look like a semver, got {v:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod onboarding_skip_tests {
+    use super::skip_onboarding_value;
+
+    #[test]
+    fn skip_onboarding_truth_table() {
+        for yes in ["1", "true", "TRUE", " yes ", "On"] {
+            assert!(skip_onboarding_value(Some(yes)), "{yes:?} should skip");
+        }
+        for no in ["", "0", "false", "no", "off", "maybe"] {
+            assert!(!skip_onboarding_value(Some(no)), "{no:?} should not skip");
+        }
+        assert!(!skip_onboarding_value(None));
     }
 }

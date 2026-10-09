@@ -314,6 +314,7 @@ cat > "$LAUNCHER" <<'LAUNCHER_EOF'
 #   osa update             Update in place, show what's new, then launch
 #   osa doctor             Run backend health checks
 #   osa serve              Run the backend in the foreground (headless API)
+#   osa run [opts] [task]  Run the agent headless (no TUI): docs/headless.md
 #   osa version            Print version
 #   osa opencomputers ...  Manage the MIOSA host connection
 #   osa help               Show this help
@@ -387,6 +388,26 @@ if [ -f "$OSA_HOME/.env" ]; then
     unset "_OSA_INHERITED_$_k" 2>/dev/null || true
   done
   unset _osa_env_keys _k _v 2>/dev/null || true
+fi
+
+# The release lives next to THIS launcher, whoever runs it. A launcher reached
+# through a system-wide symlink (/usr/local/bin/osa -> /home/ubuntu/.osa/bin/osa)
+# by another user (MIOSA runs agents as `sandbox`) has its own OSA_HOME for
+# config and sessions, but no release under it: resolve the binaries from the
+# launcher's real location instead of failing.
+if [ ! -x "$RELEASE_BIN" ]; then
+  _osa_self="$0"
+  while [ -L "$_osa_self" ]; do
+    _osa_dir="$(cd "$(dirname "$_osa_self")" && pwd)"
+    _osa_self="$(readlink "$_osa_self")"
+    case "$_osa_self" in /*) ;; *) _osa_self="$_osa_dir/$_osa_self" ;; esac
+  done
+  _osa_install_root="$(cd "$(dirname "$_osa_self")/.." 2>/dev/null && pwd || true)"
+  if [ -n "$_osa_install_root" ] && [ -x "$_osa_install_root/release/bin/osagent" ]; then
+    RELEASE_BIN="$_osa_install_root/release/bin/osagent"
+    [ -x "$TUI_BIN" ] || TUI_BIN="$_osa_install_root/bin/osagent-tui"
+  fi
+  unset _osa_self _osa_dir _osa_install_root
 fi
 
 if [ ! -x "$RELEASE_BIN" ]; then
@@ -534,6 +555,7 @@ print_help() {
   printf "    ${CYAN}osa update${RESET}           Update in place, show what's new, then launch\n"
   printf "    ${CYAN}osa doctor${RESET}           Run backend health checks\n"
   printf "    ${CYAN}osa serve${RESET}            Run the backend in the foreground ${DIM}(headless API)${RESET}\n"
+  printf "    ${CYAN}osa run${RESET}              Run the agent headless ${DIM}(no TUI; osa run --help)${RESET}\n"
   printf "    ${CYAN}osa version${RESET}          Print version\n"
   printf "    ${CYAN}osa opencomputers${RESET}    Manage the MIOSA host connection\n"
   printf "    ${CYAN}osa help${RESET}             Show this help\n"
@@ -1250,6 +1272,21 @@ if [ "${1:-}" = "opencomputers" ]; then
   exec "$RELEASE_BIN" opencomputers "$@"
 fi
 
+# ── --no-onboarding ───────────────────────────────────────────────
+#
+# Anywhere in argv: never show onboarding (the setup wizard, the first-run
+# provider picker), the same as OSA_SKIP_ONBOARDING=1, which the backend this
+# launch starts inherits. Removed from argv so the TUI parser never sees it.
+_n=$#; _i=0
+while [ "$_i" -lt "$_n" ]; do
+  a="$1"; shift; _i=$((_i + 1))
+  if [ "$a" = "--no-onboarding" ]; then
+    OSA_SKIP_ONBOARDING=1; export OSA_SKIP_ONBOARDING
+  else
+    set -- "$@" "$a"
+  fi
+done
+
 # ── Subcommand scan ───────────────────────────────────────────────
 #
 # The verb is found WHEREVER it sits in argv, not only at $1, so mode flags may
@@ -1272,7 +1309,7 @@ for a in "$@"; do
     --help|-h) OSA_VERB="help"; break ;;
     --version|-V|-v) OSA_VERB="version"; break ;;
     -*) ;;
-    overdrive|continue|resume|help|version|setup|serve|doctor|stop|update)
+    overdrive|continue|resume|help|version|setup|serve|doctor|stop|update|run)
       OSA_VERB="$a"; break ;;
     # Any other bare token is not ours — leave argv untouched and let the TUI's
     # parser reject it loudly rather than silently swallowing a typo here.
@@ -1288,11 +1325,15 @@ done
 # typed survives in place. `update` is stripped with no translation because it
 # runs here and then falls through to launch.
 case "$OSA_VERB" in
-  overdrive|continue|resume|update)
+  overdrive|continue|resume|update|run)
     _n=$#; _i=0; _skip=0; _hit=0; _next=0; _rid=""
     while [ "$_i" -lt "$_n" ]; do
       a="$1"; shift; _i=$((_i + 1))
       if [ "$_skip" -eq 1 ]; then _skip=0; set -- "$@" "$a"; continue; fi
+      # Everything after `run` belongs to `osa run` (its own parser): copied
+      # through untouched, so `osa run --resume <id>` is never turned into the
+      # TUI's --resume.
+      if [ "$_hit" -eq 1 ] && [ "$OSA_VERB" = "run" ]; then set -- "$@" "$a"; continue; fi
       case "$a" in
         --profile|--permission-mode|--model|-m|--provider)
           _skip=1; set -- "$@" "$a"; continue ;;
@@ -1356,6 +1397,9 @@ case "$OSA_VERB" in
     ;;
   setup)                exec "$RELEASE_BIN" setup ;;
   serve)                exec "$RELEASE_BIN" serve ;;
+  # The headless agent: no TUI, no daemon, no wizard, in a full or a headless
+  # install alike. The release wrapper gives the event stream its own stdout.
+  run)                  exec "$RELEASE_BIN" run "$@" ;;
   doctor)               exec "$RELEASE_BIN" doctor ;;
   stop)                 stop_daemon; exit 0 ;;
   update)
